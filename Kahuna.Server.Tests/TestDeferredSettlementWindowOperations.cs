@@ -128,6 +128,104 @@ public sealed class TestDeferredSettlementWindowOperations
         Assert.Equal("v3"u8.ToArray(), read.Value);
     }
 
+    /// <summary>
+    /// The window pinned open through the durable stores, so the finalize of the unique insert always meets the
+    /// committed delete's intent still held on the key: a pessimistic script carries the base its lock observed,
+    /// which is "absent" once the grant materialized the committed tombstone, and the finalize's pre-propose
+    /// staged-base check must recognise that committed delete as exactly that base — not as a competitor that
+    /// overtook it — so the insert commits instead of aborting as a conflict that never happened.
+    /// </summary>
+    [Fact]
+    public async Task UniqueReuse_OverHeldCommittedDeleteIntent_InsertSucceeds()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using EmbeddedKahunaNode node = await StartNode(loggerFactory, ct);
+        KahunaManager kahuna = (KahunaManager)node.Kahuna;
+
+        const string key = "gate/reuse-held";
+
+        (KeyValueResponseType startType, TransactionHandle holder) = await kahuna.LocateAndStartTransaction(
+            new KeyValueTransactionOptions { CoordinatorKey = key + "/holder", Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+        Assert.Equal(KeyValueResponseType.Set, startType);
+
+        // A committed delete of the key, decided and not yet settled: its tombstone lives only in the intent.
+        kahuna.DurablePreparedIntentStore.ImportIntents([CommittedDeleteIntent(holder.TransactionId, key)]);
+        kahuna.DurableTransactionRecordStore.ImportRecords([CommittedRecord(holder.TransactionId, key)]);
+
+        KeyValueTransactionResult reinsert = await Run(node, $"BEGIN SET `{key}` 'v3' NX COMMIT END");
+        Assert.Equal(KeyValueResponseType.Set, reinsert.Type);
+
+        await WaitUntil(() => kahuna.DurablePreparedIntentStore.Count == 0);
+        KeyValueTransactionResult read = await Run(node, $"GET `{key}`");
+        Assert.Equal(KeyValueResponseType.Get, read.Type);
+        Assert.Equal("v3"u8.ToArray(), read.Value);
+    }
+
+    /// <summary>
+    /// A pessimistic transaction that scans a bucket takes an exclusive range lock, which stamps its write intent
+    /// on every resident key it covers, and then point-locks the key it writes. The range lock does not
+    /// materialize a decided-but-unsettled predecessor (only an undecided one blocks it), so the point lock meets
+    /// its own intent on an entry still one revision behind the committed head. The grant must report the
+    /// committed head as its base and not the stale resident revision: a stale base is refused at finalize as
+    /// overtaken by the very commit the lock was granted over.
+    /// </summary>
+    [Fact]
+    public async Task PointLockAfterOwnRangeLock_ObservesCommittedHeadOverUnsettledIntent()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using EmbeddedKahunaNode node = await StartNode(loggerFactory, ct);
+        KahunaManager kahuna = (KahunaManager)node.Kahuna;
+
+        const string key = "gate/relock";
+
+        // A settled committed value makes the entry resident at revision 0.
+        Assert.Equal(KeyValueResponseType.Set, (await Run(node, $"BEGIN SET `{key}` 'v1' COMMIT END")).Type);
+        await WaitUntil(() => kahuna.DurablePreparedIntentStore.Count == 0);
+
+        (KeyValueResponseType startType, TransactionHandle holder) = await kahuna.LocateAndStartTransaction(
+            new KeyValueTransactionOptions { CoordinatorKey = key + "/holder", Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+        Assert.Equal(KeyValueResponseType.Set, startType);
+
+        // The predecessor's committed update at revision 1, decided and not yet settled: the resident entry
+        // still shows revision 0.
+        kahuna.DurablePreparedIntentStore.ImportIntents([CommittedSetIntent(holder.TransactionId, key, revision: 1)]);
+        kahuna.DurableTransactionRecordStore.ImportRecords([CommittedRecord(holder.TransactionId, key)]);
+
+        (KeyValueResponseType writerType, TransactionHandle writer) = await kahuna.LocateAndStartTransaction(
+            new KeyValueTransactionOptions { CoordinatorKey = key + "/writer", Locking = KeyValueTransactionLocking.Pessimistic }, ct);
+        Assert.Equal(KeyValueResponseType.Set, writerType);
+
+        (KeyValueResponseType rangeType, _) = await kahuna.LocateAndTryAcquireExclusiveRangeLock(
+            writer.TransactionId, "gate", null, true, null, true, 0, KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.Locked, rangeType);
+
+        (KeyValueResponseType lockType, _, _, _, long baseRevision) = await kahuna.LocateAndTryAcquireExclusiveLockObserved(
+            writer.TransactionId, key, 0, KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.Locked, lockType);
+        Assert.Equal(1, baseRevision);
+    }
+
+    private static PreparedIntent CommittedSetIntent(HLCTimestamp transactionId, string key, long revision) => new(
+        transactionId, Epoch: 0, key, ManifestHash: 0, RecordAnchorKey: key + "/holder",
+        CommitTimestamp: transactionId, State: KeyValueState.Set, Value: "v2"u8.ToArray(), Bucket: "gate",
+        Revision: revision, Expires: HLCTimestamp.Zero, NoRevision: false, BaseRevision: revision - 1,
+        BaseState: KeyValueState.Set, RecoveryDeadline: HLCTimestamp.Zero,
+        Resolution: PreparedIntentResolution.Pending);
+
+    private static PreparedIntent CommittedDeleteIntent(HLCTimestamp transactionId, string key) => new(
+        transactionId, Epoch: 0, key, ManifestHash: 0, RecordAnchorKey: key + "/holder",
+        CommitTimestamp: transactionId, State: KeyValueState.Deleted, Value: null, Bucket: "gate",
+        Revision: 1, Expires: HLCTimestamp.Zero, NoRevision: false, BaseRevision: 0,
+        BaseState: KeyValueState.Set, RecoveryDeadline: HLCTimestamp.Zero,
+        Resolution: PreparedIntentResolution.Pending);
+
+    private static TransactionRecord CommittedRecord(HLCTimestamp transactionId, string key) => new(
+        transactionId, Epoch: 0, CoordinatorKey: key + "/holder", RecordAnchorKey: key + "/holder",
+        CommitTimestamp: transactionId, DecisionDeadline: HLCTimestamp.Zero, ManifestHash: 0,
+        Participants: [new TransactionParticipantRef(key, KeyValueDurability.Persistent)], ManifestPresent: true,
+        Decision: TransactionDecision.Commit, AbortClass: TransactionAbortClass.None, WinningOpId: transactionId,
+        CreatedAt: transactionId, DecidedAt: transactionId);
+
     private static async Task WaitUntil(Func<bool> predicate, int timeoutMs = 5000)
     {
         long deadline = Environment.TickCount64 + timeoutMs;

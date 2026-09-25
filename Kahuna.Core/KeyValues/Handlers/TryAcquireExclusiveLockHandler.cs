@@ -69,6 +69,15 @@ internal sealed class TryAcquireExclusiveLockHandler : BaseHandler
             if (entry.WriteIntent.TransactionId == message.TransactionId)
             {
                 entry.WriteIntent.Expires = KeyValueWriteIntentLease.FromRequest(currentTime, message.ExpiresMs);
+
+                // The intent may have been planted by this transaction's own range lock, which stamps every
+                // covered key without materializing a decided-but-unsettled predecessor's committed value.
+                // The grant's base must be the committed head, so converge the entry exactly as a fresh grant
+                // does before observing it: a base read off the stale resident head would be refused at
+                // finalize as overtaken by the very commit this lock was granted over.
+                if (!ConvergeCommittedHead(message, ref entry, currentTime))
+                    return KeyValueStaticResponses.WaitingForReplicationResponse;
+
                 return new(KeyValueResponseType.Locked, PointLockBase.Observe(entry, currentTime));
             }
 
@@ -113,22 +122,8 @@ internal sealed class TryAcquireExclusiveLockHandler : BaseHandler
         // acquire resolves the durable intent the way a write does before it grants: a committed value is
         // materialized into the entry, and an undecided one is waited out (the acquire loop retries this answer
         // and routes the holder's decision when it is not local).
-        if (message.Durability == KeyValueDurability.Persistent)
-        {
-            KeyValueEntry? resolvedEntry = entry;
-            if (ForeignIntentWriteResolver.Resolve(
-                    context, message.Key, message.TransactionId, ref resolvedEntry, ApplyCommittedHead, message.ForeignDecisionHint)
-                == ForeignIntentWriteDecision.MustRetry)
-                return KeyValueStaticResponses.WaitingForReplicationResponse;
-
-            entry = resolvedEntry!;
-        }
-
-        // Converge a head parked behind an in-flight operation before the base is observed: a lock that
-        // reported a stale resident head as its base would be refused at commit against the committed history
-        // the parked head carries, even though nothing wrote over it.
-        if (entry.PendingCommittedHead is not null)
-            TryDrainPendingCommittedHead(message.Key, entry, currentTime);
+        if (!ConvergeCommittedHead(message, ref entry, currentTime))
+            return KeyValueStaticResponses.WaitingForReplicationResponse;
 
         entry.WriteIntent = new()
         {
@@ -144,5 +139,35 @@ internal sealed class TryAcquireExclusiveLockHandler : BaseHandler
         // transaction's read set and refuse a later write of the key if the exclusion was lost to a leader
         // change and another transaction committed over that base.
         return new(KeyValueResponseType.Locked, PointLockBase.Observe(entry, currentTime));
+    }
+
+    /// <summary>
+    /// Brings <paramref name="entry"/> to the key's committed head before a grant observes its base, so the
+    /// base a lock reports is what a commit-time compare will find. Two sources can leave the resident entry
+    /// behind the committed head: a decided-but-unsettled durable intent whose value has not materialized yet
+    /// (materialized here as a write would), and a head parked behind an in-flight operation (drained here).
+    /// Returns false when a foreign durable intent on the key is still undecided: the grant must wait for
+    /// that decision, and the caller answers the transient wait the acquire loop retries.
+    /// </summary>
+    private bool ConvergeCommittedHead(KeyValueRequest message, ref KeyValueEntry entry, HLCTimestamp currentTime)
+    {
+        if (message.Durability == KeyValueDurability.Persistent)
+        {
+            KeyValueEntry? resolvedEntry = entry;
+            if (ForeignIntentWriteResolver.Resolve(
+                    context, message.Key, message.TransactionId, ref resolvedEntry, ApplyCommittedHead, message.ForeignDecisionHint)
+                == ForeignIntentWriteDecision.MustRetry)
+                return false;
+
+            entry = resolvedEntry!;
+        }
+
+        // Converge a head parked behind an in-flight operation before the base is observed: a lock that
+        // reported a stale resident head as its base would be refused at commit against the committed history
+        // the parked head carries, even though nothing wrote over it.
+        if (entry.PendingCommittedHead is not null)
+            TryDrainPendingCommittedHead(message.Key, entry, currentTime);
+
+        return true;
     }
 }
