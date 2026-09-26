@@ -81,6 +81,27 @@ public sealed class TestStaleBaseVeto
     }
 
     [Fact]
+    public void ReDrivenPrepareOfASettledTransaction_NeverFiresTheHook()
+    {
+        PreparedIntentStore store = new();
+        PreparedIntent t = MakeIntent("veto/settled", Ts(1_000), epoch: 1, revision: 6, baseRevision: 5, KeyValueState.Set);
+        CommitThroughStore(store, t);
+        // A successor built on T's commit: the head now sits two past T's base, the shape the soaks reported.
+        CommitThroughStore(store, MakeIntent("veto/settled", Ts(1_100), epoch: 1, revision: 7, baseRevision: 6, KeyValueState.Set));
+
+        int vetoes = 0;
+        store.AttachStaleBaseVetoer((_, _) => vetoes++);
+
+        // T's re-driven prepare lands after its own settlement: rejected as a settled replay, never judged
+        // against the head that holds its own commit, so no veto can find the commit and count it as late.
+        bool acked = store.ApplyDeltaAckPrepares(IntentLog(new PrepareIntentCommand(t)));
+
+        Assert.False(acked);
+        Assert.Null(store.Get("veto/settled"));
+        Assert.Equal(0, vetoes);
+    }
+
+    [Fact]
     public void CurrentBasePrepare_DoesNotFireTheHook()
     {
         PreparedIntentStore store = new();
@@ -258,6 +279,71 @@ public sealed class TestStaleBaseVeto
         // commit stands untouched.
         await WaitUntil(() => DurableTransactionMetrics.StaleBaseVetoesLateCount >= lateBefore + 1);
         Assert.Equal(TransactionDecision.Commit, kahuna.DurableTransactionRecordStore.Get(forkTx, epoch)!.Decision);
+    }
+
+    /// <summary>
+    /// The soak shape on a wired node: T's bundle committed and settled, a successor committed on top, and then
+    /// T's re-driven prepare applies through the real dispatcher path. The late counter — the loss witness —
+    /// must not move, no veto is sent, and no phantom intent is left for the recovery sweep.
+    /// </summary>
+    [Fact]
+    public async Task ReDrivenPrepare_AfterSettlement_IsNotCountedAsALateVeto()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        await using EmbeddedKahunaNode node = new(Options(), loggerFactory);
+        await node.StartAsync(ct);
+        await node.WaitForLeaderForKeyAsync("veto/redrive", ct);
+
+        KahunaManager kahuna = (KahunaManager)node.Kahuna;
+        PreparedIntentStore store = kahuna.DurablePreparedIntentStore;
+
+        await CommitAndSettleAsync(node, kahuna, "veto/redrive", "v1");
+        await WaitUntil(() => store.TryGetCommittedHead("veto/redrive", out _, out _));
+        Assert.True(store.TryGetCommittedHead("veto/redrive", out long head, out _));
+
+        // T: committed at the anchor, prepared, resolved and settled through the partition's apply path.
+        HLCTimestamp tx = new(0, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), 0);
+        const long epoch = 1;
+        IReadOnlyList<TransactionParticipantRef> manifest = [new("veto/redrive", KeyValueDurability.Persistent)];
+        HLCTimestamp commitTs = new(tx.N, tx.L + 1, tx.C);
+        long hash = TransactionManifest.ComputeHash(tx, epoch, "veto/redrive", commitTs, manifest);
+        Assert.True(kahuna.DurableTransactionRecordStore.Replicate(0, new RaftLog
+        {
+            LogType = ReplicationTypes.TransactionRecord,
+            LogData = [.. TransactionRecordStore.SerializeDelta([
+                new InitializeTransactionCommand(tx, epoch, "veto/redrive", "veto/redrive", commitTs,
+                    new HLCTimestamp(tx.N, tx.L + 60_000, tx.C), hash, manifest, OpId: tx, CreatedAt: tx),
+                new CommitTransactionCommand(tx, epoch, hash, OpId: commitTs, AttemptHlc: commitTs)])]
+        }));
+
+        PreparedIntent t = MakeIntent("veto/redrive", tx, epoch, revision: head + 1, baseRevision: head, KeyValueState.Set, manifestHash: hash) with { CommitTimestamp = commitTs };
+        Assert.True(store.ApplyDeltaAckPrepares(0, IntentLog(new PrepareIntentCommand(t))));
+        Assert.True(store.Replicate(0, IntentLog(
+            new ResolveIntentCommand(tx, epoch, "veto/redrive", Commit: true),
+            new RemoveIntentCommand(tx, epoch, "veto/redrive"))));
+        Assert.Null(store.Get("veto/redrive"));
+
+        // A successor read T's commit and settled on top of it (the head is now two past T's base).
+        HLCTimestamp successorTx = new(0, tx.L + 2, 0);
+        PreparedIntent successor = MakeIntent("veto/redrive", successorTx, epoch, revision: head + 2, baseRevision: head + 1, KeyValueState.Set)
+            with { CommitTimestamp = new HLCTimestamp(0, tx.L + 3, 0) };
+        Assert.True(store.ApplyDeltaAckPrepares(0, IntentLog(new PrepareIntentCommand(successor))));
+        Assert.True(store.Replicate(0, IntentLog(
+            new ResolveIntentCommand(successorTx, epoch, "veto/redrive", Commit: true),
+            new RemoveIntentCommand(successorTx, epoch, "veto/redrive"))));
+
+        long sentBefore = DurableTransactionMetrics.StaleBaseVetoesSentCount;
+        long lateBefore = DurableTransactionMetrics.StaleBaseVetoesLateCount;
+
+        // The re-driven copy of T's prepare.
+        Assert.False(store.ApplyDeltaAckPrepares(0, IntentLog(new PrepareIntentCommand(t))));
+
+        Assert.Null(store.Get("veto/redrive"));
+        await Task.Delay(200, ct); // a detached veto, had one fired, would have been counted by now
+        Assert.Equal(sentBefore, DurableTransactionMetrics.StaleBaseVetoesSentCount);
+        Assert.Equal(lateBefore, DurableTransactionMetrics.StaleBaseVetoesLateCount);
+        Assert.Equal(TransactionDecision.Commit, kahuna.DurableTransactionRecordStore.Get(tx, epoch)!.Decision);
     }
 
     private static async Task WaitUntil(Func<bool> predicate, int timeoutMs = 10_000)

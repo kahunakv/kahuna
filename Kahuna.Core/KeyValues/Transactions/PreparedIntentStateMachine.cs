@@ -14,11 +14,18 @@ namespace Kahuna.Server.KeyValues.Transactions;
 /// transition is identical everywhere), but the local producer's acknowledgement must refuse it so the
 /// coordinator drives a truthful conflict abort instead of committing a lost update. The pure state machine
 /// never sets this — it is a store-level, advisory verdict.</param>
+/// <param name="SettledReplay">Set by the store on a REJECTED prepare whose transaction identity already
+/// settled on the applying partition's log: the prepare is a re-driven duplicate of a decided transaction (a
+/// proposal released at a leader step-down and re-proposed to the successor after the first copy landed), so
+/// nothing installs, the fence never judges it, and the producer reads the decision from the record instead
+/// of driving an abort. Unlike <paramref name="StaleBase"/> this is a replicated verdict — every replica
+/// rejects the same entry from the same log-derived memory.</param>
 internal readonly record struct PreparedIntentApplyResult(
     TransactionApplyOutcome Outcome,
     PreparedIntent? Intent,
     string? RejectReason,
-    bool StaleBase = false);
+    bool StaleBase = false,
+    bool SettledReplay = false);
 
 /// <summary>
 /// The pure, deterministic state machine for a single key's durable prepared intent. Enforces exactly one live

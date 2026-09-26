@@ -21,7 +21,8 @@ internal enum PrepareRetryLoopOutcome
     Exhausted,
     Cancelled,
     StaleBase,
-    RangeMoved
+    RangeMoved,
+    Settled
 }
 
 /// <summary>What an over-budget retention sweep could do; the tag of <see cref="DurableTransactionMetrics.GcBudgetSweeps"/>.</summary>
@@ -289,6 +290,21 @@ internal static class DurableTransactionMetrics
         Meter.CreateCounter<long>(
             "kahuna.durable_tx.staged_base_fence_history_replays",
             description: "Validated-base prepares replayed below an installed snapshot's reflected position, which the fence does not judge.");
+
+    /// <summary>
+    /// Prepares rejected at apply because their transaction had already settled on the partition's log: a
+    /// re-driven duplicate (a proposal released as not-leader at a step-down, or an apply the proposer never
+    /// observed, re-proposed to the successor after its first copy had landed and committed there). Before the
+    /// intent store rejected these, each one re-installed a phantom intent for a decided transaction, was refused
+    /// by the staged-base fence against a head that held the transaction's own commit, and drove a veto that
+    /// found the commit and counted it as an acknowledged stale-base commit — the false loss witness. Counted
+    /// on live applies only (not on history replay), so a rising rate points at leader step-downs or unobserved
+    /// applies under the proposers, never at a lost update.
+    /// </summary>
+    internal static readonly Counter<long> SettledPrepareReplays =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.settled_prepare_replays",
+            description: "Prepares rejected at apply as re-driven duplicates of transactions that had already settled on the partition's log.");
 
     /// <summary>
     /// Cache-miss hydrations refused because the loaded persistent row (or its absence) sits strictly below the
@@ -1200,7 +1216,8 @@ internal static class DurableTransactionMetrics
     /// ended: <c>prepared</c> (a later round acknowledged every participant), <c>exhausted</c> (the budget ran
     /// out and the finalize aborts as a retryable failure), <c>stale_base</c> (a refusal named a moved base and
     /// the finalize aborted as a conflict at once), <c>range_moved</c> (a refused participant's range moved since
-    /// freeze; a clean retry), or <c>cancelled</c>. The exhausted share is the fraction of contended finalizes
+    /// freeze; a clean retry), <c>settled</c> (a refusal named a transaction that had already settled — a
+    /// re-driven duplicate — and the finalize concluded from the record at once), or <c>cancelled</c>. The exhausted share is the fraction of contended finalizes
     /// whose retry work bought nothing.
     /// </summary>
     internal static readonly Counter<long> PrepareRetryLoops =
@@ -1213,6 +1230,7 @@ internal static class DurableTransactionMetrics
     private static readonly KeyValuePair<string, object?> LoopOutcomeCancelled = new("outcome", "cancelled");
     private static readonly KeyValuePair<string, object?> LoopOutcomeStaleBase = new("outcome", "stale_base");
     private static readonly KeyValuePair<string, object?> LoopOutcomeRangeMoved = new("outcome", "range_moved");
+    private static readonly KeyValuePair<string, object?> LoopOutcomeSettled = new("outcome", "settled");
 
     internal static void PrepareRetryLoopEnded(PrepareRetryLoopOutcome outcome) =>
         PrepareRetryLoops.Add(1, outcome switch
@@ -1221,6 +1239,7 @@ internal static class DurableTransactionMetrics
             PrepareRetryLoopOutcome.Cancelled => LoopOutcomeCancelled,
             PrepareRetryLoopOutcome.StaleBase => LoopOutcomeStaleBase,
             PrepareRetryLoopOutcome.RangeMoved => LoopOutcomeRangeMoved,
+            PrepareRetryLoopOutcome.Settled => LoopOutcomeSettled,
             _ => LoopOutcomeExhausted
         });
 

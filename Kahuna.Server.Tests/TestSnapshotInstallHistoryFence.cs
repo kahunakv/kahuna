@@ -72,18 +72,28 @@ public sealed class TestSnapshotInstallHistoryFence : IDisposable
     }
 
     /// <summary>An exporter that committed key <c>h/k</c> twice (revisions 6 then 7) at log ids 1..6, and the
-    /// section it exports for the partition: reflected through log id 6.</summary>
+    /// section it exports for the partition: reflected through log id 6, and — the cut taken at that position —
+    /// fully reflected through log id 6 as well.</summary>
     private static (PreparedIntentStore Exporter, PreparedIntentStore.PartitionIntentSection Section) ExportedHistory()
     {
         PreparedIntentStore exporter = new();
         ApplyLive(exporter, CommitLog(1, MakeIntent("h/k", 1_000, revision: 6, baseRevision: 5)));
         ApplyLive(exporter, CommitLog(4, MakeIntent("h/k", 1_100, revision: 7, baseRevision: 6)));
 
-        byte[] bytes = exporter.SerializePartitionIntents(Partition, [.. exporter.SnapshotRange(null, null)]);
-        PreparedIntentStore.PartitionIntentSection section = PreparedIntentStore.DeserializePartitionIntents(bytes);
+        PreparedIntentStore.PartitionIntentSection section = Export(exporter);
 
         Assert.Equal(6, section.ReflectedThroughIndex);
+        Assert.Equal(6, section.FullyReflectedThroughIndex);
         return (exporter, section);
+    }
+
+    /// <summary>Exports the partition as the whole-partition transfer does: the position is read before the
+    /// intents are cut, so the section's fully reflected position is the cut's.</summary>
+    private static PreparedIntentStore.PartitionIntentSection Export(PreparedIntentStore exporter)
+    {
+        long cut = exporter.GetAppliedLogIndex(Partition);
+        byte[] bytes = exporter.SerializePartitionIntents(Partition, [.. exporter.SnapshotRange(null, null)], cut);
+        return PreparedIntentStore.DeserializePartitionIntents(bytes);
     }
 
     // ── the history window ───────────────────────────────────────────────────────
@@ -99,7 +109,9 @@ public sealed class TestSnapshotInstallHistoryFence : IDisposable
         installed.ReplacePartitionIntents(Partition, section, requireLedger: true, isOwned: _ => true);
 
         Assert.Equal(6, installed.GetLedgerReflectedThroughIndex(Partition));
+        Assert.Equal(6, installed.GetLedgerFullyReflectedThroughIndex(Partition));
         Assert.True(installed.IsHistoricalApply(Partition, 6));
+        Assert.True(installed.IsFullyReflectedApply(Partition, 6));
         Assert.False(installed.IsHistoricalApply(Partition, 7));
         Assert.True(installed.TryGetCommittedHead("h/k", out long head, out _));
         Assert.Equal(7, head);
@@ -107,11 +119,13 @@ public sealed class TestSnapshotInstallHistoryFence : IDisposable
         // The receiver's WAL boundary is below the exporter's position, so the first transaction's prepare
         // (validated at base 5, long since committed and superseded) replays through the live path against
         // a ledger whose head is already 7. Judged, it would be "stale"; it is history, so it is neither
-        // refused nor vetoed, and the transition still installs.
+        // refused nor vetoed — and, the installed set being exact for a fully reflected entry, it installs
+        // nothing: the intent it names was settled below the boundary, and the section rightly lacks it.
         RaftLog[] replay = CommitLog(1, MakeIntent("h/k", 1_000, revision: 6, baseRevision: 5));
-        Assert.True(ApplyLive(installed, replay[0]), "a replayed prepare below the reflected position must be acknowledged as applied");
-        Assert.NotNull(installed.Get("h/k"));
+        Assert.True(ApplyLive(installed, replay[0]), "a replayed prepare below the reflected position is folded, never refused");
+        Assert.Null(installed.Get("h/k"));
         Assert.Empty(vetoes);
+        Assert.False(installed.TryTakePrepareRejection(Ts(1_000), 1, "h/k", out _), "no refusal is memoed for history");
 
         ApplyLive(installed, replay.Skip(1));
         ApplyLive(installed, CommitLog(4, MakeIntent("h/k", 1_100, revision: 7, baseRevision: 6)));
@@ -142,6 +156,128 @@ public sealed class TestSnapshotInstallHistoryFence : IDisposable
         Assert.Equal(exporter.SnapshotLedger(Partition), installed.SnapshotLedger(Partition));
         Assert.Equal(exporter.GetLedgerWatermark(Partition), installed.GetLedgerWatermark(Partition));
         Assert.Equal(0, installed.LiveIntentCount);
+    }
+
+    /// <summary>
+    /// The tear window — entries between the position the exporter read before its walk and the one it read
+    /// after: an intent prepared there may be missing from the section, so its replayed prepare must still
+    /// install (the tail settles it), while the fence stays silent on it.
+    /// </summary>
+    [Fact]
+    public void ReplayInsideTheTearWindow_StillInstallsAnIntentTheWalkMissed()
+    {
+        PreparedIntentStore exporter = new();
+        ApplyLive(exporter, CommitLog(1, MakeIntent("h/k", 1_000, revision: 6, baseRevision: 5)));
+
+        // The walk began at id 3; the second transaction prepared at id 4 while it ran and the walk missed it.
+        long cut = exporter.GetAppliedLogIndex(Partition);
+        List<PreparedIntent> walked = [.. exporter.SnapshotRange(null, null)];
+        PreparedIntent missed = MakeIntent("h/k", 1_100, revision: 7, baseRevision: 6);
+        ApplyLive(exporter, Log(4, new PrepareIntentCommand(missed)));
+        PreparedIntentStore.PartitionIntentSection section = PreparedIntentStore.DeserializePartitionIntents(
+            exporter.SerializePartitionIntents(Partition, walked, cut));
+        Assert.Equal(3, section.FullyReflectedThroughIndex);
+        Assert.Equal(4, section.ReflectedThroughIndex);
+        Assert.Empty(section.Intents);
+
+        PreparedIntentStore installed = new();
+        List<(string Key, long Head)> vetoes = [];
+        installed.AttachStaleBaseVetoer((intent, head) => vetoes.Add((intent.Key, head)));
+        installed.ReplacePartitionIntents(Partition, section, requireLedger: true, isOwned: _ => true);
+
+        Assert.True(ApplyLive(installed, Log(4, new PrepareIntentCommand(missed))));
+        Assert.NotNull(installed.Get("h/k"));
+        Assert.Empty(vetoes);
+
+        RaftLog[] tail = CommitLog(5, missed).Skip(1).ToArray();
+        ApplyLive(exporter, tail);
+        ApplyLive(installed, tail);
+        Assert.Null(installed.Get("h/k"));
+        Assert.Equal(exporter.SnapshotLedger(Partition), installed.SnapshotLedger(Partition));
+        Assert.Equal(exporter.SnapshotSettledIdentities(Partition), installed.SnapshotSettledIdentities(Partition));
+    }
+
+    /// <summary>
+    /// A re-driven prepare of a settled transaction that the exporter rejected inside the tear window is
+    /// rejected on the receiver too: the memory shipped with the section (captured before the walk) plus the
+    /// settlements replayed on top of it hold every identity the exporter's memory held at that position.
+    /// </summary>
+    [Fact]
+    public void ReplayInsideTheTearWindow_OfASettledTransaction_InstallsNoPhantom()
+    {
+        PreparedIntentStore exporter = new();
+        PreparedIntent t = MakeIntent("h/k", 1_000, revision: 6, baseRevision: 5);
+        ApplyLive(exporter, CommitLog(1, t));
+
+        long cut = exporter.GetAppliedLogIndex(Partition);
+        List<PreparedIntent> walked = [.. exporter.SnapshotRange(null, null)];
+        Assert.False(ApplyLive(exporter, Log(4, new PrepareIntentCommand(t)))); // the duplicate: rejected live
+        Assert.Null(exporter.Get("h/k"));
+        PreparedIntentStore.PartitionIntentSection section = PreparedIntentStore.DeserializePartitionIntents(
+            exporter.SerializePartitionIntents(Partition, walked, cut));
+        Assert.Equal(3, section.FullyReflectedThroughIndex);
+        Assert.Equal(4, section.ReflectedThroughIndex);
+
+        PreparedIntentStore installed = new();
+        List<(string Key, long Head)> vetoes = [];
+        installed.AttachStaleBaseVetoer((intent, head) => vetoes.Add((intent.Key, head)));
+        installed.ReplacePartitionIntents(Partition, section, requireLedger: true, isOwned: _ => true);
+
+        ApplyLive(installed, Log(4, new PrepareIntentCommand(t)));
+        Assert.Null(installed.Get("h/k"));
+        Assert.Empty(vetoes);
+        Assert.Equal(0, installed.LiveIntentCount);
+    }
+
+    /// <summary>
+    /// Below the fully reflected position the installed set is exact, so a replayed prepare of a transaction
+    /// the memory no longer remembers (its settlement aged out of the window before the export) still installs
+    /// nothing — history can never re-create an intent the exporter had rejected.
+    /// </summary>
+    [Fact]
+    public void ReplayBelowTheFullyReflectedPosition_OfAForgottenSettledTransaction_InstallsNoPhantom()
+    {
+        PreparedIntentStore exporter = new();
+        PreparedIntent t = MakeIntent("h/k", 1_000, revision: 6, baseRevision: 5);
+        ApplyLive(exporter, CommitLog(1, t));
+        Assert.False(ApplyLive(exporter, Log(4, new PrepareIntentCommand(t)))); // rejected while remembered
+
+        // Commits a full window later age T's identity out of the memory before the export.
+        long later = 1_000 + PreparedIntentStore.SettledIdentityRetentionMs + 10;
+        ApplyLive(exporter, CommitLog(5, MakeIntent("h/other", later, revision: 1, baseRevision: 0)));
+        PreparedIntentStore.PartitionIntentSection section = Export(exporter);
+        Assert.Equal(7, section.FullyReflectedThroughIndex);
+        Assert.DoesNotContain(section.Settled!, e => e.TransactionId == t.TransactionId);
+
+        PreparedIntentStore installed = new();
+        List<(string Key, long Head)> vetoes = [];
+        installed.AttachStaleBaseVetoer((intent, head) => vetoes.Add((intent.Key, head)));
+        installed.ReplacePartitionIntents(Partition, section, requireLedger: true, isOwned: _ => true);
+
+        Assert.True(ApplyLive(installed, Log(4, new PrepareIntentCommand(t))));
+        Assert.Null(installed.Get("h/k"));
+        Assert.Empty(vetoes);
+        Assert.Equal(0, installed.LiveIntentCount);
+    }
+
+    [Fact]
+    public void FullyReflectedPosition_IsClampedToTheReflectedOne_AndNeverRegresses()
+    {
+        (PreparedIntentStore exporter, PreparedIntentStore.PartitionIntentSection older) = ExportedHistory();
+
+        // A cut claimed above the exporter's position is clamped to it.
+        PreparedIntentStore.PartitionIntentSection overClaimed = PreparedIntentStore.DeserializePartitionIntents(
+            exporter.SerializePartitionIntents(Partition, [.. exporter.SnapshotRange(null, null)], fullyReflectedThroughIndex: 99));
+        Assert.Equal(6, overClaimed.FullyReflectedThroughIndex);
+
+        ApplyLive(exporter, CommitLog(7, MakeIntent("h/k", 1_200, revision: 8, baseRevision: 7)));
+        PreparedIntentStore.PartitionIntentSection newer = Export(exporter);
+        Assert.Equal(9, newer.FullyReflectedThroughIndex);
+
+        PreparedIntentStore installed = new();
+        installed.ReplacePartitionIntents(Partition, newer, requireLedger: true, isOwned: _ => true);
+        installed.ReplacePartitionIntents(Partition, older, requireLedger: true, isOwned: _ => true);
+        Assert.Equal(9, installed.GetLedgerFullyReflectedThroughIndex(Partition));
     }
 
     [Fact]
@@ -205,7 +341,9 @@ public sealed class TestSnapshotInstallHistoryFence : IDisposable
         restarted.AttachPartitionResolver(_ => Partition);
 
         Assert.Equal(6, restarted.GetLedgerReflectedThroughIndex(Partition));
+        Assert.Equal(6, restarted.GetLedgerFullyReflectedThroughIndex(Partition));
         Assert.True(restarted.IsHistoricalApply(Partition, 6));
+        Assert.True(restarted.IsFullyReflectedApply(Partition, 6));
         Assert.False(restarted.IsHistoricalApply(Partition, 7));
         Assert.Equal(installed.SnapshotLedger(Partition), restarted.SnapshotLedger(Partition));
 

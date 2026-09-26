@@ -1191,6 +1191,13 @@ internal sealed class DurableMaintenanceService
     /// a confirmed stale-base commit exists (counted as late, logged as an error: this is a fork the veto
     /// missed, or one found retroactively during catch-up); still undecided — the drive itself could not
     /// resolve the record (counted as sent only; the recovery sweep owns the transaction from here).</para>
+    ///
+    /// <para>The late count is only a loss witness because the store never lets a re-driven prepare of an
+    /// already-settled transaction reach the fence: such a prepare (a proposal re-proposed to the successor
+    /// after a leader step-down while its first copy had landed, committed and settled there) is rejected by
+    /// the settled-identity memory before it is judged. Without that rejection it re-installed a phantom intent,
+    /// was refused against a head holding its own commit, and its veto found the commit — a late count with no
+    /// fork behind it, rising with every step-down under load.</para>
     /// </summary>
     internal async Task VetoStaleBasePrepareAsync(PreparedIntent intent, long committedHeadRevision, CancellationToken cancellationToken = default)
     {
@@ -1251,7 +1258,8 @@ internal sealed class DurableMaintenanceService
     // the finalizer proposes the commit, so a refusal is ordered ahead of the decision instead of raced
     // against it. A replica that cannot answer contributes nothing: a down node cannot veto either, so the
     // commit never blocks on absence — the veto remains the backstop for that residual, and its late counter
-    // stays the loss witness.
+    // stays the loss witness (see VetoStaleBasePrepareAsync for the re-driven duplicate the store keeps out
+    // of it).
 
     // How long a replica may hold the verdict request while waiting for the prepare to apply locally. The
     // prepare already committed on the leader before the confirmation starts, so a healthy follower applies

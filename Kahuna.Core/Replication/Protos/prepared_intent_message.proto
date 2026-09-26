@@ -89,6 +89,23 @@ message CommittedHeadLedgerEntryMessage {
   uint32 committedAtCounter  = 6;
 }
 
+// One (transaction identity, key) whose settlement (the removal of the resolved intent on that key) applied
+// through the partition's log, with the commit timestamp of that intent — the time base the settled-identity
+// memory's retention is measured against. A prepare that arrives for a remembered identity and key is a
+// re-driven duplicate of an already-decided leg and is rejected instead of re-installed (see
+// PreparedIntentStore). Keyed per key, not per transaction, so a range move that hands a decided transaction's
+// still-unsettled leg on another key to this partition installs it as it must.
+message SettledTransactionLedgerEntryMessage {
+  int32  transactionIdNode     = 1;
+  int64  transactionIdPhysical = 2;
+  uint32 transactionIdCounter  = 3;
+  int64  epoch = 4;
+  int32  settledAtNode     = 5;
+  int64  settledAtPhysical = 6;
+  uint32 settledAtCounter  = 7;
+  string key = 8;
+}
+
 // The full materialized intent set of a data partition, for the durable on-disk snapshot and whole-partition
 // state transfer. Each entry is a PREPARE-kind command message, which already carries every intent field
 // including its current resolution, so no separate entry shape is needed.
@@ -121,4 +138,17 @@ message PreparedIntentSnapshotMessage {
   // backend. A reader loads these into a separate set — never as live intents — and drops each one once the
   // flush carrying its row is confirmed.
   repeated PreparedIntentCommandMessage settledIntentsAwaitingFlush = 9;
+  // The ledger slice's settled-identity memory (transactions whose settlement applied through this
+  // partition's log within the memory's retention window). Part of the replicated slice: it decides whether
+  // a prepare is a re-driven duplicate of a settled transaction, so a reader installs it with the heads.
+  // Absent in a snapshot written before it existed, which loads as an empty memory.
+  repeated SettledTransactionLedgerEntryMessage settledTransactions = 10;
+  // The partition's highest applied log index whose intents the section's intent set FULLY reflects: the
+  // exporter's applied position when its intent walk began (the walk is lock-free, so an intent prepared
+  // while it ran may be missing, but one prepared at or below this position is present unless it was
+  // removed during the walk, and that removal replays). A replay at or below it therefore installs no
+  // intent the section lacks — the installed set is the truth there — which is what keeps a replica from
+  // re-creating, out of history, an intent the exporter had rejected. At most ledgerReflectedThroughIndex.
+  // Zero when unknown (an older writer, or a section not cut against a log position).
+  int64  ledgerFullyReflectedThroughIndex = 11;
 }

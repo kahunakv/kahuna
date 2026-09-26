@@ -211,8 +211,9 @@ public sealed class TestOnePhaseApplyTimeGate
             ApplyBundle(records, intents, stale, MakeIntent("g/appeared", stale, revision: 0, baseRevision: -1, KeyValueState.Undefined), Ts(1_200)));
         Assert.Equal(TransactionDecision.Undecided, records.Get(stale, 1)!.Decision);
 
-        // The tombstone is a revision of its own, so the insert over it stages the next one.
-        CommitThroughStore(intents, MakeIntent("g/deleted", Ts(1_000), revision: 4, baseRevision: 3, KeyValueState.Set, state: KeyValueState.Deleted));
+        // The tombstone is a revision of its own, so the insert over it stages the next one. (A fresh identity:
+        // the transaction above already settled on this partition, so its prepare would be a rejected replay.)
+        CommitThroughStore(intents, MakeIntent("g/deleted", Ts(1_050), revision: 4, baseRevision: 3, KeyValueState.Set, state: KeyValueState.Deleted));
         HLCTimestamp clean = Ts(1_150);
         Assert.Equal(TransactionApplyOutcome.Applied,
             ApplyBundle(records, intents, clean, MakeIntent("g/deleted", clean, revision: 5, baseRevision: -1, KeyValueState.Undefined), Ts(1_250)));

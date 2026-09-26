@@ -552,6 +552,50 @@ public sealed class TestDurableTransactionFinalizer
         Assert.Equal(TransactionDecision.Commit, records.Get(txId, 1)!.Decision);
     }
 
+    /// <summary>
+    /// A same-identity re-drive of an input whose earlier attempt already committed and settled (the proposal
+    /// was released as not-leader at a step-down, or its apply went unobserved, while its first copy landed):
+    /// the re-driven prepare is a settled replay. It must be refused without re-installing a phantom intent,
+    /// without the staged-base fence judging it against its own commit, and without a veto; the finalize then
+    /// concludes Committed from the record with zero retry rounds and no abort proposal.
+    /// </summary>
+    [Fact]
+    public async Task ReFinalize_AfterSettlement_IsASettledReplay_NotAStaleBaseFork()
+    {
+        HLCTimestamp txId = Ts(1000);
+        Seam seam = new();
+        (DurableTransactionFinalizer finalizer, TransactionRecordStore records, PreparedIntentStore intents) = Build(seam);
+        DurableFinalizeInput input = Input(txId, 1, (5, "acct/1"));
+
+        int vetoes = 0;
+        intents.AttachStaleBaseVetoer((_, _) => vetoes++);
+
+        DurableFinalizeOutcome first = await finalizer.FinalizeAsync(input, Validate(true), opId: Ts(2000), CancellationToken.None);
+        Assert.Equal(DurableFinalizeResult.Committed, first.Result);
+        Assert.Null(intents.Get("acct/1"));
+
+        using MetricCapture capture = new("outcome",
+            "kahuna.transactions.staged_base_prepare_rejections", "kahuna.durable_tx.settled_prepare_replays",
+            "kahuna.durable_tx.finalize_prepare_retries", "kahuna.durable_tx.prepare_retry_loops");
+        int recordCallsBefore = seam.Calls.Count(c => c.Type == ReplicationTypes.TransactionRecord);
+
+        DurableFinalizeOutcome second = await finalizer.FinalizeAsync(input, Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.Committed, second.Result);
+        Assert.True(second.CanonicalDecisionRead);
+        Assert.Equal(TransactionDecision.Commit, records.Get(txId, 1)!.Decision);
+        Assert.Equal(1, records.Count);
+        Assert.Null(intents.Get("acct/1"));
+        Assert.Equal(0, vetoes);
+        Assert.Empty(capture.Samples("kahuna.transactions.staged_base_prepare_rejections"));
+        Assert.Single(capture.Samples("kahuna.durable_tx.settled_prepare_replays"));
+        Assert.Contains(0, capture.Samples("kahuna.durable_tx.finalize_prepare_retries"));
+        Assert.True(capture.Total("kahuna.durable_tx.prepare_retry_loops", "settled") >= 1);
+
+        // Only the (idempotent) record init was proposed on the second attempt — no decision, no abort.
+        Assert.Equal(recordCallsBefore + 1, seam.Calls.Count(c => c.Type == ReplicationTypes.TransactionRecord));
+    }
+
     [Fact]
     public async Task SequentialTransactions_SameKey_BothCommit_NoLingeringIntent()
     {
@@ -1392,6 +1436,51 @@ public sealed class TestDurableTransactionFinalizer
         Assert.Equal(1, records.Count);
         Assert.Equal(TransactionDecision.Commit, records.Get(txId, 1)!.Decision);
         Assert.Null(intents.Get("acct/1"));
+    }
+
+    /// <summary>
+    /// The re-driven one-phase bundle from the fault soaks: the bundle's first copy landed on the successor
+    /// after a leader step-down and committed there, a successor transaction built on it, and only then did the
+    /// coordinator's re-driven copy apply. Its prepare is a settled replay: nothing installs, the fence never
+    /// refuses it as stale (the head holds its own commit plus the successor's), no veto fires, and the reply's
+    /// canonical read still answers Committed.
+    /// </summary>
+    [Fact]
+    public async Task OnePhase_ReDrivenBundle_AfterSettlementAndASuccessor_IsASettledReplay_NotAFork()
+    {
+        HLCTimestamp txId = Ts(1000);
+        (TransactionRecordStore records, PreparedIntentStore intents) = StoresWithProbe();
+        Seam seam = new() { Records = records, Intents = intents };
+        DurableTransactionFinalizer finalizer = new(records, intents, seam.Replicate, replicateOnePhaseBundle: OnePhase(records, intents));
+
+        int vetoes = 0;
+        intents.AttachStaleBaseVetoer((_, _) => vetoes++);
+
+        DurableFinalizeInput input = Input(txId, 1, (5, "acct/1"));
+        DurableFinalizeOutcome first = await finalizer.FinalizeAsync(input, Validate(true), opId: Ts(2000), CancellationToken.None);
+        Assert.Equal(DurableFinalizeResult.Committed, first.Result);
+        Assert.Null(intents.Get("acct/1"));
+
+        // A successor read T's committed value (revision 1) and committed revision 2 on top of it.
+        DurableFinalizeOutcome successor = await finalizer.FinalizeAsync(
+            Input(Ts(3000), 1, revision: 2, baseRevision: 1, (5, "acct/1")), Validate(true), opId: Ts(4000), CancellationToken.None);
+        Assert.Equal(DurableFinalizeResult.Committed, successor.Result);
+        Assert.True(intents.TryGetCommittedHead("acct/1", out long head, out _));
+        Assert.Equal(2, head);
+
+        using MetricCapture capture = new("outcome",
+            "kahuna.transactions.staged_base_prepare_rejections", "kahuna.durable_tx.settled_prepare_replays");
+
+        DurableFinalizeOutcome redriven = await finalizer.FinalizeAsync(input, Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.Committed, redriven.Result);
+        Assert.Equal(TransactionDecision.Commit, records.Get(txId, 1)!.Decision);
+        Assert.Null(intents.Get("acct/1"));
+        Assert.Equal(0, vetoes);
+        Assert.Empty(capture.Samples("kahuna.transactions.staged_base_prepare_rejections"));
+        Assert.Single(capture.Samples("kahuna.durable_tx.settled_prepare_replays"));
+        Assert.True(intents.TryGetCommittedHead("acct/1", out head, out _));
+        Assert.Equal(2, head); // the successor's commit stands; nothing was rolled back or re-decided
     }
 
     /// <summary>The gate must not over-reject: an uncontended one-phase bundle applies its own prepare in the

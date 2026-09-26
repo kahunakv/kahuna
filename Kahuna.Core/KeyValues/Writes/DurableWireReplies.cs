@@ -15,7 +15,13 @@ internal enum PrepareRejectionKind
     /// <summary>Never sent on the wire: the origin's own classification of a refused prepare whose partition
     /// the key no longer routes to (a split or merge since freeze released the fenced submission). Final for
     /// this frozen input; the caller must retry from a fresh freeze.</summary>
-    RangeMoved = 3
+    RangeMoved = 3,
+
+    /// <summary>The prepare's transaction already settled on the partition's log — the prepare is a re-driven
+    /// duplicate of a decided transaction, rejected by the intent store's settled-identity memory instead of
+    /// re-installed. Final: the outcome is whatever the canonical record holds, so the caller concludes from
+    /// the record without retrying or driving an abort. Outranks every other kind.</summary>
+    Settled = 4
 }
 
 /// <summary>A remote partition leader's answer to a forwarded durable bundle. The two signals stay separate:

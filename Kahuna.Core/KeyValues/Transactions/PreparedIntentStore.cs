@@ -61,6 +61,15 @@ internal sealed class PreparedIntentStore
     {
         public readonly ConcurrentDictionary<string, CommittedHead> Heads = new();
 
+        // Settled-identity memory: every (TransactionId, Epoch, Key) whose resolved intent was REMOVED through
+        // this partition's log, with the intent's commit timestamp as the time base of its retention. Fed and
+        // read only under applyGate (a prepare apply consults it before the state machine runs), so a plain
+        // map. See IsSettledIdentity for what it decides and why it must be part of the replicated slice.
+        public readonly Dictionary<SettledIdentity, HLCTimestamp> Settled = new();
+
+        // The settled-memory prune bucket (Watermark.L / SettledIdentityPruneBucketMs) the last prune ran in.
+        public long SettledPrunedBucket;
+
         // Highest commit timestamp among the heads this slice ever recorded. Mutated under applyGate.
         public HLCTimestamp Watermark = HLCTimestamp.Zero;
 
@@ -82,12 +91,37 @@ internal sealed class PreparedIntentStore
         // history the installed state already accounts for — see IsHistoricalApply. Zero for a slice that was
         // never installed. Written under applyGate, read lock-free.
         public long ReflectedThroughIndex;
+
+        // The partition's highest applied log index whose intents the installed set fully reflected: the
+        // exporter's position when its intent walk began (see WritePartitionSection). A prepare replayed at
+        // or below it that finds no intent installs nothing — the installed set is exact for such entries, up
+        // to removals during the walk that replay on their own — so history can never re-create an intent the
+        // exporter had rejected (a settled replay the exporter's memory refused but a memory captured later
+        // no longer remembers). Never above ReflectedThroughIndex. Same lifecycle and access rules as it.
+        public long FullyReflectedThroughIndex;
     }
 
     /// <summary>The slice key used when an apply cannot be attributed to a partition's log — the pure/in-memory
     /// configuration of the unit tests, where commands are applied directly rather than through
     /// <see cref="Replicate"/>/<see cref="Restore"/>. Production applies always carry their log's partition.</summary>
     internal const int UnattributedPartition = -1;
+
+    /// <summary>Where one applied entry sits relative to the partition's installed snapshot (see
+    /// <see cref="IsHistoricalApply"/> and <see cref="IsFullyReflectedApply"/>).</summary>
+    private enum HistoryWindow
+    {
+        /// <summary>Above the installed position: live catch-up or steady state; every verdict is given.</summary>
+        Live,
+
+        /// <summary>At or below the installed position but above the fully reflected one — inside the
+        /// exporter's walk: the transition applies (an intent the walk missed must install), no advisory
+        /// verdict is given.</summary>
+        Reflected,
+
+        /// <summary>At or below the fully reflected position: the installed intent set is exact for the entry,
+        /// so a prepare that finds no intent installs nothing, and no advisory verdict is given.</summary>
+        FullyReflected
+    }
 
     // The committed-head ledger, one slice per partition whose log this node applies. See PartitionLedger.
     private readonly ConcurrentDictionary<int, PartitionLedger> ledgers = new();
@@ -124,6 +158,34 @@ internal sealed class PreparedIntentStore
     /// <summary>Approximate bytes one ledger entry retains: the key's characters plus the entry struct and
     /// the dictionary slot around it.</summary>
     private static long LedgerEntryBytes(string key) => 2L * key.Length + 64;
+
+    /// <summary>One leg — a transaction attempt's identity on one key — as the settled-identity memory keys it.
+    /// Per key, not per transaction: a decided multi-key transaction can have one leg settled here while a
+    /// range move hands another of its legs, still pending, to this partition; that leg must install, and only
+    /// a prepare of a key that itself settled here is a replay.</summary>
+    private readonly record struct SettledIdentity(HLCTimestamp TransactionId, long Epoch, string Key);
+
+    /// <summary>
+    /// How long (in commit-timestamp time, measured from the slice's watermark) the settled-identity memory
+    /// keeps rejecting a re-driven prepare of a settled transaction. The duplicate this guards against is a
+    /// proposal the finalizer re-drove after a leader step-down or an unobserved apply while its first copy was
+    /// already in the successor's log: the copies land seconds apart at most (the re-drive is immediate and
+    /// the successor's queue is bounded by the finalize deadline), so a minute covers it with a wide margin,
+    /// while keeping the memory at one small entry per settled transaction of the last minute rather than the
+    /// staged-base fence's ten-minute horizon. A fixed constant, not a setting: the verdict is a replicated
+    /// transition, so every replica must judge the same entry by the same window whatever its configuration.
+    /// An identity older than the window is forgotten and its duplicate degrades to the pre-existing behaviour
+    /// (a re-installed intent the recovery sweep settles again), never to anything worse.
+    /// </summary>
+    internal const int SettledIdentityRetentionMs = 60_000;
+
+    // Physical prunes of the settled memory run when the slice's watermark crosses into a new bucket of this
+    // many milliseconds — one scan per quarter window per partition.
+    private const int SettledIdentityPruneBucketMs = SettledIdentityRetentionMs / 4;
+
+    /// <summary>Approximate bytes one settled-identity entry retains: the key's characters (the string is the
+    /// removed intent's, kept alive by the entry) plus the identity, the timestamp and the dictionary slot.</summary>
+    private static long SettledIdentityBytes(string key) => 2L * key.Length + 80;
 
     // Monotonic tick source for the dirty stamps below: each mutation mints one tick, so stamps taken
     // from it order mutations against the pre-scan capture in <see cref="PersistSnapshot"/>.
@@ -602,15 +664,18 @@ internal sealed class PreparedIntentStore
     /// commit gate later judges bundles of that partition against — so it must be the log's partition, never a
     /// routing guess: routing changes with the range map while the log's partition is fixed.</summary>
     public PreparedIntentApplyResult Apply(PreparedIntentCommand command, int partitionId) =>
-        Apply(command, partitionId, judgeFence: true);
+        Apply(command, partitionId, HistoryWindow.Live);
 
-    /// <param name="judgeFence">Whether the advisory staged-base fence judges a validated-base prepare in this
-    /// apply. False for history the partition's installed ledger already reflects (<see cref="IsHistoricalApply"/>):
-    /// the transition still applies identically, but no refusal, veto, wedge streak or metric is produced from a
-    /// ledger that is ahead of the entry by construction.</param>
-    private PreparedIntentApplyResult Apply(PreparedIntentCommand command, int partitionId, bool judgeFence)
+    /// <param name="window">Where the entry sits relative to the partition's installed snapshot. The advisory
+    /// staged-base fence judges a validated-base prepare only for a <see cref="HistoryWindow.Live"/> entry; for
+    /// history the partition's installed ledger already reflects (<see cref="IsHistoricalApply"/>) the transition
+    /// still applies, but no refusal, veto, wedge streak or metric is produced from a ledger that is ahead of
+    /// the entry by construction — and at or below the fully reflected position a prepare that finds no intent
+    /// installs nothing at all.</param>
+    private PreparedIntentApplyResult Apply(PreparedIntentCommand command, int partitionId, HistoryWindow window)
     {
         string key = KeyOf(command);
+        bool judgeFence = window == HistoryWindow.Live;
 
         PreparedIntent? settledCommit = null;
         bool wedgeRepairDue = false;
@@ -621,6 +686,48 @@ internal sealed class PreparedIntentStore
         lock (applyGate)
         {
             intents.TryGetValue(key, out PreparedIntent? existing);
+
+            // ── Fully reflected history: nothing to install ──
+            // The installed intent set is exact for entries at or below the fully reflected position (the
+            // exporter's position when its walk began): every intent prepared there and still live at the
+            // export is installed, and one removed during the walk is removed again by its own replayed
+            // removal. A prepare that finds no intent here is therefore either a transaction the installed
+            // state already settled, or one the exporter rejected — installing it would create, out of history,
+            // a phantom holder no replica of the partition ever had. Folded as a no-op; the entry's later
+            // transitions fold the same way.
+            if (window == HistoryWindow.FullyReflected && existing is null && command is PrepareIntentCommand)
+                return new PreparedIntentApplyResult(TransactionApplyOutcome.IdempotentNoop, null, null);
+
+            // ── Settled-identity replay, judged before the state machine ──
+            // A prepare of a leg that already settled on this partition's log is a re-driven duplicate: the
+            // finalizer re-proposed the delta (a proposal released as not-leader at a step-down, or an apply this
+            // node never observed) after its first copy had landed, committed and settled on the successor. The
+            // state machine alone would re-install it — the settlement removed the intent, so the key looks free
+            // — as a pending intent for a decided transaction: a phantom holder the recovery sweep has to settle
+            // again, and one the staged-base fence then judges against a head that already contains the
+            // transaction's own commit, refusing it as stale and driving a veto that finds the commit and counts
+            // it as an acknowledged stale-base commit. Rejecting it here installs nothing, judges nothing, and
+            // names the reason so the producer reads the decision from the record. The memory is a pure
+            // function of the partition's log (fed by the settlement's remove, persisted and installed with the
+            // slice), so every replica rejects the same entry — this is a replicated transition, not an
+            // advisory verdict, and it therefore applies on every path including history replay.
+            if (command is PrepareIntentCommand replayCandidate && IsSettledIdentity(partitionId, replayCandidate.Intent))
+            {
+                result = new PreparedIntentApplyResult(
+                    TransactionApplyOutcome.Rejected, existing,
+                    "prepare of a transaction whose settlement already applied on this partition (re-driven duplicate)",
+                    SettledReplay: true);
+
+                if (judgeFence)
+                {
+                    DurableTransactionMetrics.SettledPrepareReplays.Add(1);
+                    logger?.LogInformation(
+                        "Prepare of transaction {TransactionId} (epoch {Epoch}) on key {Key} arrived after its settlement applied on partition {PartitionId}; rejected as a re-driven duplicate instead of re-installing a settled intent",
+                        replayCandidate.Intent.TransactionId, replayCandidate.Intent.Epoch, key, partitionId);
+                }
+
+                return result;
+            }
 
             result = PreparedIntentStateMachine.Apply(existing, command);
 
@@ -657,6 +764,12 @@ internal sealed class PreparedIntentStore
                     RecordCommittedHead(existing, partitionId);
                     settledCommit = existing;
                 }
+
+                // The removal of a resolved intent — commit or abort — is the settlement that opens the hole a
+                // re-driven prepare of this leg would fall into; remember the identity and key so that prepare is
+                // rejected instead.
+                if (command is RemoveIntentCommand && result.Outcome == TransactionApplyOutcome.Applied && existing.IsResolved)
+                    RecordSettledIdentity(existing, partitionId);
 
                 // The removal takes the intent out of the live set and, at the next rewrite, out of the snapshot;
                 // if its materialized row is still only queued here, keep the intent reachable for a restart replay
@@ -1156,6 +1269,27 @@ internal sealed class PreparedIntentStore
         return entries;
     }
 
+    /// <summary>Every settled identity a partition's ledger slice currently retains, sorted by transaction id,
+    /// epoch, then key. Test seam for cross-replica parity assertions.</summary>
+    internal IReadOnlyList<SettledIdentityEntry> SnapshotSettledIdentities(int partitionId)
+    {
+        List<SettledIdentityEntry> entries;
+        lock (applyGate)
+        {
+            entries = ledgers.TryGetValue(partitionId, out PartitionLedger? ledger) ? CopySettledLocked(ledger) : [];
+        }
+
+        entries.Sort(static (a, b) =>
+        {
+            int byId = a.TransactionId.CompareTo(b.TransactionId);
+            if (byId != 0)
+                return byId;
+            int byEpoch = a.Epoch.CompareTo(b.Epoch);
+            return byEpoch != 0 ? byEpoch : string.CompareOrdinal(a.Key, b.Key);
+        });
+        return entries;
+    }
+
     /// <summary>Number of live prepared intents currently held. Observability only — logged in the
     /// leadership-change fingerprint alongside <see cref="CommittedHeadCount"/>.</summary>
     internal int LiveIntentCount => intents.Count;
@@ -1346,6 +1480,69 @@ internal sealed class PreparedIntentStore
         }
     }
 
+    /// <summary>
+    /// Whether <paramref name="intent"/>'s leg (its transaction identity on its key) settled on
+    /// <paramref name="partitionId"/>'s log within the settled-identity window — the verdict that rejects a
+    /// re-driven prepare of a decided transaction. Judged only against the slice of the log the prepare arrives on: a node's other slices are
+    /// node-local (a replica hosting a different partition set holds different ones), and this verdict changes
+    /// the replicated transition, so it may depend on nothing but this partition's own applied prefix.
+    /// Retention is logical, measured from the slice's watermark exactly as the committed heads' is, so the
+    /// timing of the physical prune is unobservable. Caller holds <see cref="applyGate"/>.
+    /// </summary>
+    private bool IsSettledIdentity(int partitionId, PreparedIntent intent) =>
+        ledgers.TryGetValue(partitionId, out PartitionLedger? ledger)
+        && ledger.Settled.TryGetValue(new SettledIdentity(intent.TransactionId, intent.Epoch, intent.Key), out HLCTimestamp settledAt)
+        && IsSettledWithinRetention(settledAt, ledger.Watermark);
+
+    private static bool IsSettledWithinRetention(HLCTimestamp settledAt, HLCTimestamp watermark) =>
+        settledAt.L >= watermark.L - SettledIdentityRetentionMs;
+
+    /// <summary>Remembers a removed resolved intent's transaction identity in the slice of the partition whose
+    /// log delivered the removal. The intent's commit timestamp is the entry's time base; a replayed removal
+    /// records the same value. Stamps the partition dirty: the memory is persisted with the slice. Caller holds
+    /// <see cref="applyGate"/>.</summary>
+    private void RecordSettledIdentity(PreparedIntent intent, int partitionId)
+    {
+        PartitionLedger ledger = ledgers.GetOrAdd(partitionId, static _ => new PartitionLedger());
+
+        SettledIdentity identity = new(intent.TransactionId, intent.Epoch, intent.Key);
+        if (ledger.Settled.TryAdd(identity, intent.CommitTimestamp))
+            ledger.Bytes += SettledIdentityBytes(intent.Key);
+        else
+            ledger.Settled[identity] = intent.CommitTimestamp;
+
+        StampPartitionDirty(partitionId);
+
+        // Physical prune once per bucket of watermark time. Unobservable to the verdict (logical retention).
+        long bucket = ledger.Watermark.L / SettledIdentityPruneBucketMs;
+        if (bucket != ledger.SettledPrunedBucket)
+        {
+            ledger.SettledPrunedBucket = bucket;
+            PruneSettledIdentities(ledger);
+        }
+    }
+
+    /// <summary>Physically drops settled identities that fell outside the window measured from the slice's
+    /// watermark — only what the window already treats as absent. Caller holds <see cref="applyGate"/>.</summary>
+    private void PruneSettledIdentities(PartitionLedger ledger)
+    {
+        List<SettledIdentity>? expired = null;
+        foreach (KeyValuePair<SettledIdentity, HLCTimestamp> entry in ledger.Settled)
+        {
+            if (!IsSettledWithinRetention(entry.Value, ledger.Watermark))
+                (expired ??= []).Add(entry.Key);
+        }
+
+        if (expired is null)
+            return;
+
+        foreach (SettledIdentity identity in expired)
+        {
+            if (ledger.Settled.Remove(identity))
+                ledger.Bytes -= SettledIdentityBytes(identity.Key);
+        }
+    }
+
     /// <summary>Records a committed intent's mutation as its key's committed head in the slice of the
     /// partition whose log delivered the settlement, and advances that slice's watermark. Monotonic per key:
     /// an older revision never overwrites a newer one, so a replayed settlement is a no-op. Stamps the
@@ -1427,36 +1624,52 @@ internal sealed class PreparedIntentStore
         ledger.PruneGeneration++;
     }
 
+    /// <summary>The settled identity entries a ledger section or snapshot carries for one slice.</summary>
+    internal readonly record struct SettledIdentityEntry(HLCTimestamp TransactionId, long Epoch, string Key, HLCTimestamp SettledAt);
+
     /// <summary>Replaces one partition's ledger slice with an installed one (whole-partition state transfer):
     /// the installed slice is the exporter's state at the snapshot boundary, which the entries that follow the
     /// boundary then advance exactly as they did on the exporter. Under the apply gate so an apply cannot
     /// interleave with the swap.</summary>
     private void InstallLedger(
         int partitionId, IReadOnlyList<(string Key, long Revision, KeyValueState State, HLCTimestamp CommittedAt)> heads,
-        HLCTimestamp watermark, long reflectedThroughIndex)
+        HLCTimestamp watermark, long reflectedThroughIndex, IReadOnlyList<SettledIdentityEntry>? settled, long fullyReflectedThroughIndex)
     {
-        PartitionLedger ledger = BuildLedger(heads, watermark, reflectedThroughIndex);
+        PartitionLedger ledger = BuildLedger(heads, watermark, reflectedThroughIndex, settled, fullyReflectedThroughIndex);
 
         lock (applyGate)
             InstallLedgerLocked(partitionId, ledger);
     }
 
-    /// <summary>Materializes an installed slice outside the gate (the heads are copied in before the swap).</summary>
+    /// <summary>Materializes an installed slice outside the gate (the heads and the settled identities are
+    /// copied in before the swap). The fully reflected position is clamped to the reflected one.</summary>
     private PartitionLedger BuildLedger(
         IReadOnlyList<(string Key, long Revision, KeyValueState State, HLCTimestamp CommittedAt)> heads,
-        HLCTimestamp watermark, long reflectedThroughIndex)
+        HLCTimestamp watermark, long reflectedThroughIndex, IReadOnlyList<SettledIdentityEntry>? settled, long fullyReflectedThroughIndex)
     {
+        long reflected = Math.Max(0, reflectedThroughIndex);
         PartitionLedger ledger = new()
         {
             Watermark = watermark,
             PrunedBucket = watermark.L / LedgerPruneBucketMs,
-            ReflectedThroughIndex = Math.Max(0, reflectedThroughIndex)
+            SettledPrunedBucket = watermark.L / SettledIdentityPruneBucketMs,
+            ReflectedThroughIndex = reflected,
+            FullyReflectedThroughIndex = Math.Clamp(fullyReflectedThroughIndex, 0, reflected)
         };
 
         foreach ((string key, long revision, KeyValueState state, HLCTimestamp committedAt) in heads)
         {
             if (ledger.Heads.TryAdd(key, new CommittedHead(revision, state, committedAt)))
                 ledger.Bytes += LedgerEntryBytes(key);
+        }
+
+        if (settled is not null)
+        {
+            foreach (SettledIdentityEntry entry in settled)
+            {
+                if (ledger.Settled.TryAdd(new SettledIdentity(entry.TransactionId, entry.Epoch, entry.Key), entry.SettledAt))
+                    ledger.Bytes += SettledIdentityBytes(entry.Key);
+            }
         }
 
         return ledger;
@@ -1466,8 +1679,13 @@ internal sealed class PreparedIntentStore
     /// or older section cannot re-open the history window a newer install closed. Caller holds <see cref="applyGate"/>.</summary>
     private void InstallLedgerLocked(int partitionId, PartitionLedger ledger)
     {
-        if (ledgers.TryGetValue(partitionId, out PartitionLedger? previous) && previous.ReflectedThroughIndex > ledger.ReflectedThroughIndex)
-            ledger.ReflectedThroughIndex = previous.ReflectedThroughIndex;
+        if (ledgers.TryGetValue(partitionId, out PartitionLedger? previous))
+        {
+            if (previous.ReflectedThroughIndex > ledger.ReflectedThroughIndex)
+                ledger.ReflectedThroughIndex = previous.ReflectedThroughIndex;
+            if (previous.FullyReflectedThroughIndex > ledger.FullyReflectedThroughIndex)
+                ledger.FullyReflectedThroughIndex = previous.FullyReflectedThroughIndex;
+        }
 
         ledgers[partitionId] = ledger;
 
@@ -1503,18 +1721,39 @@ internal sealed class PreparedIntentStore
         ledgers.TryGetValue(partitionId, out PartitionLedger? ledger) ? Volatile.Read(ref ledger.ReflectedThroughIndex) : 0;
 
     /// <summary>Records <paramref name="logIndex"/> as applied through this store on <paramref name="partitionId"/>'s
-    /// log and reports whether the entry is history its installed ledger already reflects. An unindexed log
-    /// (the pure/in-memory test configuration) is never history.</summary>
-    private bool NoteApplied(int partitionId, long logIndex)
+    /// log and reports where the entry sits relative to the installed snapshot. An unindexed log (the
+    /// pure/in-memory test configuration) is never history.</summary>
+    private HistoryWindow NoteApplied(int partitionId, long logIndex)
     {
         if (logIndex <= 0)
-            return false;
+            return HistoryWindow.Live;
 
         appliedLogIndexByPartition.AddOrUpdate(
             partitionId, static (_, index) => index, static (_, current, index) => index > current ? index : current, logIndex);
 
-        return IsHistoricalApply(partitionId, logIndex);
+        if (!ledgers.TryGetValue(partitionId, out PartitionLedger? ledger))
+            return HistoryWindow.Live;
+
+        if (logIndex <= Volatile.Read(ref ledger.FullyReflectedThroughIndex))
+            return HistoryWindow.FullyReflected;
+
+        return logIndex <= Volatile.Read(ref ledger.ReflectedThroughIndex) ? HistoryWindow.Reflected : HistoryWindow.Live;
     }
+
+    /// <summary>
+    /// Whether the entry at <paramref name="logIndex"/> on <paramref name="partitionId"/>'s log is at or below the
+    /// installed slice's fully reflected position — the exporter's applied position when its intent walk began,
+    /// so the installed intent set is exact for the entry (see <see cref="IsHistoricalApply"/> for the wider
+    /// history window). A prepare replayed there that finds no intent installs nothing.
+    /// </summary>
+    internal bool IsFullyReflectedApply(int partitionId, long logIndex) =>
+        logIndex > 0
+        && ledgers.TryGetValue(partitionId, out PartitionLedger? ledger)
+        && logIndex <= Volatile.Read(ref ledger.FullyReflectedThroughIndex);
+
+    /// <summary>The fully reflected position of a partition's installed slice (0 when none). Test seam.</summary>
+    internal long GetLedgerFullyReflectedThroughIndex(int partitionId) =>
+        ledgers.TryGetValue(partitionId, out PartitionLedger? ledger) ? Volatile.Read(ref ledger.FullyReflectedThroughIndex) : 0;
 
     /// <summary>The highest log index applied through this store for the partition (0 when none).</summary>
     private long AppliedLogIndexOf(int partitionId) =>
@@ -1549,11 +1788,17 @@ internal sealed class PreparedIntentStore
             HLCTimestamp watermark;
             long generation;
             long reflectedThroughIndex;
+            long fullyReflectedThroughIndex;
+            List<SettledIdentityEntry> settled;
             lock (applyGate)
             {
                 watermark = ledger.Watermark;
                 generation = ledger.PruneGeneration;
                 reflectedThroughIndex = ledger.ReflectedThroughIndex;
+                fullyReflectedThroughIndex = ledger.FullyReflectedThroughIndex;
+                // The settled memory is mutated and read under the gate only, so it is copied here: the copy
+                // pairs with the watermark read in the same critical section and cannot tear.
+                settled = CopySettledLocked(ledger);
             }
 
             List<KeyValuePair<string, CommittedHead>> heads = new(ledger.Heads.Count);
@@ -1563,7 +1808,7 @@ internal sealed class PreparedIntentStore
             lock (applyGate)
             {
                 if (generation == ledger.PruneGeneration)
-                    return new LedgerCapture(watermark, reflectedThroughIndex, heads);
+                    return new LedgerCapture(watermark, reflectedThroughIndex, fullyReflectedThroughIndex, heads, settled);
 
                 // A prune tore the capture. Prunes are rare (once per retention bucket), so a rescan almost
                 // always succeeds; past a few attempts take the gate for the scan itself.
@@ -1572,15 +1817,27 @@ internal sealed class PreparedIntentStore
                     heads.Clear();
                     foreach (KeyValuePair<string, CommittedHead> entry in ledger.Heads)
                         heads.Add(entry);
-                    return new LedgerCapture(ledger.Watermark, ledger.ReflectedThroughIndex, heads);
+                    return new LedgerCapture(ledger.Watermark, ledger.ReflectedThroughIndex, ledger.FullyReflectedThroughIndex, heads, CopySettledLocked(ledger));
                 }
             }
         }
     }
 
-    /// <summary>One slice as captured for persistence or transfer: its watermark, its reflected position and its
-    /// heads, consistent with respect to physical pruning (see <see cref="CaptureLedger"/>).</summary>
-    private readonly record struct LedgerCapture(HLCTimestamp Watermark, long ReflectedThroughIndex, List<KeyValuePair<string, CommittedHead>> Heads);
+    /// <summary>Copies a slice's settled-identity memory. Caller holds <see cref="applyGate"/>.</summary>
+    private static List<SettledIdentityEntry> CopySettledLocked(PartitionLedger ledger)
+    {
+        List<SettledIdentityEntry> settled = new(ledger.Settled.Count);
+        foreach (KeyValuePair<SettledIdentity, HLCTimestamp> entry in ledger.Settled)
+            settled.Add(new SettledIdentityEntry(entry.Key.TransactionId, entry.Key.Epoch, entry.Key.Key, entry.Value));
+        return settled;
+    }
+
+    /// <summary>One slice as captured for persistence or transfer: its watermark, its reflected position, its
+    /// heads (consistent with respect to physical pruning, see <see cref="CaptureLedger"/>) and its settled
+    /// identities (copied under the gate with the watermark).</summary>
+    private readonly record struct LedgerCapture(
+        HLCTimestamp Watermark, long ReflectedThroughIndex, long FullyReflectedThroughIndex,
+        List<KeyValuePair<string, CommittedHead>> Heads, List<SettledIdentityEntry> Settled);
 
     /// <summary>The current intent at <paramref name="key"/>, or null. The emptiness pre-check is
     /// deliberate: this runs on every point read/write in the actor hot path, and on workloads with
@@ -1764,11 +2021,11 @@ internal sealed class PreparedIntentStore
         // History below an installed snapshot's reflected position applies without the advisory fence: the
         // ledger is ahead of these entries by construction, so a verdict here could only be a false refusal and
         // a false veto (see IsHistoricalApply).
-        bool judgeFence = !NoteApplied(partitionId, log.Id);
+        HistoryWindow window = NoteApplied(partitionId, log.Id);
 
         foreach (PreparedIntentCommand command in commands)
         {
-            PreparedIntentApplyResult result = Apply(command, partitionId, judgeFence);
+            PreparedIntentApplyResult result = Apply(command, partitionId, window);
             if (command is PrepareIntentCommand prepare && (result.Outcome == TransactionApplyOutcome.Rejected || result.StaleBase))
             {
                 allPreparesAccepted = false;
@@ -1776,11 +2033,14 @@ internal sealed class PreparedIntentStore
                     (staleFlagged ??= []).Add(prepare.Intent);
 
                 // A state-machine rejection means another transaction's live intent holds the key; a stale-base
-                // flag means the base moved. The proposing finalizer takes this to decide between helping, backing
-                // off, and aborting at once.
+                // flag means the base moved; a settled replay means the transaction is already decided. The
+                // proposing finalizer takes this to decide between helping, backing off, aborting at once, and
+                // concluding from the record.
                 RecordPrepareRejection(
                     prepare.Intent.TransactionId, prepare.Intent.Epoch, prepare.Intent.Key,
-                    result.StaleBase ? Writes.PrepareRejectionKind.StaleBase : Writes.PrepareRejectionKind.KeyHeld);
+                    result.SettledReplay ? Writes.PrepareRejectionKind.Settled
+                    : result.StaleBase ? Writes.PrepareRejectionKind.StaleBase
+                    : Writes.PrepareRejectionKind.KeyHeld);
             }
         }
 
@@ -1811,10 +2071,10 @@ internal sealed class PreparedIntentStore
         if (!locallyProposedDeltas.TryTake(log.LogData, out PreparedIntentCommand[]? commands))
             commands = DecodeDelta(log.LogData);
 
-        bool judgeFence = !NoteApplied(partitionId, log.Id);
+        HistoryWindow window = NoteApplied(partitionId, log.Id);
 
         foreach (PreparedIntentCommand command in commands)
-            Apply(command, partitionId, judgeFence);
+            Apply(command, partitionId, window);
 
         return true;
     }
@@ -2469,9 +2729,9 @@ internal sealed class PreparedIntentStore
                         }
                     }
 
-                    // The checkpoint persists the slice's reflected position as installed, so a restart mid
+                    // The checkpoint persists the slice's reflected positions as installed, so a restart mid
                     // catch-up after a snapshot install keeps treating the remaining window as history.
-                    WriteLedgerSection(output, partitionId, ledger, ledger?.ReflectedThroughIndex ?? 0);
+                    WriteLedgerSection(output, partitionId, ledger, ledger?.ReflectedThroughIndex ?? 0, ledger?.FullyReflectedThroughIndex ?? 0);
                 }
 
                 File.Move(tmp, path, overwrite: true);
@@ -2536,7 +2796,7 @@ internal sealed class PreparedIntentStore
             }
 
             if (message.LedgerPresent)
-                InstallLedger(message.LedgerPartitionId, LedgerEntriesOf(message), LedgerWatermarkOf(message), message.LedgerReflectedThroughIndex);
+                InstallLedger(message.LedgerPartitionId, LedgerEntriesOf(message), LedgerWatermarkOf(message), message.LedgerReflectedThroughIndex, SettledEntriesOf(message), message.LedgerFullyReflectedThroughIndex);
             else if (TryParsePartitionFromSnapshotPath(path, out int partitionId))
                 ledgerMissingPartitions.Add(partitionId);
         }
@@ -2551,10 +2811,12 @@ internal sealed class PreparedIntentStore
         return marker >= 0 && int.TryParse(name.AsSpan(marker + 2), out partitionId);
     }
 
-    /// <summary>Streams a partition's ledger slice (or an explicitly empty one) after the intents: each head
-    /// under the repeated field's tag, then the scalar trailer. The writer always marks the ledger present so a
-    /// reader can tell "empty ledger" from "written before the ledger existed".</summary>
-    private static void WriteLedgerSection(CodedOutputStream output, int partitionId, LedgerCapture? ledger, long reflectedThroughIndex)
+    /// <summary>Streams a partition's ledger slice (or an explicitly empty one) after the intents, in the
+    /// message's field order so the bytes equal a whole-message serialization: each head under the repeated
+    /// field's tag, the scalar trailer, each settled identity under its tag, then the fully reflected position.
+    /// The writer always marks the ledger present so a reader can tell "empty ledger" from "written before the
+    /// ledger existed".</summary>
+    private static void WriteLedgerSection(CodedOutputStream output, int partitionId, LedgerCapture? ledger, long reflectedThroughIndex, long fullyReflectedThroughIndex)
     {
         HLCTimestamp watermark = HLCTimestamp.Zero;
 
@@ -2571,6 +2833,8 @@ internal sealed class PreparedIntentStore
             }
         }
 
+        long reflected = Math.Max(0, reflectedThroughIndex);
+
         PreparedIntentSnapshotMessage trailer = new()
         {
             LedgerPresent = true,
@@ -2578,10 +2842,29 @@ internal sealed class PreparedIntentStore
             LedgerWatermarkNode = watermark.N,
             LedgerWatermarkPhysical = watermark.L,
             LedgerWatermarkCounter = watermark.C,
-            LedgerReflectedThroughIndex = Math.Max(0, reflectedThroughIndex)
+            LedgerReflectedThroughIndex = reflected
         };
 
         trailer.WriteTo(output);
+
+        if (ledger is { } withSettled)
+        {
+            SettledTransactionLedgerEntryMessage settled = new();
+            foreach (SettledIdentityEntry entry in withSettled.Settled)
+            {
+                FillSettledEntry(settled, entry);
+                output.WriteTag(PreparedIntentSnapshotMessage.SettledTransactionsFieldNumber, WireFormat.WireType.LengthDelimited);
+                output.WriteMessage(settled);
+            }
+        }
+
+        // Written last, as the highest-numbered field; a zero is omitted exactly as the message serializer omits it.
+        PreparedIntentSnapshotMessage positionTrailer = new()
+        {
+            LedgerFullyReflectedThroughIndex = Math.Clamp(fullyReflectedThroughIndex, 0, reflected)
+        };
+
+        positionTrailer.WriteTo(output);
     }
 
     private static void FillLedgerEntry(CommittedHeadLedgerEntryMessage m, string key, CommittedHead head)
@@ -2605,6 +2888,30 @@ internal sealed class PreparedIntentStore
 
     private static HLCTimestamp LedgerWatermarkOf(PreparedIntentSnapshotMessage message) =>
         new(message.LedgerWatermarkNode, message.LedgerWatermarkPhysical, message.LedgerWatermarkCounter);
+
+    private static void FillSettledEntry(SettledTransactionLedgerEntryMessage m, SettledIdentityEntry entry)
+    {
+        m.TransactionIdNode = entry.TransactionId.N;
+        m.TransactionIdPhysical = entry.TransactionId.L;
+        m.TransactionIdCounter = entry.TransactionId.C;
+        m.Epoch = entry.Epoch;
+        m.Key = entry.Key;
+        m.SettledAtNode = entry.SettledAt.N;
+        m.SettledAtPhysical = entry.SettledAt.L;
+        m.SettledAtCounter = entry.SettledAt.C;
+    }
+
+    private static List<SettledIdentityEntry> SettledEntriesOf(PreparedIntentSnapshotMessage message)
+    {
+        List<SettledIdentityEntry> entries = new(message.SettledTransactions.Count);
+        foreach (SettledTransactionLedgerEntryMessage m in message.SettledTransactions)
+            entries.Add(new SettledIdentityEntry(
+                new HLCTimestamp(m.TransactionIdNode, m.TransactionIdPhysical, m.TransactionIdCounter),
+                m.Epoch,
+                m.Key,
+                new HLCTimestamp(m.SettledAtNode, m.SettledAtPhysical, m.SettledAtCounter)));
+        return entries;
+    }
 
     // Load-time merge across (possibly overlapping) per-partition files: at most one live intent per key. A more
     // resolved intent for the same identity is authoritative; a different transaction on the same key is a
@@ -2682,6 +2989,13 @@ internal sealed class PreparedIntentStore
     {
         LedgerCapture? ledger = CaptureLedger(partitionId);
 
+        // Read BEFORE the walk: every intent prepared at or below this position is in the map when the walk
+        // starts, so the section holds it unless a removal during the walk took it out — and that removal is
+        // replayed. Entries at or below it are therefore fully reflected on the receiver (see
+        // IsFullyReflectedApply); the ones between it and the position read after the walk are the tear window,
+        // where a missed intent must still install on replay.
+        long fullyReflected = ReflectedPositionForExport(partitionId, ledger);
+
         int written = 0;
 
         using CodedOutputStream coded = new(output, leaveOpen: true);
@@ -2703,7 +3017,7 @@ internal sealed class PreparedIntentStore
         // entries as history (see IsHistoricalApply). An entry applied during the walk may or may not be in the
         // captured ledger or intents; either way its replay folds idempotently, and the only thing withheld
         // from it on the receiver is an advisory verdict on a decision that predates the transfer.
-        WriteLedgerSection(coded, partitionId, ledger, ReflectedPositionForExport(partitionId, ledger));
+        WriteLedgerSection(coded, partitionId, ledger, ReflectedPositionForExport(partitionId, ledger), fullyReflected);
 
         return written;
     }
@@ -2843,13 +3157,21 @@ internal sealed class PreparedIntentStore
         IReadOnlyList<PreparedIntent> Intents,
         IReadOnlyList<(string Key, long Revision, KeyValueState State, HLCTimestamp CommittedAt)>? Ledger,
         HLCTimestamp LedgerWatermark,
-        long ReflectedThroughIndex = 0);
+        long ReflectedThroughIndex = 0,
+        IReadOnlyList<SettledIdentityEntry>? Settled = null,
+        long FullyReflectedThroughIndex = 0);
 
     /// <summary>Serializes one partition's intents together with its committed-head ledger slice, for
     /// whole-partition state transfer. The ledger is captured first so its position is no later than the
     /// intents' — a seeded replica then re-applies every entry after the snapshot boundary on top of a ledger
     /// that is exact at or before each of them.</summary>
-    public byte[] SerializePartitionIntents(int partitionId, IReadOnlyList<PreparedIntent> partitionIntents)
+    /// <param name="partitionId">The partition whose slice rides with the intents.</param>
+    /// <param name="partitionIntents">The intents, cut by the caller before this call.</param>
+    /// <param name="fullyReflectedThroughIndex">The partition's applied log index read by the caller BEFORE it
+    /// cut <paramref name="partitionIntents"/> (see <see cref="GetAppliedLogIndex"/>): every intent prepared at or
+    /// below it is in the cut, so a replay there installs nothing the cut lacks. Zero when the cut was not taken
+    /// against a position; the section then advertises no fully reflected window.</param>
+    public byte[] SerializePartitionIntents(int partitionId, IReadOnlyList<PreparedIntent> partitionIntents, long fullyReflectedThroughIndex = 0)
     {
         LedgerCapture? ledger = CaptureLedger(partitionId);
 
@@ -2874,12 +3196,24 @@ internal sealed class PreparedIntentStore
                 FillLedgerEntry(head, entry.Key, entry.Value);
                 message.CommittedHeads.Add(head);
             }
+
+            foreach (SettledIdentityEntry entry in captured.Settled)
+            {
+                SettledTransactionLedgerEntryMessage settled = new();
+                FillSettledEntry(settled, entry);
+                message.SettledTransactions.Add(settled);
+            }
         }
 
         message.LedgerReflectedThroughIndex = ReflectedPositionForExport(partitionId, ledger);
+        message.LedgerFullyReflectedThroughIndex = Math.Clamp(fullyReflectedThroughIndex, 0, message.LedgerReflectedThroughIndex);
 
         return ReplicationSerializer.Serialize(message);
     }
+
+    /// <summary>The highest log index applied through this store for <paramref name="partitionId"/> (0 when none):
+    /// the position a caller reads before cutting the intents it hands to <see cref="SerializePartitionIntents"/>.</summary>
+    internal long GetAppliedLogIndex(int partitionId) => AppliedLogIndexOf(partitionId);
 
     /// <summary>Decodes a section written by <see cref="SerializePartitionIntents"/> (or, with a null ledger,
     /// by the ledgerless <see cref="SerializeIntents"/> of an older build).</summary>
@@ -2895,7 +3229,9 @@ internal sealed class PreparedIntentStore
             result,
             message.LedgerPresent ? LedgerEntriesOf(message) : null,
             message.LedgerPresent ? LedgerWatermarkOf(message) : HLCTimestamp.Zero,
-            message.LedgerPresent ? message.LedgerReflectedThroughIndex : 0);
+            message.LedgerPresent ? message.LedgerReflectedThroughIndex : 0,
+            message.LedgerPresent ? SettledEntriesOf(message) : null,
+            message.LedgerPresent ? message.LedgerFullyReflectedThroughIndex : 0);
     }
 
     /// <summary>
@@ -2918,7 +3254,7 @@ internal sealed class PreparedIntentStore
             PurgePartitionLedger(partitionId);
         }
         else
-            InstallLedger(partitionId, section.Ledger, section.LedgerWatermark, section.ReflectedThroughIndex);
+            InstallLedger(partitionId, section.Ledger, section.LedgerWatermark, section.ReflectedThroughIndex, section.Settled, section.FullyReflectedThroughIndex);
 
         ImportIntents(section.Intents);
     }
@@ -2949,7 +3285,7 @@ internal sealed class PreparedIntentStore
 
         PartitionLedger? ledger = section.Ledger is null
             ? null
-            : BuildLedger(section.Ledger, section.LedgerWatermark, section.ReflectedThroughIndex);
+            : BuildLedger(section.Ledger, section.LedgerWatermark, section.ReflectedThroughIndex, section.Settled, section.FullyReflectedThroughIndex);
 
         int purged = 0;
 

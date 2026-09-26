@@ -100,12 +100,14 @@ public sealed class TestPreparedIntentStagedBaseFence
         Assert.True(conflicting.StaleBase, "a validated-absent base must conflict once the key exists");
 
         // A committed transactional DELETE keeps the key absent, so a validated-absent insert stays clean. The
-        // tombstone is a revision of its own, so the insert over it stages the next one.
-        CommitThroughStore(store, MakeIntent("k/deleted", txPhysical: 1_000, revision: 4,
+        // tombstone is a revision of its own, so the insert over it stages the next one. (A fresh transaction
+        // identity: the one above already settled on this partition, and a settled identity's prepare is a
+        // rejected replay rather than a new transaction.)
+        CommitThroughStore(store, MakeIntent("k/deleted", txPhysical: 2_000, revision: 4,
             baseRevision: 3, KeyValueState.Set, state: KeyValueState.Deleted));
 
         PreparedIntentApplyResult clean = store.Apply(new PrepareIntentCommand(
-            MakeIntent("k/deleted", txPhysical: 1_100, revision: 5, baseRevision: -1, KeyValueState.Undefined)));
+            MakeIntent("k/deleted", txPhysical: 2_100, revision: 5, baseRevision: -1, KeyValueState.Undefined)));
 
         Assert.Equal(TransactionApplyOutcome.Applied, clean.Outcome);
         Assert.False(clean.StaleBase);

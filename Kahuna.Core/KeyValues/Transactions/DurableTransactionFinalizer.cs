@@ -608,8 +608,11 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         //
         // Each refusal is classified before it is retried: a stale base is final (heads only advance, so every
         // re-ask answers the same) and aborts as a conflict at once; a range that moved since freeze can never
-        // accept this frozen input and yields a clean retry from a fresh freeze; a held key is helped and retried;
-        // a refusal with no verdict (a lost reply, an older remote node) is retried as before. ──
+        // accept this frozen input and yields a clean retry from a fresh freeze; a settled identity means this
+        // input already decided (the refused prepare was a re-driven duplicate — a proposal released as not-leader
+        // at a step-down, or an apply this node never observed, whose first copy had landed and committed on the
+        // successor) and concludes from the canonical record at once; a held key is helped and retried; a refusal
+        // with no verdict (a lost reply, an older remote node) is retried as before. ──
         //
         // The loop's cost is attributed separately from the first barrier: rounds, helper calls and time, and
         // backoff time per finalize, plus how the loop ended. All are recorded only for finalizes that entered it.
@@ -621,6 +624,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         bool retryCancelled = false;
         bool staleBase = false;
         bool rangeMoved = false;
+        bool identitySettled = false;
         List<int> unacknowledged = new(input.Partitions.Count);
 
         for (int attempt = 0; !allPrepared && attempt < MaxPrepareRetries && !cancellationToken.IsCancellationRequested; attempt++)
@@ -640,12 +644,16 @@ internal sealed class DurableTransactionFinalizer : IDisposable
                     case Writes.PrepareRejectionKind.RangeMoved:
                         rangeMoved = true;
                         break;
+
+                    case Writes.PrepareRejectionKind.Settled:
+                        identitySettled = true;
+                        break;
                 }
 
                 unacknowledged.Add(i);
             }
 
-            if (staleBase || rangeMoved)
+            if (staleBase || rangeMoved || identitySettled)
                 break;
 
             // Helping pass over the refused participants only, concurrently: a blocking intent whose record is
@@ -726,6 +734,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             DurableTransactionMetrics.PrepareRetryLoopEnded(
                 allPrepared ? PrepareRetryLoopOutcome.Prepared
                 : retryCancelled || cancellationToken.IsCancellationRequested ? PrepareRetryLoopOutcome.Cancelled
+                : identitySettled ? PrepareRetryLoopOutcome.Settled
                 : staleBase ? PrepareRetryLoopOutcome.StaleBase
                 : rangeMoved ? PrepareRetryLoopOutcome.RangeMoved
                 : PrepareRetryLoopOutcome.Exhausted);
@@ -736,7 +745,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         // The range a refused participant was frozen against moved: this input can never prepare there. Nothing
         // decided is durable (the record is Undecided and the acknowledged intents stay recoverable), so a clean
         // retry from a fresh freeze is truthful; the abandoned-attempt fence covers a client that gives up instead.
-        if (!allPrepared && rangeMoved && !staleBase)
+        if (!allPrepared && rangeMoved && !staleBase && !identitySettled)
             return Retry();
 
         // ── Post-prepare validation, only meaningful when everything is durable ──
@@ -766,7 +775,14 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
         long decisionStart = Stopwatch.GetTimestamp();
         DurableFinalizeOutcome outcome;
-        if (allPrepared && validated)
+        if (identitySettled)
+        {
+            // This input already decided: its earlier attempt's prepare landed, committed (or aborted) and settled
+            // before this attempt's re-driven prepare applied. The truthful outcome is the record's, and no new
+            // decision may be proposed for it — an abort here would only lose to the commit at the anchor.
+            outcome = await ConcludeSettledAsync(input, opId, cancellationToken).ConfigureAwait(false);
+        }
+        else if (allPrepared && validated)
             outcome = await DecideAsync(input, commit: true, TransactionAbortClass.None, opId, cancellationToken).ConfigureAwait(false);
         else
         {
@@ -1545,5 +1561,26 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         DurableTransactionMetrics.LateCommitConcluded(concluded.Result);
 
         return concluded with { LateCommitRejected = true };
+    }
+
+    /// <summary>
+    /// Concludes a finalize whose prepare was refused because the transaction had already settled on the
+    /// partition — this attempt is a re-drive of an input an earlier attempt already decided. The canonical
+    /// record is the outcome: read it and report it, so the client learns the decision that stands and the
+    /// resolution re-applies it idempotently. Only when the record cannot be read as terminal (unreachable
+    /// anchor, or a record already reclaimed) does the record CAS decide, as the abandoned-attempt fence does:
+    /// a presumed abort that loses to the standing commit reports Committed, one that wins from absence
+    /// reports Aborted, and a fence that cannot replicate stays MustRetry.
+    /// </summary>
+    private async Task<DurableFinalizeOutcome> ConcludeSettledAsync(DurableFinalizeInput input, HLCTimestamp opId, CancellationToken cancellationToken)
+    {
+        TransactionRecord? record = await ReadCanonicalRecordAsync(input, cancellationToken).ConfigureAwait(false);
+
+        return record?.Decision switch
+        {
+            TransactionDecision.Commit => new DurableFinalizeOutcome(DurableFinalizeResult.Committed, TransactionAbortClass.None, CanonicalDecisionRead: true),
+            TransactionDecision.Abort => new DurableFinalizeOutcome(DurableFinalizeResult.Aborted, record.AbortClass, CanonicalDecisionRead: true),
+            _ => await DecideAsync(input, commit: false, TransactionAbortClass.PresumedAbort, opId, cancellationToken).ConfigureAwait(false)
+        };
     }
 }

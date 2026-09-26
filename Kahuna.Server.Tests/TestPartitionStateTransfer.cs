@@ -262,6 +262,10 @@ public sealed class TestPartitionStateTransfer : IDisposable
         Assert.Equal(77, target.Intents.GetLedgerReflectedThroughIndex(2));
         Assert.True(target.Intents.IsHistoricalApply(2, 77));
         Assert.False(target.Intents.IsHistoricalApply(2, 78));
+        // The real export reads its position before the intent walk, so with no entry applied during the walk
+        // the whole history window is fully reflected: a replay there installs nothing the section lacks.
+        Assert.Equal(77, target.Intents.GetLedgerFullyReflectedThroughIndex(2));
+        Assert.True(target.Intents.IsFullyReflectedApply(2, 77));
 
         // The key is free: a later transaction's prepare is admitted, as on every other replica.
         Assert.Equal(TransactionApplyOutcome.Applied,
@@ -543,7 +547,9 @@ public sealed class TestPartitionStateTransfer : IDisposable
             TransactionRecords = records.Count > 0
                 ? UnsafeByteOperations.UnsafeWrap(TransactionRecordStore.SerializeRecords(records))
                 : ByteString.Empty,
-            PreparedIntents = UnsafeByteOperations.UnsafeWrap(node.Intents.SerializePartitionIntents(partitionId, intents))
+            // The streamed export reads its position before the intent walk; nothing applies during this
+            // materialisation, so the position read here is that same cut.
+            PreparedIntents = UnsafeByteOperations.UnsafeWrap(node.Intents.SerializePartitionIntents(partitionId, intents, node.Intents.GetAppliedLogIndex(partitionId)))
         };
 
         KvStateMachineTransfer.FnvHashStream hasher = new();
