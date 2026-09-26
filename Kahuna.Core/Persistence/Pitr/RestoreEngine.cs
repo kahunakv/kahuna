@@ -360,7 +360,7 @@ internal static class RestoreEngine
     /// is the correct axis for an as-of cut. Returns <c>null</c> for entries that are not
     /// key-value mutations (e.g. range-map or lock entries).
     /// </summary>
-    private static (PersistenceRequestItem item, HLCTimestamp commitHlc)? ToRequestItem(
+    internal static (PersistenceRequestItem item, HLCTimestamp commitHlc)? ToRequestItem(
         WalSegmentEntry entry, Dictionary<PreparedIntentIdentity, PreparedIntent> liveIntents, Guid backupId)
     {
         if (entry.LogType != ReplicationTypes.KeyValues)
@@ -374,30 +374,34 @@ internal static class RestoreEngine
         KeyValueState state;
         byte[]? value;
 
-        if ((KeyValueRequestType)msg.Type == KeyValueRequestType.MaterializeIntent)
+        switch (KeyValueMessageDecoder.Classify(KeyValueMessageDecoder.RecordType(msg)))
         {
-            // A by-reference record carries no value; the committed mutation lives in the prepared intent it
-            // names, which the same segment stream installed earlier in log order.
-            PreparedIntentIdentity identity = new(
-                new HLCTimestamp(msg.TransactionIdNode, msg.TransactionIdPhysical, msg.TransactionIdCounter),
-                msg.Epoch,
-                msg.Key);
+            case KeyValueRecordKind.ByReferenceMutation:
+            {
+                // A by-reference record carries no value; the committed mutation lives in the prepared intent it
+                // names, which the same segment stream installed earlier in log order.
+                PreparedIntentIdentity identity = new(
+                    new HLCTimestamp(msg.TransactionIdNode, msg.TransactionIdPhysical, msg.TransactionIdCounter),
+                    msg.Epoch,
+                    msg.Key);
 
-            if (!liveIntents.TryGetValue(identity, out PreparedIntent? intent))
-                throw new BackupDriverException(
-                    $"Backup {backupId:N}: log entry {entry.Id} materializes prepared intent " +
-                    $"{identity.TransactionId}/{identity.Epoch} for key '{identity.Key}' by reference, but no " +
-                    "prepare for it appears in the replayed segments; the restore would silently drop a " +
-                    "committed value and is aborted.");
+                if (!liveIntents.TryGetValue(identity, out PreparedIntent? intent))
+                    throw new BackupDriverException(
+                        $"Backup {backupId:N}: log entry {entry.Id} materializes prepared intent " +
+                        $"{identity.TransactionId}/{identity.Epoch} for key '{identity.Key}' by reference, but no " +
+                        "prepare for it appears in the replayed segments; the restore would silently drop a " +
+                        "committed value and is aborted.");
 
-            state = intent.State;
-            value = intent.Value;
-        }
-        else
-        {
-            (state, value) = KeyValueMessageDecoder.Decode(msg);
+                state = intent.State;
+                value = intent.Value;
+                break;
+            }
 
-            if (state == KeyValueState.Undefined)
+            case KeyValueRecordKind.ValueMutation:
+                (state, value) = KeyValueMessageDecoder.Decode(msg);
+                break;
+
+            default:
                 return null;
         }
 

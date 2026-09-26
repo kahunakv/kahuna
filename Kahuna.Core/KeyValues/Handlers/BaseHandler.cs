@@ -50,7 +50,7 @@ internal abstract class BaseHandler
     {
         KeyValueMessage kvm = serializeProposalMessage ??= new();
 
-        kvm.Type = (int)type;
+        kvm.Type = KeyValueMessageDecoder.ToLoggedType(type);
         kvm.Key = proposal.Key;
         kvm.Revision = proposal.Revision;
         kvm.ExpireNode = proposal.Expires.N;

@@ -71,32 +71,34 @@ internal sealed class KeyValueRestorer
             KeyValueState state;
             byte[]? messageValue;
 
-            if ((KeyValueRequestType)keyValueMessage.Type == KeyValueRequestType.MaterializeIntent)
+            switch (KeyValueMessageDecoder.Classify(KeyValueMessageDecoder.RecordType(keyValueMessage)))
             {
-                // A by-reference record carries no value: the mutation comes from the prepared intent it
-                // names. Replay reaches it in the same order a live replica does — the prepare delta applies
-                // first on this partition, and the settle that removes the intent applies later. When the
-                // replay window starts at or below the prepare, the replayed prepare re-installs the intent.
-                // When it starts above the prepare (the durability floor certified the prepare through an
-                // earlier intent snapshot) the intent comes from the snapshot: as a live intent if the settle
-                // had not applied when the snapshot was written, otherwise as a settled intent the store
-                // retained because this record's row was still queued for the flush — the only place the
-                // committed value survives once the intent is settled and the row is not yet in the backend.
-                if (!TryResolveIntentForRestore(keyValueMessage, log.Id, out PreparedIntent? intent))
-                    return true;
-
-                state = intent!.State;
-                messageValue = intent.Value;
-            }
-            else
-            {
-                (state, messageValue) = KeyValueMessageDecoder.Decode(keyValueMessage);
-
-                if (state == KeyValueState.Undefined)
+                case KeyValueRecordKind.ByReferenceMutation:
                 {
+                    // A by-reference record carries no value: the mutation comes from the prepared intent it
+                    // names. Replay reaches it in the same order a live replica does — the prepare delta applies
+                    // first on this partition, and the settle that removes the intent applies later. When the
+                    // replay window starts at or below the prepare, the replayed prepare re-installs the intent.
+                    // When it starts above the prepare (the durability floor certified the prepare through an
+                    // earlier intent snapshot) the intent comes from the snapshot: as a live intent if the settle
+                    // had not applied when the snapshot was written, otherwise as a settled intent the store
+                    // retained because this record's row was still queued for the flush — the only place the
+                    // committed value survives once the intent is settled and the row is not yet in the backend.
+                    if (!TryResolveIntentForRestore(keyValueMessage, log.Id, out PreparedIntent? intent))
+                        return true;
+
+                    state = intent!.State;
+                    messageValue = intent.Value;
+                    break;
+                }
+
+                case KeyValueRecordKind.ValueMutation:
+                    (state, messageValue) = KeyValueMessageDecoder.Decode(keyValueMessage);
+                    break;
+
+                default:
                     logger.LogError("KeyValueRestorer: Unknown restore message type: {Type}", keyValueMessage.Type);
                     return true;
-                }
             }
 
             HLCTimestamp expires      = new(keyValueMessage.ExpireNode, keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter);

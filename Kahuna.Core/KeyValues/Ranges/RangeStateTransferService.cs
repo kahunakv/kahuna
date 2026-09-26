@@ -655,7 +655,7 @@ internal sealed class RangeStateTransferService
 
             Kahuna.Server.Replication.Protos.KeyValueMessage kvm = new()
             {
-                Type = (int)(state == KeyValueState.Deleted ? KeyValueRequestType.TryDelete : KeyValueRequestType.TrySet),
+                Type = KeyValueMessageDecoder.ToLoggedType(state == KeyValueState.Deleted ? KeyValueRequestType.TryDelete : KeyValueRequestType.TrySet),
                 Key = entry.Key,
                 Revision = entry.Revision,
                 ExpireNode = entry.ExpiresNode,

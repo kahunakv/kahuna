@@ -62,6 +62,15 @@ public sealed class TestMaterializeIntentByReference : BaseCluster, IDisposable
     private static RaftLog KvLog(long id, byte[] record) =>
         new() { Id = id, Type = RaftLogType.Committed, LogType = ReplicationTypes.KeyValues, LogData = [.. record] };
 
+    // Rewrites a by-reference record into the shape one published build wrote: it had inserted DropLeaderState
+    // ahead of MaterializeIntent in the enum, so its by-reference commits carry type 30 instead of 29.
+    private static byte[] WithLegacyShiftedType(byte[] record)
+    {
+        KeyValueMessage message = ReplicationSerializer.UnserializeKeyValueMessage(record);
+        message.Type = 30;
+        return ReplicationSerializer.Serialize(message);
+    }
+
     // Sums the increments of a named counter on the "Kahuna" meter emitted while the action runs.
     private static async Task<long> MeasureCounter(string instrumentName, Func<Task> action)
     {
@@ -158,49 +167,8 @@ public sealed class TestMaterializeIntentByReference : BaseCluster, IDisposable
 
     // ── restorer (write-ahead-log replay) ───────────────────────────────────────
 
-    private (KeyValueRestorer Restorer, UnflushedKeyValueWritesIndex Overlay, PreparedIntentStore Intents, IDisposable Lifetime)
-        BuildRestorer(out MemoryPersistenceBackend backend)
-    {
-        IDisposable lifetime = TestActorSystemLifetime.Create(out Nixie.ActorSystem actorSystem);
-
-        backend = new MemoryPersistenceBackend();
-        UnflushedKeyValueWritesIndex overlay = new();
-        UnflushedOverlayPersistenceBackend decorated = new(backend, overlay, new UnflushedLockWritesIndex());
-        PreparedIntentStore intents = new();
-
-        RaftManager raft = new(
-            new RaftConfiguration
-            {
-                NodeName = "byref-restore", NodeId = 1, Host = "localhost", Port = 0,
-                InitialPartitions = 1, EnableQuiescence = false, PartitionExecutorPoolSize = 1
-            },
-            new Kommander.Discovery.StaticDiscovery([]),
-            new InMemoryWAL(NullLogger<IRaft>.Instance),
-            new Kommander.Communication.Memory.InMemoryCommunication(),
-            new HybridLogicalClock(),
-            NullLogger<IRaft>.Instance);
-
-        Kahuna.Server.Configuration.KahunaConfiguration config =
-            Kahuna.Server.Configuration.ConfigurationValidator.Validate(new()
-            {
-                LocksWorkers = 1, KeyValueWorkers = 1, BackgroundWriterWorkers = 1, Storage = "memory",
-                CacheEntryTtl = TimeSpan.FromMinutes(5), CacheEntriesToRemove = 1000,
-                MaxEntriesPerActor = 50_000, MaxBytesPerActor = 256L * 1024 * 1024, CollectBatchMax = 1000,
-                RevisionRetention = 16, DirtyObjectsWriterDelay = 30_000
-            });
-
-        Nixie.IActorRef<BackgroundWriterActor, BackgroundWriteRequest> writer =
-            actorSystem.Spawn<BackgroundWriterActor, BackgroundWriteRequest>(
-                "byref-restore-bg", raft, raft.ReadScheduler, decorated,
-                null!, null!, new TransactionRecordStore(), intents,
-                config, NullLogger<IKahuna>.Instance, new FlushNotificationSink(), null!);
-
-        KeyValueRestorer restorer = new(
-            writer, raft, new CompletionReceiptStore(), NullLogger<IKahuna>.Instance,
-            overlay, durabilityTracker: null, preparedIntentStore: intents);
-
-        return (restorer, overlay, intents, lifetime);
-    }
+    private static (KeyValueRestorer Restorer, UnflushedKeyValueWritesIndex Overlay, PreparedIntentStore Intents, IDisposable Lifetime)
+        BuildRestorer(out MemoryPersistenceBackend backend) => KeyValueRestorerHarness.Build(out backend);
 
     [Fact]
     public async Task Restorer_ByReferenceRecord_AppliesTheValueFromTheReplayedIntent()
@@ -228,6 +196,31 @@ public sealed class TestMaterializeIntentByReference : BaseCluster, IDisposable
             Assert.Equal(new byte[] { 4, 5, 6 }, replayed.Value);
             Assert.Equal(KeyValueState.Set, replayed.State);
             Assert.Equal(Ts(1_234), replayed.LastModified);
+        }
+    }
+
+    [Fact]
+    public void Restorer_LegacyShiftedByReferenceRecord_AppliesTheValueFromTheReplayedIntent()
+    {
+        (KeyValueRestorer restorer, UnflushedKeyValueWritesIndex overlay, PreparedIntentStore intents, IDisposable lifetime) =
+            BuildRestorer(out _);
+
+        using (lifetime)
+        {
+            PreparedIntent intent = Intent("acct/1", revision: 9, value: [4, 5, 6]);
+            intents.Apply(new PrepareIntentCommand(intent));
+
+            // A node upgraded from the shifted build replays that build's records from its own log; reading
+            // type 30 as DropLeaderState would skip the commit and lose the write on this node.
+            byte[] record = WithLegacyShiftedType(
+                PreparedIntentMaterializer.ToKeyValueRecord(intent, new KeyValueMessage(), byReference: true));
+
+            Assert.True(restorer.Restore(PartitionId, KvLog(10, record)));
+
+            Assert.True(overlay.TryGet("acct/1", out UnflushedKeyValueWrite replayed));
+            Assert.Equal(9, replayed.Revision);
+            Assert.Equal(new byte[] { 4, 5, 6 }, replayed.Value);
+            Assert.Equal(KeyValueState.Set, replayed.State);
         }
     }
 
@@ -465,6 +458,38 @@ public sealed class TestMaterializeIntentByReference : BaseCluster, IDisposable
         Assert.Equal(1, missed);
     }
 
+    [Fact]
+    public async Task Replicator_LegacyShiftedByReferenceRecord_TakesTheByReferencePath()
+    {
+        // A follower on this build that receives a record from a leader still on the shifted build must expand it
+        // by reference. The backend verification only runs on that path, so reaching it proves the type was read
+        // as MaterializeIntent rather than skipped as an unknown message.
+        KeyValueEntry stale = new() { Revision = 8, Value = [1], State = KeyValueState.Set, LastModified = Ts(1_000) };
+
+        TaskCompletionSource verified = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        KeyValueReplicator replicator = new(
+            null!, null!, null!, null!, null!, null!, NullLogger<IKahuna>.Instance,
+            hydrateFromBackend: (_, _) =>
+            {
+                verified.TrySetResult();
+                return Task.FromResult<KeyValueEntry?>(stale);
+            });
+
+        PreparedIntent intent = Intent("acct/1", revision: 9, value: [4, 5, 6]);
+        byte[] record = WithLegacyShiftedType(
+            PreparedIntentMaterializer.ToKeyValueRecord(intent, new KeyValueMessage(), byReference: true));
+
+        long missed = await MeasureCounter(MissCounter, async () =>
+        {
+            Assert.True(replicator.Replicate(PartitionId, KvLog(10, record)));
+            await verified.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            await Task.Delay(300, TestContext.Current.CancellationToken);
+        });
+
+        Assert.Equal(1, missed);
+    }
+
     // ── point-in-time recovery ──────────────────────────────────────────────────
 
     private static RaftLog IntentLog(long id, long timeMs, params PreparedIntentCommand[] commands) =>
@@ -477,15 +502,19 @@ public sealed class TestMaterializeIntentByReference : BaseCluster, IDisposable
             LogData = [.. PreparedIntentStore.SerializeDelta(commands)]
         };
 
-    private static RaftLog ByReferenceLog(long id, long timeMs, PreparedIntent intent) =>
-        new()
+    private static RaftLog ByReferenceLog(long id, long timeMs, PreparedIntent intent, bool legacyShiftedType = false)
+    {
+        byte[] record = PreparedIntentMaterializer.ToKeyValueRecord(intent, new KeyValueMessage(), byReference: true);
+
+        return new()
         {
             Id = id,
             Type = RaftLogType.Committed,
             Time = new HLCTimestamp(0, timeMs, 0),
             LogType = ReplicationTypes.KeyValues,
-            LogData = [.. PreparedIntentMaterializer.ToKeyValueRecord(intent, new KeyValueMessage(), byReference: true)]
+            LogData = legacyShiftedType ? WithLegacyShiftedType(record) : [.. record]
         };
+    }
 
     private static InMemoryWAL BuildWal(int partition, params RaftLog[] logs)
     {
@@ -503,8 +532,10 @@ public sealed class TestMaterializeIntentByReference : BaseCluster, IDisposable
 
     private static RaftPartitionRange Part(int id) => new() { PartitionId = id, State = RaftPartitionState.Active };
 
-    [Fact]
-    public async Task Restore_ExpandsAByReferenceRecordFromTheReplayedPrepare()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)] // a WAL segment the shifted build wrote, where the by-reference record carries type 30
+    public async Task Restore_ExpandsAByReferenceRecordFromTheReplayedPrepare(bool legacyShiftedType)
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
@@ -534,7 +565,7 @@ public sealed class TestMaterializeIntentByReference : BaseCluster, IDisposable
 
         wal.Write([(1, [
             IntentLog(2, 200, new PrepareIntentCommand(intent)),
-            ByReferenceLog(3, 300, intent),
+            ByReferenceLog(3, 300, intent, legacyShiftedType),
             IntentLog(4, 310,
                 new ResolveIntentCommand(intent.TransactionId, intent.Epoch, intent.Key, Commit: true),
                 new RemoveIntentCommand(intent.TransactionId, intent.Epoch, intent.Key))

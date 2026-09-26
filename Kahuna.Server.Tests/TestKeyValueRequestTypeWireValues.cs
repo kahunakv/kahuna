@@ -1,3 +1,5 @@
+using Kahuna.Server.Replication;
+using Kahuna.Server.Replication.Protos;
 using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Server.Tests;
@@ -63,6 +65,18 @@ public sealed class TestKeyValueRequestTypeWireValues
         // name the same operation on this build.
         foreach ((KeyValueRequestType member, int value) in PinnedValues)
             Assert.Equal(member, (KeyValueRequestType)value);
+    }
+
+    [Fact]
+    public void LoggedRecordTypeReadsTheShiftedMaterializeIntentValue()
+    {
+        // The shifted build wrote by-reference commits as 30. DropLeaderState now owns 30 but is never logged,
+        // so a logged 30 must still read as MaterializeIntent; every other value reads as its own member.
+        foreach ((KeyValueRequestType member, int value) in PinnedValues)
+        {
+            KeyValueRequestType expected = value == 30 ? KeyValueRequestType.MaterializeIntent : member;
+            Assert.Equal(expected, KeyValueMessageDecoder.RecordType(new KeyValueMessage { Type = value }));
+        }
     }
 
     [Fact]

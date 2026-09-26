@@ -1056,48 +1056,27 @@ internal sealed class KeyValueReplicator
             // to this parse's ByteString, not to the shell, so it is safe to hand onward.
             KeyValueMessage keyValueMessage = ReplicationSerializer.UnserializeKeyValueMessageThreadCached(log.LogData);
 
-            switch ((KeyValueRequestType)keyValueMessage.Type)
+            KeyValueRequestType type = KeyValueMessageDecoder.RecordType(keyValueMessage);
+
+            switch (KeyValueMessageDecoder.Classify(type))
             {
-                case KeyValueRequestType.TrySet:
-                    ApplyCommittedMutation(
-                        partitionId, log, keyValueMessage,
-                        ByteStringPayload.GetArrayOrNull(keyValueMessage.HasValue, keyValueMessage.Value), KeyValueState.Set,
-                        witnessBelowHead: true, witnessCollision: true);
-                    return true;
+                case KeyValueRecordKind.ValueMutation:
+                {
+                    (KeyValueState state, byte[]? value) = KeyValueMessageDecoder.Decode(keyValueMessage);
 
-                case KeyValueRequestType.TryDelete:
+                    // An extend only refreshes the expiry of a value already applied, so it runs neither witness.
+                    // A delete runs the below-head witness only; the same-revision value comparison is for sets.
                     ApplyCommittedMutation(
-                        partitionId, log, keyValueMessage,
-                        ByteStringPayload.GetArrayOrNull(keyValueMessage.HasValue, keyValueMessage.Value), KeyValueState.Deleted,
-                        witnessBelowHead: true, witnessCollision: false);
+                        partitionId, log, keyValueMessage, value, state,
+                        witnessBelowHead: type != KeyValueRequestType.TryExtend,
+                        witnessCollision: type == KeyValueRequestType.TrySet);
                     return true;
+                }
 
-                case KeyValueRequestType.TryExtend:
-                    ApplyCommittedMutation(
-                        partitionId, log, keyValueMessage,
-                        ByteStringPayload.GetArrayOrNull(keyValueMessage.HasValue, keyValueMessage.Value), KeyValueState.Set,
-                        witnessBelowHead: false, witnessCollision: false);
-                    return true;
-
-                case KeyValueRequestType.MaterializeIntent:
+                case KeyValueRecordKind.ByReferenceMutation:
                     ApplyMaterializeIntent(partitionId, log, keyValueMessage);
                     return true;
 
-                case KeyValueRequestType.TryGet:
-                case KeyValueRequestType.TryExists:
-                case KeyValueRequestType.TryAcquireExclusiveLock:
-                case KeyValueRequestType.TryReleaseExclusiveLock:
-                case KeyValueRequestType.TryPrepareMutations:
-                case KeyValueRequestType.TryCommitMutations:
-                case KeyValueRequestType.TryRollbackMutations:
-                case KeyValueRequestType.TryFinalizeMutation:
-                case KeyValueRequestType.RunActorTurn:
-                case KeyValueRequestType.ScanByPrefix:
-                case KeyValueRequestType.GetByBucket:
-                case KeyValueRequestType.GetByRange:
-                case KeyValueRequestType.TryAcquireExclusivePrefixLock:
-                case KeyValueRequestType.TryReleaseExclusivePrefixLock:
-                case KeyValueRequestType.ScanByPrefixFromDisk:
                 default:
                     logger.LogError("KeyValueReplicator: Unknown replication message type: {Type}", keyValueMessage.Type);
                     break;

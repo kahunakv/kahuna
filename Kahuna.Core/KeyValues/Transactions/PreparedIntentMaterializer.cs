@@ -49,7 +49,7 @@ internal static class PreparedIntentMaterializer
         else
             type = KeyValueRequestType.TrySet;
 
-        scratch.Type = (int)type;
+        scratch.Type = KeyValueMessageDecoder.ToLoggedType(type);
         scratch.Key = intent.Key;
         scratch.Revision = intent.Revision;
         scratch.NoRevision = intent.NoRevision;

@@ -13,6 +13,15 @@ namespace Kahuna.Shared.KeyValue;
 /// restarted on that build skipped every by-reference commit in its replay window as an unknown type.
 /// Add a new member at the end with the next unused value; <c>TestKeyValueRequestTypeWireValues</c> pins
 /// the numbers.</para>
+///
+/// <para><b>A new member must also get a record kind</b> in <c>KeyValueMessageDecoder.Classify</c>: not logged,
+/// or the mutation kind every consumer of the key-value log applies it as. Producers can log only a mutation
+/// kind, and <c>TestLoggedRecordTypeCoverage</c> fails until the member is classified.</para>
+///
+/// <para>Records written by the shifted build still carry 30 for a by-reference commit. Consumers of a logged
+/// record read its type through <c>KeyValueMessageDecoder.RecordType</c>, which reads a logged 30 as
+/// <see cref="MaterializeIntent"/>. That stays correct only while <see cref="DropLeaderState"/> is never
+/// written into a log record.</para>
 /// </summary>
 public enum KeyValueRequestType
 {
@@ -66,6 +75,9 @@ public enum KeyValueRequestType
     /// Drops the belief-only state an actor holds for a partition this node stopped leading: staged
     /// transactional entries with their write intents, and exclusive prefix and range locks. Committed
     /// entries stay resident. Sent to every shard when Raft reports the leadership lost.
+    ///
+    /// <para>Never serialized into a log record: a logged 30 is a by-reference commit from the build that shifted
+    /// <see cref="MaterializeIntent"/> to 30, and replay reads it as one.</para>
     /// </summary>
     DropLeaderState = 30,
 
