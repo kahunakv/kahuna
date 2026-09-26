@@ -721,9 +721,11 @@ internal sealed class PreparedIntentStore
                 if (judgeFence)
                 {
                     DurableTransactionMetrics.SettledPrepareReplays.Add(1);
-                    logger?.LogInformation(
-                        "Prepare of transaction {TransactionId} (epoch {Epoch}) on key {Key} arrived after its settlement applied on partition {PartitionId}; rejected as a re-driven duplicate instead of re-installing a settled intent",
-                        replayCandidate.Intent.TransactionId, replayCandidate.Intent.Epoch, key, partitionId);
+
+                    if (logger is not null && logger.IsEnabled(LogLevel.Information))
+                        logger.LogInformation(
+                            "Prepare of transaction {TransactionId} (epoch {Epoch}) on key {Key} arrived after its settlement applied on partition {PartitionId}; rejected as a re-driven duplicate instead of re-installing a settled intent",
+                            replayCandidate.Intent.TransactionId, replayCandidate.Intent.Epoch, key, partitionId);
                 }
 
                 return result;

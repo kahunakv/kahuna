@@ -17,7 +17,7 @@ namespace RadLine
         private readonly InputBuffer _input;
 
         public KeyBindings KeyBindings { get; }
-        public bool MultiLine { get; init; } = false;
+        public bool MultiLine { get; init; }
         public string Text { get; init; } = string.Empty;
 
         public ILineEditorPrompt Prompt { get; init; } = new LineEditorPrompt("[yellow]>[/]");
