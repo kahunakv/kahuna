@@ -101,60 +101,25 @@ internal sealed class KeyValueRestorer
                     return true;
             }
 
-            HLCTimestamp expires      = new(keyValueMessage.ExpireNode, keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter);
-            HLCTimestamp lastUsed     = new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter);
-            HLCTimestamp lastModified = new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter);
+            CommittedKeyValueMutation mutation = CommittedKeyValueMutation.FromRecord(keyValueMessage, messageValue, state);
 
             // A replayed transactional entry re-derives a completion receipt below, so it must
             // register on Flush AND Receipts — the floor may not pass it until the flushed row and
             // a receipt snapshot covering the rebuilt receipt are both durable. A single-shot entry
             // (zero transaction id) derives no receipt and registers on Flush alone.
-            bool derivesReceipt = keyValueMessage.TransactionIdNode != 0
-                || keyValueMessage.TransactionIdPhysical != 0
-                || keyValueMessage.TransactionIdCounter != 0;
-
+            //
             // Register before enqueueing: the partition's durability floor must not pass this
             // replayed entry until its durable artifacts land. Replay runs in log-id order, so the
             // registration always precedes any watermark advance over this index.
-            if (derivesReceipt)
+            if (mutation.IsTransactional)
                 durabilityTracker?.RegisterPending(partitionId, log.Id, DurabilityChannel.Flush, DurabilityChannel.Receipts);
             else
                 durabilityTracker?.RegisterPending(partitionId, log.Id, DurabilityChannel.Flush);
 
-            // Record before enqueueing so reads observe the replayed committed write even before the
-            // background flush lands it in the backend.
-            unflushedWrites?.Record(keyValueMessage.Key, messageValue, keyValueMessage.Revision,
-                expires, lastUsed, lastModified, state, keyValueMessage.NoRevision);
-
-            backgroundWriter.Send(BackgroundWriteRequestPool.Rent(
-            BackgroundWriteType.QueueStoreKeyValue,
-                partitionId,
-                keyValueMessage.Key,
-                messageValue,
-                keyValueMessage.Revision,
-                expires,
-                lastUsed,
-                lastModified,
-                (int)state,
-                keyValueMessage.NoRevision,
-                logIndex: log.Id
-            ));
-
-            // Rebuild the completion receipt from the replayed committed record so a re-commit after a
-            // cold restart / leader change resolves Committed rather than MustRetry. Then raise the
-            // Receipts resolve ceiling over this entry — Record precedes MarkApplied so a snapshot
+            // Raise the Receipts resolve ceiling over this entry after its receipt is recorded, so a snapshot
             // capture that samples the raised ceiling always finds the receipt already in the store.
-            if (derivesReceipt)
-            {
-                HLCTimestamp transactionId = new(keyValueMessage.TransactionIdNode, keyValueMessage.TransactionIdPhysical, keyValueMessage.TransactionIdCounter);
-                completionReceiptStore.Record(
-                    transactionId,
-                    keyValueMessage.Key,
-                    keyValueMessage.HasRecordAnchorKey ? keyValueMessage.RecordAnchorKey : null,
-                    KeyValueDurability.Persistent);
-
+            if (QueueCommittedMutation(partitionId, log.Id, mutation))
                 durabilityTracker?.MarkApplied(partitionId, log.Id, DurabilityChannel.Receipts);
-            }
 
             return true;
         }
@@ -163,6 +128,64 @@ internal sealed class KeyValueRestorer
             logger.LogError(ex, "KeyValueRestorer: Error processing replication message");
             return false;
         }
+    }
+
+    /// <summary>
+    /// Replays a materializing resolve's install of a committed prepared intent at <paramref name="logIndex"/>:
+    /// the same durable state a replayed materialization record of the intent rebuilds. The entry is already
+    /// pending on the prepared-intent channel for the whole replay of its delta, and it may install several rows,
+    /// so each row is counted on the Flush channel before it is queued and the Receipts channel is added to the
+    /// entry; <see cref="CompleteResolvedIntentEntry"/> raises the Receipts ceiling after the last row.
+    /// </summary>
+    internal void RestoreResolvedIntent(int partitionId, long logIndex, PreparedIntent intent)
+    {
+        CommittedKeyValueMutation mutation = CommittedKeyValueMutation.FromIntent(intent);
+
+        if (durabilityTracker is not null)
+        {
+            durabilityTracker.AddPendingFlushRow(partitionId, logIndex);
+            if (mutation.IsTransactional)
+                durabilityTracker.AddPending(partitionId, logIndex, DurabilityChannel.Receipts);
+        }
+
+        QueueCommittedMutation(partitionId, logIndex, mutation);
+    }
+
+    /// <summary>Raises the Receipts resolve ceiling over a replayed materializing resolve's entry, after every
+    /// receipt its installs derived is recorded (see <see cref="RestoreResolvedIntent"/>).</summary>
+    internal void CompleteResolvedIntentEntry(int partitionId, long logIndex) =>
+        durabilityTracker?.MarkApplied(partitionId, logIndex, DurabilityChannel.Receipts);
+
+    /// <summary>
+    /// Rebuilds the durable state of one replayed committed mutation: records it in the unflushed overlay so
+    /// reads observe it before the flush lands, queues the flush that carries <paramref name="logIndex"/>, and
+    /// rebuilds the completion receipt so a re-commit after a cold restart or leader change resolves Committed
+    /// rather than MustRetry. Returns whether a receipt was recorded. Durability registration is the caller's.
+    /// </summary>
+    private bool QueueCommittedMutation(int partitionId, long logIndex, in CommittedKeyValueMutation mutation)
+    {
+        unflushedWrites?.Record(mutation.Key, mutation.Value, mutation.Revision,
+            mutation.Expires, mutation.LastUsed, mutation.LastModified, mutation.State, mutation.NoRevision);
+
+        backgroundWriter.Send(BackgroundWriteRequestPool.Rent(
+            BackgroundWriteType.QueueStoreKeyValue,
+            partitionId,
+            mutation.Key,
+            mutation.Value,
+            mutation.Revision,
+            mutation.Expires,
+            mutation.LastUsed,
+            mutation.LastModified,
+            (int)mutation.State,
+            mutation.NoRevision,
+            logIndex: logIndex
+        ));
+
+        if (!mutation.IsTransactional)
+            return false;
+
+        completionReceiptStore.Record(mutation.TransactionId, mutation.Key, mutation.RecordAnchorKey, KeyValueDurability.Persistent);
+        return true;
     }
 
     /// <summary>

@@ -1112,6 +1112,9 @@ internal sealed class DurableMaintenanceService
         // the same by-reference setting; otherwise a sweep would keep copying values the finalizer stopped
         // copying.
         materializeByReference: runtime.Configuration.DurableMaterializeByReference,
+        // Likewise for the materializing settle: a recovery or helping pass settles with the same shape a
+        // finalize produces.
+        materializeOnResolve: runtime.Configuration.DurableMaterializeOnResolve,
         // The same materialization window caps and local-apply bound the finalizer's resolution honors, so a
         // recovery or helping pass coalesces like a finalize and cannot out-fan it.
         maxMaterializationBatchItems: Math.Min(

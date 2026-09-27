@@ -263,6 +263,12 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     // upgrade order); an older node skips an unknown message type, which loses the write on that node.
     private readonly bool materializeByReference;
 
+    // Settles a committed intent with a resolve that also installs its value, at the settle's own apply on every
+    // replica, instead of proposing a materialization record per key before the settle. Off unless every node in
+    // the cluster applies that resolve (see the configuration flag's upgrade order); an older node resolves
+    // without installing, which loses the write on that node.
+    private readonly bool materializeOnResolve;
+
     public DurableTransactionFinalizer(
         TransactionRecordStore recordStore,
         // Applied by the ordered scheduler-completion path (the single apply owner), never mutated by the
@@ -287,9 +293,11 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         ConfirmReplicaFenceDelegate? confirmReplicaFence = null,
         bool materializeByReference = false,
         SemaphoreSlim? localApplyGate = null,
-        DecideDelegate? decide = null)
+        DecideDelegate? decide = null,
+        bool materializeOnResolve = false)
     {
         this.decide = decide;
+        this.materializeOnResolve = materializeOnResolve;
         // A node-shared gate bounds local applies across the finalizer and its recovery paths together; a
         // finalizer built without one (protocol tests) bounds only itself.
         this.localApplyGate = localApplyGate ?? new SemaphoreSlim(MaxConcurrentLocalApplies);
@@ -1366,18 +1374,24 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         // Only an intent whose terminal effect is durably applied may be settled (resolved + removed). On
         // commit that means its value is materialized: settling an intent whose materialization did not commit
         // would delete the only durable copy of an already-committed value, so a false/thrown materialization
-        // leaves the intent for the recovery sweep to retry. On abort the actor must still positively clear
-        // staged state before settlement, otherwise the intent remains for recovery.
+        // leaves the intent for the recovery sweep to retry. A materializing settle installs the value in the
+        // same apply that removes the intent, so it carries its own precondition. On abort the actor must still
+        // positively clear staged state before settlement, otherwise the intent remains for recovery.
         List<PreparedIntent> settleable;
         if (commit)
         {
-            // Fill scheduler-sized windows before awaiting them. Each window can coalesce into a capped proposal,
-            // while a transaction larger than the scheduler's admission capacity advances without allocating or
-            // admitting its whole working set at once.
-            bool[] materialized = await MaterializePartitionAsync(partition, cancellationToken).ConfigureAwait(false);
+            // With the materializing settle, the settle's own apply installs every committed value, so nothing
+            // is proposed before it: the only precondition left is the abort fence. Otherwise fill scheduler-sized
+            // windows of materialization records before awaiting them. Each window can coalesce into a capped
+            // proposal, while a transaction larger than the scheduler's admission capacity advances without
+            // allocating or admitting its whole working set at once.
+            bool[] materialized = materializeOnResolve
+                ? PassAbortFence(partition)
+                : await MaterializePartitionAsync(partition, cancellationToken).ConfigureAwait(false);
 
             if (applyCommitLocally is not null)
-                materialized = await ApplyLocallyAsync(
+            {
+                bool[] applied = await ApplyLocallyAsync(
                     partition.PartitionId,
                     partition.Intents,
                     materialized,
@@ -1385,8 +1399,22 @@ internal sealed class DurableTransactionFinalizer : IDisposable
                     localApplyGate,
                     cancellationToken).ConfigureAwait(false);
 
+                // A materialization record made the value durable, so only a confirmed leader apply may let the
+                // settle remove the intent. A materializing settle makes the value durable itself, on every
+                // replica, and routes the committed head to the owning actor before it removes the intent — so
+                // the leader apply here is a best-effort head start and never gates the settle. Gating it would
+                // deadlock: an actor that already holds the head but did not apply it answers MustRetry until
+                // it can see the completion receipt, and that receipt is written by this settle.
+                if (!materializeOnResolve)
+                    materialized = applied;
+            }
+
             settleable = partition.Intents.Where((_, index) => materialized[index]).ToList();
-            DurableTransactionMetrics.Materialized(ResolutionSource.Finalize, settleable.Count);
+
+            // A materialization record already made these values durable; a materializing settle does so only
+            // when it replicates, and is counted there.
+            if (!materializeOnResolve)
+                DurableTransactionMetrics.Materialized(ResolutionSource.Finalize, settleable.Count);
 
             // Every intent left behind stays committed-but-unsettled until the recovery sweep — a window in
             // which the value is visible only through the intent overlay. Surface the rate: settlement being
@@ -1416,24 +1444,44 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
     private Task<bool[]> MaterializePartitionAsync(DurablePartitionPrepare partition, CancellationToken cancellationToken)
     {
-        // Abort fence, re-checked at the last moment before any value reaches the log: the resolution
-        // direction was read from the canonical record, but a locally visible terminal Abort is definitive
-        // (an abort never overwrites a commit, and terminal records replicate only through the canonical
-        // log), and a materialization proposed past it would durably apply an aborted transaction's leg on
-        // every replica. Report nothing materialized; the recovery sweep re-reads the canonical record.
-        if (partition.Intents.Count > 0)
-        {
-            PreparedIntent fenceProbe = partition.Intents[0];
-            if (recordStore.Get(fenceProbe.TransactionId, fenceProbe.Epoch) is { Decision: TransactionDecision.Abort })
-            {
-                DurableTransactionMetrics.AbortFencedCommitApplies.Add(partition.Intents.Count);
-                return Task.FromResult(new bool[partition.Intents.Count]);
-            }
-        }
+        if (IsAbortFenced(partition))
+            return Task.FromResult(new bool[partition.Intents.Count]);
 
         return DurableMaterializationWindow.MaterializeAsync(
             partition.PartitionId, partition.Intents, materializeByReference,
             maxMaterializationBatchItems, maxMaterializationBatchBytes, replicate, cancellationToken);
+    }
+
+    /// <summary>The per-intent precondition of a materializing settle: every intent may proceed unless the abort
+    /// fence refuses the whole partition group.</summary>
+    private bool[] PassAbortFence(DurablePartitionPrepare partition)
+    {
+        bool[] pass = new bool[partition.Intents.Count];
+        if (!IsAbortFenced(partition))
+            Array.Fill(pass, true);
+
+        return pass;
+    }
+
+    /// <summary>
+    /// Abort fence, re-checked at the last moment before any committed value reaches the log — as a
+    /// materialization record or as a materializing settle. The resolution direction was read from the canonical
+    /// record, but a locally visible terminal Abort is definitive (an abort never overwrites a commit, and
+    /// terminal records replicate only through the canonical log), and a value proposed past it would durably
+    /// apply an aborted transaction's leg on every replica. A fenced group proceeds with nothing; the recovery
+    /// sweep re-reads the canonical record.
+    /// </summary>
+    private bool IsAbortFenced(DurablePartitionPrepare partition)
+    {
+        if (partition.Intents.Count == 0)
+            return false;
+
+        PreparedIntent fenceProbe = partition.Intents[0];
+        if (recordStore.Get(fenceProbe.TransactionId, fenceProbe.Epoch) is not { Decision: TransactionDecision.Abort })
+            return false;
+
+        DurableTransactionMetrics.AbortFencedCommitApplies.Add(partition.Intents.Count);
+        return true;
     }
 
     /// <summary>Runs one leader-local apply per intent whose durable effect landed, under the node's shared
@@ -1486,19 +1534,39 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
     // Resolves and removes each intent in one atomic delta (applied in order Pending -> resolved -> deleted), so
     // no "resolved-but-not-removed" state can linger to block a later write to the key or serve a stale value.
-    // Idempotent: a replay of [Resolve, Remove] over an already-removed intent is a pair of no-ops.
+    // Idempotent: a replay of [Resolve, Remove] over an already-removed intent is a pair of no-ops, and a replayed
+    // materializing resolve re-installs the same row (see PreparedIntentStore.TryInstallOnResolve).
     private async Task SettleIntentsAsync(int partitionId, IReadOnlyList<PreparedIntent> intents, bool commit, CancellationToken cancellationToken)
     {
-        List<PreparedIntentCommand> settle = new(intents.Count * 2);
-        foreach (PreparedIntent intent in intents)
+        byte[] delta = PreparedIntentStore.SerializeDelta(BuildSettleCommands(intents, commit, commit && materializeOnResolve));
+        if (await ReplicateIntentsAsync(partitionId, delta, cancellationToken).ConfigureAwait(false))
         {
-            settle.Add(new ResolveIntentCommand(intent.TransactionId, intent.Epoch, intent.Key, commit));
-            settle.Add(new RemoveIntentCommand(intent.TransactionId, intent.Epoch, intent.Key));
+            if (commit && materializeOnResolve)
+                DurableTransactionMetrics.Materialized(ResolutionSource.Finalize, intents.Count);
+
+            DurableTransactionMetrics.Settled(ResolutionSource.Finalize, intents.Count);
+        }
+    }
+
+    /// <summary>
+    /// The settle transitions for <paramref name="intents"/>: a resolve then a remove per intent. With
+    /// <paramref name="materializeOnResolve"/> each resolve also installs the committed value at its apply, which
+    /// runs before the remove of the same intent, so the intent is present from its prepare's apply until the
+    /// apply that installs its value and removes it. Shared with the recovery paths so both produce one shape.
+    /// </summary>
+    internal static PreparedIntentCommand[] BuildSettleCommands(IReadOnlyList<PreparedIntent> intents, bool commit, bool materializeOnResolve)
+    {
+        PreparedIntentCommand[] settle = new PreparedIntentCommand[intents.Count * 2];
+        for (int i = 0; i < intents.Count; i++)
+        {
+            PreparedIntent intent = intents[i];
+            settle[2 * i] = materializeOnResolve
+                ? new ResolveIntentCommand(intent.TransactionId, intent.Epoch, intent.Key, commit, MaterializeOnResolve: true, intent.CommitTimestamp)
+                : new ResolveIntentCommand(intent.TransactionId, intent.Epoch, intent.Key, commit);
+            settle[2 * i + 1] = new RemoveIntentCommand(intent.TransactionId, intent.Epoch, intent.Key);
         }
 
-        byte[] delta = PreparedIntentStore.SerializeDelta(settle);
-        if (await ReplicateIntentsAsync(partitionId, delta, cancellationToken).ConfigureAwait(false))
-            DurableTransactionMetrics.Settled(ResolutionSource.Finalize, intents.Count);
+        return settle;
     }
 
     // Both replicate helpers return whatever the replicate seam reports. The seam is the single apply owner: on a

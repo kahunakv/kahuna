@@ -14,11 +14,20 @@ internal sealed record PrepareIntentCommand(PreparedIntent Intent) : PreparedInt
 
 /// <summary>Records the transaction's terminal decision on its intent: commit (value will materialize) or abort
 /// (value is discarded). Idempotent; never flips an already-resolved intent to the other outcome.</summary>
+/// <param name="MaterializeOnResolve">On a commit, the apply of this resolve also installs the intent's committed
+/// value as the key's visible revision, on every replica, from that replica's own copy of the intent — so no
+/// separate materialization record is needed. Only written once every node applies it: an older node skips the
+/// field and resolves without installing, which loses the value on that node.</param>
+/// <param name="CommitTimestamp">The transaction's commit timestamp, carried only with
+/// <paramref name="MaterializeOnResolve"/> so a reader of the log alone (the backup's applied barrier) can place
+/// the rows this resolve installs without the intent. <see cref="HLCTimestamp.Zero"/> otherwise.</param>
 internal sealed record ResolveIntentCommand(
     HLCTimestamp TransactionId,
     long Epoch,
     string Key,
-    bool Commit) : PreparedIntentCommand;
+    bool Commit,
+    bool MaterializeOnResolve = false,
+    HLCTimestamp CommitTimestamp = default) : PreparedIntentCommand;
 
 /// <summary>Removes a resolved intent after its outcome has been materialized/discarded (garbage collection). A
 /// pending intent may not be removed.</summary>

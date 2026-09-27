@@ -61,6 +61,11 @@ internal sealed class PartitionDurabilityTracker
         /// and the floor must not pass the index until both have landed.</summary>
         public readonly SortedDictionary<long, byte> Pending = [];
 
+        /// <summary>For an index that carries more than one flushed row (see <see cref="AddPendingFlushRow"/>),
+        /// how many of its rows have not yet landed. The Flush bit clears only when this reaches zero. Null until
+        /// the first such index; most partitions never allocate it.</summary>
+        public Dictionary<long, int>? PendingFlushRows;
+
         /// <summary>Highest index ever registered (pending or durable).</summary>
         public long HighestRegistered = -1;
 
@@ -121,6 +126,54 @@ internal sealed class PartitionDurabilityTracker
                 state.HighestRegistered = logIndex;
                 return;
             }
+        }
+    }
+
+    /// <summary>
+    /// Adds <paramref name="channel"/> to an index that is still pending, for an apply that learns only while it
+    /// runs that it produces another durable artifact (a materializing settle derives completion receipts).
+    /// Returns false, and changes nothing, when the index is not pending: it was never registered, or it is
+    /// already durable (a redelivered entry). Registration is by index and never re-registers, so this is the
+    /// only way to widen an index after its first registration.
+    /// </summary>
+    public bool AddPending(int partitionId, long logIndex, DurabilityChannel channel)
+    {
+        if (!partitions.TryGetValue(partitionId, out PartitionState? state))
+            return false;
+
+        lock (state)
+        {
+            if (state.Removed || !state.Pending.TryGetValue(logIndex, out byte channels))
+                return false;
+
+            state.Pending[logIndex] = (byte)(channels | Mask(channel));
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Adds one flushed row to a pending index, before that row is queued for the background flush. An index
+    /// can carry several rows (a settle that installs the committed value of every key it resolves), and the
+    /// flush writer may land them in different batches; the Flush requirement clears only when every row
+    /// counted here resolved through <see cref="Resolve"/>. Returns false, and changes nothing, when the index is
+    /// not pending (see <see cref="AddPending"/>). The caller keeps the index pending on a snapshot channel for
+    /// the whole apply, so an early row landing before a later row is counted cannot clear the index.
+    /// </summary>
+    public bool AddPendingFlushRow(int partitionId, long logIndex)
+    {
+        if (!partitions.TryGetValue(partitionId, out PartitionState? state))
+            return false;
+
+        lock (state)
+        {
+            if (state.Removed || !state.Pending.TryGetValue(logIndex, out byte channels))
+                return false;
+
+            state.Pending[logIndex] = (byte)(channels | FlushMask);
+
+            Dictionary<long, int> rows = state.PendingFlushRows ??= [];
+            rows[logIndex] = rows.TryGetValue(logIndex, out int pending) ? pending + 1 : 1;
+            return true;
         }
     }
 
@@ -202,6 +255,18 @@ internal sealed class PartitionDurabilityTracker
         {
             if (!state.Pending.TryGetValue(logIndex, out byte channels))
                 return;
+
+            // An index with several counted rows keeps its Flush requirement until the last one lands.
+            if (state.PendingFlushRows is { } rows && rows.TryGetValue(logIndex, out int pendingRows))
+            {
+                if (pendingRows > 1)
+                {
+                    rows[logIndex] = pendingRows - 1;
+                    return;
+                }
+
+                rows.Remove(logIndex);
+            }
 
             channels &= unchecked((byte)~FlushMask);
 

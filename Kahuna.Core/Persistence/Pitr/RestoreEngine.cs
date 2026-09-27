@@ -114,6 +114,13 @@ internal static class RestoreEngine
         // holds only the intents that are genuinely in flight at the point the replay has reached.
         Dictionary<PreparedIntentIdentity, PreparedIntent> liveIntents = [];
 
+        // Identities the replay settled recently, so a second producer's duplicate settle (a deferred settlement
+        // racing the recovery sweep) is recognized as already installed instead of as a settle with no prepare.
+        SettledIntentWindow settledIntents = new();
+
+        // The rows the current prepared-intent delta installs through its materializing resolves.
+        List<(PersistenceRequestItem Item, HLCTimestamp CommitHlc)> installs = [];
+
         try
         {
             // Skip the first (Full) entry — its state is already in the backend via the checkpoint.
@@ -163,7 +170,33 @@ internal static class RestoreEngine
                         // inside the cut with nothing to expand from.
                         if (entry.LogType == ReplicationTypes.PreparedIntent)
                         {
-                            TrackIntentTransitions(liveIntents, entry);
+                            installs.Clear();
+                            TrackIntentTransitions(liveIntents, settledIntents, entry, installs, manifest.BackupId);
+
+                            // A materializing resolve installs its rows at this entry. Each row carries the
+                            // transaction's commit timestamp, so the cut includes or excludes it on the same
+                            // axis as a key/value record.
+                            foreach ((PersistenceRequestItem installed, HLCTimestamp installedHlc) in installs)
+                            {
+                                if (installedHlc.CompareTo(targetTime) > 0)
+                                    continue;
+
+                                batch.Add(installed);
+                                if (installedHlc.CompareTo(lastAppliedTime) >= 0)
+                                {
+                                    lastAppliedTime = installedHlc;
+                                    lastAppliedIndex = entry.Id;
+                                }
+                                totalApplied++;
+                                activePartitions.Add(partitionId);
+
+                                if (batch.Count >= ApplyBatchSize)
+                                {
+                                    StoreBatchOrThrow(backend, batch, manifest.BackupId, partitionId);
+                                    batch.Clear();
+                                }
+                            }
+
                             continue;
                         }
 
@@ -429,11 +462,17 @@ internal static class RestoreEngine
     /// <summary>
     /// Folds one replayed prepared-intent delta into the restore's live-intent map: a prepare installs the
     /// intent, a resolve leaves it in place (a resolved intent is still the value its materialization names),
-    /// and a remove drops it. Decoding goes through the store's own codec, so the restore can never read a
-    /// delta differently from the live apply path.
+    /// and a remove drops it. A materializing committed resolve also adds the row it installs to
+    /// <paramref name="installs"/>, taken from the intent the same segment stream installed earlier in log
+    /// order — before the remove of the same intent drops it. Decoding goes through the store's own codec, so
+    /// the restore can never read a delta differently from the live apply path.
     /// </summary>
     private static void TrackIntentTransitions(
-        Dictionary<PreparedIntentIdentity, PreparedIntent> liveIntents, WalSegmentEntry entry)
+        Dictionary<PreparedIntentIdentity, PreparedIntent> liveIntents,
+        SettledIntentWindow settledIntents,
+        WalSegmentEntry entry,
+        List<(PersistenceRequestItem Item, HLCTimestamp CommitHlc)> installs,
+        Guid backupId)
     {
         if (entry.LogData is null || entry.LogData.Length == 0)
             return;
@@ -446,10 +485,80 @@ internal static class RestoreEngine
                     liveIntents[new PreparedIntentIdentity(prepare.Intent.TransactionId, prepare.Intent.Epoch, prepare.Intent.Key)] = prepare.Intent;
                     break;
 
+                case ResolveIntentCommand { Commit: true, MaterializeOnResolve: true } resolve:
+                {
+                    PreparedIntentIdentity identity = new(resolve.TransactionId, resolve.Epoch, resolve.Key);
+
+                    if (liveIntents.TryGetValue(identity, out PreparedIntent? intent))
+                    {
+                        installs.Add((ToRequestItem(intent), intent.CommitTimestamp));
+                        break;
+                    }
+
+                    // A second copy of a settle the replay already applied: its row was installed with the first.
+                    if (settledIntents.Contains(identity))
+                        break;
+
+                    throw new BackupDriverException(
+                        $"Backup {backupId:N}: log entry {entry.Id} installs prepared intent " +
+                        $"{identity.TransactionId}/{identity.Epoch} for key '{identity.Key}' at its resolve, but no " +
+                        "prepare for it appears in the replayed segments; the restore would silently drop a " +
+                        "committed value and is aborted.");
+                }
+
                 case RemoveIntentCommand remove:
-                    liveIntents.Remove(new PreparedIntentIdentity(remove.TransactionId, remove.Epoch, remove.Key));
+                {
+                    PreparedIntentIdentity identity = new(remove.TransactionId, remove.Epoch, remove.Key);
+                    if (liveIntents.Remove(identity))
+                        settledIntents.Add(identity);
                     break;
+                }
             }
+        }
+    }
+
+    /// <summary>The row a committed prepared intent installs, stamped with the transaction's one commit
+    /// timestamp exactly as the materialization record built from the same intent is.</summary>
+    private static PersistenceRequestItem ToRequestItem(PreparedIntent intent) => new(
+        intent.Key,
+        intent.Value,
+        intent.Revision,
+        intent.Expires.N,
+        intent.Expires.L,
+        intent.Expires.C,
+        intent.CommitTimestamp.N,
+        intent.CommitTimestamp.L,
+        intent.CommitTimestamp.C,
+        intent.CommitTimestamp.N,
+        intent.CommitTimestamp.L,
+        intent.CommitTimestamp.C,
+        (int)intent.State,
+        intent.NoRevision);
+
+    /// <summary>
+    /// A bounded memory of the identities the replay settled most recently. A duplicate settle follows its first
+    /// copy closely in the log (two producers racing the same resolution), so a window of recent identities
+    /// recognizes it without the memory growing with every transaction in the chain. A duplicate older than the
+    /// window fails the restore closed rather than guessing.
+    /// </summary>
+    private sealed class SettledIntentWindow
+    {
+        private const int Capacity = 65_536;
+
+        private readonly HashSet<PreparedIntentIdentity> members = [];
+
+        private readonly Queue<PreparedIntentIdentity> order = new();
+
+        public bool Contains(PreparedIntentIdentity identity) => members.Contains(identity);
+
+        public void Add(PreparedIntentIdentity identity)
+        {
+            if (!members.Add(identity))
+                return;
+
+            order.Enqueue(identity);
+            if (order.Count > Capacity)
+                members.Remove(order.Dequeue());
         }
     }
 }

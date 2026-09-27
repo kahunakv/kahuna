@@ -30,6 +30,14 @@ internal static class PartitionWriteAggregatorMetrics
     internal static readonly Counter<long> DispatchedEntries =
         Meter.CreateCounter<long>("kahuna.kv.write.entries", description: "Log entries dispatched across all aggregator batches, tagged by admission class.");
 
+    /// <summary>Log entries dispatched, tagged by the stage that produced the submission carrying them
+    /// (<c>one_phase</c>, <c>record_init</c>, <c>prepare</c>, <c>re_prepare</c>, <c>decision</c>,
+    /// <c>materialize</c>, <c>settle</c>, <c>other</c>). Divided by committed transactions, it says what each
+    /// commit's log entries are — the bundle, the materialization records, the settle — instead of only how many
+    /// are ordinary or terminal. The tag set is fixed.</summary>
+    internal static readonly Counter<long> DispatchedStageEntries =
+        Meter.CreateCounter<long>("kahuna.kv.write.stage_entries", description: "Log entries dispatched across all aggregator batches, tagged by the stage that produced the submission.");
+
     internal static readonly Counter<long> BatchOutcomes =
         Meter.CreateCounter<long>("kahuna.kv.write.outcomes", description: "Batch outcomes tagged success/transient/permanent.");
 
@@ -129,8 +137,13 @@ internal static class PartitionWriteAggregatorMetrics
 
     /// <summary>One submission selected into a batch: its admission-to-dispatch delay, by class, log type, and
     /// the stage the submission carried from its creation site.</summary>
-    internal static void SubmissionDispatched(long queueDelayMs, WriteAdmissionClass cls, string firstEntryLogType, WriteSubmissionStage stage) =>
-        SubmissionQueueDelayMs.Record(queueDelayMs, ClassTag(cls), TypeTag(firstEntryLogType), StageTag(stage));
+    internal static void SubmissionDispatched(long queueDelayMs, WriteAdmissionClass cls, string firstEntryLogType, WriteSubmissionStage stage, int entries)
+    {
+        KeyValuePair<string, object?> stageTag = StageTag(stage);
+        SubmissionQueueDelayMs.Record(queueDelayMs, ClassTag(cls), TypeTag(firstEntryLogType), stageTag);
+        if (entries > 0)
+            DispatchedStageEntries.Add(entries, stageTag);
+    }
 
     internal static void BatchDispatched(int ordinaryEntries, int terminalEntries, long bytes, long oldestAgeMs, WriteAdmissionClass oldestClass)
     {

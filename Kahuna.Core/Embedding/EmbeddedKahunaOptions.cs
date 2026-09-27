@@ -362,6 +362,16 @@ public sealed class EmbeddedKahunaOptions
     /// </summary>
     public bool DurableMaterializeByReference { get; set; } = true;
 
+    /// <summary>
+    /// When true, a committed durable transaction's settle also installs each committed value from the prepared
+    /// intent on every replica, so no materialization record is written at all (see
+    /// <c>KahunaConfiguration.DurableMaterializeOnResolve</c>).
+    /// <para><b>Rolling upgrade.</b> Default off. Every node must run a build that installs on a materializing
+    /// settle before any node turns this on; an older node resolves the intent without installing the value,
+    /// losing that write locally. Turning it off is safe at any time.</para>
+    /// </summary>
+    public bool DurableMaterializeOnResolve { get; set; }
+
     public int DurablePreparedIntentMaxCount { get; set; } = 500_000;
 
     public long DurablePreparedIntentMaxBytes { get; set; } = 1L * 1024 * 1024 * 1024;

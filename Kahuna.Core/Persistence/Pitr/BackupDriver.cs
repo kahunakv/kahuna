@@ -1,5 +1,7 @@
 
 using System.Text.Json;
+using Kahuna.Server.KeyValues.Transactions;
+using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
@@ -627,13 +629,28 @@ internal sealed class BackupDriver
 
                 if (log.Type is not (RaftLogType.Committed or RaftLogType.CommittedCheckpoint))
                     continue;
-                if (log.LogType != ReplicationTypes.KeyValues || log.LogData is null || log.LogData.Length == 0)
+                if (log.LogData is null || log.LogData.Length == 0)
                     continue;
 
-                KeyValueMessage msg = ReplicationSerializer.UnserializeKeyValueMessage(log.LogData);
-                HLCTimestamp commitHlc = new(msg.LastModifiedNode, msg.LastModifiedPhysical, msg.LastModifiedCounter);
-                if (commitHlc.CompareTo(max) > 0)
-                    max = commitHlc;
+                if (log.LogType == ReplicationTypes.KeyValues)
+                {
+                    KeyValueMessage msg = ReplicationSerializer.UnserializeKeyValueMessage(log.LogData);
+                    HLCTimestamp commitHlc = new(msg.LastModifiedNode, msg.LastModifiedPhysical, msg.LastModifiedCounter);
+                    if (commitHlc.CompareTo(max) > 0)
+                        max = commitHlc;
+                }
+                else if (log.LogType == ReplicationTypes.PreparedIntent)
+                {
+                    // A materializing resolve installs its committed rows at this entry, stamped with the commit
+                    // timestamp the resolve carries — which, like a key/value record's, never exceeds the
+                    // entry's WAL Time, so the early stop above holds for these entries too.
+                    foreach (PreparedIntentCommand command in PreparedIntentStore.DecodeDelta(log.LogData))
+                    {
+                        if (command is ResolveIntentCommand { Commit: true, MaterializeOnResolve: true } resolve
+                            && resolve.CommitTimestamp.CompareTo(max) > 0)
+                            max = resolve.CommitTimestamp;
+                    }
+                }
             }
 
             ceiling = start - 1;

@@ -1919,9 +1919,59 @@ internal sealed class PreparedIntentStore
 
     // ── replication ─────────────────────────────────────────────────────────────
 
-    public bool Restore(int partitionId, RaftLog log) => ApplyLog(log, partitionId);
+    public bool Restore(int partitionId, RaftLog log) => ApplyLog(log, partitionId, replay: true);
 
-    public bool Replicate(int partitionId, RaftLog log) => ApplyLog(log, partitionId);
+    public bool Replicate(int partitionId, RaftLog log) => ApplyLog(log, partitionId, replay: false);
+
+    // ── materializing resolve ─────────────────────────────────────────────────────
+    //
+    // A committing resolve that carries MaterializeOnResolve makes its own apply the owner of the committed value:
+    // every replica installs the value from its copy of the intent, in log order, before the settle removes the
+    // intent. The install runs before the resolve applies, so the unflushed overlay already holds the row when the
+    // resolve's convergence hook checks for it and when the remove decides whether to retain the settled intent
+    // until the row is durable. The intent peek runs without the apply gate: the partition's ordered apply path is
+    // the only writer of the key's live intent, and the resolve only ever follows a canonical commit, so installing
+    // the value is correct even if a purge removed the intent in between.
+
+    private IResolvedIntentInstaller? resolvedIntentInstaller;
+
+    /// <summary>Wires the installer a materializing resolve uses (manager construction). Without one, a
+    /// materializing resolve applies as a plain resolve and installs nothing — the pure/in-memory configuration.</summary>
+    public void AttachResolvedIntentInstaller(IResolvedIntentInstaller installer) => resolvedIntentInstaller = installer;
+
+    /// <summary>The attached installer, so a test can wrap it and observe which replica installed what.</summary>
+    internal IResolvedIntentInstaller? ResolvedIntentInstaller => resolvedIntentInstaller;
+
+    /// <summary>
+    /// Installs the committed value a materializing resolve names, when this node holds it. Returns whether an
+    /// install ran. The source is the live intent of the same transaction attempt, unless it is already aborted
+    /// (the state machine refuses the commit then). On a restart replay the live set may no longer hold it — the
+    /// snapshot was written after the settle — and the source is then the settled intent retained until its row
+    /// is durable. Absent from both, the value is already durable here: the settle applied before, and the row
+    /// flushed before the snapshot dropped the retained copy.
+    /// </summary>
+    private bool TryInstallOnResolve(int partitionId, long logIndex, ResolveIntentCommand resolve, bool replay)
+    {
+        IResolvedIntentInstaller? installer = resolvedIntentInstaller;
+        if (installer is null || !resolve.Commit || !resolve.MaterializeOnResolve)
+            return false;
+
+        PreparedIntent? source = null;
+
+        if (intents.TryGetValue(resolve.Key, out PreparedIntent? live)
+            && live.TransactionId == resolve.TransactionId
+            && live.Epoch == resolve.Epoch
+            && live.Resolution != PreparedIntentResolution.Aborted)
+            source = live;
+        else if (replay && TryGetSettledIntentAwaitingFlush(resolve.TransactionId, resolve.Epoch, resolve.Key, out PreparedIntent? settled))
+            source = settled;
+
+        if (source is null)
+            return false;
+
+        installer.Install(partitionId, logIndex, source, replay);
+        return true;
+    }
 
     // The proposer's decoded commands, keyed by the exact byte array handed to Raft, budgeted for one
     // take per co-hosted node. See ProposedDeltaCache for the reuse and lifetime contract; reusing the
@@ -2024,9 +2074,13 @@ internal sealed class PreparedIntentStore
         // ledger is ahead of these entries by construction, so a verdict here could only be a false refusal and
         // a false veto (see IsHistoricalApply).
         HistoryWindow window = NoteApplied(partitionId, log.Id);
+        bool installed = false;
 
         foreach (PreparedIntentCommand command in commands)
         {
+            if (command is ResolveIntentCommand resolve && TryInstallOnResolve(partitionId, log.Id, resolve, replay: false))
+                installed = true;
+
             PreparedIntentApplyResult result = Apply(command, partitionId, window);
             if (command is PrepareIntentCommand prepare && (result.Outcome == TransactionApplyOutcome.Rejected || result.StaleBase))
             {
@@ -2045,6 +2099,9 @@ internal sealed class PreparedIntentStore
                     : Writes.PrepareRejectionKind.KeyHeld);
             }
         }
+
+        if (installed)
+            resolvedIntentInstaller!.CompleteEntry(partitionId, log.Id, replay: false);
 
         FireStaleBaseVetoes(staleFlagged);
         return allPreparesAccepted;
@@ -2065,7 +2122,7 @@ internal sealed class PreparedIntentStore
         }
     }
 
-    private bool ApplyLog(RaftLog log, int partitionId)
+    private bool ApplyLog(RaftLog log, int partitionId, bool replay)
     {
         if (log.LogType != ReplicationTypes.PreparedIntent || log.LogData is null)
             return true;
@@ -2074,9 +2131,18 @@ internal sealed class PreparedIntentStore
             commands = DecodeDelta(log.LogData);
 
         HistoryWindow window = NoteApplied(partitionId, log.Id);
+        bool installed = false;
 
         foreach (PreparedIntentCommand command in commands)
+        {
+            if (command is ResolveIntentCommand resolve && TryInstallOnResolve(partitionId, log.Id, resolve, replay))
+                installed = true;
+
             Apply(command, partitionId, window);
+        }
+
+        if (installed)
+            resolvedIntentInstaller!.CompleteEntry(partitionId, log.Id, replay);
 
         return true;
     }
@@ -2295,6 +2361,7 @@ internal sealed class PreparedIntentStore
         int baseState = 0;
         int deadlineNode = 0; long deadlinePhysical = 0; uint deadlineCounter = 0;
         int resolution = 0;
+        bool materializeOnResolve = false;
 
         int pos = 0;
         while (pos < data.Length)
@@ -2330,6 +2397,7 @@ internal sealed class PreparedIntentStore
                 case 26 << 3 | Varint: deadlinePhysical = (long)ReadVarint(data, ref pos); break;
                 case 27 << 3 | Varint: deadlineCounter = (uint)ReadVarint(data, ref pos); break;
                 case 28 << 3 | Varint: resolution = (int)(uint)ReadVarint(data, ref pos); break;
+                case 29 << 3 | Varint: materializeOnResolve = ReadVarint(data, ref pos) != 0; break;
                 default: SkipField(data, ref pos, tag); break;
             }
         }
@@ -2362,7 +2430,11 @@ internal sealed class PreparedIntentStore
                     (PreparedIntentResolution)resolution));
 
             case PreparedIntentCommandKindMessage.PreparedIntentResolve:
-                return new ResolveIntentCommand(txId, effectiveEpoch, key, commit);
+                // A materializing resolve's commit timestamp is its own, never the header's: the header hoists
+                // the timestamp only from prepares.
+                return new ResolveIntentCommand(
+                    txId, effectiveEpoch, key, commit, materializeOnResolve,
+                    materializeOnResolve ? new HLCTimestamp(commitNode, commitPhysical, commitCounter) : HLCTimestamp.Zero);
 
             case PreparedIntentCommandKindMessage.PreparedIntentRemove:
                 return new RemoveIntentCommand(txId, effectiveEpoch, key);
@@ -2466,6 +2538,7 @@ internal sealed class PreparedIntentStore
         m.BaseRevision = 0; m.BaseState = 0;
         m.RecoveryDeadlineNode = 0; m.RecoveryDeadlinePhysical = 0; m.RecoveryDeadlineCounter = 0;
         m.Resolution = 0;
+        m.MaterializeOnResolve = false;
     }
 
     /// <summary>
@@ -2566,6 +2639,16 @@ internal sealed class PreparedIntentStore
                 m.Kind = PreparedIntentCommandKindMessage.PreparedIntentResolve;
                 m.TransactionIdNode = resolve.TransactionId.N; m.TransactionIdPhysical = resolve.TransactionId.L; m.TransactionIdCounter = resolve.TransactionId.C;
                 m.Epoch = resolve.Epoch; m.Key = resolve.Key; m.Commit = resolve.Commit;
+
+                // A plain resolve stays byte-identical to the form every older node reads.
+                if (resolve.MaterializeOnResolve)
+                {
+                    m.MaterializeOnResolve = true;
+                    m.CommitTimestampNode = resolve.CommitTimestamp.N;
+                    m.CommitTimestampPhysical = resolve.CommitTimestamp.L;
+                    m.CommitTimestampCounter = resolve.CommitTimestamp.C;
+                }
+
                 return m;
 
             case RemoveIntentCommand remove:
@@ -2600,7 +2683,11 @@ internal sealed class PreparedIntentStore
                 return new PrepareIntentCommand(IntentOf(m, header));
 
             case PreparedIntentCommandKindMessage.PreparedIntentResolve:
-                return new ResolveIntentCommand(txId, epoch, m.Key, m.Commit);
+                return new ResolveIntentCommand(
+                    txId, epoch, m.Key, m.Commit, m.MaterializeOnResolve,
+                    m.MaterializeOnResolve
+                        ? new HLCTimestamp(m.CommitTimestampNode, m.CommitTimestampPhysical, m.CommitTimestampCounter)
+                        : HLCTimestamp.Zero);
 
             case PreparedIntentCommandKindMessage.PreparedIntentRemove:
                 return new RemoveIntentCommand(txId, epoch, m.Key);

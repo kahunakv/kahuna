@@ -111,9 +111,9 @@ internal sealed class KeyValueReplicator
     /// below settled history — the permanent-overwrite shape of a lost update — and this line is what lets a
     /// conserved-total drift under load attribute to its producing transaction from the node log alone.
     /// </summary>
-    private void WitnessBelowHeadMaterialization(int partitionId, KeyValueMessage keyValueMessage, long logIndex)
+    private void WitnessBelowHeadMaterialization(int partitionId, in CommittedKeyValueMutation mutation, long logIndex)
     {
-        if (committedHeadRevisionProbe is null || keyValueMessage.NoRevision)
+        if (committedHeadRevisionProbe is null || mutation.NoRevision)
             return;
 
         // History below an installed snapshot's reflected position: the installed ledger is ahead of this entry
@@ -122,16 +122,14 @@ internal sealed class KeyValueReplicator
         if (preparedIntentStore is not null && preparedIntentStore.IsHistoricalApply(partitionId, logIndex))
             return;
 
-        long headRevision = committedHeadRevisionProbe(keyValueMessage.Key);
-        if (headRevision <= keyValueMessage.Revision)
+        long headRevision = committedHeadRevisionProbe(mutation.Key);
+        if (headRevision <= mutation.Revision)
             return;
 
         Transactions.DurableTransactionMetrics.BelowHeadMaterializations.Add(1);
         logger.LogWarning(
             "Committed key-value record for key {Key} applied at revision {Revision}, below this node's remembered committed head {HeadRevision} (transaction {TransactionId}, log entry {LogIndex})",
-            keyValueMessage.Key, keyValueMessage.Revision, headRevision,
-            new HLCTimestamp(keyValueMessage.TransactionIdNode, keyValueMessage.TransactionIdPhysical, keyValueMessage.TransactionIdCounter),
-            logIndex);
+            mutation.Key, mutation.Revision, headRevision, mutation.TransactionId, logIndex);
     }
 
     // Answers whether this node's record store holds a terminal Abort for (transactionId, epoch). A local
@@ -142,30 +140,20 @@ internal sealed class KeyValueReplicator
     private readonly Func<HLCTimestamp, long, bool>? transactionLocallyAborted;
 
     /// <summary>
-    /// Applies the transactional commit metadata carried on a committed persistent mutation as a follower
-    /// replicates the log record: records a durable completion receipt (so a re-commit that lands here after
-    /// the write intent / MVCC entry are gone answers <c>Committed</c> instead of <c>MustRetry</c>), then
-    /// raises the Receipts resolve ceiling over this entry so the next durable receipt snapshot certifies
-    /// it. A non-transactional (single-shot) write carries a zero transaction id and derives no receipt,
-    /// so it neither records nor touches the Receipts channel.
+    /// Records the durable completion receipt a committed transactional mutation derives, so a re-commit that
+    /// lands here after the write intent / MVCC entry are gone answers <c>Committed</c> instead of
+    /// <c>MustRetry</c>. Returns whether a receipt was recorded: a non-transactional (single-shot) write carries a
+    /// zero transaction id and derives none. The caller raises the Receipts resolve ceiling over the entry once
+    /// every receipt the entry derives is recorded, so a snapshot capture that samples the raised ceiling always
+    /// finds them all in the store.
     /// </summary>
-    private void RecordCompletionReceipt(int partitionId, long logIndex, KeyValueMessage keyValueMessage)
+    private bool RecordCompletionReceipt(in CommittedKeyValueMutation mutation)
     {
-        HLCTimestamp transactionId = new(keyValueMessage.TransactionIdNode, keyValueMessage.TransactionIdPhysical, keyValueMessage.TransactionIdCounter);
+        if (!mutation.IsTransactional)
+            return false;
 
-        if (transactionId == HLCTimestamp.Zero)
-            return;
-
-        completionReceiptStore.Record(
-            transactionId,
-            keyValueMessage.Key,
-            keyValueMessage.HasRecordAnchorKey ? keyValueMessage.RecordAnchorKey : null,
-            KeyValueDurability.Persistent
-        );
-
-        // Record precedes MarkApplied so a snapshot capture that samples the raised ceiling always
-        // finds the receipt already in the store.
-        durabilityTracker?.MarkApplied(partitionId, logIndex, DurabilityChannel.Receipts);
+        completionReceiptStore.Record(mutation.TransactionId, mutation.Key, mutation.RecordAnchorKey, KeyValueDurability.Persistent);
+        return true;
     }
 
     /// <summary>
@@ -176,12 +164,12 @@ internal sealed class KeyValueReplicator
     /// on a floor-narrowed restart replay (a post-restart re-commit would answer MustRetry instead
     /// of Committed). A single-shot entry derives no receipt and registers on Flush alone.
     /// </summary>
-    private void RegisterPendingApply(int partitionId, long logIndex, KeyValueMessage keyValueMessage)
+    private void RegisterPendingApply(int partitionId, long logIndex, in CommittedKeyValueMutation mutation)
     {
         if (durabilityTracker is null)
             return;
 
-        if (keyValueMessage.TransactionIdNode != 0 || keyValueMessage.TransactionIdPhysical != 0 || keyValueMessage.TransactionIdCounter != 0)
+        if (mutation.IsTransactional)
             durabilityTracker.RegisterPending(partitionId, logIndex, DurabilityChannel.Flush, DurabilityChannel.Receipts);
         else
             durabilityTracker.RegisterPending(partitionId, logIndex, DurabilityChannel.Flush);
@@ -797,12 +785,63 @@ internal sealed class KeyValueReplicator
         (a ?? []).AsSpan().SequenceEqual(b ?? []);
 
     /// <summary>
+    /// Applies a committed key/value mutation that a key/value log record carries, as the only mutation of its
+    /// entry: registers the entry with the durability tracker, applies the mutation, and raises the Receipts
+    /// resolve ceiling over the entry once its receipt is recorded.
+    /// </summary>
+    private void ApplyLoggedMutation(int partitionId, long logIndex, in CommittedKeyValueMutation mutation, bool witnessBelowHead, bool witnessCollision)
+    {
+        // Register before enqueueing: the partition's durability floor must not pass
+        // this entry until every durable artifact of its apply lands (see
+        // RegisterPendingApply). Applies arrive in log-id order (leaders deliver their
+        // own committed proposals through this path too), so the registration always
+        // precedes any watermark advance over this index.
+        RegisterPendingApply(partitionId, logIndex, mutation);
+
+        if (ApplyCommittedMutation(partitionId, logIndex, mutation, witnessBelowHead, witnessCollision))
+            durabilityTracker?.MarkApplied(partitionId, logIndex, DurabilityChannel.Receipts);
+    }
+
+    /// <summary>
+    /// Installs a committed prepared intent's value for a materializing resolve at <paramref name="logIndex"/>:
+    /// the same durable effects a materialization record of the intent produces, without the record. The entry
+    /// is already pending on the prepared-intent channel for the whole apply of its delta, and it may install
+    /// several rows, so each row is counted on the Flush channel before it is queued and the Receipts channel is
+    /// added to the entry; <see cref="CompleteResolvedIntentEntry"/> raises the Receipts ceiling after the last row.
+    /// </summary>
+    internal void InstallResolvedIntent(int partitionId, long logIndex, PreparedIntent intent)
+    {
+        CommittedKeyValueMutation mutation = CommittedKeyValueMutation.FromIntent(intent);
+
+        if (durabilityTracker is not null)
+        {
+            durabilityTracker.AddPendingFlushRow(partitionId, logIndex);
+            if (mutation.IsTransactional)
+                durabilityTracker.AddPending(partitionId, logIndex, DurabilityChannel.Receipts);
+        }
+
+        // The intent is the authority for the mutation, exactly as for a by-reference record; only a set runs the
+        // same-revision value comparison.
+        ApplyCommittedMutation(
+            partitionId, logIndex, mutation,
+            witnessBelowHead: true,
+            witnessCollision: intent.State != KeyValueState.Deleted);
+    }
+
+    /// <summary>Raises the Receipts resolve ceiling over a materializing resolve's entry, after every receipt its
+    /// installs derived is recorded (see <see cref="InstallResolvedIntent"/>).</summary>
+    internal void CompleteResolvedIntentEntry(int partitionId, long logIndex) =>
+        durabilityTracker?.MarkApplied(partitionId, logIndex, DurabilityChannel.Receipts);
+
+    /// <summary>
     /// Applies one committed key/value mutation: the single body behind every mutating arm of
-    /// <see cref="Replicate"/>. The value-carrying arms read the mutation straight off the record; the
-    /// by-reference arm reads it from the local prepared intent the record names. Keeping one body is what
-    /// stops the two from drifting — the durability registration, the fork and collision witnesses, the
+    /// <see cref="Replicate"/> and behind a materializing resolve's install. The value-carrying arms read the
+    /// mutation straight off the record; the by-reference arm and the install read it from the local prepared
+    /// intent. Keeping one body is what stops them from drifting — the fork and collision witnesses, the
     /// unflushed overlay, the queued backend write, the cache-coherence message, the completion receipt and
-    /// the write-frequency sample all live here and only here.
+    /// the write-frequency sample all live here and only here. Durability registration is the caller's, because
+    /// it differs between an entry that carries one mutation and an entry that installs several. Returns whether
+    /// a completion receipt was recorded.
     /// </summary>
     /// <param name="witnessBelowHead">
     /// Runs the below-head fork witness. True for the set and delete mutations, whose revision is meaningful
@@ -812,28 +851,15 @@ internal sealed class KeyValueReplicator
     /// Runs the same-revision divergent-apply witness. True only for a set: a delete and an extend legitimately
     /// reuse a revision number, so an equal revision there is not the alarm it is for a set.
     /// </param>
-    private void ApplyCommittedMutation(
+    private bool ApplyCommittedMutation(
         int partitionId,
-        RaftLog log,
-        KeyValueMessage keyValueMessage,
-        byte[]? messageValue,
-        KeyValueState state,
+        long logIndex,
+        in CommittedKeyValueMutation mutation,
         bool witnessBelowHead,
         bool witnessCollision)
     {
-        HLCTimestamp expires      = new(keyValueMessage.ExpireNode, keyValueMessage.ExpirePhysical, keyValueMessage.ExpireCounter);
-        HLCTimestamp lastUsed     = new(keyValueMessage.LastUsedNode, keyValueMessage.LastUsedPhysical, keyValueMessage.LastUsedCounter);
-        HLCTimestamp lastModified = new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter);
-
-        // Register before enqueueing: the partition's durability floor must not pass
-        // this entry until every durable artifact of its apply lands (see
-        // RegisterPendingApply). Applies arrive in log-id order (leaders deliver their
-        // own committed proposals through this path too), so the registration always
-        // precedes any watermark advance over this index.
-        RegisterPendingApply(partitionId, log.Id, keyValueMessage);
-
         if (witnessBelowHead)
-            WitnessBelowHeadMaterialization(partitionId, keyValueMessage, log.Id);
+            WitnessBelowHeadMaterialization(partitionId, mutation, logIndex);
 
         // Collision witness: this apply is about to become durable unconditionally (the overlay
         // record and the queued flush below run for every committed entry; the actor's head
@@ -845,59 +871,58 @@ internal sealed class KeyValueReplicator
         // identities, so a conserved-total drift attributes to its producer from the log alone.
         if (witnessCollision
             && unflushedWrites is not null
-            && unflushedWrites.TryGet(keyValueMessage.Key, out UnflushedKeyValueWrite newest)
-            && newest.Revision == keyValueMessage.Revision
-            && !keyValueMessage.NoRevision
-            && !ValuesEqual(newest.Value, messageValue))
+            && unflushedWrites.TryGet(mutation.Key, out UnflushedKeyValueWrite newest)
+            && newest.Revision == mutation.Revision
+            && !mutation.NoRevision
+            && !ValuesEqual(newest.Value, mutation.Value))
         {
             Transactions.DurableTransactionMetrics.SameRevisionDivergentApplies.Add(1);
             logger.LogError(
                 "Same-revision divergent apply for key {Key} at revision {Revision}: log entry {LogIndex} (transaction {TransactionId}) overwrites a different value already recorded at this revision",
-                keyValueMessage.Key, keyValueMessage.Revision, log.Id,
-                new HLCTimestamp(keyValueMessage.TransactionIdNode, keyValueMessage.TransactionIdPhysical, keyValueMessage.TransactionIdCounter));
+                mutation.Key, mutation.Revision, logIndex, mutation.TransactionId);
         }
 
         // Record before enqueueing so a read that misses the actor cache observes this
         // committed write even before the background flush lands it in the backend.
         unflushedWrites?.Record(
-            keyValueMessage.Key,
-            messageValue,
-            keyValueMessage.Revision,
-            expires,
-            lastUsed,
-            lastModified,
-            state,
-            keyValueMessage.NoRevision
+            mutation.Key,
+            mutation.Value,
+            mutation.Revision,
+            mutation.Expires,
+            mutation.LastUsed,
+            mutation.LastModified,
+            mutation.State,
+            mutation.NoRevision
         );
 
         backgroundWriter.Send(BackgroundWriteRequestPool.Rent(
             BackgroundWriteType.QueueStoreKeyValue,
             partitionId,
-            keyValueMessage.Key,
-            messageValue,
-            keyValueMessage.Revision,
-            expires,
-            lastUsed,
-            lastModified,
-            (int)state,
-            keyValueMessage.NoRevision,
-            logIndex: log.Id
+            mutation.Key,
+            mutation.Value,
+            mutation.Revision,
+            mutation.Expires,
+            mutation.LastUsed,
+            mutation.LastModified,
+            (int)mutation.State,
+            mutation.NoRevision,
+            logIndex: logIndex
         ));
 
         SendInvalidateOrApply(
             partitionId,
-            keyValueMessage.Key,
-            messageValue,
-            keyValueMessage.Revision,
-            expires,
-            lastUsed,
-            lastModified,
-            state,
-            new(keyValueMessage.TransactionIdNode, keyValueMessage.TransactionIdPhysical, keyValueMessage.TransactionIdCounter),
-            keyValueMessage.NoRevision
+            mutation.Key,
+            mutation.Value,
+            mutation.Revision,
+            mutation.Expires,
+            mutation.LastUsed,
+            mutation.LastModified,
+            mutation.State,
+            mutation.TransactionId,
+            mutation.NoRevision
         );
 
-        RecordCompletionReceipt(partitionId, log.Id, keyValueMessage);
+        bool receiptRecorded = RecordCompletionReceipt(mutation);
 
         // Record the committed write into the local histogram.
         // Running on every node (leader + followers) so the P0/meta leader — which
@@ -905,8 +930,10 @@ internal sealed class KeyValueReplicator
         // partition leader sits.
         // Guard: only key-range spaces are load-split; skip hash-routed writes to
         // avoid building 4096-entry trackers for partitions the trigger never reads.
-        if (RangeRouting.IsKeyRange(keySpaceRegistry, keyValueMessage.Key))
-            writeFrequencyRegistry.GetOrCreate(partitionId).RecordWrite(keyValueMessage.Key);
+        if (RangeRouting.IsKeyRange(keySpaceRegistry, mutation.Key))
+            writeFrequencyRegistry.GetOrCreate(partitionId).RecordWrite(mutation.Key);
+
+        return receiptRecorded;
     }
 
     /// <summary>
@@ -962,12 +989,10 @@ internal sealed class KeyValueReplicator
         // The intent is the authority for the mutation itself — the value and whether the key is set or
         // deleted — exactly as it is for the leader's own ApplyDurableCommit. The record supplies the identity,
         // the revision and the commit timestamps.
-        ApplyCommittedMutation(
+        ApplyLoggedMutation(
             partitionId,
-            log,
-            keyValueMessage,
-            intent.Value,
-            intent.State,
+            log.Id,
+            CommittedKeyValueMutation.FromRecord(keyValueMessage, intent.Value, intent.State),
             witnessBelowHead: true,
             witnessCollision: intent.State != KeyValueState.Deleted);
     }
@@ -1066,8 +1091,8 @@ internal sealed class KeyValueReplicator
 
                     // An extend only refreshes the expiry of a value already applied, so it runs neither witness.
                     // A delete runs the below-head witness only; the same-revision value comparison is for sets.
-                    ApplyCommittedMutation(
-                        partitionId, log, keyValueMessage, value, state,
+                    ApplyLoggedMutation(
+                        partitionId, log.Id, CommittedKeyValueMutation.FromRecord(keyValueMessage, value, state),
                         witnessBelowHead: type != KeyValueRequestType.TryExtend,
                         witnessCollision: type == KeyValueRequestType.TrySet);
                     return true;

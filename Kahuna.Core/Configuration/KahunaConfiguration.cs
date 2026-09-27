@@ -542,6 +542,20 @@ public sealed class KahunaConfiguration
     public bool DurableMaterializeByReference { get; set; } = true;
 
     /// <summary>
+    /// When true, a committed durable transaction needs no materialization record at all: its settle — the one
+    /// post-decision entry that resolves and removes the prepared intents — also installs each committed value, on
+    /// every replica, from that replica's own copy of the intent, at the settle's position in the log. A commit
+    /// then costs its decision path plus one settle entry per partition instead of one materialization entry per
+    /// written key plus the settle. <see cref="DurableMaterializeByReference"/> no longer applies while this is on.
+    /// <para><b>Rolling upgrade.</b> Default off. Every node in the cluster must run a build that installs on a
+    /// materializing settle before any node turns this on: an older node reads the settle as a plain resolve and
+    /// removes the intent without installing the value, which is a silently lost write on that node. Turn it on
+    /// only after the whole cluster runs the new build; turning it off again is safe at any time, because every
+    /// build that installs on a settle also applies materialization records.</para>
+    /// </summary>
+    public bool DurableMaterializeOnResolve { get; set; }
+
+    /// <summary>
     /// Strict upper bound on the number of prepared intents resident across all partitions on this node. Checked
     /// at durable admission: a transaction whose prepares would push the resident count past this bound is
     /// refused with a retryable <c>MustRetry</c> before it prepares, so slow settlement cannot let resident

@@ -480,6 +480,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             DurableMaintenanceInterval = options.DurableMaintenanceInterval,
             DurableDeferredSettlement = options.DurableDeferredSettlement,
             DurableMaterializeByReference = options.DurableMaterializeByReference,
+            DurableMaterializeOnResolve = options.DurableMaterializeOnResolve,
             DurableDecisionOutstandingMax = options.DurableDecisionOutstandingMax, DurablePreparedIntentMaxCount = options.DurablePreparedIntentMaxCount, DurablePreparedIntentMaxBytes = options.DurablePreparedIntentMaxBytes,
             DurableDecisionDeadlineFloorMs = options.DurableDecisionDeadlineFloorMs,
             DurableDecisionDeadlineCeilingMs = options.DurableDecisionDeadlineCeilingMs,

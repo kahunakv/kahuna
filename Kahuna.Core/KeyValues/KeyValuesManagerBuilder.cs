@@ -424,6 +424,11 @@ internal sealed class KeyValuesManagerBuilder
             // intent this store already holds, so the committed value never travels through the log twice.
             preparedIntentStore: preparedIntentStore);
 
+        // A materializing resolve installs the committed value from the intent at its own apply, in log order and
+        // before the settle removes the intent — live through the replicator, on a restart replay through the
+        // restorer — so a committed transaction needs no separate materialization record.
+        preparedIntentStore.AttachResolvedIntentInstaller(new ResolvedIntentInstaller(replicator, restorer));
+
         // Commit-settlement convergence check: at the same apply position that advances the staged-base
         // fence's committed head, verify this node's replicator actually processed the commit's kv record —
         // witnessed by the unflushed overlay, which the replicator writes before anything else and which holds

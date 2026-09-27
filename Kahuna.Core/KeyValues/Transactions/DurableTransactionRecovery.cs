@@ -101,6 +101,10 @@ internal sealed class DurableTransactionRecovery
     // upgrade order); an older node skips an unknown message type, which loses the write on that node.
     private readonly bool materializeByReference;
 
+    // Settles a committed intent with a resolve that also installs its value at the settle's apply, instead of
+    // proposing a materialization record per key first — the same shape the finalizer produces (see its field).
+    private readonly bool materializeOnResolve;
+
     // Materialization window caps, the same the finalizer's resolution uses: one window coalesces into one capped
     // scheduler proposal, and a large group advances window by window instead of admitting everything at once.
     private readonly int maxMaterializationBatchItems;
@@ -129,8 +133,10 @@ internal sealed class DurableTransactionRecovery
         SemaphoreSlim? localApplyGate = null,
         Func<PreparedIntent, bool>? legMaterialized = null,
         DurableTransactionFinalizer.ApplyRollbackLocally? applyRollbackLocally = null,
-        CrossCheckRecordlessHoldDelegate? crossCheckRecordlessHold = null)
+        CrossCheckRecordlessHoldDelegate? crossCheckRecordlessHold = null,
+        bool materializeOnResolve = false)
     {
+        this.materializeOnResolve = materializeOnResolve;
         this.crossCheckRecordlessHold = crossCheckRecordlessHold;
         this.applyRollbackLocally = applyRollbackLocally;
         this.legMaterialized = legMaterialized;
@@ -516,12 +522,23 @@ internal sealed class DurableTransactionRecovery
                 return new ResolveGroupResult(0, ResolveFailureCause.Fenced);
             }
 
-            // Materialize the whole group in scheduler-sized windows (every record of a window submitted before
-            // the window is awaited), exactly as the finalizer's own resolution does, so a blocked successor
-            // waits one coalesced round for a predecessor's keys instead of one durable round per key.
-            bool[] materialized = await DurableMaterializationWindow.MaterializeAsync(
-                partitionId, group, materializeByReference, maxMaterializationBatchItems, maxMaterializationBatchBytes,
-                replicate, cancellationToken).ConfigureAwait(false);
+            // A materializing settle installs every committed value at its own apply, so nothing is proposed
+            // before it. Otherwise materialize the whole group in scheduler-sized windows (every record of a
+            // window submitted before the window is awaited), exactly as the finalizer's own resolution does, so
+            // a blocked successor waits one coalesced round for a predecessor's keys instead of one durable round
+            // per key.
+            bool[] materialized;
+            if (materializeOnResolve)
+            {
+                materialized = new bool[group.Count];
+                Array.Fill(materialized, true);
+            }
+            else
+            {
+                materialized = await DurableMaterializationWindow.MaterializeAsync(
+                    partitionId, group, materializeByReference, maxMaterializationBatchItems, maxMaterializationBatchBytes,
+                    replicate, cancellationToken).ConfigureAwait(false);
+            }
 
             // Replication makes the value durable and converges followers, but the leader applies a key/value
             // materialization to its own in-memory KV state through its dedicated apply path, not the generic
@@ -534,6 +551,11 @@ internal sealed class DurableTransactionRecovery
                 ? materialized
                 : await DurableTransactionFinalizer.ApplyLocallyAsync(
                     partitionId, group, materialized, (p, intent) => applyCommitLocally(p, intent), localApplyGate, cancellationToken).ConfigureAwait(false);
+
+            // A materializing settle makes the value durable and routes it to the owning actor itself, so the
+            // leader apply above is a best-effort head start that never gates it (see the finalizer's resolution).
+            if (materializeOnResolve)
+                applied = materialized;
 
             settleable = new(group.Count);
             bool anyMaterializeFailed = false;
@@ -549,7 +571,9 @@ internal sealed class DurableTransactionRecovery
                     settleable.Add(group[i]);
             }
 
-            DurableTransactionMetrics.Materialized(source, settleable.Count);
+            // A materializing settle is counted as a materialization only once it replicates, below.
+            if (!materializeOnResolve)
+                DurableTransactionMetrics.Materialized(source, settleable.Count);
 
             if (settleable.Count == 0)
                 return new ResolveGroupResult(0, anyMaterializeFailed ? ResolveFailureCause.MaterializeFailed : anyApplyFailed ? ResolveFailureCause.ApplyFailed : ResolveFailureCause.None);
@@ -582,13 +606,9 @@ internal sealed class DurableTransactionRecovery
             return new ResolveGroupResult(0, ResolveFailureCause.None);
 
         // Resolve and remove each intent atomically (Pending -> resolved -> deleted), so recovery leaves no
-        // lingering resolved intent. Idempotent under replay.
-        List<PreparedIntentCommand> settle = new(settleable.Count * 2);
-        foreach (PreparedIntent intent in settleable)
-        {
-            settle.Add(new ResolveIntentCommand(intent.TransactionId, intent.Epoch, intent.Key, commit));
-            settle.Add(new RemoveIntentCommand(intent.TransactionId, intent.Epoch, intent.Key));
-        }
+        // lingering resolved intent. Idempotent under replay. A committing materializing settle also installs each
+        // value at its apply, before the remove of the same intent.
+        PreparedIntentCommand[] settle = DurableTransactionFinalizer.BuildSettleCommands(settleable, commit, commit && materializeOnResolve);
 
         // The replicate seam is the single ordered apply owner: on the partition leader it applies this settle
         // delta through the scheduler's Raft-ordered completion, in the same order as any concurrent finalizer
@@ -612,6 +632,9 @@ internal sealed class DurableTransactionRecovery
 
         if (!settled)
             return new ResolveGroupResult(0, ResolveFailureCause.SettleFailed);
+
+        if (commit && materializeOnResolve)
+            DurableTransactionMetrics.Materialized(source, settleable.Count);
 
         DurableTransactionMetrics.Settled(source, settleable.Count);
         return new ResolveGroupResult(settleable.Count, ResolveFailureCause.None);

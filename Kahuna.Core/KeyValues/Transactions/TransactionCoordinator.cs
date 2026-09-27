@@ -1594,6 +1594,9 @@ internal sealed class TransactionCoordinator : IDisposable
         // record then names the prepared intent every replica already holds instead of copying the committed
         // value through the log a second time.
         materializeByReference: configuration.DurableMaterializeByReference,
+        // Install committed values at the settle's own apply instead of through materialization records, when
+        // every node in the cluster is known to apply the materializing settle.
+        materializeOnResolve: configuration.DurableMaterializeOnResolve,
         // One node-wide bound on leader-local applies, shared with the recovery paths that resolve on this node.
         localApplyGate: manager.DurableLocalApplyGate,
         // The typed decision: replicate the terminal transition and read the canonical winner in one round —

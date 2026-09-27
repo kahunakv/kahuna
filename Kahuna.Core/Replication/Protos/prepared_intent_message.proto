@@ -23,7 +23,7 @@ message PreparedIntentCommandMessage {
 
   bool commit = 7; // resolve only
 
-  // prepare payload
+  // prepare payload (the commit timestamp is also carried by a materializing resolve, see materializeOnResolve)
   int64  manifestHash = 8;
   string recordAnchorKey = 9;
   int32  commitTimestampNode     = 10;
@@ -45,6 +45,13 @@ message PreparedIntentCommandMessage {
   int64  recoveryDeadlinePhysical = 26;
   uint32 recoveryDeadlineCounter  = 27;
   int32  resolution = 28; // PreparedIntentResolution (carried so a replayed prepare reflects its resolved state)
+
+  // Resolve only. A committing resolve that also installs the intent's committed value as the key's visible
+  // revision at its own apply, on every replica, from that replica's copy of the intent. Such a resolve carries
+  // the transaction's commit timestamp in fields 10-12 on the command itself (never hoisted into the delta
+  // header). An older reader skips this field and resolves without installing, so no node may write it until
+  // every node reads it.
+  bool   materializeOnResolve = 29;
 }
 
 // The fields every transition in a delta has in common. A delta almost always carries one transaction attempt's
