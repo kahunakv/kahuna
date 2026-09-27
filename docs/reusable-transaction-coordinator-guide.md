@@ -556,7 +556,7 @@ takes ownership of the lock set, so the predicate lock never lapses in the gap b
 
 | Setting or limit | Default | Purpose |
 |---|---:|---|
-| `TransactionOutcomeRetentionMax` | 10,000 | Strict maximum retained terminal outcomes; a non-positive value disables best-effort outcome retention. Independent of the durable-decision admission budget. |
+| `TransactionOutcomeRetentionMax` | 10,000 | Maximum retained terminal outcomes (exact at rest; exceeded only by the finalizes in flight); a non-positive value disables best-effort outcome retention. Independent of the durable-decision admission budget. |
 | `DurableDecisionOutstandingMax` | 100,000 | Strict maximum **outstanding** (undecided) canonical transaction records this node admits; a non-positive value disables the bound. Decided records do not count against it. |
 | `DurableDecisionDeadlineFloorMs` | 5,000 | Lower clamp on the per-transaction decision-deadline margin, and the value used during estimator warmup. |
 | `DurableDecisionDeadlineCeilingMs` | 60,000 | Upper clamp on the decision-deadline margin, capping how long a dead coordinator's undecided record can block recovery. Must be ≥ the floor. |

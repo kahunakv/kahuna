@@ -9,9 +9,10 @@ namespace Kahuna.Server.Tests;
 /// Tests for <see cref="TerminalOutcomeWindow"/> — the bounded idempotency window replayed to duplicate
 /// commit/rollback requests. The contract under test: the size cap is a strict upper bound with FIFO
 /// eviction on retention order, a re-retained id moves to the back (newest again), TTL pruning removes
-/// exactly the entries past the window, and the structure stays consistent under concurrent
-/// retain/lookup/prune (the previous implementation's per-insert eviction scan was the server's largest
-/// commit-path contention point, which is why this structure exists at all).
+/// exactly the entries past the window, stale tickets never accumulate, and the structure stays consistent
+/// under concurrent retain/lookup/prune. The window takes no monitor — earlier implementations serialized every
+/// committing thread behind one — so the concurrent tests are the evidence that the lock-free counters and the
+/// retention order stay exact.
 /// </summary>
 public sealed class TestTerminalOutcomeWindow
 {
@@ -174,5 +175,132 @@ public sealed class TestTerminalOutcomeWindow
         window.Retain(Tx(long.MaxValue), Committed, Tx(long.MaxValue), max);
         Assert.True(window.TryGet(Tx(long.MaxValue), out _));
         Assert.InRange(window.Count, 1, max);
+    }
+
+    [Fact]
+    public void ContendedEvictions_LeaveCountAndTicketsExactAtTheCap()
+    {
+        TerminalOutcomeWindow window = new();
+        const int max = 4;
+        const int perWriter = 50_000;
+        int writers = Math.Max(8, Environment.ProcessorCount * 2);
+        using Barrier start = new(writers);
+
+        // A tiny cap makes every retain evict, so more threads than cores keep meeting at the head of the
+        // retention order. Once they stop, the counter must match the map, and exactly one ticket per retained
+        // entry must remain: a lost ticket would strand an entry, an extra one would leak.
+        Thread[] threads = new Thread[writers];
+        for (int w = 0; w < writers; w++)
+        {
+            long first = (long)w * perWriter;
+            threads[w] = new(() =>
+            {
+                start.SignalAndWait();
+
+                for (long id = first; id < first + perWriter; id++)
+                    window.Retain(Tx(id), Committed, Tx(id), max);
+            });
+            threads[w].Start();
+        }
+
+        foreach (Thread thread in threads)
+            thread.Join();
+
+        Assert.Equal(max, window.Count);
+        Assert.Equal(max, window.TicketCount);
+    }
+
+    [Fact]
+    public void PruneExpired_DrainsTheTicketsOfPrunedEntries()
+    {
+        TerminalOutcomeWindow window = new();
+
+        // The window never reaches its cap, so eviction never runs: only the prune can clear the retention
+        // order. Without that, every pruned entry would leave a ticket behind and the queue would grow forever.
+        for (long i = 1; i <= 1_000; i++)
+            window.Retain(Tx(i), Committed, new HLCTimestamp(0, i, 0), max: 10_000);
+
+        Assert.Equal(1_000, window.TicketCount);
+
+        window.PruneExpired(new HLCTimestamp(0, 100_000, 0), TimeSpan.FromSeconds(5));
+
+        Assert.Equal(0, window.Count);
+        Assert.Equal(0, window.TicketCount);
+    }
+
+    [Fact]
+    public void RepeatedReRetains_UnderTheCap_KeepTheTicketQueueBounded()
+    {
+        TerminalOutcomeWindow window = new();
+        const int max = 100;
+
+        // Each re-retain supersedes the id's previous ticket. With the window under its cap and no prune,
+        // retains themselves must drain those stale tickets once they outnumber the cap.
+        for (long i = 0; i < 100_000; i++)
+            window.Retain(Tx(i % 10), Committed, Tx(i), max);
+
+        Assert.Equal(10, window.Count);
+        Assert.InRange(window.TicketCount, 10, 2 * max + 1);
+
+        for (long id = 0; id < 10; id++)
+        {
+            Assert.True(window.TryGet(Tx(id), out TerminalOutcomeWindow.RetainedOutcome retained));
+            Assert.Equal(Tx(100_000 - 10 + id), retained.RetainedAt);
+        }
+    }
+
+    [Fact]
+    public async Task ConcurrentReRetainsEvictionsAndPrunes_KeepCountExact_AndEveryEntryEvictable()
+    {
+        TerminalOutcomeWindow window = new();
+        const int max = 64;
+        const int writers = 8;
+        const int perWriter = 20_000;
+        const long sharedIds = 32;
+        using CancellationTokenSource cts = new();
+
+        // A pruner with a TTL no entry ever reaches: it only drains stale tickets from the head, racing the
+        // writers' evictions for the same head.
+        Task pruner = Task.Run(() =>
+        {
+            while (!cts.IsCancellationRequested)
+                window.PruneExpired(Tx(0), TimeSpan.FromDays(1));
+        }, TestContext.Current.CancellationToken);
+
+        // Half the retains re-retain a small shared id set (duplicate finalizes racing each other and the
+        // evictions of the same id); the other half are distinct ids that keep the window over its cap.
+        await Task.WhenAll(Enumerable.Range(0, writers).Select(w => Task.Run(() =>
+        {
+            for (int i = 0; i < perWriter; i++)
+            {
+                long id = i % 2 == 0 ? i % sharedIds : sharedIds + (long)w * perWriter + i;
+                window.Retain(Tx(id), Committed, Tx(i), max);
+                window.TryGet(Tx(id), out _);
+            }
+        })));
+
+        cts.Cancel();
+        await pruner;
+
+        // The counter matches the map exactly: count what a lookup can find over every id used.
+        long found = 0;
+        for (long id = 0; id < sharedIds + (long)writers * perWriter; id++)
+        {
+            if (window.TryGet(Tx(id), out _))
+                found++;
+        }
+
+        Assert.Equal(found, window.Count);
+        Assert.Equal(max, window.Count);
+        Assert.InRange(window.TicketCount, window.Count, 2 * max + writers);
+
+        // Every surviving entry still has a current ticket: enough distinct retains evict all of them.
+        for (long id = -max; id < 0; id++)
+            window.Retain(Tx(id), Committed, Tx(id), max);
+
+        for (long id = -max; id < 0; id++)
+            Assert.True(window.TryGet(Tx(id), out _));
+
+        Assert.Equal(max, window.Count);
     }
 }

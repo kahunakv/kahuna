@@ -381,11 +381,12 @@ public sealed class KahunaConfiguration
     public int MaxKeyValueWriteAggregatorInboxSize { get; set; } = 16_384;
 
     /// <summary>
-    /// Strict upper bound on the number of finalized transaction outcomes retained after their session is
+    /// Upper bound on the number of finalized transaction outcomes retained after their session is
     /// removed from the active map. A duplicate commit/rollback that arrives after the session is gone consults
     /// this retention and receives the same terminal answer (Committed/RolledBack) instead of an unknown result
     /// — the best-effort idempotency window. Beyond this many entries the oldest (by retention time) are evicted
-    /// atomically, so the window never exceeds this many entries at rest; a duplicate whose outcome has been
+    /// by the retaining caller before it returns, so the window never exceeds this many entries at rest; while
+    /// finalizes run concurrently it can exceed it by at most the number in flight. A duplicate whose outcome has been
     /// evicted receives an unknown <c>Errored</c>, never a conflict <c>Aborted</c>. A value &lt;= 0 <b>disables
     /// retention entirely</b> — nothing is retained, so every duplicate after removal reports unknown
     /// <c>Errored</c>.

@@ -94,8 +94,8 @@ internal sealed class TransactionCoordinator : IDisposable
     /// record's true outcome or a retryable <see cref="KeyValueResponseType.MustRetry"/> while the record
     /// is absent, and only an unanchored handle receives the unknown
     /// <see cref="KeyValueResponseType.Errored"/> — never a conflict Aborted.
-    /// Lookups are lock-free; inserts and eviction are O(1) — see <see cref="TerminalOutcomeWindow"/> for the
-    /// structure and why a scanning implementation is not acceptable on this path.
+    /// Lookups, inserts and eviction are lock-free and O(1) — see <see cref="TerminalOutcomeWindow"/> for the
+    /// structure and why neither a scan nor a shared monitor is acceptable on this path.
     /// </summary>
     private readonly TerminalOutcomeWindow terminalOutcomes = new();
 
@@ -849,9 +849,9 @@ internal sealed class TransactionCoordinator : IDisposable
     /// <summary>
     /// Records a finalized outcome so a duplicate finalize arriving after the session is removed replays the
     /// same answer. Only terminal outcomes are retained — a non-terminal MustRetry leaves the session live, so
-    /// there is nothing to replay. <c>TransactionOutcomeRetentionMax</c> is a <b>strict</b> upper bound: the
-    /// window evicts oldest-retained-first before the insert is observable above the cap (see
-    /// <see cref="TerminalOutcomeWindow.Retain"/>). A non-positive max <b>disables retention entirely</b> —
+    /// there is nothing to replay. <c>TransactionOutcomeRetentionMax</c> bounds the window: each retain evicts
+    /// oldest-retained-first back to the cap before it returns, so the cap holds exactly at rest and is exceeded
+    /// only by the retains in flight (see <see cref="TerminalOutcomeWindow.Retain"/>). A non-positive max <b>disables retention entirely</b> —
     /// nothing is retained, so a duplicate after removal reports an unknown
     /// <see cref="KeyValueResponseType.Errored"/> (never a conflict Aborted).
     /// </summary>
@@ -870,7 +870,7 @@ internal sealed class TransactionCoordinator : IDisposable
     /// <summary>
     /// Prunes retained outcomes older than the configured idempotency window. Called on each reaper sweep so
     /// the window is bounded by age in addition to size. A non-positive TTL disables age pruning (size alone
-    /// bounds the window). Serialized against retention inserts/evictions inside
+    /// bounds the window). Runs concurrently with retention inserts and evictions without blocking them — see
     /// <see cref="TerminalOutcomeWindow.PruneExpired"/>.
     /// </summary>
     private void PruneRetainedOutcomes(HLCTimestamp now)
