@@ -306,6 +306,7 @@ KahunaConfiguration kahunaConfiguration = ConfigurationValidator.Validate(new()
     CacheEntriesToRemove = opts.CacheEntriesToRemove,
     KeyValueWriteLingerMs = opts.KeyValueWriteLingerMs,
     KeyValueWritePostCompletionHoldMs = opts.KeyValueWritePostCompletionHoldMs,
+    KeyValueWritePreciseWake = opts.KeyValueWritePreciseWake,
     KeyValueWriteMaxBatchItems = opts.KeyValueWriteMaxBatchItems,
     KeyValueWriteMaxInFlightBatchesPerPartition = opts.KeyValueWriteMaxInFlightBatchesPerPartition,
     KeyValueWriteMaxBatchBytes = opts.KeyValueWriteMaxBatchBytes,

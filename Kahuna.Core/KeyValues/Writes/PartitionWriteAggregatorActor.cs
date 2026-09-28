@@ -92,7 +92,7 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
                 break;
 
             case PartitionWriteMessageKind.TimerWake:
-                OnTimerWake(message.PartitionId);
+                OnTimerWake(message.PartitionId, message.SentTimestamp);
                 break;
 
             case PartitionWriteMessageKind.BatchComplete:
@@ -130,16 +130,21 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
         // ShouldFlushNow case — always overrides the hold). Otherwise schedule a wake so the buffer flushes at
         // its flush deadline and its items are released no later than their queue-age deadline — even while
         // the pipeline is full (the at-capacity case schedules an age-only wake).
+        if (result.OpenedBuffer)
+            state.Cycle.OnBufferOpened(Stopwatch.GetTimestamp());
+
         if (result.ShouldFlushNow || (result.OpenedBuffer && options.LingerMs <= 0 && state.HasDispatchCapacity && state.HoldElapsed(NowMs())))
-            Dispatch(item.PartitionId, state);
+            Dispatch(item.PartitionId, state, Stopwatch.GetTimestamp(), PartitionWriteDispatchTrigger.Submit);
         else
             ScheduleWake(item.PartitionId, state);
     }
 
-    private void OnTimerWake(int partitionId)
+    private void OnTimerWake(int partitionId, long firedTimestamp)
     {
         if (!states.TryGetValue(partitionId, out PartitionWriteState? state))
             return;
+
+        long turnStarted = Stopwatch.GetTimestamp();
 
         state.ClearArmedWake();
 
@@ -153,7 +158,7 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
         SweepExpired(partitionId, state);
 
         if (state.LingerElapsed(NowMs(), options.LingerMs))
-            Dispatch(partitionId, state);
+            Dispatch(partitionId, state, turnStarted, PartitionWriteDispatchTrigger.Wake, firedTimestamp);
 
         ScheduleWake(partitionId, state);
         PruneIfIdle(partitionId, state);
@@ -161,6 +166,7 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
 
     private void OnBatchComplete(PartitionWriteMessage message)
     {
+        long turnStarted = Stopwatch.GetTimestamp();
         PartitionWriteState state = GetState(message.PartitionId);
         state.OnBatchComplete();
         admission.DecInFlight();
@@ -204,11 +210,19 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
         // items remain bounded by their queue-age deadline via the wake below.
         if (!stopping)
         {
+            long turnEnded = Stopwatch.GetTimestamp();
+            long holdEnds = 0;
+
             if (options.PostCompletionHoldMs > 0)
+            {
                 state.ArmDispatchHold(NowMs(), options.PostCompletionHoldMs);
+                holdEnds = turnEnded + options.PostCompletionHoldMs * Stopwatch.Frequency / 1000;
+            }
+
+            state.Cycle.OnCompletion(message.DispatchedTimestamp, message.SentTimestamp, turnStarted, turnEnded, holdEnds, state.PendingCount > 0);
 
             if (state.PendingCount > 0 && (options.PostCompletionHoldMs <= 0 || state.HasFullBatchBuffered(options.MaxBatchItems, options.MaxBatchBytes)))
-                Dispatch(message.PartitionId, state);
+                Dispatch(message.PartitionId, state, turnEnded, PartitionWriteDispatchTrigger.Completion);
         }
 
         ScheduleWake(message.PartitionId, state);
@@ -217,7 +231,7 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
         // One timestamp read per completed batch: the mailbox wait plus this whole completion turn (ordered
         // apply/complete of every submission, then the re-dispatch above), measured from the Raft return the
         // detached batch stamped on the message.
-        PartitionWriteAggregatorMetrics.BatchCompleted(Stopwatch.GetElapsedTime(message.RaftReturnedTimestamp).TotalMilliseconds);
+        PartitionWriteAggregatorMetrics.BatchCompleted(Stopwatch.GetElapsedTime(message.SentTimestamp).TotalMilliseconds);
     }
 
     private void OnStop()
@@ -236,7 +250,10 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
         }
     }
 
-    private void Dispatch(int partitionId, PartitionWriteState state)
+    /// <summary>Selects and proposes the partition's buffered batches. <paramref name="turnStarted"/>,
+    /// <paramref name="trigger"/> and <paramref name="wakeFired"/> describe the lane turn that dispatches, for
+    /// the cycle trace only.</summary>
+    private void Dispatch(int partitionId, PartitionWriteState state, long turnStarted, PartitionWriteDispatchTrigger trigger, long wakeFired = 0)
     {
         // Loop over the all-released case iteratively rather than recursing: with a small MaxBatchItems and a
         // full queue of expired/stale items, one recursive frame per selected item would overflow the stack.
@@ -327,10 +344,16 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
 
             RaftProposalEntry[] entries = [.. entryList];
 
-            PartitionWriteAggregatorMetrics.BatchDispatched(ordinaryEntries, terminalEntries, batchBytes, now - valid[0].EnqueueTicks, valid[0].AdmissionClass);
+            PartitionWriteAggregatorMetrics.BatchDispatched(valid.Count, ordinaryEntries, terminalEntries, batchBytes, now - valid[0].EnqueueTicks, valid[0].AdmissionClass);
             admission.IncInFlight();
 
-            _ = RunBatch(partitionId, valid, entries);
+            // The dispatch stamp doubles as the Raft round trip's start and as the batch's identity in the
+            // cycle trace. A top-up dispatch in the same turn closes no cycle: no batch completed since the first.
+            long dispatched = Stopwatch.GetTimestamp();
+            if (state.Cycle.TryClose(dispatched, turnStarted, trigger, wakeFired, out PartitionWriteCycleStages stages))
+                PartitionWriteAggregatorMetrics.CycleClosed(stages);
+
+            _ = RunBatch(partitionId, valid, entries, dispatched);
 
             // Top up the pipeline: while another full batch is already buffered and in-flight capacity
             // remains, dispatch it now instead of waiting for a completion or a wake. A sub-threshold
@@ -347,13 +370,13 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
     /// lane state. Bounds the round trip with a linked deadline+shutdown token so it cannot outlive queue age or
     /// hang shutdown, maps each submission to its own entries' outcome, and sends the per-submission results back
     /// as priority control — every failure converted into a normal completion.</summary>
-    private async Task RunBatch(int partitionId, IReadOnlyList<IProposalSubmission> batch, RaftProposalEntry[] entries)
+    private async Task RunBatch(int partitionId, IReadOnlyList<IProposalSubmission> batch, RaftProposalEntry[] entries, long start)
     {
-        // High-resolution start stamp. Environment.TickCount64 is a coarse clock (a jiffy — 4 ms on a typical
-        // Linux kernel — and integer milliseconds at best), and with the post-completion hold shortening each
-        // round to a few milliseconds most rounds read as 0 or 1 ms: the raft_duration histogram under-read the
-        // round by 4-5x under sustained load (0.73 ms sampled against ~3.4 ms implied by the batch rate).
-        long start = Stopwatch.GetTimestamp();
+        // start is a high-resolution Stopwatch stamp. Environment.TickCount64 is a coarse clock (a jiffy — 4 ms
+        // on a typical Linux kernel — and integer milliseconds at best), and with the post-completion hold
+        // shortening each round to a few milliseconds most rounds read as 0 or 1 ms: the raft_duration histogram
+        // under-read the round by 4-5x under sustained load (0.73 ms sampled against ~3.4 ms implied by the batch
+        // rate).
 
         RaftBatchReplicationResult? result = null;
         bool threw = false;
@@ -399,9 +422,10 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
 
         // One batch-level effectiveness sample: committed if every submission committed; transient if any failure
         // was retryable. (A mixed batch is rare — only per-entry fencing produces it — and records as a failure.)
-        PartitionWriteAggregatorMetrics.BatchSettled(anyCommitted && !anyFailed, anyTransient, Stopwatch.GetElapsedTime(start).TotalMilliseconds);
+        long returned = Stopwatch.GetTimestamp();
+        PartitionWriteAggregatorMetrics.BatchSettled(anyCommitted && !anyFailed, anyTransient, Stopwatch.GetElapsedTime(start, returned).TotalMilliseconds);
 
-        self.Send(PartitionWriteMessage.BatchComplete(partitionId, outcomes, Stopwatch.GetTimestamp()));
+        self.Send(PartitionWriteMessage.BatchComplete(partitionId, outcomes, start, returned));
     }
 
     /// <summary>
@@ -489,23 +513,58 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
             return;
 
         if (state.TryArmWake(deadline))
-            _ = WakeDelay(partitionId, deadline);
+            _ = WakeDelay(partitionId, deadline, flush: deadline != state.AgeDeadline(options.MaxQueueDelayMs));
     }
 
-    private async Task WakeDelay(int partitionId, long deadline)
+    /// <summary>Posts a <c>TimerWake</c> at <paramref name="deadline"/>. Only a <paramref name="flush"/> wake
+    /// (linger or post-completion hold) takes the precise path: its lateness lands on every cycle, while an
+    /// age-deadline wake only releases expired items and is mostly superseded before it fires.</summary>
+    private async Task WakeDelay(int partitionId, long deadline, bool flush)
     {
-        long delayMs = deadline - NowMs();
+        long armed = timeProvider.GetTimestamp();
+        long delayMs = deadline - armed / stampsPerMs;
+        bool precise = options.PreciseWake && flush;
         try
         {
             if (delayMs > 0)
-                await Task.Delay(TimeSpan.FromMilliseconds(delayMs), timeProvider);
+            {
+                if (precise)
+                    await PreciseDelay(armed + delayMs * stampsPerMs, delayMs);
+                else
+                    await Task.Delay(TimeSpan.FromMilliseconds(delayMs), timeProvider);
+
+                PartitionWriteAggregatorMetrics.WakeFired((timeProvider.GetTimestamp() - armed - delayMs * stampsPerMs) / (double)stampsPerMs, precise, flush);
+            }
         }
         catch
         {
             // ignore
         }
 
-        self.Send(PartitionWriteMessage.TimerWake(partitionId));
+        self.Send(PartitionWriteMessage.TimerWake(partitionId, Stopwatch.GetTimestamp()));
+    }
+
+    /// <summary>Waits until the <see cref="timeProvider"/> timestamp <paramref name="due"/>: sleeps on the
+    /// timer queue for all but the last <see cref="PartitionWriteAggregatorOptions.PreciseWakeSpinWindowMs"/>,
+    /// then spin-yields on a thread-pool thread — never on the lane, which called this synchronously.</summary>
+    private async Task PreciseDelay(long due, long delayMs)
+    {
+        long sleepMs = delayMs - PartitionWriteAggregatorOptions.PreciseWakeSpinWindowMs;
+        if (sleepMs > 0)
+            await Task.Delay(TimeSpan.FromMilliseconds(sleepMs), timeProvider);
+
+        await Task.Factory.StartNew(
+            static state =>
+            {
+                (TimeProvider clock, long until) = ((TimeProvider, long))state!;
+                SpinWait spin = default;
+                while (clock.GetTimestamp() < until)
+                    spin.SpinOnce(sleep1Threshold: -1);
+            },
+            (timeProvider, due),
+            CancellationToken.None,
+            TaskCreationOptions.DenyChildAttach,
+            TaskScheduler.Default);
     }
 
     private PartitionWriteState GetState(int partitionId)

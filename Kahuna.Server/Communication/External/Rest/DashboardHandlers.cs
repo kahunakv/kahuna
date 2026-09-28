@@ -50,6 +50,14 @@ public static class DashboardHandlers
         "kahuna.kv.write.rejections",
         "kahuna.kv.write.outcomes",
 
+        // Write aggregator cycle: the dispatch-to-dispatch stages, what triggered each dispatch, how late the
+        // wakes fired, the completion tail and the batch fill against the item cap.
+        "kahuna.kv.write.cycle_stage",
+        "kahuna.kv.write.cycle_trigger",
+        "kahuna.kv.write.wake_lateness",
+        "kahuna.kv.write.completion_delay",
+        "kahuna.kv.write.batch_submissions",
+
         // Persistence back-pressure: the unflushed backlog against its budget, and whether the gate is closed.
         "kahuna.persistence.unflushed_budget_fraction",
         "kahuna.persistence.backlog_gate_closed",
