@@ -476,7 +476,7 @@ public sealed class TestMaterializeOnResolve : BaseCluster, IDisposable
             IntentLog(3, 310, Settle(materialize: true, intent))
         ])]);
 
-        Assert.Equal(Ts(305), BackupDriver.MaxCommittedKeyValueCommitHlc(wal, 1, 3));
+        Assert.Equal(Ts(305), BackupDriver.MaxCommittedKeyValueCommitHlc(wal, 1, 3, TestContext.Current.CancellationToken));
     }
 
     // ── end to end ──────────────────────────────────────────────────────────────
@@ -716,7 +716,7 @@ public sealed class TestMaterializeOnResolve : BaseCluster, IDisposable
 
             KahunaManager manager = (KahunaManager)node.Kahuna;
             Assert.Equal(2, manager.DurablePreparedIntentStore.Count);
-            Assert.Equal(0, ScanCommittedShapes(node.Raft).InstalledKeys.Count);
+            Assert.Empty(ScanCommittedShapes(node.Raft).InstalledKeys);
         }
 
         await using (EmbeddedKahunaNode restarted = new(Options(decorator: null), loggerFactory))
