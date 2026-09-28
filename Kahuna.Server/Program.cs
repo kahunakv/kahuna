@@ -26,12 +26,7 @@ using Kommander.Communication.Rest;
 
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 
-Console.WriteLine("  _           _                     ");
-Console.WriteLine(" | | ____ _| |__  _   _ _ __   __ _ ");
-Console.WriteLine(" | |/ / _` | '_ \\| | | | '_ \\ / _` |");
-Console.WriteLine(" |   < (_| | | | | |_| | | | | (_| |");
-Console.WriteLine(" |_|\\_\\__,_|_| |_|\\__,_|_| |_|\\__,_|");
-Console.WriteLine("");
+StartupBanner.Print();
 
 ParserResult<KahunaCommandLineOptions> optsResult = ParseCommandLine(args);
 
