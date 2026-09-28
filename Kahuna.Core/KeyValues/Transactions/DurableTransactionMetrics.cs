@@ -738,6 +738,29 @@ internal static class DurableTransactionMetrics
             description: "Same-id resends of a completed many-key batch refused instead of re-executed.");
 
     /// <summary>
+    /// Times the coordinator saw a transaction lose a staging it had confirmed: a key restaged at a revision
+    /// that does not continue the earlier staging, or a point read of a staged key that answered the
+    /// committed state instead of the staging. Staged writes live only in the partition leader's memory,
+    /// so every firing marks a leader change that ran under an open transaction. The transaction is refused
+    /// at commit (<see cref="StagedChainBreakAborts"/>); a firing without a matching abort is a transaction
+    /// the client rolled back on its own.
+    /// </summary>
+    internal static readonly Counter<long> StagedChainBreaks =
+        Meter.CreateCounter<long>(
+            "kahuna.kv.staged_chain_breaks",
+            description: "Transactions observed to have lost a confirmed staging to a partition leader change.");
+
+    /// <summary>
+    /// Commits refused because the transaction lost a staging (see <see cref="StagedChainBreaks"/>). Each one
+    /// is a lost update that would otherwise have been acknowledged: the value the transaction would have
+    /// installed was computed over its own earlier write, which the leader change had already discarded.
+    /// </summary>
+    internal static readonly Counter<long> StagedChainBreakAborts =
+        Meter.CreateCounter<long>(
+            "kahuna.kv.staged_chain_break_aborts",
+            description: "Commits refused because the transaction lost a confirmed staging to a leader change.");
+
+    /// <summary>
     /// Scans that exhausted the per-page retry budget: one page kept answering
     /// MustRetry/WaitingForReplication for the whole budget, so the scan failed loudly instead of
     /// hanging. The paired error log names the range and the cursor. A firing means some key in the

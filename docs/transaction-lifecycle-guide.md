@@ -392,6 +392,13 @@ the base the transaction read, and it is what makes that transaction's next read
 `Aborted`. Deleting it would let the transaction re-pin at the new head and write a value computed from the
 superseded one over the commit — a lost update that every later check would accept.
 
+A leader change does delete it (`DropLeaderStateHandler` drops every staged entry of the partition the
+node stopped leading), and the new leader has never seen the transaction, so the re-pin happens there. The
+coordinator closes that hole: it holds every staged revision, and it refuses the commit (`Aborted`,
+`Lost staging: …`) when a key is restaged at a revision that does not continue the earlier one, or when a
+point read of a staged key answers anything but the staged revision. See
+`docs/leadership-fencing-and-apply-fingerprint-guide.md`.
+
 **Cross-node.** The decision record lives on the anchor partition, which may be led by another node. When
 the decision is not resolvable locally, the read routes a lookup to the anchor leader
 (`LookupDurableRecordRouted` via `TryRouteForeignDecision`) and re-issues with the terminal decision, rather

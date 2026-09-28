@@ -203,18 +203,72 @@ internal class TransactionContext
     /// it is resolved to an absolute HLC at freeze. <paramref name="noRevision"/> carries whether the write
     /// suppressed history retention so the materialized durable write matches a direct <c>SET NOREV</c>.
     /// <paramref name="stagedAt"/> is the participant's stamp on the write; restaging a key keeps the highest
-    /// stamp seen, since every write the key took in this transaction must sit below the commit timestamp.</summary>
-    public void StageMutation(string key, byte[]? value, KeyValueState state, long revision, long expiresMs, bool noRevision, HLCTimestamp stagedAt = default)
+    /// stamp seen, since every write the key took in this transaction must sit below the commit timestamp.
+    /// <paramref name="advancesRevision"/> says whether the operation allocated a new revision on the
+    /// participant (a set or a delete) or kept the staged one (an extend); a restaging whose revision does not
+    /// continue the previous one records a <see cref="StagedChainBreak"/>.</summary>
+    public void StageMutation(string key, byte[]? value, KeyValueState state, long revision, long expiresMs, bool noRevision, HLCTimestamp stagedAt = default, bool advancesRevision = true)
     {
         lock (registryLock)
         {
             StagedMutations ??= [];
 
-            if (StagedMutations.TryGetValue(key, out StagedValue previous) && previous.StagedAt > stagedAt)
-                stagedAt = previous.StagedAt;
+            if (StagedMutations.TryGetValue(key, out StagedValue previous))
+            {
+                CheckStagedChainLocked(key, previous, revision, stagedAt, advancesRevision);
+
+                if (previous.StagedAt > stagedAt)
+                    stagedAt = previous.StagedAt;
+            }
 
             StagedMutations[key] = new StagedValue(value, state, revision, expiresMs, noRevision, stagedAt);
         }
+    }
+
+    /// <summary>
+    /// Caller must hold <see cref="registryLock"/>. A participant allocates every staged revision from the
+    /// transaction's own MVCC pin, so the second staging of a key sits exactly one revision above the first
+    /// (or on the same revision after an extend, which changes only the expiry). Any other revision means the
+    /// participant no longer held the pin when it staged: a leader change dropped the first staging, and the
+    /// new leader pinned the committed head instead. The one benign repeat is a single participant answer
+    /// folded twice under the same stamp, which a batch that names a key twice produces.
+    /// </summary>
+    private void CheckStagedChainLocked(string key, StagedValue previous, long revision, HLCTimestamp stagedAt, bool advancesRevision)
+    {
+        if (revision == previous.Revision && stagedAt == previous.StagedAt)
+            return;
+
+        long expected = advancesRevision ? previous.Revision + 1 : previous.Revision;
+        if (revision == expected)
+            return;
+
+        DurableTransactionMetrics.StagedChainBreaks.Add(1);
+        stagedChainBreak ??= $"key {key} was restaged at revision {revision} over a staging at revision {previous.Revision} (expected {expected}); the earlier staging is no longer held by the partition leader";
+    }
+
+    /// <summary>
+    /// Caller must hold <see cref="registryLock"/>. A point read of a key this transaction staged must answer
+    /// that staging: the participant serves the transaction's own MVCC entry, whose revision is the staged
+    /// one. An answer at another revision, an absent answer for a staged set, or a present answer for a
+    /// staged delete means the entry is gone and the read served the committed head. A staged set with a TTL
+    /// may lapse inside the transaction, so its absence is not judged.
+    /// </summary>
+    private void CheckOwnStagingReadLocked(KeyValueTransactionReadKey observed)
+    {
+        if (StagedMutations is null || !StagedMutations.TryGetValue(observed.Key!, out StagedValue staged))
+            return;
+
+        bool consistent = staged.State == KeyValueState.Deleted
+            ? !observed.Exists
+            : observed.Exists ? observed.Revision == staged.Revision : staged.ExpiresMs > 0;
+
+        if (consistent)
+            return;
+
+        DurableTransactionMetrics.StagedChainBreaks.Add(1);
+        string answered = observed.Exists ? $"revision {observed.Revision}" : "absent";
+        string expected = staged.State == KeyValueState.Deleted ? "a delete" : $"revision {staged.Revision}";
+        stagedChainBreak ??= $"a read of key {observed.Key} answered {answered} while this transaction staged {expected}; the staging is no longer held by the partition leader";
     }
 
     /// <summary>
@@ -285,6 +339,7 @@ internal class TransactionContext
     private SessionLifecycle lifecycle = SessionLifecycle.AcceptingOperations;
     private bool renewalExcluded;
     private bool readObservationConflict;
+    private string? stagedChainBreak;
     private int pendingOperationCount;
     private int retainedOperationCount;
 
@@ -324,6 +379,21 @@ internal class TransactionContext
     internal bool ReadObservationConflict
     {
         get { lock (registryLock) return readObservationConflict; }
+    }
+
+    /// <summary>
+    /// Non-null once this transaction lost a staging it had confirmed. A participant keeps a transaction's
+    /// staged writes only in its leader memory, and a leader change drops them; the transaction's next
+    /// operation on that key then starts from the committed head as if it had never touched the key. Two
+    /// signs give that away at the coordinator, which alone knows what was staged: a second staging of a key
+    /// whose revision does not continue the first one (it must be exactly one above a set or delete, and
+    /// equal after an extend), and a point read of a staged key that answers anything but the staged
+    /// revision. The text names the key and the mismatch. A transaction with a break must not commit: its
+    /// later values were computed over its own lost write, and installing them would erase it.
+    /// </summary>
+    internal string? StagedChainBreak
+    {
+        get { lock (registryLock) return stagedChainBreak; }
     }
 
     /// <summary>
@@ -408,7 +478,7 @@ internal class TransactionContext
 
             record.Status = OperationStatus.Completed;
             record.CachedResponse = response;
-            ApplyPayloadLocked(payload);
+            ApplyPayloadLocked(payload, record.Kind);
             DecrementPending();
             return RecordAnchorKey;
         }
@@ -457,7 +527,7 @@ internal class TransactionContext
     /// set, pairing each key and lock with the payload's shared durability. The payload is read directly —
     /// there is no intermediate effect object — so a completion allocates nothing on this path.
     /// </summary>
-    private void ApplyPayloadLocked(OperationCompletionPayload? payload)
+    private void ApplyPayloadLocked(OperationCompletionPayload? payload, OperationKind kind)
     {
         if (payload is null)
             return;
@@ -520,13 +590,17 @@ internal class TransactionContext
         if (payload.ReleasedRangeLock is { } removedRangeLock)
             RangeLocksAcquired?.Remove(removedRangeLock);
 
+        // A lock grant folds the committed base it protects as an observation too; only a point read
+        // promises to answer the transaction's own staging, so only a read is held to it.
+        bool fromRead = kind is OperationKind.Get or OperationKind.Exists or OperationKind.GetMany;
+
         if (payload.Read is { } read)
-            FoldReadObservationLocked(read);
+            FoldReadObservationLocked(read, fromRead);
 
         if (payload.ReadObservations is { } reads)
         {
             foreach (KeyValueTransactionReadKey observed in reads)
-                FoldReadObservationLocked(observed);
+                FoldReadObservationLocked(observed, fromRead);
         }
     }
 
@@ -536,7 +610,7 @@ internal class TransactionContext
     /// transaction saw two inconsistent snapshots of that key, which cannot both be valid — flag the read set
     /// as conflicted so commit-time validation aborts. The first observation is retained (never overwritten).
     /// </summary>
-    private void FoldReadObservationLocked(KeyValueTransactionReadKey observed)
+    private void FoldReadObservationLocked(KeyValueTransactionReadKey observed, bool fromRead)
     {
         if (string.IsNullOrEmpty(observed.Key))
             return;
@@ -546,8 +620,15 @@ internal class TransactionContext
         // A key this transaction has written is validated as a write, not a read: reading back its own
         // uncommitted value is not a dependency on external committed state, so it never enters the read set
         // (and must not trip the two-inconsistent-snapshots conflict against the staged write's revision).
+        // What a point read of it must still prove is that the staging it read back is the one this
+        // transaction confirmed; see CheckOwnStagingReadLocked.
         if (ModifiedKeys is not null && ModifiedKeys.Contains(key))
+        {
+            if (fromRead)
+                CheckOwnStagingReadLocked(observed);
+
             return;
+        }
 
         ReadKeys ??= [];
 

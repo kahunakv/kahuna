@@ -75,8 +75,16 @@ the exclusive prefix and range locks of that partition. Committed entries stay. 
 KeyValues: leadership of partition 2 lost in term 1; dropping the staged transactional writes and exclusive locks admitted under it
 ```
 
-A transaction that staged on the old leader fails deterministically at its next step and retries
-against the current leader.
+A transaction that staged on the old leader does not fail at its next step by itself: the current
+leader has no memory of the key, so a read or a write of it pins the committed head as if the
+transaction had never touched the key. The coordinator catches it instead. Every staging folds its
+revision into the coordinator, and a restaging of the same key must continue that chain (one above
+after a set or delete, equal after an extend); a point read of a staged key must answer the staged
+revision. A restaging or a read that does not match marks the transaction, and its commit is refused
+with `Aborted` and the reason `Lost staging: …`. The counters are `kahuna.kv.staged_chain_breaks`
+(detections) and `kahuna.kv.staged_chain_break_aborts` (commits refused). A blind write with no
+earlier staging of the key needs no fence: it is last-writer-wins by design, and a write under a
+point lock carries the lock's committed base, which the prepare compares with the head.
 
 ### What to look for in the logs
 

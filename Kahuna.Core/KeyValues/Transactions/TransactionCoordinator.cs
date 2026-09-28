@@ -1376,6 +1376,20 @@ internal sealed class TransactionCoordinator : IDisposable
             return;
         }
 
+        // A participant keeps a transaction's staged writes in its leader memory only, and a leader change
+        // drops them without telling anyone; the transaction's next write of the key then stages over the
+        // committed head as if the key were untouched, and the coordinator's last-staged value carries that
+        // regression into the commit. The coordinator is the one party that saw both stagings (or the read
+        // that came back without the staging), so it is the one that refuses. The client restarts the
+        // transaction; nothing it staged is lost, because none of it was committed.
+        if (context.StagedChainBreak is { } stagedChainBreak)
+        {
+            DurableTransactionMetrics.StagedChainBreakAborts.Add(1);
+            logger.LogWarning("Refusing to commit transaction {TransactionId}: {Break}", context.TransactionId, stagedChainBreak);
+            context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Lost staging: " + stagedChainBreak };
+            return;
+        }
+
         // A Durable-mode transaction promises crash-atomicity, which an ephemeral (in-memory) mutation cannot
         // provide — so a Durable transaction that modified any ephemeral key is rejected outright, before the
         // split below (which would otherwise commit those ephemeral keys in memory keyed on the persistent

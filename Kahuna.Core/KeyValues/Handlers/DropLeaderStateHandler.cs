@@ -9,9 +9,12 @@ namespace Kahuna.Server.KeyValues.Handlers;
 /// transactional entries (MVCC staging plus the write intent that guards them) and the exclusive prefix
 /// and range locks. None of that state ever reached Raft — it was admitted on the strength of a
 /// leadership that has ended — so a new leader cannot see it, and any proposal derived from it under
-/// the lost term is refused by the term fence. Dropping it here makes the transactions that staged it
-/// fail deterministically at their next step instead of lingering until a lease expires, and keeps a
-/// re-elected node from carrying stale staging into its new term. Committed entries stay resident: they
+/// the lost term is refused by the term fence. Dropping it here keeps a re-elected node from carrying
+/// stale staging into its new term, and stops the locks from lingering until a lease expires. It does
+/// not by itself fail the transactions that staged here: their next read or write of the key on the
+/// current leader pins the committed head as if the key were untouched. What refuses them is the
+/// coordinator, which sees the restaged revision fail to continue the first one (or a read answer the
+/// committed state instead of the staging) and aborts the commit. Committed entries stay resident: they
 /// are the applied log, which the node keeps following.
 /// </summary>
 internal sealed class DropLeaderStateHandler : BaseHandler
