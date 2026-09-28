@@ -565,6 +565,24 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-compaction-durability-clamp-report-interval", Required = false, HelpText = "How often a partition whose compaction is clamped by the application-durability floor repeats its warning, and how long the floor must sit unchanged before the warning calls the flusher stalled, in milliseconds. Values <= 0 keep only the streak-start and streak-end log lines.", Default = 60000)]
     public int RaftCompactionDurabilityClampReportInterval { get; set; } = 60000;
 
+    [Option("raft-fan-out-before-local-write", Required = false, HelpText = "Send a proposal to the followers while the leader's own write is queued, so the follower writes overlap the leader's. When false, the fan-out waits until the leader's write is durable, which puts two WAL writes in series in every round.", Default = true)]
+    public bool RaftFanOutBeforeLocalWrite { get; set; } = true;
+
+    [Option("raft-compaction-live-replica-lag-window", Required = false, HelpText = "How much recent write history, in milliseconds, the leader keeps for a follower that still lags. The retention is the larger of this window's entry count and the live-replica lag budget, up to the lag cap. 0 sizes the retention by the lag budget alone.", Default = 180000)]
+    public int RaftCompactionLiveReplicaLagWindow { get; set; } = 180000;
+
+    [Option("raft-compaction-live-replica-lag-cap", Required = false, HelpText = "Upper bound, in entries, on how far the live-replica lag window can raise the retention. Values <= 0 turn the window off.", Default = 10_000_000L)]
+    public long RaftCompactionLiveReplicaLagCap { get; set; } = 10_000_000L;
+
+    [Option("raft-follower-apply-in-own-turn", Required = false, HelpText = "Deliver committed entries to the application on a follower in executor turns of their own, so the next append waits for one short turn at most. When false, the follower delivers inside the append's completion, before its ack.", Default = true)]
+    public bool RaftFollowerApplyInOwnTurn { get; set; } = true;
+
+    [Option("raft-follower-apply-turn-time", Required = false, HelpText = "How long one follower apply turn may deliver entries before it yields the executor, in microseconds. 0 leaves only the turn entry budget.", Default = 100)]
+    public int RaftFollowerApplyTurnTime { get; set; } = 100;
+
+    [Option("raft-follower-apply-turn-budget", Required = false, HelpText = "The most committed entries one follower apply turn delivers, whatever the turn time allows. Values <= 0 mean no entry bound.", Default = 1024)]
+    public int RaftFollowerApplyTurnBudget { get; set; } = 1024;
+
     [Option("script-cache-expiration", Required = false, HelpText = "Script cache expiration (in seconds)", Default = 600)]
     public int ScriptCacheExpiration { get; set; } = 600;
 

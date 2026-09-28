@@ -129,7 +129,13 @@ public sealed class TestKommanderConfigurationSurface
         [nameof(RaftConfiguration.SnapshotExportRetryCacheMaxBytes)] = nameof(KahunaCommandLineOptions.RaftSnapshotExportRetryCacheMaxBytes),
         [nameof(RaftConfiguration.CompactionLiveReplicaLagBudget)] = nameof(KahunaCommandLineOptions.RaftCompactionLiveReplicaLagBudget),
         [nameof(RaftConfiguration.CompactionSilentPeerRetentionWindow)] = nameof(KahunaCommandLineOptions.RaftCompactionSilentPeerRetentionWindow),
-        [nameof(RaftConfiguration.CompactionDurabilityClampReportInterval)] = nameof(KahunaCommandLineOptions.RaftCompactionDurabilityClampReportInterval)
+        [nameof(RaftConfiguration.CompactionDurabilityClampReportInterval)] = nameof(KahunaCommandLineOptions.RaftCompactionDurabilityClampReportInterval),
+        [nameof(RaftConfiguration.FanOutBeforeLocalWrite)] = nameof(KahunaCommandLineOptions.RaftFanOutBeforeLocalWrite),
+        [nameof(RaftConfiguration.CompactionLiveReplicaLagWindow)] = nameof(KahunaCommandLineOptions.RaftCompactionLiveReplicaLagWindow),
+        [nameof(RaftConfiguration.CompactionLiveReplicaLagCap)] = nameof(KahunaCommandLineOptions.RaftCompactionLiveReplicaLagCap),
+        [nameof(RaftConfiguration.FollowerApplyInOwnTurn)] = nameof(KahunaCommandLineOptions.RaftFollowerApplyInOwnTurn),
+        [nameof(RaftConfiguration.FollowerApplyTurnTime)] = nameof(KahunaCommandLineOptions.RaftFollowerApplyTurnTime),
+        [nameof(RaftConfiguration.FollowerApplyTurnBudget)] = nameof(KahunaCommandLineOptions.RaftFollowerApplyTurnBudget)
     };
 
     /// <summary>

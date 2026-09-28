@@ -608,7 +608,13 @@ static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts, 
         SnapshotExportRetryCacheMaxBytes = opts.RaftSnapshotExportRetryCacheMaxBytes,
         CompactionLiveReplicaLagBudget = opts.RaftCompactionLiveReplicaLagBudget,
         CompactionSilentPeerRetentionWindow = TimeSpan.FromMilliseconds(opts.RaftCompactionSilentPeerRetentionWindow),
-        CompactionDurabilityClampReportInterval = TimeSpan.FromMilliseconds(opts.RaftCompactionDurabilityClampReportInterval)
+        CompactionDurabilityClampReportInterval = TimeSpan.FromMilliseconds(opts.RaftCompactionDurabilityClampReportInterval),
+        FanOutBeforeLocalWrite = opts.RaftFanOutBeforeLocalWrite,
+        CompactionLiveReplicaLagWindow = TimeSpan.FromMilliseconds(opts.RaftCompactionLiveReplicaLagWindow),
+        CompactionLiveReplicaLagCap = opts.RaftCompactionLiveReplicaLagCap,
+        FollowerApplyInOwnTurn = opts.RaftFollowerApplyInOwnTurn,
+        FollowerApplyTurnTime = TimeSpan.FromMicroseconds(opts.RaftFollowerApplyTurnTime),
+        FollowerApplyTurnBudget = opts.RaftFollowerApplyTurnBudget
     };
 }
 
