@@ -17,6 +17,18 @@ internal sealed record PartitionWriteAggregatorOptions
     /// re-dispatch. Trades up to the hold in extra write latency for fewer, larger Raft rounds.</summary>
     public int PostCompletionHoldMs { get; init; }
 
+    /// <summary>Fires the aggregator's flush wakes (the post-completion hold and the linger) on a
+    /// high-resolution wait instead of <see cref="Task.Delay(TimeSpan, TimeProvider)"/>: the last
+    /// <see cref="PreciseWakeSpinWindowMs"/> of each wait spin-yields on a thread-pool thread against the
+    /// monotonic clock. The timer queue fires a millisecond-scale delay late by its own granularity, which a
+    /// 1-2 ms hold pays on every cycle; the spin removes that lateness at the cost of up to the window of one
+    /// thread-pool thread's CPU per wake. Queue-age release wakes keep the timer queue. Off by default.</summary>
+    public bool PreciseWake { get; init; }
+
+    /// <summary>Tail of each wait, in milliseconds, spent spin-yielding when <see cref="PreciseWake"/> is on;
+    /// the part of a longer wait before it still sleeps on the timer queue.</summary>
+    public const int PreciseWakeSpinWindowMs = 2;
+
     /// <summary>Maximum batches a single partition may have awaiting their Raft result at once. 1 keeps the
     /// classic serial pipeline (one round trip at a time); a higher value overlaps the rounds' quorum waits so
     /// the round latency is no longer paid serially per batch. Dispatch order stays FIFO regardless, so

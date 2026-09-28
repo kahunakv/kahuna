@@ -46,31 +46,39 @@ internal sealed class PartitionWriteMessage
 
     /// <summary>For <see cref="PartitionWriteMessageKind.BatchComplete"/>: the <see cref="System.Diagnostics.Stopwatch"/>
     /// timestamp taken when the detached Raft round trip returned, so the lane can attribute the mailbox wait
-    /// and the ordered completion turn separately from the Raft call itself.</summary>
-    public long RaftReturnedTimestamp { get; }
+    /// and the ordered completion turn separately from the Raft call itself. For
+    /// <see cref="PartitionWriteMessageKind.TimerWake"/>: when the timer fired, so the lane can separate the
+    /// timer's lateness from its own mailbox wait.</summary>
+    public long SentTimestamp { get; }
+
+    /// <summary>For <see cref="PartitionWriteMessageKind.BatchComplete"/>: the <see cref="System.Diagnostics.Stopwatch"/>
+    /// timestamp of the batch's dispatch, which identifies the batch in the lane's cycle trace.</summary>
+    public long DispatchedTimestamp { get; }
 
     private PartitionWriteMessage(
         PartitionWriteMessageKind kind,
         int partitionId,
         IProposalSubmission? item,
         IReadOnlyList<BatchSubmissionOutcome>? outcomes,
-        long raftReturnedTimestamp = 0)
+        long sentTimestamp = 0,
+        long dispatchedTimestamp = 0)
     {
         Kind = kind;
         PartitionId = partitionId;
         Item = item;
         Outcomes = outcomes;
-        RaftReturnedTimestamp = raftReturnedTimestamp;
+        SentTimestamp = sentTimestamp;
+        DispatchedTimestamp = dispatchedTimestamp;
     }
 
     public static PartitionWriteMessage Submit(IProposalSubmission item) =>
         new(PartitionWriteMessageKind.Submit, item.PartitionId, item, null);
 
-    public static PartitionWriteMessage TimerWake(int partitionId) =>
-        new(PartitionWriteMessageKind.TimerWake, partitionId, null, null);
+    public static PartitionWriteMessage TimerWake(int partitionId, long firedTimestamp) =>
+        new(PartitionWriteMessageKind.TimerWake, partitionId, null, null, firedTimestamp);
 
-    public static PartitionWriteMessage BatchComplete(int partitionId, IReadOnlyList<BatchSubmissionOutcome> outcomes, long raftReturnedTimestamp) =>
-        new(PartitionWriteMessageKind.BatchComplete, partitionId, null, outcomes, raftReturnedTimestamp);
+    public static PartitionWriteMessage BatchComplete(int partitionId, IReadOnlyList<BatchSubmissionOutcome> outcomes, long dispatchedTimestamp, long raftReturnedTimestamp) =>
+        new(PartitionWriteMessageKind.BatchComplete, partitionId, null, outcomes, raftReturnedTimestamp, dispatchedTimestamp);
 
     public static readonly PartitionWriteMessage StopSignal =
         new(PartitionWriteMessageKind.Stop, 0, null, null);

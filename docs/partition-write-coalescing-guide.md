@@ -270,6 +270,7 @@ options and on `EmbeddedKahunaOptions` for the embedded/standalone engine):
 |---|---:|---|
 | `KeyValueWriteLingerMs` | `1` | Delay from the oldest queued item before a partition batch is proposed. `0` dispatches an idle partition immediately (still batching work that accumulates behind an in-flight batch). |
 | `KeyValueWritePostCompletionHoldMs` | `0` | Hold after each batch completion before the next sub-threshold batch may dispatch, so arrivals accumulate into a denser batch. A full batch always dispatches at once, and queue-age releases are unaffected. `0` re-dispatches on completion immediately. |
+| `KeyValueWritePreciseWake` | `false` | Fire the flush wakes (post-completion hold, linger) on a spin-tailed high-resolution wait instead of the timer queue: the last 2 ms of each wait spin-yields on a thread-pool thread. Removes the timer's lateness from every held cycle at the cost of up to 2 ms of one thread's CPU per wake. Queue-age release wakes keep the timer queue. |
 | `KeyValueWriteMaxBatchItems` | `512` | Maximum log entries per Raft call. |
 | `KeyValueWriteMaxBatchBytes` | `4 MiB` | Target serialized bytes per Raft call; an oversized single item dispatches alone. |
 | `KeyValueWriteMaxQueuedItemsPerPartition` | `8192` | Maximum admitted items per partition, including those in flight. |
@@ -322,6 +323,12 @@ dispatch, which raises entries per batch at the cost of up to the hold in extra 
 hold never delays a full batch and never extends the queue-age release deadline. Keep it `0` unless a
 measured workload shows batch sizes pinned well below the caps at a saturated round rate.
 
+The hold is armed on the timer queue, which fires a millisecond-scale delay late: on Linux a 2 ms hold
+was measured to wake about 1 ms after its deadline, so the dead time per cycle is the hold plus that
+lateness, not the hold alone. `KeyValueWritePreciseWake` removes most of the lateness for a CPU cost;
+`kahuna.kv.write.cycle_stage` (below) shows both parts of every cycle, so choose the hold against the
+`hold` and `wake_late` stages together.
+
 ### Key layout matters
 
 Coalescing is per partition. Keys in one hash key-space route to a single partition, so a bulk insert
@@ -342,6 +349,19 @@ outcome string — never a key, partition id, or transaction id):
 - **Histograms** — entries per batch, serialized bytes per batch, oldest-item queue age, and Raft-call
   duration (`kahuna.kv.write.raft_duration`, measured on the high-resolution `Stopwatch` clock: a
   coarse tick clock under-read the few-millisecond rounds a post-completion hold produces by 4–5×).
+- **Cycle accounting** — `kahuna.kv.write.cycle_stage` splits each partition's dispatch-to-dispatch cycle
+  into consecutive stages, tagged `stage`: `raft` (the round trip), `completion_mailbox` (Raft return to the
+  lane's completion turn), `completion_turn` (completing the batch's submissions), `hold` (the requested
+  post-completion hold), `arrival_wait` (the buffer was empty — the cycle waited for work), `wake_late`
+  (the timer firing after its deadline, plus the linger when a linger wake dispatched), `wake_mailbox`
+  (timer to wake turn) and `dispatch` (select, fence check, entry assembly). Their means sum to the
+  `cycle` series, whose mean is close to `1000 / batches per second`. Cycles whose batch overlapped a
+  later dispatch, or whose partition went idle, are not recorded. `kahuna.kv.write.cycle_trigger` counts
+  closed cycles by what dispatched the next batch (`completion` / `wake` / `submit`),
+  `kahuna.kv.write.wake_lateness` records how late each wake fired against its requested delay (tagged
+  `timer` = `delay` / `precise` and `deadline` = `flush` / `age`), `kahuna.kv.write.completion_delay`
+  is the Raft-return-to-end-of-completion tail, and `kahuna.kv.write.batch_submissions` is the batch
+  fill against `KeyValueWriteMaxBatchItems` (which counts submissions; `batch_items` counts their entries).
 - **Observable gauges** — queued items, queued serialized bytes, and in-flight partitions; and, from the
   persistence side, `kahuna.persistence.unflushed_items` (writer inbox plus dirty queues),
   `kahuna.persistence.unflushed_bytes` (the dirty queues' exact value bytes plus the inbox sized at

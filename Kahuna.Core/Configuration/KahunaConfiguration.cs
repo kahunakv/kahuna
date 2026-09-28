@@ -319,6 +319,12 @@ public sealed class KahunaConfiguration
     /// 0 (the default) keeps the immediate re-dispatch.</summary>
     public int KeyValueWritePostCompletionHoldMs { get; set; }
 
+    /// <summary>Fires the aggregator's flush wakes (post-completion hold, linger) on a high-resolution
+    /// wait: the last 2 ms of each wait spin-yields on a thread-pool thread instead of sleeping on the timer
+    /// queue, whose granularity makes a millisecond-scale hold fire late on every cycle. Costs up to that window
+    /// of one thread's CPU per wake. Off by default.</summary>
+    public bool KeyValueWritePreciseWake { get; set; }
+
     /// <summary>Maximum log entries selected for one aggregator Raft call.</summary>
     public int KeyValueWriteMaxBatchItems { get; set; } = 512;
 

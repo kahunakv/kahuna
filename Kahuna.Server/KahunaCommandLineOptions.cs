@@ -599,6 +599,9 @@ public sealed class KahunaCommandLineOptions
     [Option("kv-write-post-completion-hold-ms", Required = false, HelpText = "Hold after each partition batch completion before the next sub-threshold batch dispatches, so arrivals accumulate into denser batches; a full batch always dispatches at once; 0 = immediate re-dispatch", Default = 0)]
     public int KeyValueWritePostCompletionHoldMs { get; set; }
 
+    [Option("kv-write-precise-wake", Required = false, HelpText = "Fire the write aggregator's hold and linger wakes on a high-resolution wait (the last 2 ms spin-yield on a thread-pool thread) instead of the timer queue, whose granularity lengthens a millisecond-scale hold; costs up to 2 ms of one thread's CPU per wake", Default = false)]
+    public bool KeyValueWritePreciseWake { get; set; }
+
     [Option("kv-write-max-batch-items", Required = false, HelpText = "Maximum log entries per aggregator Raft call", Default = 512)]
     public int KeyValueWriteMaxBatchItems { get; set; } = 512;
 

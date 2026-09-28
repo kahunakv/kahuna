@@ -108,6 +108,74 @@ internal static class PartitionWriteAggregatorMetrics
     internal static readonly Histogram<double> CompletionDelayMs =
         Meter.CreateHistogram<double>("kahuna.kv.write.completion_delay", unit: "ms", description: "Time from Raft return to the end of the lane's batch-completion turn.");
 
+    /// <summary>Submissions per dispatched batch — the fill measured against the item cap
+    /// (<c>MaxBatchItems</c> counts submissions, while <see cref="BatchItemCount"/> counts their entries).</summary>
+    internal static readonly Histogram<int> BatchSubmissionCount =
+        Meter.CreateHistogram<int>("kahuna.kv.write.batch_submissions", unit: "{submissions}", description: "Submissions per dispatched batch.");
+
+    /// <summary>One partition's dispatch-to-dispatch cycle split into consecutive stages, tagged by
+    /// <c>stage</c>: <c>raft</c>, <c>completion_mailbox</c>, <c>completion_turn</c>, <c>hold</c>,
+    /// <c>arrival_wait</c>, <c>wake_late</c>, <c>wake_mailbox</c>, <c>dispatch</c> — whose per-cycle values sum to
+    /// the <c>cycle</c> series recorded alongside. One sample per stage per closed cycle; a cycle whose batch
+    /// overlapped a later dispatch, or whose partition went idle between the two, is not recorded. The tag set
+    /// is fixed.</summary>
+    internal static readonly Histogram<double> CycleStageMs =
+        Meter.CreateHistogram<double>("kahuna.kv.write.cycle_stage", unit: "ms", description: "Aggregator dispatch-to-dispatch cycle per stage, tagged by stage; the stages sum to the cycle series.");
+
+    /// <summary>Closed cycles by what started the dispatching turn: <c>completion</c> (re-dispatch inside the
+    /// completion turn), <c>wake</c> (a timer), <c>submit</c> (an arrival).</summary>
+    internal static readonly Counter<long> CycleTriggers =
+        Meter.CreateCounter<long>("kahuna.kv.write.cycle_trigger", description: "Closed aggregator cycles, tagged by the kind of turn that dispatched the next batch.");
+
+    /// <summary>How late each aggregator wake fired against the delay it asked for, tagged by <c>timer</c>
+    /// (<c>delay</c> for the timer queue, <c>precise</c> for the spin-tailed wait) and by <c>deadline</c>
+    /// (<c>flush</c> for a linger or post-completion-hold wake, <c>age</c> for a queue-age release wake). A
+    /// wake with no delay left (its deadline already passed when armed) is not recorded.</summary>
+    internal static readonly Histogram<double> WakeLatenessMs =
+        Meter.CreateHistogram<double>("kahuna.kv.write.wake_lateness", unit: "ms", description: "Aggregator wake fire time minus its requested delay, tagged by timer kind.");
+
+    private static readonly KeyValuePair<string, object?> StageRaft = new("stage", "raft");
+    private static readonly KeyValuePair<string, object?> StageCompletionMailbox = new("stage", "completion_mailbox");
+    private static readonly KeyValuePair<string, object?> StageCompletionTurn = new("stage", "completion_turn");
+    private static readonly KeyValuePair<string, object?> StageHold = new("stage", "hold");
+    private static readonly KeyValuePair<string, object?> StageArrivalWait = new("stage", "arrival_wait");
+    private static readonly KeyValuePair<string, object?> StageWakeLate = new("stage", "wake_late");
+    private static readonly KeyValuePair<string, object?> StageWakeMailbox = new("stage", "wake_mailbox");
+    private static readonly KeyValuePair<string, object?> StageDispatch = new("stage", "dispatch");
+    private static readonly KeyValuePair<string, object?> StageCycle = new("stage", "cycle");
+
+    private static readonly KeyValuePair<string, object?> TriggerCompletion = new("trigger", "completion");
+    private static readonly KeyValuePair<string, object?> TriggerWake = new("trigger", "wake");
+    private static readonly KeyValuePair<string, object?> TriggerSubmit = new("trigger", "submit");
+
+    private static readonly KeyValuePair<string, object?> TimerDelay = new("timer", "delay");
+    private static readonly KeyValuePair<string, object?> TimerPrecise = new("timer", "precise");
+    private static readonly KeyValuePair<string, object?> DeadlineFlush = new("deadline", "flush");
+    private static readonly KeyValuePair<string, object?> DeadlineAge = new("deadline", "age");
+
+    internal static void CycleClosed(in PartitionWriteCycleStages stages)
+    {
+        CycleStageMs.Record(stages.Raft, StageRaft);
+        CycleStageMs.Record(stages.CompletionMailbox, StageCompletionMailbox);
+        CycleStageMs.Record(stages.CompletionTurn, StageCompletionTurn);
+        CycleStageMs.Record(stages.Hold, StageHold);
+        CycleStageMs.Record(stages.ArrivalWait, StageArrivalWait);
+        CycleStageMs.Record(stages.WakeLate, StageWakeLate);
+        CycleStageMs.Record(stages.WakeMailbox, StageWakeMailbox);
+        CycleStageMs.Record(stages.Dispatch, StageDispatch);
+        CycleStageMs.Record(stages.Cycle, StageCycle);
+
+        CycleTriggers.Add(1, stages.Trigger switch
+        {
+            PartitionWriteDispatchTrigger.Completion => TriggerCompletion,
+            PartitionWriteDispatchTrigger.Wake => TriggerWake,
+            _ => TriggerSubmit
+        });
+    }
+
+    internal static void WakeFired(double latenessMs, bool precise, bool flush) =>
+        WakeLatenessMs.Record(latenessMs, precise ? TimerPrecise : TimerDelay, flush ? DeadlineFlush : DeadlineAge);
+
     private static readonly KeyValuePair<string, object?> ClassOrdinary = new("class", "ordinary");
     private static readonly KeyValuePair<string, object?> ClassTerminal = new("class", "terminal");
 
@@ -145,10 +213,11 @@ internal static class PartitionWriteAggregatorMetrics
             DispatchedStageEntries.Add(entries, stageTag);
     }
 
-    internal static void BatchDispatched(int ordinaryEntries, int terminalEntries, long bytes, long oldestAgeMs, WriteAdmissionClass oldestClass)
+    internal static void BatchDispatched(int submissions, int ordinaryEntries, int terminalEntries, long bytes, long oldestAgeMs, WriteAdmissionClass oldestClass)
     {
         int entries = ordinaryEntries + terminalEntries;
         DispatchedBatches.Add(1);
+        BatchSubmissionCount.Record(submissions);
         if (ordinaryEntries > 0)
             DispatchedEntries.Add(ordinaryEntries, ClassOrdinary);
         if (terminalEntries > 0)

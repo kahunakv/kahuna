@@ -51,6 +51,9 @@ internal sealed class PartitionWriteState
         this.maxInFlightBatches = Math.Max(1, maxInFlightBatches);
     }
 
+    /// <summary>Stopwatch stamps of this partition's dispatch-to-dispatch cycle, for the cycle-stage metrics.</summary>
+    public PartitionWriteCycleTrace Cycle { get; } = new();
+
     /// <summary>Serialized bytes of the items still waiting (not yet selected into a batch).</summary>
     public long QueuedBytes { get; private set; }
 
@@ -113,6 +116,11 @@ internal sealed class PartitionWriteState
         long flushDeadline = Math.Max(oldest + lingerMs, holdUntil);
         return Math.Min(flushDeadline, ageDeadline);
     }
+
+    /// <summary>The oldest pending item's queue-age release deadline, or <see cref="NoWake"/> when nothing is
+    /// pending. A wake deadline equal to it releases expired items; any other wake deadline is a flush (linger or
+    /// post-completion hold).</summary>
+    public long AgeDeadline(int maxQueueDelayMs) => PendingCount == 0 ? NoWake : OldestPendingTicks + maxQueueDelayMs;
 
     /// <summary>Arms a wake for <paramref name="deadline"/> only if it is earlier than the one already armed,
     /// so a steady arrival stream does not start a timer per item. Returns true if the caller should start the

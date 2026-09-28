@@ -1032,6 +1032,236 @@ public sealed class TestPartitionWriteAggregator
         Assert.Equal(2, exec.Calls.Count);
     }
 
+    [Fact]
+    public async Task Aggregator_PreciseWake_HoldsThenDispatches_AndReportsItsLateness()
+    {
+        // The spin-tailed wake keeps the hold's semantics — nothing dispatches inside the hold, the held backlog
+        // dispatches once it passes — and reports how late it fired against the requested delay.
+        List<double> preciseLateness = [];
+        using MeterListener listener = new();
+        listener.InstrumentPublished = (inst, l) => { if (inst.Name == "kahuna.kv.write.wake_lateness") l.EnableMeasurementEvents(inst); };
+        listener.SetMeasurementEventCallback<double>((inst, val, tags, s) =>
+        {
+            foreach (KeyValuePair<string, object?> tag in tags)
+                if (tag.Key == "timer" && (string?)tag.Value == "precise")
+                    lock (preciseLateness) preciseLateness.Add(val);
+        });
+        listener.Start();
+
+        RecordingExecutor exec = new();
+        RecordingRouter router = new();
+        exec.Gate(71);
+
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
+        {
+            MaxBatchItems = 64,
+            LingerMs = 0,
+            PostCompletionHoldMs = 300,
+            PreciseWake = true,
+            MaxQueueDelayMs = 10_000,
+            MaxQueuedItemsPerPartition = 1024
+        });
+
+        Assert.True(agg.TryEnqueue(Item(71, 1, sink: router))); // dispatched immediately, gated
+        await WaitUntil(() => exec.Calls.Count == 1);
+        Assert.True(agg.TryEnqueue(Item(71, 2, sink: router))); // queued behind the in-flight batch
+
+        exec.Release(71);
+        await WaitUntil(() => router.Completed.ContainsKey(1));
+        await Task.Delay(100, TestContext.Current.CancellationToken);
+        Assert.Single(exec.Calls); // still inside the hold
+
+        await WaitUntil(() => router.Completed.Count == 2); // the precise wake ends the hold
+        Assert.Equal(2, exec.Calls.Count);
+
+        await WaitUntil(() => { lock (preciseLateness) return preciseLateness.Count > 0; });
+        lock (preciseLateness)
+            Assert.All(preciseLateness, l => Assert.InRange(l, 0, 50)); // never early; late only by scheduling noise
+    }
+
+    [Fact]
+    public async Task Aggregator_CycleStages_SumToTheCycle_OnTheLane()
+    {
+        // Every closed cycle records its eight stages and then the cycle, in one run on the lane's thread;
+        // grouping by thread therefore reassembles each cycle even with other tests' lanes recording alongside.
+        ThreadLocal<double> running = new(() => 0);
+        ThreadLocal<double> hold = new(() => 0);
+        List<(double Sum, double Cycle, double Hold)> cycles = [];
+        using MeterListener listener = new();
+        listener.InstrumentPublished = (inst, l) => { if (inst.Name == "kahuna.kv.write.cycle_stage") l.EnableMeasurementEvents(inst); };
+        listener.SetMeasurementEventCallback<double>((inst, val, tags, s) =>
+        {
+            string? stage = null;
+            foreach (KeyValuePair<string, object?> tag in tags)
+                if (tag.Key == "stage")
+                    stage = (string?)tag.Value;
+
+            switch (stage)
+            {
+                case "raft":
+                    running.Value = val;
+                    break;
+                case "cycle":
+                    lock (cycles) cycles.Add((running.Value, val, hold.Value));
+                    break;
+                case "hold":
+                    hold.Value = val;
+                    running.Value += val;
+                    break;
+                default:
+                    running.Value += val;
+                    break;
+            }
+        });
+        listener.Start();
+
+        RecordingExecutor exec = new();
+        RecordingRouter router = new();
+        exec.Gate(72);
+
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
+        {
+            MaxBatchItems = 64,
+            LingerMs = 0,
+            PostCompletionHoldMs = 40,
+            MaxQueueDelayMs = 10_000,
+            MaxQueuedItemsPerPartition = 1024
+        });
+
+        Assert.True(agg.TryEnqueue(Item(72, 1, sink: router))); // dispatched immediately, gated
+        await WaitUntil(() => exec.Calls.Count == 1);
+        Assert.True(agg.TryEnqueue(Item(72, 2, sink: router))); // held behind the round, then dispatched by the hold wake
+
+        exec.Release(72);
+        await WaitUntil(() => router.Completed.Count == 2);
+
+        await WaitUntil(() => { lock (cycles) return cycles.Any(c => c.Hold >= 39); });
+        lock (cycles)
+            Assert.All(cycles, c => Assert.Equal(c.Cycle, c.Sum, 6));
+    }
+
+    // ── cycle trace (pure) ────────────────────────────────────────────────────
+
+    private static long Stamp(double ms) => (long)(ms * System.Diagnostics.Stopwatch.Frequency / 1000);
+
+    private static void AssertStagesSum(PartitionWriteCycleStages s) =>
+        Assert.Equal(s.Cycle, s.Raft + s.CompletionMailbox + s.CompletionTurn + s.Hold + s.ArrivalWait + s.WakeLate + s.WakeMailbox + s.Dispatch, 6);
+
+    [Fact]
+    public void CycleTrace_FirstDispatch_ClosesNothing()
+    {
+        PartitionWriteCycleTrace trace = new();
+        Assert.False(trace.TryClose(Stamp(10), Stamp(10), PartitionWriteDispatchTrigger.Submit, 0, out _));
+    }
+
+    [Fact]
+    public void CycleTrace_HeldWake_SplitsHoldTimerLatenessAndMailbox()
+    {
+        PartitionWriteCycleTrace trace = new();
+        trace.TryClose(Stamp(100), Stamp(100), PartitionWriteDispatchTrigger.Submit, 0, out _);
+
+        // Round 1.5 ms, completion mailbox 0.1, completion turn 0.2, hold 2 ms requested, timer fires 1 ms
+        // late, wake mailbox 0.05, dispatch assembly 0.15.
+        trace.OnCompletion(Stamp(100), Stamp(101.5), Stamp(101.6), Stamp(101.8), holdEndsAt: Stamp(103.8), hasPending: true);
+        Assert.True(trace.TryClose(Stamp(105), Stamp(104.85), PartitionWriteDispatchTrigger.Wake, Stamp(104.8), out PartitionWriteCycleStages s));
+
+        Assert.Equal(PartitionWriteDispatchTrigger.Wake, s.Trigger);
+        Assert.Equal(1.5, s.Raft, 6);
+        Assert.Equal(0.1, s.CompletionMailbox, 6);
+        Assert.Equal(0.2, s.CompletionTurn, 6);
+        Assert.Equal(2.0, s.Hold, 6);
+        Assert.Equal(0, s.ArrivalWait, 6);
+        Assert.Equal(1.0, s.WakeLate, 6);
+        Assert.Equal(0.05, s.WakeMailbox, 6);
+        Assert.Equal(0.15, s.Dispatch, 6);
+        Assert.Equal(5.0, s.Cycle, 6);
+        AssertStagesSum(s);
+    }
+
+    [Fact]
+    public void CycleTrace_CompletionRedispatch_HasNoGapBetweenTurnAndDispatch()
+    {
+        PartitionWriteCycleTrace trace = new();
+        trace.TryClose(Stamp(0), Stamp(0), PartitionWriteDispatchTrigger.Submit, 0, out _);
+
+        trace.OnCompletion(Stamp(0), Stamp(2), Stamp(2.3), Stamp(2.5), holdEndsAt: 0, hasPending: true);
+        Assert.True(trace.TryClose(Stamp(2.6), Stamp(2.5), PartitionWriteDispatchTrigger.Completion, 0, out PartitionWriteCycleStages s));
+
+        Assert.Equal(0, s.Hold, 6);
+        Assert.Equal(0, s.ArrivalWait, 6);
+        Assert.Equal(0, s.WakeLate, 6);
+        Assert.Equal(0, s.WakeMailbox, 6);
+        Assert.Equal(0.1, s.Dispatch, 6);
+        AssertStagesSum(s);
+    }
+
+    [Fact]
+    public void CycleTrace_EmptyBufferAfterHold_CountsTheWaitForWorkApartFromTheTimer()
+    {
+        PartitionWriteCycleTrace trace = new();
+        trace.TryClose(Stamp(0), Stamp(0), PartitionWriteDispatchTrigger.Submit, 0, out _);
+
+        // Nothing pending at the completion; the hold ends at 4, the first submission opens the buffer at 7,
+        // and its linger wake fires at 8.
+        trace.OnCompletion(Stamp(0), Stamp(1.5), Stamp(1.6), Stamp(2), holdEndsAt: Stamp(4), hasPending: false);
+        trace.OnBufferOpened(Stamp(7));
+        trace.OnBufferOpened(Stamp(7.5)); // only the first opening after the completion counts
+        Assert.True(trace.TryClose(Stamp(8.2), Stamp(8.1), PartitionWriteDispatchTrigger.Wake, Stamp(8), out PartitionWriteCycleStages s));
+
+        Assert.Equal(2, s.Hold, 6);
+        Assert.Equal(3, s.ArrivalWait, 6);
+        Assert.Equal(1, s.WakeLate, 6);
+        AssertStagesSum(s);
+    }
+
+    [Fact]
+    public void CycleTrace_FullBatchDuringHold_ChargesTheSpentHoldOnly()
+    {
+        PartitionWriteCycleTrace trace = new();
+        trace.TryClose(Stamp(0), Stamp(0), PartitionWriteDispatchTrigger.Submit, 0, out _);
+
+        trace.OnCompletion(Stamp(0), Stamp(1), Stamp(1.1), Stamp(1.2), holdEndsAt: Stamp(3.2), hasPending: true);
+        Assert.True(trace.TryClose(Stamp(2.3), Stamp(2.2), PartitionWriteDispatchTrigger.Submit, 0, out PartitionWriteCycleStages s));
+
+        Assert.Equal(1.0, s.Hold, 6);
+        Assert.Equal(0, s.ArrivalWait, 6);
+        Assert.Equal(0, s.WakeLate, 6);
+        Assert.Equal(0.1, s.Dispatch, 6);
+        AssertStagesSum(s);
+    }
+
+    [Fact]
+    public void CycleTrace_WakeFiredBeforeTheCompletionEnded_StaysConsecutive()
+    {
+        PartitionWriteCycleTrace trace = new();
+        trace.TryClose(Stamp(0), Stamp(0), PartitionWriteDispatchTrigger.Submit, 0, out _);
+
+        trace.OnCompletion(Stamp(0), Stamp(1), Stamp(1.1), Stamp(1.5), holdEndsAt: 0, hasPending: true);
+        Assert.True(trace.TryClose(Stamp(1.8), Stamp(1.7), PartitionWriteDispatchTrigger.Wake, Stamp(1.3), out PartitionWriteCycleStages s));
+
+        Assert.Equal(0, s.WakeLate, 6);
+        Assert.Equal(0.2, s.WakeMailbox, 6);
+        AssertStagesSum(s);
+    }
+
+    [Fact]
+    public void CycleTrace_OverlappedBatch_DoesNotCloseACycle()
+    {
+        // With two batches in flight, the first one's completion arrives after the second dispatched; folding it
+        // into a cycle would span two rounds, so it is ignored.
+        PartitionWriteCycleTrace trace = new();
+        trace.TryClose(Stamp(0), Stamp(0), PartitionWriteDispatchTrigger.Submit, 0, out _);
+        trace.TryClose(Stamp(0.5), Stamp(0.5), PartitionWriteDispatchTrigger.Submit, 0, out _);
+
+        trace.OnCompletion(Stamp(0), Stamp(1.5), Stamp(1.6), Stamp(1.7), holdEndsAt: 0, hasPending: true);
+        Assert.False(trace.TryClose(Stamp(1.8), Stamp(1.7), PartitionWriteDispatchTrigger.Completion, 0, out _));
+
+        // The latest batch's completion does close one.
+        trace.OnCompletion(Stamp(1.8), Stamp(3), Stamp(3.1), Stamp(3.2), holdEndsAt: 0, hasPending: true);
+        Assert.True(trace.TryClose(Stamp(3.3), Stamp(3.2), PartitionWriteDispatchTrigger.Completion, 0, out PartitionWriteCycleStages s));
+        Assert.Equal(1.5, s.Cycle, 6);
+    }
+
     // ── hardening ───────────────────────────────────────────────────────────────
 
     [Fact]

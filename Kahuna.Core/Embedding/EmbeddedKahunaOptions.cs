@@ -389,6 +389,10 @@ public sealed class EmbeddedKahunaOptions
     /// immediately; 0 (the default) keeps the immediate re-dispatch on completion.</summary>
     public int KeyValueWritePostCompletionHoldMs { get; set; }
 
+    /// <summary>Fires the aggregator's wakes on a spin-tailed high-resolution wait instead of the timer queue,
+    /// so a millisecond-scale hold is not lengthened by timer granularity. Off by default.</summary>
+    public bool KeyValueWritePreciseWake { get; set; }
+
     public int KeyValueWriteMaxBatchItems { get; set; } = 512;
 
     /// <summary>Maximum aggregator batches a single partition may have awaiting their Raft result at once;

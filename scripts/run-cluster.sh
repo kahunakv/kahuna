@@ -18,6 +18,8 @@
 #                       also avoids replaying a store written by a different Kommander version)
 #   KAHUNA_LINGER_MS    WAL group-commit linger window in ms (default 0 = disabled, the measured best
 #                       pairing with the fast path). Raise to re-enable cross-write fsync coalescing.
+#   KAHUNA_NODE_ARGS    extra server options appended to every node's command line, word-split, e.g.
+#                       "--kv-write-post-completion-hold-ms 2 --range-split-threshold 0"
 #
 # Port layout (all on 127.0.0.1):
 #   Node 1 — HTTP :8081  HTTPS/Raft :8082  cleartext-gRPC :8087
@@ -151,6 +153,11 @@ start_node() {
     # Diagnostic knob: KAHUNA_SHARED_POOL=0 reverts to the original one-OS-thread-per-partition
     # model (disables the shared executor pool). Honored via env in Program.cs because the CLI
     # bool is a bare switch and cannot express "false". Unset => server default (on).
+
+    if [ -n "${KAHUNA_NODE_ARGS:-}" ]; then
+        # shellcheck disable=SC2206 # word-splitting the option list is the point
+        args+=(${KAHUNA_NODE_ARGS})
+    fi
 
     if [ "${STORAGE}" = "memory" ]; then
         args+=(--storage memory --wal-storage memory)
