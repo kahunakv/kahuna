@@ -164,7 +164,9 @@ public sealed class TestPartitionPlacementView
         int[] hostedUnderMapA = [1, 2];
         int[] hostedUnderMapB = [3, 4];
 
-        Task reader = Task.Run(() =>
+        // A dedicated thread, never the pool: the loop runs unyielding for the whole test and would
+        // otherwise hold a pool thread hostage (see TestBackendStorageRecovery for the failure mode).
+        Task reader = Task.Factory.StartNew(() =>
         {
             while (!cts.IsCancellationRequested)
             {
@@ -174,7 +176,7 @@ public sealed class TestPartitionPlacementView
                 Assert.True(hosted.SequenceEqual(hostedUnderMapA) || hosted.SequenceEqual(hostedUnderMapB),
                     $"Observed a torn hosted set: [{string.Join(',', hosted)}]");
             }
-        }, CancellationToken.None);
+        }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
 
         for (int i = 0; i < 2_000; i++)
             raft.ApplyMap(i % 2 == 0 ? mapB : mapA);

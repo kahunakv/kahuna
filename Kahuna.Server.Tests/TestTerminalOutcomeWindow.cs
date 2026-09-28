@@ -157,11 +157,13 @@ public sealed class TestTerminalOutcomeWindow
         const int max = 50;
         using CancellationTokenSource cts = new();
 
-        Task pruner = Task.Run(() =>
+        // A dedicated thread, never the pool: the loop runs unyielding for the whole test and would
+        // otherwise hold a pool thread hostage (see TestBackendStorageRecovery for the failure mode).
+        Task pruner = Task.Factory.StartNew(() =>
         {
             while (!cts.IsCancellationRequested)
                 window.PruneExpired(new HLCTimestamp(0, 100_000_000, 0), TimeSpan.FromMilliseconds(1));
-        }, TestContext.Current.CancellationToken);
+        }, TestContext.Current.CancellationToken, TaskCreationOptions.LongRunning, TaskScheduler.Default);
 
         for (long i = 0; i < 20_000; i++)
             window.Retain(Tx(i), Committed, Tx(i), max);
@@ -261,11 +263,11 @@ public sealed class TestTerminalOutcomeWindow
 
         // A pruner with a TTL no entry ever reaches: it only drains stale tickets from the head, racing the
         // writers' evictions for the same head.
-        Task pruner = Task.Run(() =>
+        Task pruner = Task.Factory.StartNew(() =>
         {
             while (!cts.IsCancellationRequested)
                 window.PruneExpired(Tx(0), TimeSpan.FromDays(1));
-        }, TestContext.Current.CancellationToken);
+        }, TestContext.Current.CancellationToken, TaskCreationOptions.LongRunning, TaskScheduler.Default);
 
         // Half the retains re-retain a small shared id set (duplicate finalizes racing each other and the
         // evictions of the same id); the other half are distinct ids that keep the window over its cap.
