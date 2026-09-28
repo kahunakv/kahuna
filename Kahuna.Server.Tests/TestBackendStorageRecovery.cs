@@ -236,7 +236,11 @@ public sealed class TestBackendStorageRecovery
             using CancellationTokenSource readersDone = new();
             List<Exception> readerFailures = [];
 
-            Task[] readers = [.. Enumerable.Range(0, 4).Select(_ => Task.Run(() =>
+            // Dedicated threads, never the pool: each reader is a synchronous loop that runs for the
+            // whole test without yielding. Queued through Task.Run on a runner with few cores, four of
+            // them occupy every pool thread, and everything pool-driven in the process (timers, actor
+            // dispatch, the Raft election of tests running alongside) stalls until the pool grows.
+            Task[] readers = [.. Enumerable.Range(0, 4).Select(_ => Task.Factory.StartNew(() =>
             {
                 try
                 {
@@ -253,7 +257,7 @@ public sealed class TestBackendStorageRecovery
                     lock (readerFailures)
                         readerFailures.Add(ex);
                 }
-            }))];
+            }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default))];
 
             // Several swaps under concurrent point reads: each one closes the native handle and
             // reopens it while the readers keep hammering the fence.

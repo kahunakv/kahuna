@@ -54,7 +54,9 @@ public sealed class TestPreparedIntentWindowCapture
         using CancellationTokenSource cts = new();
 
         // Churn on unrelated keys: prepares grow the map (table resizes), purges shrink it, re-prepares replace nodes.
-        Task writer = Task.Run(() =>
+        // A dedicated thread, never the pool: the loop runs unyielding for the whole test and would
+        // otherwise hold a pool thread hostage (see TestBackendStorageRecovery for the failure mode).
+        Task writer = Task.Factory.StartNew(() =>
         {
             Random random = new(5);
             long txn = 10_000;
@@ -69,7 +71,7 @@ public sealed class TestPreparedIntentWindowCapture
                 int drop = random.Next(3_000);
                 store.PurgeWhere(k => k.StartsWith("v/", StringComparison.Ordinal) && k.GetHashCode() % 3 == drop % 3);
             }
-        }, TestContext.Current.CancellationToken);
+        }, TestContext.Current.CancellationToken, TaskCreationOptions.LongRunning, TaskScheduler.Default);
 
         List<string> window = stable.Skip(100).Take(100).ToList(); // s/0100 .. s/0199 inclusive
 

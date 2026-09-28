@@ -680,7 +680,9 @@ public sealed class TestPartitionStateTransfer : IDisposable
         static bool Owned(string key) => key.StartsWith("a/", StringComparison.Ordinal);
 
         using CancellationTokenSource stop = new();
-        Task churn = Task.Run(() =>
+        // A dedicated thread, never the pool: the loop runs unyielding for the whole test and would
+        // otherwise hold a pool thread hostage (see TestBackendStorageRecovery for the failure mode).
+        Task churn = Task.Factory.StartNew(() =>
         {
             int generation = 0;
             while (!stop.IsCancellationRequested)
@@ -691,7 +693,7 @@ public sealed class TestPartitionStateTransfer : IDisposable
 
                 store.PurgeWhere(key => key.StartsWith("b/", StringComparison.Ordinal) && (key.GetHashCode() & 3) != 0);
             }
-        }, TestContext.Current.CancellationToken);
+        }, TestContext.Current.CancellationToken, TaskCreationOptions.LongRunning, TaskScheduler.Default);
 
         try
         {
