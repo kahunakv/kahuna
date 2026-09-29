@@ -549,7 +549,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
 
     internal static RaftConfiguration CreateRaftConfiguration(EmbeddedKahunaOptions options)
     {
-        return new()
+        RaftConfiguration configuration = new()
         {
             NodeName = options.NodeName,
             NodeId = options.NodeId,
@@ -618,6 +618,15 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             EnableHostPumpedScheduling = options.EnableHostPumpedScheduling
 #endif
         };
+
+        // Unset keeps Kommander's own default, so a host that sets neither gets exactly the shipped receive caps.
+        if (options.RaftSnapshotMaxPendingBytes is long maxPendingBytes)
+            configuration.SnapshotMaxPendingBytes = maxPendingBytes;
+
+        if (options.RaftSnapshotMaxPendingSessions is int maxPendingSessions)
+            configuration.SnapshotMaxPendingSessions = maxPendingSessions;
+
+        return configuration;
     }
 
     private static void ValidateOptions(EmbeddedKahunaOptions options)
@@ -651,6 +660,16 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
                 "EnableSharedExecutorPool must be true in the thread-free (browser) build: a partition executor on its own thread cannot run there.",
                 nameof(options));
 #endif
+
+        if (options.RaftSnapshotMaxPendingBytes is <= 0)
+            throw new ArgumentException(
+                $"RaftSnapshotMaxPendingBytes ({options.RaftSnapshotMaxPendingBytes}) must be positive, or null for Kommander's default.",
+                nameof(options));
+
+        if (options.RaftSnapshotMaxPendingSessions is <= 0)
+            throw new ArgumentException(
+                $"RaftSnapshotMaxPendingSessions ({options.RaftSnapshotMaxPendingSessions}) must be positive, or null for Kommander's default.",
+                nameof(options));
 
         if (options.EnableLeaderBalancer &&
             options.LeaderBalancerReportInterval >= options.LeaderBalancerReportTtl)

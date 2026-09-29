@@ -15,8 +15,8 @@ public static partial class KahunaLoggerExtensions
     [LoggerMessage(Level = LogLevel.Information, Message = "Exported whole-partition state of partition #{PartitionId} at index {UpToIndex} ({Bytes} bytes)")]
     public static partial void LogExportedPartitionState(this ILogger<IKahuna> logger, int partitionId, long upToIndex, long bytes);
 
-    [LoggerMessage(Level = LogLevel.Information, Message = "Imported whole-partition state of partition #{PartitionId}: {KeyValues} key-values, {Locks} locks, {Records} records, {Intents} intents")]
-    public static partial void LogImportedPartitionState(this ILogger<IKahuna> logger, int partitionId, int keyValues, int locks, int records, int intents);
+    [LoggerMessage(Level = LogLevel.Information, Message = "Imported whole-partition state of partition #{PartitionId}: {KeyValues} key-values, {Locks} locks, {Records} records, {Receipts} receipts, {Intents} intents ({Bytes} snapshot bytes)")]
+    public static partial void LogImportedPartitionState(this ILogger<IKahuna> logger, int partitionId, int keyValues, int locks, int records, int receipts, int intents, long bytes);
 
     [LoggerMessage(Level = LogLevel.Debug, Message = "KeyValueActor Took: {Actor} {Type} Key={Key} Response={Response} Revision={Revision} Time={Elapsed}ms")]
     public static partial void LogKeyValueActorTook(this ILogger<IKahuna> logger, string actor, KeyValueRequestType type, string key, KeyValueResponseType? response, long? revision, long elapsed);

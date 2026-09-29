@@ -2847,26 +2847,27 @@ internal sealed class PreparedIntentStore
 
         foreach (string path in files)
         {
-            byte[] data;
-            try
-            {
-                lock (fileLock)
-                    data = File.ReadAllBytes(path);
-            }
-            catch (Exception ex)
-            {
-                throw new IOException($"Failed to read prepared-intent snapshot {path}; refusing to start with a possibly incomplete intent set", ex);
-            }
-
+            // Parsed straight off the file rather than read into one array first, so loading a file never holds
+            // its bytes and its decoded message at once. The message itself is kept whole: the ledger slice it
+            // carries is installed as one unit, and the file's size is bounded by in-flight intents and the
+            // ledger's retention window rather than by throughput.
             PreparedIntentSnapshotMessage message;
 
             try
             {
-                message = ReplicationSerializer.UnserializePreparedIntentSnapshotMessage(data);
+                lock (fileLock)
+                {
+                    using FileStream file = new(path, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024);
+                    message = PreparedIntentSnapshotMessage.Parser.ParseFrom(file);
+                }
             }
-            catch (Exception ex)
+            catch (InvalidProtocolBufferException ex)
             {
                 throw new InvalidDataException($"Corrupt prepared-intent snapshot {path}; refusing to start empty and lose a prepared intent", ex);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                throw new IOException($"Failed to read prepared-intent snapshot {path}; refusing to start with a possibly incomplete intent set", ex);
             }
 
             foreach (PreparedIntentCommandMessage entry in message.Intents)
@@ -3306,10 +3307,16 @@ internal sealed class PreparedIntentStore
 
     /// <summary>Decodes a section written by <see cref="SerializePartitionIntents"/> (or, with a null ledger,
     /// by the ledgerless <see cref="SerializeIntents"/> of an older build).</summary>
-    public static PartitionIntentSection DeserializePartitionIntents(byte[] data)
-    {
-        PreparedIntentSnapshotMessage message = ReplicationSerializer.UnserializePreparedIntentSnapshotMessage(data);
+    public static PartitionIntentSection DeserializePartitionIntents(byte[] data) =>
+        PartitionIntentSectionOf(ReplicationSerializer.UnserializePreparedIntentSnapshotMessage(data));
 
+    /// <summary>Decodes a section written by <see cref="SerializePartitionIntents"/> straight off
+    /// <paramref name="payload"/> (read to its end), without first copying the section into one array.</summary>
+    public static PartitionIntentSection DeserializePartitionIntents(Stream payload) =>
+        PartitionIntentSectionOf(PreparedIntentSnapshotMessage.Parser.ParseFrom(payload));
+
+    private static PartitionIntentSection PartitionIntentSectionOf(PreparedIntentSnapshotMessage message)
+    {
         List<PreparedIntent> result = new(message.Intents.Count);
         foreach (PreparedIntentCommandMessage entry in message.Intents)
             result.Add(IntentOf(entry));

@@ -423,4 +423,135 @@ public sealed class TestDurableIntentPersistence : IDisposable
         Assert.True(File.Exists(p1));
         Assert.True(File.Exists(p2));
     }
+
+    // ── startup load ─────────────────────────────────────────────────────────────
+
+    [Fact]
+    public void RecordStore_ColdRestart_StreamsEveryFile_AndKeepsTheTerminalDecisionOverAnOverlappingUndecidedCopy()
+    {
+        // Two partition files. The committed copy of transaction 5 lands in partition 1's file and an Undecided
+        // copy of it in partition 2's (the overlap a routing change leaves behind); the load keeps the decision
+        // whichever file is read first.
+        TransactionRecordStore store = new(dir, "rev", null);
+        store.AttachAnchorResolver(anchor => (anchor.StartsWith("a/", StringComparison.Ordinal) ? 1 : 2, 0L));
+
+        for (int i = 0; i < 2_000; i++)
+        {
+            (InitializeTransactionCommand init, CommitTransactionCommand commit) = CommittedTxn(10_000 + i * 10_000L, 1, (i % 2 == 0 ? "a/" : "b/") + i);
+            store.Apply(init);
+            if (i % 3 != 0)
+                store.Apply(commit);
+        }
+
+        (InitializeTransactionCommand undecided, CommitTransactionCommand decided) = CommittedTxn(5, 1, "a/overlap");
+        store.Apply(undecided);
+        store.Apply(decided);
+        Assert.True(store.PersistSnapshot(1));
+        Assert.True(store.PersistSnapshot(2));
+
+        // Append an Undecided copy of transaction 5 to partition 2's file (concatenated snapshot messages merge).
+        TransactionRecordStore overlap = new();
+        overlap.ImportRecords([store.Get(Ts(5), 1)! with { Decision = TransactionDecision.Undecided, WinningOpId = HLCTimestamp.Zero }]);
+        byte[] p2 = File.ReadAllBytes(Path.Combine(dir, "transactionrecord_rev_p2.snapshot"));
+        File.WriteAllBytes(Path.Combine(dir, "transactionrecord_rev_p2.snapshot"),
+            [.. p2, .. TransactionRecordStore.SerializeRecords(overlap.Snapshot())]);
+
+        TransactionRecordStore reloaded = new(dir, "rev", null);
+
+        Assert.Equal(2_001, reloaded.Count);
+        Assert.Equal(TransactionDecision.Commit, reloaded.Get(Ts(5), 1)!.Decision);
+        for (int i = 0; i < 2_000; i += 7)
+        {
+            TransactionRecord original = store.Get(Ts(10_000 + i * 10_000L), 1)!;
+            TransactionRecord loaded = reloaded.Get(original.TransactionId, 1)!;
+            Assert.Equal(original.Decision, loaded.Decision);
+            Assert.Equal(original.RecordAnchorKey, loaded.RecordAnchorKey);
+            Assert.Equal(original.WinningOpId, loaded.WinningOpId);
+            Assert.Equal(original.Participants.Select(p => p.Key), loaded.Participants.Select(p => p.Key));
+        }
+    }
+
+    [Fact]
+    public void ReceiptStore_ColdRestart_StreamsEveryFile()
+    {
+        CompletionReceiptStore store = new(dir, "rev", NullLogger<IKahuna>.Instance);
+        store.AttachPartitionResolver(key => key.StartsWith("a/", StringComparison.Ordinal) ? 1 : 2);
+
+        for (int i = 0; i < 3_000; i++)
+            store.Record(Ts(1_000 + i), (i % 2 == 0 ? "a/" : "b/") + i, i % 3 == 0 ? null : "anchor", KeyValueDurability.Persistent);
+
+        Assert.True(store.PersistSnapshot(1));
+        Assert.True(store.PersistSnapshot(2));
+
+        CompletionReceiptStore reloaded = new(dir, "rev", NullLogger<IKahuna>.Instance);
+
+        Assert.Equal(3_000, reloaded.Count);
+        for (int i = 0; i < 3_000; i += 11)
+            Assert.True(reloaded.Contains(Ts(1_000 + i), (i % 2 == 0 ? "a/" : "b/") + i, KeyValueDurability.Persistent));
+        Assert.True(reloaded.Contains(Ts(1_001), "b/1", KeyValueDurability.Persistent, expectedAnchor: "anchor"));
+    }
+
+    public static TheoryData<string> StorePrefixes => ["transactionrecord", "completionreceipts", "preparedintent"];
+
+    private void PersistOneOf(string prefix)
+    {
+        switch (prefix)
+        {
+            case "transactionrecord":
+                TransactionRecordStore records = new(dir, "rev", null);
+                records.AttachAnchorResolver(_ => (PartitionId, 0));
+                for (int i = 0; i < 50; i++)
+                    records.Apply(CommittedTxn(1_000 + i * 10_000L, 1, $"acct/{i}").Item1);
+                Assert.True(records.PersistSnapshot(PartitionId));
+                break;
+
+            case "completionreceipts":
+                CompletionReceiptStore receipts = new(dir, "rev", NullLogger<IKahuna>.Instance);
+                receipts.AttachPartitionResolver(_ => PartitionId);
+                for (int i = 0; i < 50; i++)
+                    receipts.Record(Ts(1_000 + i), $"row/{i}", "anchor", KeyValueDurability.Persistent);
+                Assert.True(receipts.PersistSnapshot(PartitionId));
+                break;
+
+            default:
+                PreparedIntentStore intents = new(dir, "rev", null);
+                intents.AttachPartitionResolver(_ => PartitionId);
+                for (int i = 0; i < 50; i++)
+                    intents.Apply(new PrepareIntentCommand(Intent(1_000 + i, 1, $"row/{i}")));
+                Assert.True(intents.PersistSnapshot(PartitionId));
+                break;
+        }
+    }
+
+    private void Load(string prefix)
+    {
+        switch (prefix)
+        {
+            case "transactionrecord": _ = new TransactionRecordStore(dir, "rev", null); break;
+            case "completionreceipts": _ = new CompletionReceiptStore(dir, "rev", NullLogger<IKahuna>.Instance); break;
+            default: _ = new PreparedIntentStore(dir, "rev", null); break;
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(StorePrefixes))]
+    public void ColdRestart_OverATruncatedOrCorruptFile_RefusesToStart(string prefix)
+    {
+        PersistOneOf(prefix);
+        string path = Directory.GetFiles(dir, $"{prefix}_rev_p*.snapshot").Single();
+        byte[] intact = File.ReadAllBytes(path);
+
+        // Cut inside the first entry.
+        File.WriteAllBytes(path, intact[..10]);
+        Assert.Throws<InvalidDataException>(() => Load(prefix));
+
+        // An entry after the intact ones that declares more bytes than the file holds: the decode fails only
+        // after every intact entry was read.
+        File.WriteAllBytes(path, [.. intact, 0x0A, 0x7F, 0x01]);
+        Assert.Throws<InvalidDataException>(() => Load(prefix));
+
+        // The intact file still loads.
+        File.WriteAllBytes(path, intact);
+        Load(prefix);
+    }
 }

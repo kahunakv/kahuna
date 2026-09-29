@@ -359,45 +359,29 @@ internal sealed class RangeMerger
         {
             // With a committed replica set on the right range the gather must read its leader's
             // stores (this node may hold none of them); under legacy full replication it reads
-            // this node's stores, which every replica of the right group populated.
-            IReadOnlyCollection<CompletionReceiptRecord> movedReceipts;
-            IReadOnlyList<Kahuna.Server.KeyValues.Transactions.Data.TransactionRecord> movedRecords;
-            IReadOnlyList<Kahuna.Server.KeyValues.Transactions.Data.PreparedIntent> movedIntents;
+            // this node's stores, which every replica of the right group populated. The gather is
+            // pipelined with the handoff, one page at a time, so the merge never holds the moving
+            // range's whole transaction state.
+            RangeStateTransferService.RangeTransactionStateTransferOutcome transferred =
+                await manager.TransferRangeTransactionStateAsync(right.PartitionId, placedRight, right.StartKey, movingEndKey, left.PartitionId, ct);
 
-            if (placedRight)
+            switch (transferred)
             {
-                bool gathered;
-                (gathered, movedReceipts, movedRecords, movedIntents) =
-                    await manager.GetRangeTransactionStateFromPartitionLeaderAsync(
-                        right.PartitionId, right.StartKey, movingEndKey, ct);
-
-                if (!gathered)
-                {
+                case RangeStateTransferService.RangeTransactionStateTransferOutcome.GatherFailed:
                     logger.LogError(
                         "RangeMerger: could not gather the moving range's transaction state from P{Right}'s leader — aborting merge before cutover",
                         right.PartitionId);
                     return MergeOutcome.TransferFailed;
-                }
-            }
-            else
-            {
-                movedReceipts = manager.GetLocalCompletionReceiptsForRange(right.StartKey, movingEndKey);
-                movedRecords = manager.GetLocalTransactionRecordsForRange(right.StartKey, movingEndKey);
-                movedIntents = manager.GetLocalPreparedIntentsForRange(right.StartKey, movingEndKey);
-            }
 
-            if (!await manager.ImportCompletionReceiptsToPartitionLeaderAsync(left.PartitionId, movedReceipts, ct))
-            {
-                logger.LogError(
-                    "RangeMerger: completion-receipt handoff to P{Left} not durable — aborting merge before cutover", left.PartitionId);
-                return MergeOutcome.TransferFailed;
-            }
+                case RangeStateTransferService.RangeTransactionStateTransferOutcome.ReceiptHandoffFailed:
+                    logger.LogError(
+                        "RangeMerger: completion-receipt handoff to P{Left} not durable — aborting merge before cutover", left.PartitionId);
+                    return MergeOutcome.TransferFailed;
 
-            if (!await manager.ImportDurableTransactionStateToPartitionLeaderAsync(left.PartitionId, movedRecords, movedIntents, ct))
-            {
-                logger.LogError(
-                    "RangeMerger: durable transaction-state handoff to P{Left} not durable — aborting merge before cutover", left.PartitionId);
-                return MergeOutcome.TransferFailed;
+                case RangeStateTransferService.RangeTransactionStateTransferOutcome.StateHandoffFailed:
+                    logger.LogError(
+                        "RangeMerger: durable transaction-state handoff to P{Left} not durable — aborting merge before cutover", left.PartitionId);
+                    return MergeOutcome.TransferFailed;
             }
         }
         catch (Exception ex)

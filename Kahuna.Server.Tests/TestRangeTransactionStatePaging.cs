@@ -3,6 +3,7 @@ using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kahuna.Server.Replication;
 using Kahuna.Shared.KeyValue;
 using Kommander;
 using Kommander.Time;
@@ -90,22 +91,18 @@ public sealed class TestRangeTransactionStatePaging : BaseCluster
         RecoveryDeadline: new HLCTimestamp(0, long.MaxValue, 0),
         Resolution: PreparedIntentResolution.Pending);
 
-    /// <summary>
-    /// Seeds more intents, records and receipts than one 512-item page holds, then gathers from a
-    /// node that does not lead the source partition. Every item must come back exactly once, and a
-    /// kinds-restricted gather must carry only the requested kind.
-    /// </summary>
-    [Fact]
-    public async Task Gather_MoreItemsThanOnePage_ReturnsEveryItemOnce()
+    private const int SeededIntents = 1200;   // > 2 pages of 512
+    private const int SeededRecords = 700;    // > 1 page of 512
+    private const int SeededReceipts = 600;   // > 1 page of 512
+
+    /// <summary>Seeds more intents, records and receipts than one 512-item page holds onto the source partition and
+    /// waits until its leader's stores hold them all.</summary>
+    private async Task<(int Intents, int Records, int Receipts)> SeedMoreThanOnePage(
+        IRaft[] rafts, KahunaManager driver, KahunaManager sourceLeader, int sourcePartition, CancellationToken ct)
     {
-        CancellationToken ct = TestContext.Current.CancellationToken;
-
-        (IRaft[] rafts, _, KahunaManager driver, KahunaManager sourceLeader, int sourcePartition) =
-            await Setup(ct);
-
-        const int intentCount = 1200;   // > 2 pages of 512
-        const int recordCount = 700;    // > 1 page of 512
-        const int receiptCount = 600;   // > 1 page of 512
+        const int intentCount = SeededIntents;
+        const int recordCount = SeededRecords;
+        const int receiptCount = SeededReceipts;
 
         List<PreparedIntent> intents = new(intentCount);
         for (int i = 0; i < intentCount; i++)
@@ -145,6 +142,24 @@ public sealed class TestRangeTransactionStatePaging : BaseCluster
             && sourceLeader.KeyValues.GetLocalTransactionRecordsForRange(Space + "/", Space + "0").Count == recordCount
             && sourceLeader.KeyValues.GetLocalCompletionReceiptsForRange(Space + "/", Space + "0").Count == receiptCount,
             timeoutMs: 30_000);
+
+        return (intentCount, recordCount, receiptCount);
+    }
+
+    /// <summary>
+    /// Seeds more intents, records and receipts than one 512-item page holds, then gathers from a
+    /// node that does not lead the source partition. Every item must come back exactly once, and a
+    /// kinds-restricted gather must carry only the requested kind.
+    /// </summary>
+    [Fact]
+    public async Task Gather_MoreItemsThanOnePage_ReturnsEveryItemOnce()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft[] rafts, _, KahunaManager driver, KahunaManager sourceLeader, int sourcePartition) =
+            await Setup(ct);
+
+        (int intentCount, int recordCount, int receiptCount) = await SeedMoreThanOnePage(rafts, driver, sourceLeader, sourcePartition, ct);
 
         // The full gather, from a node that does not lead the source partition.
         (bool ok, IReadOnlyCollection<CompletionReceiptRecord> gatheredReceipts,
@@ -231,5 +246,181 @@ public sealed class TestRangeTransactionStatePaging : BaseCluster
 
         Assert.Equal(receipts.Count, collected.Count);
         Assert.Equal(3, collected.Count(r => r.Key == Space + "/b"));
+    }
+
+    /// <summary>A data partition other than <paramref name="sourcePartition"/>, to receive a handoff.</summary>
+    private static int DestinationOtherThan(int sourcePartition) => sourcePartition == 1 ? 2 : 1;
+
+    private sealed class HandoffLog
+    {
+        public readonly List<(string LogType, int Bytes)> Entries = [];
+        public int ReceiptChunks;
+    }
+
+    /// <summary>Observes, on every node, each handoff chunk replicated onto <paramref name="destination"/>; the
+    /// optional <paramref name="failEntry"/> fails the Nth record/intent chunk (1-based).</summary>
+    private static HandoffLog ObserveHandoff(KahunaManager[] managers, int destination, int failEntry = 0, bool failReceipts = false)
+    {
+        HandoffLog log = new();
+
+        foreach (KahunaManager manager in managers)
+        {
+            manager.KeyValues.DurableHandoffEntryFault = (partition, logType, bytes) =>
+            {
+                if (partition != destination)
+                    return false;
+
+                lock (log)
+                {
+                    log.Entries.Add((logType, bytes));
+                    return log.Entries.Count == failEntry;
+                }
+            };
+
+            manager.KeyValues.ReplicateReceiptImportFault = partition =>
+            {
+                if (partition != destination)
+                    return false;
+
+                Interlocked.Increment(ref log.ReceiptChunks);
+                return failReceipts;
+            };
+        }
+
+        return log;
+    }
+
+    private static void StopObserving(KahunaManager[] managers)
+    {
+        foreach (KahunaManager manager in managers)
+        {
+            manager.KeyValues.DurableHandoffEntryFault = null;
+            manager.KeyValues.ReplicateReceiptImportFault = null;
+        }
+    }
+
+    /// <summary>
+    /// The split/merge handoff pipelines the gather: each gathered page is handed off as its own bounded entries
+    /// rather than the whole range becoming one entry per kind, which for a busy range exceeded the transport's
+    /// message limit and held the range's whole decoded state on the driving node.
+    /// </summary>
+    [Fact]
+    public async Task Transfer_FromTheSourceLeader_HandsOffEveryPageAsBoundedEntries()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft[] rafts, KahunaManager[] managers, KahunaManager driver, KahunaManager sourceLeader, int sourcePartition) = await Setup(ct);
+        await SeedMoreThanOnePage(rafts, driver, sourceLeader, sourcePartition, ct);
+
+        int destination = DestinationOtherThan(sourcePartition);
+        HandoffLog log = ObserveHandoff(managers, destination);
+
+        try
+        {
+            RangeStateTransferService.RangeTransactionStateTransferOutcome outcome =
+                await driver.KeyValues.TransferRangeTransactionStateAsync(sourcePartition, fromSourceLeader: true, Space + "/", Space + "0", destination, ct);
+
+            Assert.Equal(RangeStateTransferService.RangeTransactionStateTransferOutcome.Transferred, outcome);
+        }
+        finally
+        {
+            StopObserving(managers);
+        }
+
+        // 700 records and 1,200 intents over 512-item pages: two record entries and three intent entries, none of
+        // them anywhere near the transport limit. 600 receipts: two receipt chunks.
+        Assert.Equal(2, log.Entries.Count(e => e.LogType == ReplicationTypes.TransactionRecord));
+        Assert.Equal(3, log.Entries.Count(e => e.LogType == ReplicationTypes.PreparedIntent));
+        Assert.All(log.Entries, e => Assert.True(e.Bytes < 1024 * 1024, $"a {e.LogType} handoff entry of {e.Bytes} B"));
+        Assert.Equal(2, Volatile.Read(ref log.ReceiptChunks));
+    }
+
+    [Fact]
+    public async Task Transfer_FromLocalStores_ChunksByCount_AndIntentsByValueBytes()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft[] rafts, KahunaManager[] managers, KahunaManager driver, KahunaManager sourceLeader, int sourcePartition) = await Setup(ct);
+        await SeedMoreThanOnePage(rafts, driver, sourceLeader, sourcePartition, ct);
+
+        // Forty intents of 64 KB values in their own key range: far under the item cap, but 2.5 MB of values.
+        List<PreparedIntent> heavy = [];
+        for (int i = 0; i < 40; i++)
+        {
+            HLCTimestamp txId = rafts[0].HybridLogicalClock.TrySendOrLocalEvent(rafts[0].GetLocalNodeId());
+            heavy.Add(MakeIntent(txId, Space + "/z" + i.ToString("D3"), Space + "/z") with { Value = new byte[64 * 1024] });
+        }
+
+        Assert.True(await driver.KeyValues.ImportDurableTransactionStateToPartitionLeaderAsync(sourcePartition, [], heavy, ct));
+        await WaitUntilAsync(() => driver.KeyValues.GetLocalPreparedIntentsForRange(Space + "/z", Space + "/{").Count == heavy.Count, timeoutMs: 30_000);
+        await WaitUntilAsync(() => driver.KeyValues.GetLocalPreparedIntentsForRange(Space + "/", Space + "/z").Count == SeededIntents
+            && driver.KeyValues.GetLocalTransactionRecordsForRange(Space + "/", Space + "0").Count == SeededRecords
+            && driver.KeyValues.GetLocalCompletionReceiptsForRange(Space + "/", Space + "0").Count == SeededReceipts, timeoutMs: 30_000);
+
+        int destination = DestinationOtherThan(sourcePartition);
+        HandoffLog log = ObserveHandoff(managers, destination);
+
+        try
+        {
+            // Legacy full replication: the driver's own stores hold the range.
+            Assert.Equal(RangeStateTransferService.RangeTransactionStateTransferOutcome.Transferred,
+                await driver.KeyValues.TransferRangeTransactionStateAsync(sourcePartition, fromSourceLeader: false, Space + "/z", Space + "/{", destination, ct));
+
+            List<(string LogType, int Bytes)> heavyEntries = [.. log.Entries];
+            Assert.All(heavyEntries, e => Assert.Equal(ReplicationTypes.PreparedIntent, e.LogType));
+            Assert.True(heavyEntries.Count >= 3, $"2.5 MB of intent values went out in {heavyEntries.Count} entries");
+            Assert.All(heavyEntries, e => Assert.True(e.Bytes < 2 * 1024 * 1024, $"an intent handoff entry of {e.Bytes} B"));
+
+            lock (log)
+                log.Entries.Clear();
+
+            Assert.Equal(RangeStateTransferService.RangeTransactionStateTransferOutcome.Transferred,
+                await driver.KeyValues.TransferRangeTransactionStateAsync(sourcePartition, fromSourceLeader: false, Space + "/", Space + "/z", destination, ct));
+        }
+        finally
+        {
+            StopObserving(managers);
+        }
+
+        Assert.Equal(2, log.Entries.Count(e => e.LogType == ReplicationTypes.TransactionRecord));
+        Assert.Equal(3, log.Entries.Count(e => e.LogType == ReplicationTypes.PreparedIntent));
+    }
+
+    [Fact]
+    public async Task Transfer_AChunkThatIsNotDurable_FailsTheTransferAtThatStep()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft[] rafts, KahunaManager[] managers, KahunaManager driver, KahunaManager sourceLeader, int sourcePartition) = await Setup(ct);
+        await SeedMoreThanOnePage(rafts, driver, sourceLeader, sourcePartition, ct);
+
+        int destination = DestinationOtherThan(sourcePartition);
+
+        // The second record chunk is refused: the transfer stops there and reports the state handoff failed.
+        HandoffLog log = ObserveHandoff(managers, destination, failEntry: 2);
+        try
+        {
+            Assert.Equal(RangeStateTransferService.RangeTransactionStateTransferOutcome.StateHandoffFailed,
+                await driver.KeyValues.TransferRangeTransactionStateAsync(sourcePartition, fromSourceLeader: true, Space + "/", Space + "0", destination, ct));
+            Assert.Equal(2, log.Entries.Count);
+            Assert.DoesNotContain(log.Entries, e => e.LogType == ReplicationTypes.PreparedIntent);
+        }
+        finally
+        {
+            StopObserving(managers);
+        }
+
+        // A refused receipt chunk fails the transfer before any record or intent is handed off.
+        log = ObserveHandoff(managers, destination, failReceipts: true);
+        try
+        {
+            Assert.Equal(RangeStateTransferService.RangeTransactionStateTransferOutcome.ReceiptHandoffFailed,
+                await driver.KeyValues.TransferRangeTransactionStateAsync(sourcePartition, fromSourceLeader: true, Space + "/", Space + "0", destination, ct));
+            Assert.Empty(log.Entries);
+        }
+        finally
+        {
+            StopObserving(managers);
+        }
     }
 }

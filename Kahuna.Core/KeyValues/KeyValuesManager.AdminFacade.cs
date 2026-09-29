@@ -131,6 +131,10 @@ internal sealed partial class KeyValuesManager
     internal void ImportCompletionReceipts(IReadOnlyCollection<CompletionReceiptRecord> receiptsToImport) =>
         rangeStateTransfer.ImportCompletionReceipts(receiptsToImport);
 
+    internal Task<RangeStateTransferService.RangeTransactionStateTransferOutcome> TransferRangeTransactionStateAsync(
+        int sourcePartitionId, bool fromSourceLeader, string? startKey, string? endKey, int destinationPartitionId, CancellationToken cancellationToken) =>
+        rangeStateTransfer.TransferRangeTransactionStateAsync(sourcePartitionId, fromSourceLeader, startKey, endKey, destinationPartitionId, cancellationToken);
+
     internal Task<bool> CopyRangeToPartitionAsync(
         string keySpace,
         string? startKey,

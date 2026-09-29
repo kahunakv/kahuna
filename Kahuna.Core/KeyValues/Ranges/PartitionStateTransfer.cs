@@ -1,7 +1,6 @@
 
 using Google.Protobuf;
 using Kommander;
-using Kommander.Data;
 using Kommander.Time;
 
 using Kahuna.Server.KeyValues.Logging;
@@ -10,7 +9,6 @@ using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Locks.Data;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
-using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
 using Kahuna.Utils;
 
@@ -42,8 +40,13 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// </para>
 ///
 /// <para>
-/// <b>Import discipline.</b> The whole stream is read and checksum-verified <i>before anything is
-/// mutated</i>, so a truncated or corrupt snapshot is a clean no-op. The install itself is
+/// <b>Import discipline.</b> The whole stream is read, checksum-verified and decoded <i>before anything
+/// is mutated</i>, so a truncated or corrupt snapshot is a clean no-op. That verification pass keeps
+/// nothing but counts and positions, and the apply pass then streams rows and durable-store entries
+/// from the staged snapshot into the backend and the stores, so the install's memory is a page of rows
+/// plus the stores' own contents, never a second copy of the partition: materialising the store section
+/// once to verify it and again to decode it is what ran a node out of memory at a partition of a few
+/// hundred thousand transaction records. The install itself is
 /// drain-then-purge-then-apply: the background writer is drained first so a queued pre-snapshot
 /// flush cannot land after the install and blindly overwrite an installed row, and the purge
 /// (rather than a merge) prevents resurrecting keys deleted while this node was not a replica.
@@ -318,72 +321,95 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
 
     // ── import ───────────────────────────────────────────────────────────────────
 
+    /// <summary>Key-value or lock rows buffered before each backend write of the install: bounds the rows held
+    /// between the stream and the backend without paying one backend write per 256-row page.</summary>
+    private const int ApplyBatchRows = 4_096;
+
+    /// <summary>Value bytes buffered before each backend write of the install, whichever limit comes first.</summary>
+    private const long ApplyBatchBytes = 16L * 1024 * 1024;
+
+    /// <summary>
+    /// Partitions with an install running on this node. A second install of the same partition while one runs
+    /// is refused rather than queued: it would verify and then re-purge underneath the first one's apply, and a
+    /// queued attempt pins its whole staged snapshot for as long as it waits. Kommander already serializes
+    /// installs on the partition executor, so this only ever fires if that changes; the sender retries.
+    /// </summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, byte> installsInProgress = new();
+
     public async Task ImportPartitionState(int partitionId, Stream snapshot, CancellationToken ct)
     {
-        // ── Phase 1: read and verify the whole stream before mutating anything, so a truncated or
-        // corrupt snapshot leaves the prior state untouched and the sender simply retries. ──
-        PartitionStateHeader header = ParseDelimited(PartitionStateHeader.Parser, snapshot, "header");
+        if (!installsInProgress.TryAdd(partitionId, 0))
+            throw new KahunaServerException(
+                $"ImportPartitionState: an install of partition {partitionId} is already running on this node; refusing a concurrent one.");
+
+        SegmentedBufferStream? spool = null;
+
+        try
+        {
+            Stream input = snapshot;
+
+            // The install reads the stream twice (verify, then apply), so it needs to seek. Kommander stages every
+            // snapshot in a seekable buffer; any other caller's stream is staged once here, in pooled segments.
+            if (!snapshot.CanSeek)
+            {
+                spool = new SegmentedBufferStream();
+                await snapshot.CopyToAsync(spool, ct).ConfigureAwait(false);
+                spool.Position = 0;
+                input = spool;
+            }
+
+            await ImportSeekableAsync(partitionId, input, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            spool?.Dispose();
+            installsInProgress.TryRemove(partitionId, out _);
+        }
+    }
+
+    /// <summary>
+    /// The install proper, in two passes over a seekable snapshot so that its memory is bounded by a page of rows
+    /// and one durable-store entry, never by the size of the partition. Phase 1 reads the whole stream, verifies
+    /// every checksum and decodes every entry, keeping nothing but counts, the store payloads' positions and the
+    /// intent section. Phase 2 rewinds and streams the rows and entries into the backend and the stores. Both
+    /// the key-value/lock pages and the three durable payloads are therefore read once to verify and once to
+    /// apply; the only state held whole is the intent section, whose replacement of the partition's intents and
+    /// committed-head ledger must be atomic, and whose size is bounded by in-flight transactions and the ledger's
+    /// retention window rather than by throughput.
+    /// </summary>
+    private async Task ImportSeekableAsync(int partitionId, Stream input, CancellationToken ct)
+    {
+        // ── Phase 1: read, verify and decode the whole stream before mutating anything, so a truncated or corrupt
+        // snapshot leaves the prior state untouched and the sender simply retries. ──
+        PartitionStateHeader header = ParseDelimited(PartitionStateHeader.Parser, input, "header");
 
         if (header.PartitionId != partitionId)
             throw new KahunaServerException(
                 $"ImportPartitionState: snapshot is for partition {header.PartitionId} but was delivered for partition {partitionId}.");
 
-        List<PersistenceRequestItem> kvItems = [];
+        long rowsStart = input.Position;
 
-        while (true)
-        {
-            ct.ThrowIfCancellationRequested();
+        int keyValueCount = ReadKeyValuePages(input, store: null, ct);
+        int lockCount = ReadLockPages(input, store: null, ct);
 
-            RangeSnapshotPage page = ParseDelimited(RangeSnapshotPage.Parser, snapshot, "key-value page");
+        StoreSectionLayout layout = ReadStoreSectionLayout(input);
 
-            ulong expected = KvStateMachineTransfer.ChecksumOf(page.Entries);
-            if (expected != page.Checksum)
-                throw new KahunaServerException(
-                    $"ImportPartitionState: key-value page checksum mismatch (expected {expected}, got {page.Checksum}) — corrupt snapshot.");
+        int receiptCount = CountDecoded(CompletionReceiptStore.ReadReceipts(new PayloadStream(input, layout.Receipts)), "completion receipts");
+        int recordCount = CountDecoded(TransactionRecordStore.ReadRecords(new PayloadStream(input, layout.Records)), "transaction records");
 
-            foreach (RangeSnapshotEntry entry in page.Entries)
-                kvItems.Add(KvStateMachineTransfer.ToPersistenceItem(entry));
-
-            if (!page.HasMore)
-                break;
-        }
-
-        List<PersistenceRequestItem> lockItems = [];
-
-        while (true)
-        {
-            ct.ThrowIfCancellationRequested();
-
-            PartitionStateLockPage page = ParseDelimited(PartitionStateLockPage.Parser, snapshot, "lock page");
-
-            ulong expected = LockChecksumOf(page.Entries);
-            if (expected != page.Checksum)
-                throw new KahunaServerException(
-                    $"ImportPartitionState: lock page checksum mismatch (expected {expected}, got {page.Checksum}) — corrupt snapshot.");
-
-            foreach (PartitionStateLockEntry entry in page.Entries)
-                lockItems.Add(ToLockPersistenceItem(entry));
-
-            if (!page.HasMore)
-                break;
-        }
-
-        PartitionStateStoreSection section = ParseDelimited(PartitionStateStoreSection.Parser, snapshot, "store section");
-
-        ulong sectionChecksum = StoreChecksumOf(section);
-        if (sectionChecksum != section.Checksum)
-            throw new KahunaServerException(
-                $"ImportPartitionState: store section checksum mismatch (expected {sectionChecksum}, got {section.Checksum}) — corrupt snapshot.");
-
-        IReadOnlyList<TransactionRecord> records = section.TransactionRecords.Length > 0
-            ? TransactionRecordStore.DeserializeRecords(section.TransactionRecords.ToByteArray())
-            : [];
         // An empty section is an exporter that predates the ledger (it wrote nothing when it had no intents);
         // it decodes as no intents and no ledger, which the install below refuses when the ledger is required.
-        PreparedIntentStore.PartitionIntentSection intentSection = section.PreparedIntents.Length > 0
-            ? PreparedIntentStore.DeserializePartitionIntents(section.PreparedIntents.ToByteArray())
-            : new PreparedIntentStore.PartitionIntentSection([], null, HLCTimestamp.Zero);
-        byte[] receiptBytes = section.CompletionReceipts.Length > 0 ? section.CompletionReceipts.ToByteArray() : [];
+        PreparedIntentStore.PartitionIntentSection intentSection;
+        try
+        {
+            intentSection = layout.Intents.Length > 0
+                ? PreparedIntentStore.DeserializePartitionIntents(new PayloadStream(input, layout.Intents))
+                : new PreparedIntentStore.PartitionIntentSection([], null, HLCTimestamp.Zero);
+        }
+        catch (InvalidProtocolBufferException ex)
+        {
+            throw new KahunaServerException($"ImportPartitionState: corrupt snapshot at prepared intents — {ex.Message}");
+        }
 
         if (requireLedgerOnInstall && intentSection.Ledger is null)
             throw new KahunaServerException(
@@ -392,11 +418,12 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
 
         ct.ThrowIfCancellationRequested();
 
-        // ── Phase 2: install. Marker → purge → apply → durable store snapshots → clear. A crash
-        // anywhere in here leaves the marker on disk; the sender's retry re-drives the whole
-        // sequence, and the purge makes the re-drive idempotent. Serialized per partition against
-        // the un-host purge, so a loss-triggered purge can never interleave with a seeding install
-        // of the same partition and delete freshly installed rows. ──
+        // ── Phase 2: install. Marker → purge → apply → durable store snapshots → clear. A crash, or a failure,
+        // anywhere in here leaves the marker on disk; the sender's retry re-drives the whole sequence, and the
+        // purge makes the re-drive idempotent: whatever a failed attempt applied is removed before the next one
+        // applies, so no attempt ever lands on top of another's partial state. Serialized per partition against
+        // the un-host purge, so a loss-triggered purge can never interleave with a seeding install of the same
+        // partition and delete freshly installed rows. ──
         SemaphoreSlim installGate = InstallGateOf(partitionId);
         await installGate.WaitAsync(ct).ConfigureAwait(false);
 
@@ -422,25 +449,29 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
             // phantom holder of its key for good, rejecting every later prepare of the key as a foreign holder,
             // refusing every bundled commit of it at apply, freezing the key's row and committed head on this
             // node and answering NotApplied to every fence ask about it (the shape seen after a leader kill,
-            // where the restarted node re-attested to the fence at half throughput indefinitely).
+            // where the restarted node re-attested to the fence at half throughput indefinitely). Purging first
+            // also means the retired slice is released before the installed one is decoded into the stores.
             Func<string, bool> isOwned = OwnedKeyPredicate(currentMap(), partitionId);
             completionReceiptStore.PurgeWhere(isOwned);
             transactionRecordStore.PurgeWhere(isOwned);
 
-            if (kvItems.Count > 0 && !persistenceBackend.StoreKeyValues(kvItems))
-                throw new KahunaServerException("ImportPartitionState: StoreKeyValues failed to persist the snapshot.");
+            input.Position = rowsStart;
 
-            if (lockItems.Count > 0 && !persistenceBackend.StoreLocks(lockItems))
-                throw new KahunaServerException("ImportPartitionState: StoreLocks failed to persist the snapshot.");
+            ReadKeyValuePages(input, batch =>
+            {
+                if (!persistenceBackend.StoreKeyValues(batch))
+                    throw new KahunaServerException("ImportPartitionState: StoreKeyValues failed to persist the snapshot.");
+            }, ct);
 
-            if (receiptBytes.Length > 0 && !completionReceiptStore.Replicate(partitionId, new RaftLog
-                {
-                    LogType = ReplicationTypes.CompletionReceipt,
-                    LogData = receiptBytes
-                }))
-                throw new KahunaServerException("ImportPartitionState: completion-receipt apply failed.");
+            ReadLockPages(input, batch =>
+            {
+                if (!persistenceBackend.StoreLocks(batch))
+                    throw new KahunaServerException("ImportPartitionState: StoreLocks failed to persist the snapshot.");
+            }, ct);
 
-            transactionRecordStore.ImportRecords(records);
+            // Each entry is decoded off the staged snapshot and folded into its store before the next is read.
+            completionReceiptStore.ImportRange(CompletionReceiptStore.ReadReceipts(new PayloadStream(input, layout.Receipts)));
+            transactionRecordStore.ImportRecords(TransactionRecordStore.ReadRecords(new PayloadStream(input, layout.Records)));
             preparedIntentStore.ReplacePartitionIntents(partitionId, intentSection, requireLedgerOnInstall, isOwned);
 
             // The WAL boundary installed right after this import compacts the log entries the imported
@@ -471,7 +502,318 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
             installGate.Release();
         }
 
-        logger.LogImportedPartitionState(partitionId, kvItems.Count, lockItems.Count, records.Count, intentSection.Intents.Count);
+        logger.LogImportedPartitionState(partitionId, keyValueCount, lockCount, recordCount, receiptCount, intentSection.Intents.Count, input.Length);
+    }
+
+    /// <summary>
+    /// Reads the key-value pages from the current position through the terminal page, verifying each page's
+    /// checksum. With a <paramref name="store"/> callback the rows are handed to it in batches of at most
+    /// <see cref="ApplyBatchRows"/> rows or <see cref="ApplyBatchBytes"/> value bytes; each batch is a fresh
+    /// list the callback may retain. Returns the row count.
+    /// </summary>
+    private static int ReadKeyValuePages(Stream input, Action<List<PersistenceRequestItem>>? store, CancellationToken ct)
+    {
+        int count = 0;
+        List<PersistenceRequestItem>? batch = store is null ? null : new(ApplyBatchRows);
+        long batchBytes = 0;
+
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            RangeSnapshotPage page = ParseDelimited(RangeSnapshotPage.Parser, input, "key-value page");
+
+            ulong expected = KvStateMachineTransfer.ChecksumOf(page.Entries);
+            if (expected != page.Checksum)
+                throw new KahunaServerException(
+                    $"ImportPartitionState: key-value page checksum mismatch (expected {expected}, got {page.Checksum}) — corrupt snapshot.");
+
+            count += page.Entries.Count;
+
+            if (batch is not null)
+            {
+                foreach (RangeSnapshotEntry entry in page.Entries)
+                {
+                    PersistenceRequestItem item = KvStateMachineTransfer.ToPersistenceItem(entry);
+                    batch.Add(item);
+                    batchBytes += item.Value?.Length ?? 0;
+
+                    if (batch.Count >= ApplyBatchRows || batchBytes >= ApplyBatchBytes)
+                    {
+                        store!(batch);
+                        batch = new(ApplyBatchRows);
+                        batchBytes = 0;
+                    }
+                }
+            }
+
+            if (!page.HasMore)
+                break;
+        }
+
+        if (batch is { Count: > 0 })
+            store!(batch);
+
+        return count;
+    }
+
+    /// <summary>The lock-page counterpart of <see cref="ReadKeyValuePages"/>.</summary>
+    private static int ReadLockPages(Stream input, Action<List<PersistenceRequestItem>>? store, CancellationToken ct)
+    {
+        int count = 0;
+        List<PersistenceRequestItem>? batch = store is null ? null : new(ApplyBatchRows);
+        long batchBytes = 0;
+
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            PartitionStateLockPage page = ParseDelimited(PartitionStateLockPage.Parser, input, "lock page");
+
+            ulong expected = LockChecksumOf(page.Entries);
+            if (expected != page.Checksum)
+                throw new KahunaServerException(
+                    $"ImportPartitionState: lock page checksum mismatch (expected {expected}, got {page.Checksum}) — corrupt snapshot.");
+
+            count += page.Entries.Count;
+
+            if (batch is not null)
+            {
+                foreach (PartitionStateLockEntry entry in page.Entries)
+                {
+                    PersistenceRequestItem item = ToLockPersistenceItem(entry);
+                    batch.Add(item);
+                    batchBytes += item.Value?.Length ?? 0;
+
+                    if (batch.Count >= ApplyBatchRows || batchBytes >= ApplyBatchBytes)
+                    {
+                        store!(batch);
+                        batch = new(ApplyBatchRows);
+                        batchBytes = 0;
+                    }
+                }
+            }
+
+            if (!page.HasMore)
+                break;
+        }
+
+        if (batch is { Count: > 0 })
+            store!(batch);
+
+        return count;
+    }
+
+    /// <summary>Enumerates a lazily decoded store payload to its end, turning a decode failure into a corrupt-snapshot
+    /// error, and returns the entry count.</summary>
+    private static int CountDecoded<T>(IEnumerable<T> entries, string what)
+    {
+        try
+        {
+            int count = 0;
+            foreach (T _ in entries)
+                count++;
+            return count;
+        }
+        catch (Exception ex) when (ex is InvalidProtocolBufferException or InvalidDataException)
+        {
+            throw new KahunaServerException($"ImportPartitionState: corrupt snapshot at {what} — {ex.Message}");
+        }
+    }
+
+    /// <summary>Position and length of one store payload inside the staged snapshot; a zero length is an absent field.</summary>
+    private readonly record struct PayloadRange(long Offset, long Length);
+
+    private readonly record struct StoreSectionLayout(PayloadRange Receipts, PayloadRange Records, PayloadRange Intents);
+
+    /// <summary>
+    /// Walks the length-delimited <see cref="PartitionStateStoreSection"/> at the current position without
+    /// materialising it: records where each payload field lies, reads the checksum, verifies it by hashing the
+    /// payloads in place, and leaves the stream at the section's end. Parsing the section as a message would
+    /// copy every payload into one contiguous array — the transaction-record payload alone is hundreds of
+    /// megabytes on a busy partition. Field handling matches the generated parser: a repeated scalar field keeps
+    /// its last occurrence, and a known field number carried with a different wire type is an unknown field.
+    /// </summary>
+    private static StoreSectionLayout ReadStoreSectionLayout(Stream input)
+    {
+        const string what = "store section";
+
+        ulong declared = ReadVarint(input, what);
+        long start = input.Position;
+
+        if (declared > (ulong)(input.Length - start))
+            throw new KahunaServerException($"ImportPartitionState: truncated snapshot stream at {what} — declares {declared} bytes, {input.Length - start} remain.");
+
+        long end = start + (long)declared;
+
+        PayloadRange receipts = default, records = default, intents = default;
+        ulong checksum = 0;
+
+        while (input.Position < end)
+        {
+            ulong tag = ReadVarint(input, what);
+            int fieldNumber = (int)(tag >> 3);
+            WireFormat.WireType wireType = (WireFormat.WireType)(tag & 7);
+
+            if (fieldNumber == 0)
+                throw new KahunaServerException($"ImportPartitionState: corrupt snapshot at {what} — invalid field tag.");
+
+            switch (wireType)
+            {
+                case WireFormat.WireType.LengthDelimited:
+                {
+                    ulong size = ReadVarint(input, what);
+                    long offset = input.Position;
+
+                    if (size > (ulong)(end - offset))
+                        throw new KahunaServerException($"ImportPartitionState: corrupt snapshot at {what} — field {fieldNumber} overruns the section.");
+
+                    PayloadRange range = new(offset, (long)size);
+
+                    if (fieldNumber == PartitionStateStoreSection.CompletionReceiptsFieldNumber)
+                        receipts = range;
+                    else if (fieldNumber == PartitionStateStoreSection.TransactionRecordsFieldNumber)
+                        records = range;
+                    else if (fieldNumber == PartitionStateStoreSection.PreparedIntentsFieldNumber)
+                        intents = range;
+
+                    input.Position = offset + (long)size;
+                    break;
+                }
+
+                case WireFormat.WireType.Varint:
+                {
+                    ulong value = ReadVarint(input, what);
+                    if (fieldNumber == PartitionStateStoreSection.ChecksumFieldNumber)
+                        checksum = value;
+                    break;
+                }
+
+                case WireFormat.WireType.Fixed64:
+                    SkipWithin(input, 8, end, what);
+                    break;
+
+                case WireFormat.WireType.Fixed32:
+                    SkipWithin(input, 4, end, what);
+                    break;
+
+                default:
+                    throw new KahunaServerException($"ImportPartitionState: corrupt snapshot at {what} — unsupported wire type {wireType}.");
+            }
+        }
+
+        if (input.Position != end)
+            throw new KahunaServerException($"ImportPartitionState: corrupt snapshot at {what} — a field overruns the section.");
+
+        // FNV-1a 64 over the three payloads in field order (checksum field excluded), as the exporter wrote it.
+        KvStateMachineTransfer.FnvHashStream hasher = new();
+        byte[] buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(SegmentedBufferStream.SegmentSize);
+        try
+        {
+            HashRange(input, receipts, hasher, buffer);
+            HashRange(input, records, hasher, buffer);
+            HashRange(input, intents, hasher, buffer);
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(buffer);
+        }
+
+        input.Position = end;
+
+        if (hasher.Hash != checksum)
+            throw new KahunaServerException(
+                $"ImportPartitionState: store section checksum mismatch (expected {hasher.Hash}, got {checksum}) — corrupt snapshot.");
+
+        return new StoreSectionLayout(receipts, records, intents);
+    }
+
+    private static void HashRange(Stream input, PayloadRange range, KvStateMachineTransfer.FnvHashStream hasher, byte[] buffer)
+    {
+        input.Position = range.Offset;
+        long remaining = range.Length;
+
+        while (remaining > 0)
+        {
+            int read = input.Read(buffer, 0, (int)Math.Min(buffer.Length, remaining));
+            if (read <= 0)
+                throw new KahunaServerException("ImportPartitionState: truncated snapshot stream at store section.");
+
+            hasher.Write(buffer.AsSpan(0, read));
+            remaining -= read;
+        }
+    }
+
+    private static void SkipWithin(Stream input, int count, long end, string what)
+    {
+        if (end - input.Position < count)
+            throw new KahunaServerException($"ImportPartitionState: corrupt snapshot at {what} — a field overruns the section.");
+
+        input.Position += count;
+    }
+
+    private static ulong ReadVarint(Stream input, string what)
+    {
+        ulong result = 0;
+
+        for (int shift = 0; shift < 64; shift += 7)
+        {
+            int b = input.ReadByte();
+            if (b < 0)
+                throw new KahunaServerException($"ImportPartitionState: truncated snapshot stream at {what}.");
+
+            result |= (ulong)(b & 0x7F) << shift;
+            if ((b & 0x80) == 0)
+                return result;
+        }
+
+        throw new KahunaServerException($"ImportPartitionState: corrupt snapshot at {what} — malformed varint.");
+    }
+
+    /// <summary>
+    /// A read-only window onto one store payload of the staged snapshot, so a store decoder reads exactly that
+    /// payload straight out of the staged buffer. Each read positions the underlying stream itself, so windows
+    /// never depend on where a previous reader left it; only one window is read at a time.
+    /// </summary>
+    private sealed class PayloadStream(Stream inner, PayloadRange range) : Stream
+    {
+        private long position;
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => range.Length;
+
+        public override long Position
+        {
+            get => position;
+            set => throw new NotSupportedException();
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
+
+        public override int Read(Span<byte> buffer)
+        {
+            long remaining = range.Length - position;
+            if (remaining <= 0 || buffer.IsEmpty)
+                return 0;
+
+            if (buffer.Length > remaining)
+                buffer = buffer[..(int)remaining];
+
+            inner.Position = range.Offset + position;
+            int read = inner.Read(buffer);
+            if (read <= 0)
+                throw new KahunaServerException("ImportPartitionState: truncated snapshot stream inside a store payload.");
+
+            position += read;
+            return read;
+        }
+
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
     /// <summary>
@@ -676,16 +1018,6 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
         KvStateMachineTransfer.FnvHashStream hasher = new();
         foreach (PartitionStateLockEntry entry in entries)
             entry.WriteTo(hasher);
-        return hasher.Hash;
-    }
-
-    /// <summary>FNV-1a 64 over the three store payloads in field order (checksum field excluded).</summary>
-    private static ulong StoreChecksumOf(PartitionStateStoreSection section)
-    {
-        KvStateMachineTransfer.FnvHashStream hasher = new();
-        hasher.Write(section.CompletionReceipts.Span);
-        hasher.Write(section.TransactionRecords.Span);
-        hasher.Write(section.PreparedIntents.Span);
         return hasher.Hash;
     }
 }

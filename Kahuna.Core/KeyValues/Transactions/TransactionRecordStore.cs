@@ -612,31 +612,31 @@ internal sealed class TransactionRecordStore
         lock (fileLock)
             files = Directory.GetFiles(snapshotDirectory, $"{snapshotPrefix}_p*.snapshot");
 
+        // Each file is decoded one record at a time straight off the file and merged as it is read: a partition's
+        // record set can be hundreds of megabytes on a busy durable workload, and a restarting node loading it as
+        // one array plus one protobuf object per record plus the records themselves held all three at once. A
+        // failure part-way through leaves a partial set, which is harmless: the constructor throws and the node
+        // refuses to start, exactly as it did when the whole file failed to parse up front.
         foreach (string path in files)
         {
-            byte[] data;
             try
             {
                 lock (fileLock)
-                    data = File.ReadAllBytes(path);
-            }
-            catch (Exception ex)
-            {
-                throw new IOException($"Failed to read transaction-record snapshot {path}; refusing to start with a possibly incomplete decision set", ex);
-            }
+                {
+                    using FileStream file = new(path, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024);
 
-            TransactionRecordSnapshotMessage message;
-            try
-            {
-                message = ReplicationSerializer.UnserializeTransactionRecordSnapshotMessage(data);
+                    foreach (TransactionRecord record in ReadRecords(file))
+                        MergeLoad(record);
+                }
             }
-            catch (Exception ex)
+            catch (InvalidProtocolBufferException ex)
             {
                 throw new InvalidDataException($"Corrupt transaction-record snapshot {path}; refusing to start empty and lose a committed decision", ex);
             }
-
-            foreach (TransactionRecordSnapshotEntry entry in message.Records)
-                MergeLoad(FromSnapshotEntry(entry));
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                throw new IOException($"Failed to read transaction-record snapshot {path}; refusing to start with a possibly incomplete decision set", ex);
+            }
         }
     }
 
@@ -779,7 +779,9 @@ internal sealed class TransactionRecordStore
     }
 
     /// <summary>Folds transferred records into this partition's set (idempotent by identity + terminal-decision
-    /// authority), for whole-partition state transfer that repairs a below-floor node or a split/merge cutover.</summary>
+    /// authority), for whole-partition state transfer that repairs a below-floor node or a split/merge cutover.
+    /// Enumerates <paramref name="incoming"/> once, folding each record before reading the next, so a lazily
+    /// decoded source (<see cref="ReadRecords"/>) is never materialised.</summary>
     public void ImportRecords(IEnumerable<TransactionRecord> incoming)
     {
         foreach (TransactionRecord record in incoming)
@@ -803,6 +805,36 @@ internal sealed class TransactionRecordStore
             result.Add(FromSnapshotEntry(entry));
 
         return result;
+    }
+
+    /// <summary>
+    /// Decodes a <see cref="SerializeRecords"/> payload one record at a time, reading it off
+    /// <paramref name="payload"/> as the caller enumerates. Unlike <see cref="DeserializeRecords"/>, neither the
+    /// payload bytes nor the decoded set is ever held whole: each entry is parsed into a fresh message that is
+    /// garbage as soon as its record is yielded, so the live memory of a caller that folds each record into the
+    /// store (<see cref="ImportRecords"/>) is the store itself plus one entry. The whole-partition install and the
+    /// startup load of the per-partition snapshot files use this, since a partition's record set can be hundreds of
+    /// megabytes under a busy durable workload.
+    /// A malformed payload throws <see cref="InvalidProtocolBufferException"/> at the entry that fails to parse.
+    /// </summary>
+    public static IEnumerable<TransactionRecord> ReadRecords(Stream payload)
+    {
+        CodedInputStream input = new(payload, leaveOpen: true);
+
+        uint tag;
+        while ((tag = input.ReadTag()) != 0)
+        {
+            if (WireFormat.GetTagFieldNumber(tag) != TransactionRecordSnapshotMessage.RecordsFieldNumber
+                || WireFormat.GetTagWireType(tag) != WireFormat.WireType.LengthDelimited)
+            {
+                input.SkipLastField();
+                continue;
+            }
+
+            TransactionRecordSnapshotEntry entry = new();
+            input.ReadMessage(entry);
+            yield return FromSnapshotEntry(entry);
+        }
     }
 
     // ── record <-> snapshot proto ───────────────────────────────────────────────────

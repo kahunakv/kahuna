@@ -415,6 +415,46 @@ internal sealed class CompletionReceiptStore
         }
     }
 
+    /// <summary>
+    /// Decodes a receipt batch in the <see cref="SerializeImport"/> / <see cref="WritePartitionReceipts"/> format
+    /// one receipt at a time off <paramref name="payload"/>, as the caller enumerates — for the whole-partition
+    /// install and the startup load of the per-partition snapshot files, whose receipt sets are too large to hold
+    /// as one array plus a decoded list. Only a recording batch
+    /// is a valid snapshot slice: a batch flagged <c>Forget</c> throws <see cref="InvalidDataException"/> when the
+    /// flag is reached, so a caller that enumerates the whole payload before applying anything (the install's
+    /// verification pass) refuses it before any state changes. A malformed entry throws
+    /// <see cref="InvalidProtocolBufferException"/>.
+    /// </summary>
+    public static IEnumerable<CompletionReceiptRecord> ReadReceipts(Stream payload)
+    {
+        CodedInputStream input = new(payload, leaveOpen: true);
+
+        uint tag;
+        while ((tag = input.ReadTag()) != 0)
+        {
+            switch (WireFormat.GetTagFieldNumber(tag))
+            {
+                case 1: // repeated GrpcCompletionReceiptEntry Receipts
+                    PendingReceipt receipt = ParseReceiptEntry(input);
+                    yield return new CompletionReceiptRecord(receipt.TransactionId, receipt.Key, receipt.RecordAnchorKey, receipt.Durability);
+                    break;
+
+                case 2: // int32 DestinationPartitionId — routing already resolved
+                    input.ReadInt32();
+                    break;
+
+                case 3: // bool Forget
+                    if (input.ReadBool())
+                        throw new InvalidDataException("A receipt batch flagged Forget is not a snapshot slice.");
+                    break;
+
+                default:
+                    input.SkipLastField();
+                    break;
+            }
+        }
+    }
+
     // Reads one GrpcCompletionReceiptEntry off the stream into a value tuple, without allocating the generated
     // message object. An absent RecordAnchorKey (field 5) stays null, matching HasRecordAnchorKey == false.
     private static PendingReceipt ParseReceiptEntry(CodedInputStream input)
@@ -638,37 +678,30 @@ internal sealed class CompletionReceiptStore
         lock (fileLock)
             files = Directory.GetFiles(snapshotDirectory, $"{snapshotPrefix}_p*.snapshot");
 
+        // Each file is decoded one receipt at a time straight off the file and recorded as it is read, rather than
+        // read into one array and parsed into one message holding every receipt: a partition's receipt set can be
+        // hundreds of thousands of entries under a busy durable workload. A failure part-way through leaves a
+        // partial set, which is harmless: the constructor throws and the node refuses to start.
         foreach (string path in files)
         {
-            byte[] data;
-
             try
             {
                 lock (fileLock)
-                    data = File.ReadAllBytes(path);
-            }
-            catch (Exception ex)
-            {
-                throw new IOException($"Failed to read completion-receipt snapshot {path}; refusing to start with a possibly incomplete receipt set", ex);
-            }
+                {
+                    using FileStream file = new(path, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024);
 
-            GrpcImportCompletionReceiptsRequest message;
-
-            try
-            {
-                message = GrpcImportCompletionReceiptsRequest.Parser.ParseFrom(data);
+                    foreach (CompletionReceiptRecord receipt in ReadReceipts(file))
+                        Record(receipt.TransactionId, receipt.Key, receipt.RecordAnchorKey, receipt.Durability);
+                }
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is InvalidProtocolBufferException or InvalidDataException)
             {
                 throw new InvalidDataException($"Corrupt completion-receipt snapshot {path}; refusing to start empty and lose proof of a commit", ex);
             }
-
-            foreach (GrpcCompletionReceiptEntry entry in message.Receipts)
-                Record(
-                    new HLCTimestamp(entry.TransactionIdNode, entry.TransactionIdPhysical, entry.TransactionIdCounter),
-                    entry.Key,
-                    entry.HasRecordAnchorKey ? entry.RecordAnchorKey : null,
-                    (KeyValueDurability)entry.Durability);
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                throw new IOException($"Failed to read completion-receipt snapshot {path}; refusing to start with a possibly incomplete receipt set", ex);
+            }
         }
     }
 

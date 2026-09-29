@@ -224,6 +224,22 @@ plus two map commits — and, because each stage is decided on a separate pass, 
 faster at the cost of more concurrent backfill traffic; shorten the pass interval when the tick
 term dominates, which it does whenever ranges are small.
 
+**Snapshot staging memory.** A node receiving a whole-partition snapshot stages all of it in memory
+before installing it, and a leader that retries a slow transfer opens a fresh session while the old one
+is still staged. `--raft-snapshot-max-pending-bytes` (embedded: `RaftSnapshotMaxPendingBytes`; default
+512 MB) caps those staged bytes across all sessions and is the receive path's memory bound. Size it
+between two limits:
+
+- **Above** the largest whole-partition snapshot this node will receive (key-value rows and locks plus
+  the partition's retained transaction records, receipts and intents), ideally about twice that, so a
+  retry can stage while an install runs. A snapshot larger than the cap can never be staged, and a
+  replica that falls below the leader's compaction floor then cannot be re-seeded.
+- **Well below** the memory the process may use on top of its steady state. On a memory-limited
+  container the default can be a large share of the headroom.
+
+`--raft-snapshot-max-pending-sessions` (embedded: `RaftSnapshotMaxPendingSessions`; default 8) caps the
+number of concurrent sessions.
+
 ---
 
 ## 7. What to watch

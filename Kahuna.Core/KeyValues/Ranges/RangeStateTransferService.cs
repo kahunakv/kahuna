@@ -54,6 +54,14 @@ internal sealed class RangeStateTransferService
     /// </summary>
     internal Func<int, bool>? ReplicateReceiptForgetFault { get; set; }
 
+    /// <summary>
+    /// Test-only injection point: invoked with (destination partition, log type, entry bytes) before each chunk of
+    /// a split/merge record or intent handoff is replicated; returning true reports that chunk not durable. Invoked
+    /// exactly once per chunk, so a hook that always returns false also observes how the handoff was chunked.
+    /// Never wired in production paths.
+    /// </summary>
+    internal Func<int, string, int, bool>? DurableHandoffEntryFault { get; set; }
+
     // Aliases matching the field names the moved bodies use, so those bodies stay byte-for-byte as they were.
     private IRaft raft => runtime.Raft;
 
@@ -252,6 +260,13 @@ internal sealed class RangeStateTransferService
     /// deterministic apply so every replica of the destination range holds them after cutover. Returns whether the
     /// whole handoff was durable; a false return must abort the split/merge cutover, so unresolved 2PC state is
     /// never stranded on a retired partition. Empty inputs are a no-op success.
+    ///
+    /// <para>The handoff is replicated in chunks of at most <see cref="TransactionStateHandoffChunkItems"/> items
+    /// (and, for intents, <see cref="TransactionStateHandoffChunkBytes"/> of values), one log entry each. A busy
+    /// range holds hundreds of thousands of records; as one entry the handoff was tens of megabytes — beyond the
+    /// Raft transport's message limit, so it could never reach the destination's followers, and beyond the
+    /// internode limit when forwarded to a remote destination leader. Each chunk's apply is idempotent, so a
+    /// handoff that fails part-way and is re-driven converges; a failed chunk fails the whole handoff.</para>
     /// </summary>
     internal async Task<bool> ImportDurableTransactionStateToPartitionLeaderAsync(
         int partitionId,
@@ -259,24 +274,139 @@ internal sealed class RangeStateTransferService
         IReadOnlyList<Transactions.Data.PreparedIntent> intents,
         CancellationToken cancellationToken)
     {
-        if (records.Count > 0)
+        foreach (Transactions.Data.TransactionRecord[] chunk in records.Chunk(TransactionStateHandoffChunkItems))
         {
-            byte[] recordDelta = TransactionRecordStore.SerializeReconstructionDelta(records);
+            byte[] recordDelta = TransactionRecordStore.SerializeReconstructionDelta(chunk);
+            if (DurableHandoffEntryFault is not null && DurableHandoffEntryFault(partitionId, ReplicationTypes.TransactionRecord, recordDelta.Length))
+                return false;
+
             // Topology-transfer imports must land during cutover regardless of local write pressure — admit as
             // Terminal so an ordinary-write burst on the destination cannot reject the handoff.
             if (!await ReplicateDurableThroughScheduler(partitionId, ReplicationTypes.TransactionRecord, recordDelta, Writes.WriteAdmissionClass.Terminal, cancellationToken).ConfigureAwait(false))
                 return false;
         }
 
-        if (intents.Count > 0)
+        int start = 0;
+        while (start < intents.Count)
         {
-            byte[] intentDelta = PreparedIntentStore.SerializeDelta(
-                intents.Select(i => (Transactions.Data.PreparedIntentCommand)new Transactions.Data.PrepareIntentCommand(i)));
+            // Intents carry their full values, so the chunk is also cut by value bytes; a chunk always takes at
+            // least one intent, however large.
+            int end = start;
+            long bytes = 0;
+            while (end < intents.Count && end - start < TransactionStateHandoffChunkItems
+                   && (end == start || bytes + (intents[end].Value?.Length ?? 0) <= TransactionStateHandoffChunkBytes))
+            {
+                bytes += intents[end].Value?.Length ?? 0;
+                end++;
+            }
+
+            List<Transactions.Data.PreparedIntentCommand> commands = new(end - start);
+            for (int i = start; i < end; i++)
+                commands.Add(new Transactions.Data.PrepareIntentCommand(intents[i]));
+
+            byte[] intentDelta = PreparedIntentStore.SerializeDelta(commands);
+            if (DurableHandoffEntryFault is not null && DurableHandoffEntryFault(partitionId, ReplicationTypes.PreparedIntent, intentDelta.Length))
+                return false;
+
             if (!await ReplicateDurableThroughScheduler(partitionId, ReplicationTypes.PreparedIntent, intentDelta, Writes.WriteAdmissionClass.Terminal, cancellationToken).ConfigureAwait(false))
                 return false;
+
+            start = end;
         }
 
         return true;
+    }
+
+    /// <summary>Items per replicated or forwarded handoff chunk — the gather's page size, so one gathered page
+    /// becomes at most one handoff entry per kind.</summary>
+    internal const int TransactionStateHandoffChunkItems = TransactionStatePageSize;
+
+    /// <summary>Value bytes per prepared-intent handoff chunk: keeps an entry of large values well under the
+    /// transport limits (4 MB internode, 16 MB Raft by default).</summary>
+    internal const long TransactionStateHandoffChunkBytes = 1024 * 1024;
+
+    /// <summary>Where a range transaction-state transfer stopped; anything but <see cref="Transferred"/> must abort
+    /// the split/merge before cutover.</summary>
+    internal enum RangeTransactionStateTransferOutcome
+    {
+        Transferred,
+        GatherFailed,
+        ReceiptHandoffFailed,
+        StateHandoffFailed
+    }
+
+    /// <summary>
+    /// Moves the transaction state of <c>[startKey, endKey)</c> — completion receipts, then canonical records, then
+    /// prepared intents — from the source partition onto <paramref name="destinationPartitionId"/>, for a
+    /// split/merge before its cutover.
+    ///
+    /// <para>With <paramref name="fromSourceLeader"/> (the source has a committed replica set) the state is read
+    /// from the source leader's stores, and each gathered page is handed off before the next is fetched, so the
+    /// transfer holds one page at a time however much state the range carries — gathering everything first held
+    /// the range's whole record, receipt and intent sets, decoded, on the node driving the split. Otherwise
+    /// (legacy full replication) the state is read from this node's stores, which already hold it, and handed off
+    /// in chunks.</para>
+    ///
+    /// <para>A failure part-way leaves the chunks already handed off on the destination, exactly as a failed
+    /// records handoff after a durable receipts handoff always did: the caller aborts before cutover, the source
+    /// still owns the range, and a re-driven transfer replays the same idempotent applies.</para>
+    /// </summary>
+    internal async Task<RangeTransactionStateTransferOutcome> TransferRangeTransactionStateAsync(
+        int sourcePartitionId, bool fromSourceLeader, string? startKey, string? endKey, int destinationPartitionId, CancellationToken cancellationToken)
+    {
+        if (!fromSourceLeader)
+        {
+            if (!await ImportCompletionReceiptsToPartitionLeaderAsync(destinationPartitionId, GetLocalCompletionReceiptsForRange(startKey, endKey), cancellationToken).ConfigureAwait(false))
+                return RangeTransactionStateTransferOutcome.ReceiptHandoffFailed;
+
+            if (!await ImportDurableTransactionStateToPartitionLeaderAsync(
+                    destinationPartitionId, GetLocalTransactionRecordsForRange(startKey, endKey), GetLocalPreparedIntentsForRange(startKey, endKey), cancellationToken).ConfigureAwait(false))
+                return RangeTransactionStateTransferOutcome.StateHandoffFailed;
+
+            return RangeTransactionStateTransferOutcome.Transferred;
+        }
+
+        foreach (KeyValueRangeStateKinds kind in (KeyValueRangeStateKinds[])
+                 [KeyValueRangeStateKinds.Receipts, KeyValueRangeStateKinds.Records, KeyValueRangeStateKinds.Intents])
+        {
+            string? cursor = null;
+
+            while (true)
+            {
+                (bool ok, List<CompletionReceiptRecord> receipts, byte[] recordBytes, byte[] intentBytes, bool hasMore, string? nextCursor) =
+                    await GetRangeTransactionStatePageAsync(sourcePartitionId, startKey, endKey, kind, cursor, cancellationToken).ConfigureAwait(false);
+
+                if (!ok)
+                    return RangeTransactionStateTransferOutcome.GatherFailed;
+
+                if (receipts.Count > 0
+                    && !await ImportCompletionReceiptsToPartitionLeaderAsync(destinationPartitionId, receipts, cancellationToken).ConfigureAwait(false))
+                    return RangeTransactionStateTransferOutcome.ReceiptHandoffFailed;
+
+                IReadOnlyList<Transactions.Data.TransactionRecord> records = recordBytes.Length > 0 ? DecodeRecords(recordBytes) : [];
+                IReadOnlyList<Transactions.Data.PreparedIntent> intents = intentBytes.Length > 0 ? PreparedIntentStore.DeserializeIntents(intentBytes) : [];
+
+                if ((records.Count > 0 || intents.Count > 0)
+                    && !await ImportDurableTransactionStateToPartitionLeaderAsync(destinationPartitionId, records, intents, cancellationToken).ConfigureAwait(false))
+                    return RangeTransactionStateTransferOutcome.StateHandoffFailed;
+
+                // An old peer answers the whole set unpaged (HasMore false) — the loop ends after one page.
+                if (!hasMore || nextCursor is null)
+                    break;
+
+                cursor = nextCursor;
+            }
+        }
+
+        return RangeTransactionStateTransferOutcome.Transferred;
+    }
+
+    /// <summary>Decodes one gathered page of records entry by entry, without first building the page's protobuf
+    /// message tree.</summary>
+    private static List<Transactions.Data.TransactionRecord> DecodeRecords(byte[] recordBytes)
+    {
+        using MemoryStream payload = new(recordBytes, writable: false);
+        return [.. TransactionRecordStore.ReadRecords(payload)];
     }
 
     /// <summary>Records transferred completion receipts into this node's local store (state-transfer seeding).</summary>
@@ -874,7 +1004,7 @@ internal sealed class RangeStateTransferService
 
                 receipts.AddRange(pageReceipts);
                 if (recordBytes.Length > 0)
-                    records.AddRange(TransactionRecordStore.DeserializeRecords(recordBytes));
+                    records.AddRange(DecodeRecords(recordBytes));
                 if (intentBytes.Length > 0)
                     intents.AddRange(PreparedIntentStore.DeserializeIntents(intentBytes));
 
@@ -976,6 +1106,26 @@ internal sealed class RangeStateTransferService
     /// the destination partition; used by split/merge to gate cutover.
     /// </summary>
     internal async Task<bool> ImportCompletionReceiptsToPartitionLeaderAsync(
+        int partitionId,
+        IReadOnlyCollection<CompletionReceiptRecord> receiptsToImport,
+        CancellationToken cancellationToken)
+    {
+        if (receiptsToImport.Count <= TransactionStateHandoffChunkItems)
+            return await ImportCompletionReceiptChunkToPartitionLeaderAsync(partitionId, receiptsToImport, cancellationToken).ConfigureAwait(false);
+
+        // One replicated entry (and, to a remote leader, one internode message) per chunk: the receipts of a busy
+        // range as one batch exceed the transport limits. Recording a receipt is idempotent, so a re-driven
+        // handoff after a failed chunk converges.
+        foreach (CompletionReceiptRecord[] chunk in receiptsToImport.Chunk(TransactionStateHandoffChunkItems))
+        {
+            if (!await ImportCompletionReceiptChunkToPartitionLeaderAsync(partitionId, chunk, cancellationToken).ConfigureAwait(false))
+                return false;
+        }
+
+        return true;
+    }
+
+    private async Task<bool> ImportCompletionReceiptChunkToPartitionLeaderAsync(
         int partitionId,
         IReadOnlyCollection<CompletionReceiptRecord> receiptsToImport,
         CancellationToken cancellationToken)

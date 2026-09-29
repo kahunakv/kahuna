@@ -242,6 +242,17 @@ internal sealed partial class KeyValuesManager : IDisposable
     }
 
     /// <summary>
+    /// Test-only injection point: invoked with (destination partition, log type, entry bytes) before each chunk of a
+    /// split/merge record or intent handoff is replicated; returning true reports that chunk not durable. Never
+    /// wired in production paths.
+    /// </summary>
+    internal Func<int, string, int, bool>? DurableHandoffEntryFault
+    {
+        get => rangeStateTransfer.DurableHandoffEntryFault;
+        set => rangeStateTransfer.DurableHandoffEntryFault = value;
+    }
+
+    /// <summary>
     /// Test-only injection point: when set, receives (partition, real fingerprint or null when not hosted)
     /// and answers what this node reports in its place, so a fixture can make one replica report a
     /// diverged committed-head count without corrupting a real apply stream. Never wired in production paths.

@@ -565,6 +565,29 @@ public sealed class EmbeddedKahunaOptions
     /// </summary>
     public bool RaftWalSingleFsyncCommit { get; set; }
 
+    /// <summary>
+    /// Cap on the snapshot bytes this node stages in memory across every snapshot it is receiving — the sessions
+    /// still arriving plus the ones whose install is running. Mirrors <c>RaftConfiguration.SnapshotMaxPendingBytes</c>
+    /// (<c>--raft-snapshot-max-pending-bytes</c> on <c>Kahuna.Server</c>); null keeps Kommander's default (512 MB).
+    /// <para>
+    /// A snapshot is staged whole before it installs, and a leader that retries a slow transfer opens a new
+    /// session while the old one is still staged, so this is the receive path's memory bound: size it against the
+    /// memory the process may use, not only against the data. It must also exceed the largest whole-partition
+    /// snapshot this node will ever need, or that partition's snapshot can never be staged and a replica that
+    /// falls below the leader's compaction floor cannot be re-seeded. The snapshot of a partition is its
+    /// key-value rows and persistent locks plus its retained transaction records, receipts and intents.
+    /// Around twice the largest snapshot lets one retry stage while an install runs.
+    /// </para>
+    /// </summary>
+    public long? RaftSnapshotMaxPendingBytes { get; set; }
+
+    /// <summary>
+    /// Cap on concurrent snapshot-receive sessions across all partitions; beyond it the receiver evicts its
+    /// least-recently-active sessions. Mirrors <c>RaftConfiguration.SnapshotMaxPendingSessions</c>; null keeps
+    /// Kommander's default (8).
+    /// </summary>
+    public int? RaftSnapshotMaxPendingSessions { get; set; }
+
     // ── Raft WAL shard column-family sizing (Kommander RocksDbWalTuning) ──────────────────────
     // Each knob below is null by default, and null means "leave Kommander's own default for that
     // field untouched". RaftWalTuningFactory starts from RocksDbWalTuning.Default and applies only

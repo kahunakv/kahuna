@@ -102,4 +102,48 @@ public sealed class TestEmbeddedRaftConfigurationSurface
         Assert.Equal(TimeSpan.Zero, options.RecentHeartbeat);
         Assert.Equal(TimeSpan.Zero, EmbeddedKahunaNode.CreateRaftConfiguration(options).RecentHeartbeat);
     }
+
+    [Fact]
+    public void TestSnapshotReceiveCapsDefaultToKommanderDefaults()
+    {
+        RaftConfiguration kommanderDefaults = new();
+        RaftConfiguration configuration = EmbeddedKahunaNode.CreateRaftConfiguration(new EmbeddedKahunaOptions());
+
+        Assert.Equal(kommanderDefaults.SnapshotMaxPendingBytes, configuration.SnapshotMaxPendingBytes);
+        Assert.Equal(kommanderDefaults.SnapshotMaxPendingSessions, configuration.SnapshotMaxPendingSessions);
+    }
+
+    [Fact]
+    public void TestSnapshotReceiveCapsThreadThroughRaftConfiguration()
+    {
+        EmbeddedKahunaOptions options = new()
+        {
+            RaftSnapshotMaxPendingBytes = 192L * 1024 * 1024,
+            RaftSnapshotMaxPendingSessions = 3
+        };
+
+        RaftConfiguration configuration = EmbeddedKahunaNode.CreateRaftConfiguration(options);
+
+        Assert.Equal(192L * 1024 * 1024, configuration.SnapshotMaxPendingBytes);
+        Assert.Equal(3, configuration.SnapshotMaxPendingSessions);
+        configuration.Validate();
+    }
+
+    [Theory]
+    [InlineData(0L, null)]
+    [InlineData(-1L, null)]
+    [InlineData(null, 0)]
+    [InlineData(null, -2)]
+    public void TestANonPositiveSnapshotReceiveCapIsRefusedWithTheOptionNamed(long? maxPendingBytes, int? maxPendingSessions)
+    {
+        EmbeddedKahunaOptions options = new()
+        {
+            NodeName = "snapshot-caps",
+            RaftSnapshotMaxPendingBytes = maxPendingBytes,
+            RaftSnapshotMaxPendingSessions = maxPendingSessions
+        };
+
+        ArgumentException refused = Assert.Throws<ArgumentException>(() => new EmbeddedKahunaNode(options));
+        Assert.Contains(maxPendingBytes is not null ? "RaftSnapshotMaxPendingBytes" : "RaftSnapshotMaxPendingSessions", refused.Message);
+    }
 }
