@@ -154,6 +154,44 @@ public sealed class TestPartitionApplyFingerprint : BaseCluster
         return (nodes, partition, keys);
     }
 
+    /// <summary>
+    /// A standalone node forms its quorum with two phantom witnesses that hold no replica and answer no
+    /// request. They are not peers of the comparison: with them asked, every leader-change comparison
+    /// waited out its whole window and logged an inconclusive warning on a node that has nothing to
+    /// compare against.
+    /// </summary>
+    [Fact]
+    public async Task StandaloneNode_ComparesConclusively_WithoutAskingItsPhantomWitnesses()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        await using EmbeddedKahunaNode node = new(new()
+        {
+            Storage = "memory",
+            WalStorage = "memory",
+            InitialPartitions = 1
+        });
+        await node.StartAsync(ct);
+
+        KahunaManager manager = (KahunaManager)node.Kahuna;
+        string local = node.Raft.GetLocalEndpoint();
+
+        foreach (int partition in new[] { RangeMapStore.MetaPartitionId, 1 })
+        {
+            await WaitUntilAsync(async () => await node.Raft.AmILeaderIfHosted(partition, ct), timeoutMs: 30_000);
+
+            // The roster still names the witnesses, so the probe has to leave them out itself.
+            Assert.Contains(node.Raft.GetNodes(), n => EmbeddedRaftCommunication.IsWitness(n.Endpoint));
+            Assert.Empty(manager.KeyValues.ReplicationDispatcher.ApplyFingerprintProbe.PeersOf(partition, local));
+
+            ApplyFingerprintComparison comparison = await manager.KeyValues.CompareApplyFingerprintWithReplicasAsync(partition, ct);
+            Assert.True(comparison.IsDeterminate);
+            Assert.True(comparison.IsConclusive);
+            Assert.False(comparison.HasDivergence);
+            Assert.Equal(0, comparison.PeersAsked);
+        }
+    }
+
     [Fact]
     public async Task Fingerprints_ConvergeAcrossReplicas_AfterDurableCommits()
     {

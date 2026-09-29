@@ -130,7 +130,8 @@ internal sealed class PartitionApplyFingerprintProbe
     /// <summary>
     /// Every replica of the partition except <paramref name="leader"/>: the committed replica set when
     /// the partition is placed, else every cluster node (legacy full replication hosts a partition
-    /// everywhere).
+    /// everywhere). The phantom witnesses of a standalone node are peers in the roster only: they hold
+    /// no replica and answer no request, so asking them makes every comparison inconclusive.
     /// </summary>
     internal List<string> PeersOf(int partitionId, string leader)
     {
@@ -155,7 +156,7 @@ internal sealed class PartitionApplyFingerprintProbe
             peers.Add(local);
 
         foreach (RaftNode node in nodes)
-            if (node.Endpoint != leader && node.Endpoint != local)
+            if (node.Endpoint != leader && node.Endpoint != local && !EmbeddedRaftCommunication.IsWitness(node.Endpoint))
                 peers.Add(node.Endpoint);
 
         return peers;
