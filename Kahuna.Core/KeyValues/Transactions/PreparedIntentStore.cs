@@ -306,9 +306,11 @@ internal sealed class PreparedIntentStore
         }
     }
 
-    // The pair of stamps a partition's snapshot file was written under: the mutation tick it covered and the
-    // routing stamp it routed with. A checkpoint skips the rewrite only when both still match.
-    private readonly record struct PersistedStamp(long Version, long RoutingVersion);
+    // The stamps a partition's snapshot file was written under: the mutation tick it covered, the routing stamp
+    // it routed with, and the applied position it certified as fully reflected. A checkpoint skips the rewrite
+    // only when all three still match — a file whose position fell behind the store's would replay the entries
+    // in between through the live path on the next restart (see PersistSnapshot).
+    private readonly record struct PersistedStamp(long Version, long RoutingVersion, long AppliedThroughIndex);
 
     // Invoked (outside the apply gate) with the committed intent whenever a commit settlement (resolve or
     // removal of a committed intent) applies on this node — the convergence hook: the same apply position
@@ -1722,24 +1724,32 @@ internal sealed class PreparedIntentStore
     internal long GetLedgerReflectedThroughIndex(int partitionId) =>
         ledgers.TryGetValue(partitionId, out PartitionLedger? ledger) ? Volatile.Read(ref ledger.ReflectedThroughIndex) : 0;
 
-    /// <summary>Records <paramref name="logIndex"/> as applied through this store on <paramref name="partitionId"/>'s
-    /// log and reports where the entry sits relative to the installed snapshot. An unindexed log (the
-    /// pure/in-memory test configuration) is never history.</summary>
-    private HistoryWindow NoteApplied(int partitionId, long logIndex)
+    /// <summary>Reports where the entry at <paramref name="logIndex"/> on <paramref name="partitionId"/>'s log sits
+    /// relative to the partition's installed snapshot. An unindexed log (the pure/in-memory test configuration)
+    /// is never history.</summary>
+    private HistoryWindow WindowOf(int partitionId, long logIndex)
     {
-        if (logIndex <= 0)
-            return HistoryWindow.Live;
-
-        appliedLogIndexByPartition.AddOrUpdate(
-            partitionId, static (_, index) => index, static (_, current, index) => index > current ? index : current, logIndex);
-
-        if (!ledgers.TryGetValue(partitionId, out PartitionLedger? ledger))
+        if (logIndex <= 0 || !ledgers.TryGetValue(partitionId, out PartitionLedger? ledger))
             return HistoryWindow.Live;
 
         if (logIndex <= Volatile.Read(ref ledger.FullyReflectedThroughIndex))
             return HistoryWindow.FullyReflected;
 
         return logIndex <= Volatile.Read(ref ledger.ReflectedThroughIndex) ? HistoryWindow.Reflected : HistoryWindow.Live;
+    }
+
+    /// <summary>Records <paramref name="logIndex"/> as applied through this store on <paramref name="partitionId"/>'s
+    /// log. Called AFTER the entry's commands are in the map, never before: the position is what an exporter or a
+    /// checkpoint reads before walking the intents to certify "every intent prepared at or below this position is
+    /// in the walk", and a position published while its own entry was still mid-apply would let the walk miss
+    /// that entry's intent — which a replay at or below the fully reflected position then never re-installs.</summary>
+    private void MarkApplied(int partitionId, long logIndex)
+    {
+        if (logIndex <= 0)
+            return;
+
+        appliedLogIndexByPartition.AddOrUpdate(
+            partitionId, static (_, index) => index, static (_, current, index) => index > current ? index : current, logIndex);
     }
 
     /// <summary>
@@ -2073,7 +2083,7 @@ internal sealed class PreparedIntentStore
         // History below an installed snapshot's reflected position applies without the advisory fence: the
         // ledger is ahead of these entries by construction, so a verdict here could only be a false refusal and
         // a false veto (see IsHistoricalApply).
-        HistoryWindow window = NoteApplied(partitionId, log.Id);
+        HistoryWindow window = WindowOf(partitionId, log.Id);
         bool installed = false;
 
         foreach (PreparedIntentCommand command in commands)
@@ -2099,6 +2109,8 @@ internal sealed class PreparedIntentStore
                     : Writes.PrepareRejectionKind.KeyHeld);
             }
         }
+
+        MarkApplied(partitionId, log.Id);
 
         if (installed)
             resolvedIntentInstaller!.CompleteEntry(partitionId, log.Id, replay: false);
@@ -2130,7 +2142,7 @@ internal sealed class PreparedIntentStore
         if (!locallyProposedDeltas.TryTake(log.LogData, out PreparedIntentCommand[]? commands))
             commands = DecodeDelta(log.LogData);
 
-        HistoryWindow window = NoteApplied(partitionId, log.Id);
+        HistoryWindow window = WindowOf(partitionId, log.Id);
         bool installed = false;
 
         foreach (PreparedIntentCommand command in commands)
@@ -2140,6 +2152,8 @@ internal sealed class PreparedIntentStore
 
             Apply(command, partitionId, window);
         }
+
+        MarkApplied(partitionId, log.Id);
 
         if (installed)
             resolvedIntentInstaller!.CompleteEntry(partitionId, log.Id, replay);
@@ -2750,7 +2764,25 @@ internal sealed class PreparedIntentStore
     /// <summary>Atomically rewrites this partition's on-disk intent snapshot. Returns true (durable) so the WAL
     /// checkpoint may discard the covered tail; false on write failure gates the checkpoint. No-op (true) when
     /// persistence or the resolver is not configured.</summary>
-    public bool PersistSnapshot(int partitionId)
+    /// <param name="appliedThroughIndex">
+    /// The partition's log position the caller certifies as applied through this store BEFORE the call: every
+    /// prepared-intent entry at or below it has completed its apply (the durability tracker's prepared-intent
+    /// ceiling, which is raised after each apply returns). The file records it as the slice's fully reflected
+    /// position, and the position read after the intent walk as its reflected one, exactly as a whole-partition
+    /// section carries the exporter's positions — so a restart's replay of the entries at or below them is
+    /// history the reloaded set already reflects, not live catch-up.
+    ///
+    /// <para>Without it a restart replayed history through the live path against an intent set captured later
+    /// than the replay's start: the application-durability floor the WAL replays from can sit hundreds of
+    /// thousands of entries below the checkpoint (a flusher behind on a stalled disk), and a prepare that the
+    /// live apply had rejected because a competitor held its key found the key free in the replay — the holder
+    /// had settled before the checkpoint — and installed a phantom holder no replica ever had. Every later
+    /// transaction of the key was then refused here as foreign-held, its by-reference materialization found no
+    /// intent, and the key's head froze below its peers'; when the node led next it served the frozen value
+    /// (CamusDB fault soak sn1, 2026-09-30: two rows lost ~100 s of commits). Zero means the caller certifies
+    /// nothing, and the file keeps only whatever positions the slice was installed with.</para>
+    /// </param>
+    public bool PersistSnapshot(int partitionId, long appliedThroughIndex = 0)
     {
         if (snapshotDirectory is null || snapshotPrefix is null || resolvePartition is null)
             return true;
@@ -2758,14 +2790,18 @@ internal sealed class PreparedIntentStore
         // Unchanged since this partition's last durable write: the file already holds exactly this content, so
         // the checkpoint may proceed without scanning or rewriting anything. The stamp is captured before the
         // scan and recorded only after a successful write, so a failed write or a mutation racing the scan
-        // always leaves the partition due for a rewrite.
+        // always leaves the partition due for a rewrite. The certified position is part of the stamp: an
+        // unchanged set at a later position still needs its file to say so, or the entries in between replay
+        // as live history on the next restart.
         long observedVersion = Math.Max(
             Interlocked.Read(ref allPartitionsVersion),
             partitionVersion.TryGetValue(partitionId, out long dirtyTick) ? dirtyTick : 0);
         long observedRouting = routingVersion?.Invoke() ?? 0;
+        long certifiedThroughIndex = Math.Max(0, appliedThroughIndex);
 
         if (persistedVersion.TryGetValue(partitionId, out PersistedStamp last)
-            && last.Version == observedVersion && last.RoutingVersion == observedRouting)
+            && last.Version == observedVersion && last.RoutingVersion == observedRouting
+            && last.AppliedThroughIndex == certifiedThroughIndex)
             return true;
 
         string path = Path.Combine(snapshotDirectory, $"{snapshotPrefix}_p{partitionId}.snapshot");
@@ -2788,6 +2824,12 @@ internal sealed class PreparedIntentStore
                 string tmp = path + ".tmp";
 
                 LedgerCapture? ledger = CaptureLedger(partitionId);
+
+                // The position the file certifies as fully reflected: what the caller certified, never below
+                // what the slice was installed with. Read BEFORE the walk (the caller's ceiling is raised only
+                // after an apply returns, so every intent an entry at or below it prepared is in the map when
+                // the walk starts) — the same cut a whole-partition export takes (see WritePartitionSection).
+                long fullyReflected = Math.Max(certifiedThroughIndex, ledger?.FullyReflectedThroughIndex ?? 0);
 
                 // Settled intents whose materialized row is still queued for the flush ride in the same file, in
                 // their own field: a reader must never install them as live intents.
@@ -2818,15 +2860,20 @@ internal sealed class PreparedIntentStore
                         }
                     }
 
-                    // The checkpoint persists the slice's reflected positions as installed, so a restart mid
-                    // catch-up after a snapshot install keeps treating the remaining window as history.
-                    WriteLedgerSection(output, partitionId, ledger, ledger?.ReflectedThroughIndex ?? 0, ledger?.FullyReflectedThroughIndex ?? 0);
+                    // The checkpoint persists the slice's positions: the ones it was installed with (so a restart
+                    // mid catch-up after a snapshot install keeps treating the remaining window as history) raised
+                    // to this node's own — the certified cut as fully reflected, and the position applied through
+                    // this store by the end of the walk as reflected. Entries between the two are the walk's tear
+                    // window: an intent prepared there may be missing from the file, so its replayed prepare must
+                    // still install, while the advisory fence stays silent on it.
+                    long reflected = Math.Max(fullyReflected, Math.Max(AppliedLogIndexOf(partitionId), ledger?.ReflectedThroughIndex ?? 0));
+                    WriteLedgerSection(output, partitionId, ledger, reflected, fullyReflected);
                 }
 
                 File.Move(tmp, path, overwrite: true);
             }
 
-            persistedVersion[partitionId] = new PersistedStamp(observedVersion, observedRouting);
+            persistedVersion[partitionId] = new PersistedStamp(observedVersion, observedRouting, certifiedThroughIndex);
             return true;
         }
         catch (Exception ex)
