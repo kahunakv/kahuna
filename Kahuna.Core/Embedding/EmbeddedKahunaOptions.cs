@@ -588,6 +588,56 @@ public sealed class EmbeddedKahunaOptions
     /// </summary>
     public int? RaftSnapshotMaxPendingSessions { get; set; }
 
+    /// <summary>
+    /// Node-private directory where received snapshots spill to disk once staging them in memory would exceed
+    /// <see cref="RaftSnapshotStagingMemoryBytes"/>. Mirrors <c>RaftConfiguration.SnapshotStagingDirectory</c>
+    /// (<c>--raft-snapshot-staging-directory</c> on <c>Kahuna.Server</c>).
+    /// <para>
+    /// Null picks a directory under the data directory for a node with a persistent backend (sqlite or rocksdb)
+    /// and a <see cref="StoragePath"/>: <c>{StoragePath}/snapshot-staging_{StorageRevision}</c>. A memory-only node
+    /// keeps staging in memory, where <see cref="RaftSnapshotMaxPendingBytes"/> is both the memory bound and the
+    /// largest snapshot it can receive. With a directory, staged bytes above the memory budget live in spill files
+    /// rather than on the large-object heap, so <see cref="RaftSnapshotMaxPendingBytes"/> can be sized to the largest
+    /// partition without sizing memory to match.
+    /// </para>
+    /// <para>
+    /// The directory must not be shared with another node: Kommander deletes every spill file it finds there at
+    /// startup, since a spill file outliving its process can never be resumed.
+    /// </para>
+    /// </summary>
+    public string? RaftSnapshotStagingDirectory { get; set; }
+
+    /// <summary>
+    /// Memory budget for staged snapshot bytes across every receive session, including snapshots whose install is
+    /// running, when snapshots are staged on disk; a session whose next chunk would exceed it moves to a spill file.
+    /// Zero stages every session on disk from its first chunk. Mirrors <c>RaftConfiguration.SnapshotStagingMemoryBytes</c>;
+    /// null keeps Kommander's default (64 MiB). Ignored when there is no staging directory.
+    /// </summary>
+    public long? RaftSnapshotStagingMemoryBytes { get; set; }
+
+    /// <summary>
+    /// How long a leader waits for a follower to acknowledge one snapshot chunk. Mirrors
+    /// <c>RaftConfiguration.SnapshotChunkAckTimeout</c> (<c>--raft-snapshot-chunk-ack-timeout</c> on <c>Kahuna.Server</c>);
+    /// null keeps Kommander's default (15 s).
+    /// <para>
+    /// A follower acknowledges the last chunk of a snapshot only once it has installed the snapshot, so this is
+    /// also how long the install of a whole partition may take before the leader gives up on it and starts another
+    /// transfer at a newer index, while the follower is still importing the first. Size it above the slowest
+    /// install the nodes' disks allow for the largest partition. It is read by whichever node leads, so set it on
+    /// every node.
+    /// </para>
+    /// </summary>
+    public TimeSpan? RaftSnapshotChunkAckTimeout { get; set; }
+
+    /// <summary>
+    /// Upper bound on one step of an outbound snapshot transfer that makes no progress: the export, one read of it,
+    /// or one chunk send. Mirrors <c>RaftConfiguration.SnapshotTransferStepTimeout</c>
+    /// (<c>--raft-snapshot-transfer-step-timeout</c> on <c>Kahuna.Server</c>); null keeps Kommander's default (2 min).
+    /// A chunk's acknowledgement is bounded by the smaller of this and <see cref="RaftSnapshotChunkAckTimeout"/>,
+    /// so a chunk-ack timeout raised above 2 min needs this raised with it.
+    /// </summary>
+    public TimeSpan? RaftSnapshotTransferStepTimeout { get; set; }
+
     // ── Raft WAL shard column-family sizing (Kommander RocksDbWalTuning) ──────────────────────
     // Each knob below is null by default, and null means "leave Kommander's own default for that
     // field untouched". RaftWalTuningFactory starts from RocksDbWalTuning.Default and applies only

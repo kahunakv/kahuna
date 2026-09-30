@@ -146,4 +146,125 @@ public sealed class TestEmbeddedRaftConfigurationSurface
         ArgumentException refused = Assert.Throws<ArgumentException>(() => new EmbeddedKahunaNode(options));
         Assert.Contains(maxPendingBytes is not null ? "RaftSnapshotMaxPendingBytes" : "RaftSnapshotMaxPendingSessions", refused.Message);
     }
+
+    [Fact]
+    public void TestAMemoryOnlyNodeStagesSnapshotsInMemory()
+    {
+        RaftConfiguration kommanderDefaults = new();
+        RaftConfiguration configuration = EmbeddedKahunaNode.CreateRaftConfiguration(new EmbeddedKahunaOptions { StoragePath = "/var/lib/kahuna" });
+
+        Assert.Null(configuration.SnapshotStagingDirectory);
+        Assert.Equal(kommanderDefaults.SnapshotStagingMemoryBytes, configuration.SnapshotStagingMemoryBytes);
+    }
+
+    [Theory]
+    [InlineData("rocksdb")]
+    [InlineData("sqlite")]
+    public void TestAPersistentNodeStagesSnapshotsUnderItsDataDirectory(string storage)
+    {
+        RaftConfiguration configuration = EmbeddedKahunaNode.CreateRaftConfiguration(new EmbeddedKahunaOptions
+        {
+            Storage = storage,
+            StoragePath = "/var/lib/kahuna/kv",
+            StorageRevision = "v2"
+        });
+
+        Assert.Equal(Path.Combine("/var/lib/kahuna/kv", "snapshot-staging_v2"), configuration.SnapshotStagingDirectory);
+        configuration.Validate();
+    }
+
+    [Fact]
+    public void TestNodesSharingADataDirectoryGetSeparateStagingDirectories()
+    {
+        // Kommander sweeps its staging directory at startup, so two nodes under one StoragePath must not share it,
+        // including nodes that leave the revision to be generated.
+        string? a = EmbeddedKahunaNode.ResolveSnapshotStagingDirectory(new EmbeddedKahunaOptions { Storage = "rocksdb", StoragePath = "/data", StorageRevision = "a" });
+        string? b = EmbeddedKahunaNode.ResolveSnapshotStagingDirectory(new EmbeddedKahunaOptions { Storage = "rocksdb", StoragePath = "/data", StorageRevision = "b" });
+        string? unnamed1 = EmbeddedKahunaNode.ResolveSnapshotStagingDirectory(new EmbeddedKahunaOptions { Storage = "rocksdb", StoragePath = "/data" });
+        string? unnamed2 = EmbeddedKahunaNode.ResolveSnapshotStagingDirectory(new EmbeddedKahunaOptions { Storage = "rocksdb", StoragePath = "/data" });
+
+        Assert.Equal(4, new HashSet<string?>([a, b, unnamed1, unnamed2]).Count);
+    }
+
+    [Fact]
+    public void TestSnapshotStagingOptionsThreadThroughRaftConfiguration()
+    {
+        EmbeddedKahunaOptions options = new()
+        {
+            Storage = "rocksdb",
+            StoragePath = "/var/lib/kahuna/kv",
+            RaftSnapshotStagingDirectory = "/scratch/kahuna-staging",
+            RaftSnapshotStagingMemoryBytes = 0
+        };
+
+        RaftConfiguration configuration = EmbeddedKahunaNode.CreateRaftConfiguration(options);
+
+        Assert.Equal("/scratch/kahuna-staging", configuration.SnapshotStagingDirectory);
+        Assert.Equal(0, configuration.SnapshotStagingMemoryBytes);
+        configuration.Validate();
+    }
+
+    [Theory]
+    [InlineData("", null)]
+    [InlineData("   ", null)]
+    [InlineData(null, -1L)]
+    public void TestAnInvalidSnapshotStagingOptionIsRefusedWithTheOptionNamed(string? directory, long? memoryBytes)
+    {
+        EmbeddedKahunaOptions options = new()
+        {
+            NodeName = "snapshot-staging",
+            RaftSnapshotStagingDirectory = directory,
+            RaftSnapshotStagingMemoryBytes = memoryBytes
+        };
+
+        ArgumentException refused = Assert.Throws<ArgumentException>(() => new EmbeddedKahunaNode(options));
+        Assert.Contains(directory is not null ? "RaftSnapshotStagingDirectory" : "RaftSnapshotStagingMemoryBytes", refused.Message);
+    }
+
+    [Fact]
+    public void TestSnapshotTransferTimeoutsDefaultToKommanderDefaults()
+    {
+        RaftConfiguration kommanderDefaults = new();
+        RaftConfiguration configuration = EmbeddedKahunaNode.CreateRaftConfiguration(new EmbeddedKahunaOptions());
+
+        Assert.Equal(kommanderDefaults.SnapshotChunkAckTimeout, configuration.SnapshotChunkAckTimeout);
+        Assert.Equal(kommanderDefaults.SnapshotTransferStepTimeout, configuration.SnapshotTransferStepTimeout);
+    }
+
+    [Fact]
+    public void TestSnapshotTransferTimeoutsThreadThroughRaftConfiguration()
+    {
+        EmbeddedKahunaOptions options = new()
+        {
+            RaftSnapshotChunkAckTimeout = TimeSpan.FromMinutes(3),
+            RaftSnapshotTransferStepTimeout = TimeSpan.FromMinutes(4)
+        };
+
+        RaftConfiguration configuration = EmbeddedKahunaNode.CreateRaftConfiguration(options);
+
+        Assert.Equal(TimeSpan.FromMinutes(3), configuration.SnapshotChunkAckTimeout);
+        Assert.Equal(TimeSpan.FromMinutes(4), configuration.SnapshotTransferStepTimeout);
+        configuration.Validate();
+    }
+
+    [Theory]
+    [InlineData(0, null, "RaftSnapshotChunkAckTimeout")]
+    [InlineData(-1, null, "RaftSnapshotChunkAckTimeout")]
+    [InlineData(null, 0, "RaftSnapshotTransferStepTimeout")]
+    // Above Kommander's 2-minute default step timeout, which would cap it.
+    [InlineData(180, null, "raise RaftSnapshotTransferStepTimeout")]
+    // Above an explicit step timeout.
+    [InlineData(60, 30, "raise RaftSnapshotTransferStepTimeout")]
+    public void TestAnInvalidSnapshotTransferTimeoutIsRefusedWithTheOptionNamed(int? chunkAckSeconds, int? stepSeconds, string named)
+    {
+        EmbeddedKahunaOptions options = new()
+        {
+            NodeName = "snapshot-timeouts",
+            RaftSnapshotChunkAckTimeout = chunkAckSeconds is int ack ? TimeSpan.FromSeconds(ack) : null,
+            RaftSnapshotTransferStepTimeout = stepSeconds is int step ? TimeSpan.FromSeconds(step) : null
+        };
+
+        ArgumentException refused = Assert.Throws<ArgumentException>(() => new EmbeddedKahunaNode(options));
+        Assert.Contains(named, refused.Message);
+    }
 }

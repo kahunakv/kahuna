@@ -634,7 +634,37 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         if (options.RaftSnapshotMaxPendingSessions is int maxPendingSessions)
             configuration.SnapshotMaxPendingSessions = maxPendingSessions;
 
+        configuration.SnapshotStagingDirectory = ResolveSnapshotStagingDirectory(options);
+
+        if (options.RaftSnapshotStagingMemoryBytes is long stagingMemoryBytes)
+            configuration.SnapshotStagingMemoryBytes = stagingMemoryBytes;
+
+        if (options.RaftSnapshotChunkAckTimeout is TimeSpan chunkAckTimeout)
+            configuration.SnapshotChunkAckTimeout = chunkAckTimeout;
+
+        if (options.RaftSnapshotTransferStepTimeout is TimeSpan stepTimeout)
+            configuration.SnapshotTransferStepTimeout = stepTimeout;
+
         return configuration;
+    }
+
+    /// <summary>
+    /// The directory received snapshots spill to: the configured one, or else one under the data directory of a
+    /// node with a persistent backend. Named after the storage revision, like every other per-node file there,
+    /// because hosts (and the test clusters) put several nodes under one <see cref="EmbeddedKahunaOptions.StoragePath"/>
+    /// and Kommander's startup sweep would otherwise delete a neighbour's live spill files. A node with no fixed
+    /// revision gets a fresh one each start, as its storage does.
+    /// </summary>
+    internal static string? ResolveSnapshotStagingDirectory(EmbeddedKahunaOptions options)
+    {
+        if (options.RaftSnapshotStagingDirectory is not null)
+            return options.RaftSnapshotStagingDirectory;
+
+        if (options.Storage is not ("rocksdb" or "sqlite") || string.IsNullOrWhiteSpace(options.StoragePath))
+            return null;
+
+        string revision = string.IsNullOrWhiteSpace(options.StorageRevision) ? Guid.NewGuid().ToString() : options.StorageRevision;
+        return Path.Combine(options.StoragePath, $"snapshot-staging_{revision}");
     }
 
     private static void ValidateOptions(EmbeddedKahunaOptions options)
@@ -678,6 +708,38 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             throw new ArgumentException(
                 $"RaftSnapshotMaxPendingSessions ({options.RaftSnapshotMaxPendingSessions}) must be positive, or null for Kommander's default.",
                 nameof(options));
+
+        if (options.RaftSnapshotStagingDirectory is not null && string.IsNullOrWhiteSpace(options.RaftSnapshotStagingDirectory))
+            throw new ArgumentException(
+                "RaftSnapshotStagingDirectory is blank. Set a node-private directory, or null to stage under the data directory.",
+                nameof(options));
+
+        if (options.RaftSnapshotStagingMemoryBytes is < 0)
+            throw new ArgumentException(
+                $"RaftSnapshotStagingMemoryBytes ({options.RaftSnapshotStagingMemoryBytes}) must not be negative (zero stages every snapshot on disk), or null for Kommander's default.",
+                nameof(options));
+
+        if (options.RaftSnapshotChunkAckTimeout is { } chunkAckTimeout && chunkAckTimeout <= TimeSpan.Zero)
+            throw new ArgumentException(
+                $"RaftSnapshotChunkAckTimeout ({chunkAckTimeout}) must be positive, or null for Kommander's default.",
+                nameof(options));
+
+        if (options.RaftSnapshotTransferStepTimeout is { } stepTimeout && stepTimeout <= TimeSpan.Zero)
+            throw new ArgumentException(
+                $"RaftSnapshotTransferStepTimeout ({stepTimeout}) must be positive, or null for Kommander's default.",
+                nameof(options));
+
+        // Kommander bounds a chunk's acknowledgement by the smaller of the two, so a chunk-ack timeout above the step
+        // timeout would be cut back silently, and the slow install it was raised for would still be abandoned.
+        if (options.RaftSnapshotChunkAckTimeout is { } requestedAck)
+        {
+            TimeSpan effectiveStep = options.RaftSnapshotTransferStepTimeout ?? new RaftConfiguration().SnapshotTransferStepTimeout;
+            if (requestedAck > effectiveStep)
+                throw new ArgumentException(
+                    $"RaftSnapshotChunkAckTimeout ({requestedAck}) exceeds the snapshot transfer step timeout ({effectiveStep}), which caps it; " +
+                    "raise RaftSnapshotTransferStepTimeout with it.",
+                    nameof(options));
+        }
 
         if (options.EnableLeaderBalancer &&
             options.LeaderBalancerReportInterval >= options.LeaderBalancerReportTtl)
