@@ -1015,9 +1015,12 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
 
     private static ulong LockChecksumOf(IEnumerable<PartitionStateLockEntry> entries)
     {
+        // One coded stream per page, for the same reason as KvStateMachineTransfer.ChecksumOf.
         KvStateMachineTransfer.FnvHashStream hasher = new();
+        using CodedOutputStream output = new(hasher, leaveOpen: true);
         foreach (PartitionStateLockEntry entry in entries)
-            entry.WriteTo(hasher);
+            entry.WriteTo(output);
+        output.Flush();
         return hasher.Hash;
     }
 }

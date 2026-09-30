@@ -143,6 +143,26 @@ public sealed class TestEmbeddedWitnessCommitFrontier
         Assert.True(EmbeddedKahunaNode.CreateRaftConfiguration(new()).BackfillEnabled);
     }
 
+    [Fact]
+    public async Task TestStandaloneNodeTurnsCheckQuorumOff()
+    {
+        await using EmbeddedKahunaNode node = new(new()
+        {
+            Storage = "memory",
+            WalStorage = "memory",
+            InitialPartitions = 1
+        }, loggerFactory);
+
+        // The witnesses are voters that ack every heartbeat in-process, so the check-quorum window can
+        // only elapse when this node's own leader tick runs late (a garbage-collection pause, a starved
+        // scheduler). Stepping the sole real node down then fails its writes with MustRetry and costs an
+        // election for no protection: nothing else can be elected.
+        Assert.False(node.Raft.Configuration.EnableCheckQuorum);
+
+        // A node with real peers keeps the fence: an isolated leader there must step down.
+        Assert.True(EmbeddedKahunaNode.CreateRaftConfiguration(new()).EnableCheckQuorum);
+    }
+
     private static void AssertNoWitnessCatchUpTraffic(EmbeddedKahunaNode node, int partitionId)
     {
         IReadOnlyList<RaftBackfillStatus> backfills = node.Raft.GetBackfillStatuses(partitionId);

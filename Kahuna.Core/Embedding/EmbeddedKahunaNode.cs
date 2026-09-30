@@ -95,6 +95,14 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         // to fire the moment writes pause — the exact state an embedded node spends its life in.
         raftConfiguration.BackfillEnabled = false;
 
+        // Check-quorum steps a leader down when no majority of voters acked within the window. The
+        // witnesses are roster voters and ack every heartbeat in-process at the moment it is sent, so
+        // the only way the window can elapse here is the leader's own tick running late: a garbage
+        // collection pause or a starved scheduler longer than the window (500 ms on the embedded
+        // defaults) deposes the sole real node, fails its in-flight writes with MustRetry and costs an
+        // election, while protecting against nothing — no other node can be elected in its place.
+        raftConfiguration.EnableCheckQuorum = false;
+
         this.Raft = new RaftManager(
             raftConfiguration,
             new StaticDiscovery(EmbeddedRaftCommunication.Witnesses),
