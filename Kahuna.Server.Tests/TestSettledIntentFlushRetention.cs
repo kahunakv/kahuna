@@ -38,7 +38,6 @@ public sealed class TestSettledIntentFlushRetention : IDisposable
 
     private const string MissCounter = "kahuna.kv.materialization_intent_missing";
 
-    private static readonly string[] SingleAcctOneRelease = ["acct/1"];
 
     private readonly ILoggerFactory loggerFactory;
 
@@ -120,9 +119,9 @@ public sealed class TestSettledIntentFlushRetention : IDisposable
         // A different attempt of the same key is not it.
         Assert.False(store.TryGetSettledIntentAwaitingFlush(intent.TransactionId, intent.Epoch + 1, "acct/1", out _));
 
-        // The confirmed flush drops the key from the overlay and releases the retained intent.
+        // The confirmed flush of the row releases the retained intent.
         unflushed.Remove("acct/1");
-        store.ReleaseSettledIntentsAwaitingFlush("acct/1");
+        store.ReleaseSettledIntentsAwaitingFlush("acct/1", flushedRevision: 9, flushedLastModified: intent.CommitTimestamp);
 
         Assert.Equal(0, store.SettledIntentsAwaitingFlushCount);
         Assert.False(store.TryGetSettledIntentAwaitingFlush(intent.TransactionId, intent.Epoch, "acct/1", out _));
@@ -209,7 +208,7 @@ public sealed class TestSettledIntentFlushRetention : IDisposable
 
         // The flush lands on the original node: the release re-dirties the partition and the next rewrite drops it.
         unflushed.Remove("acct/1");
-        store.ReleaseSettledIntentsAwaitingFlush("acct/1");
+        store.ReleaseSettledIntentsAwaitingFlush("acct/1", flushedRevision: 9, flushedLastModified: first.CommitTimestamp);
         Assert.True(store.PersistSnapshot(PartitionId));
 
         PreparedIntentStore afterRelease = new(dir, "rev", null);
@@ -306,27 +305,76 @@ public sealed class TestSettledIntentFlushRetention : IDisposable
     }
 
     [Fact]
-    public void OverlayRelease_ReachesTheStoreOnlyWhenTheKeyLeavesTheOverlay()
+    public void OverlayRelease_CarriesTheFlushedHead_OnEveryConfirmedFlushOfTheKey()
     {
         UnflushedKeyValueWritesIndex overlay = new();
-        List<string> released = [];
-        overlay.AttachReleaseObserver(released.Add);
+        List<(string Key, long Revision, HLCTimestamp LastModified)> released = [];
+        overlay.AttachReleaseObserver((key, revision, lastModified) => released.Add((key, revision, lastModified)));
 
         overlay.Record("acct/1", [1], revision: 9, Ts(1), Ts(1), Ts(9), KeyValueState.Set, noRevision: false);
         overlay.Record("acct/1", [2], revision: 10, Ts(1), Ts(1), Ts(10), KeyValueState.Set, noRevision: false);
 
-        // The older head's flush lands while the newer one is still queued: the key stays covered, no release.
+        // The older head's flush lands while the newer one is still queued: the key stays covered, and the
+        // observer learns exactly what became durable — revision 9, not the key.
         overlay.RemoveFlushed("acct/1", flushedRevision: 9, flushedLastModified: Ts(9));
-        Assert.Empty(released);
-        Assert.True(overlay.TryGet("acct/1", out _));
+        Assert.Equal([("acct/1", 9, Ts(9))], released);
+        Assert.True(overlay.TryGet("acct/1", out UnflushedKeyValueWrite still));
+        Assert.Equal(10, still.OldestRevision);
+
+        // A repeated confirmation of a revision already advanced past says nothing new.
+        overlay.RemoveFlushed("acct/1", flushedRevision: 9, flushedLastModified: Ts(9));
+        Assert.Single(released);
 
         overlay.RemoveFlushed("acct/1", flushedRevision: 10, flushedLastModified: Ts(10));
-        Assert.Equal(SingleAcctOneRelease, released);
+        Assert.Equal([("acct/1", 9, Ts(9)), ("acct/1", 10, Ts(10))], released);
         Assert.False(overlay.TryGet("acct/1", out _));
 
         // Nothing to remove, nothing to release.
         overlay.RemoveFlushed("acct/1", flushedRevision: 10, flushedLastModified: Ts(10));
-        Assert.Single(released);
+        Assert.Equal(2, released.Count);
+    }
+
+    [Fact]
+    public void ReleaseByFlushedHead_DropsOnlyTheRetainedIntentsAtOrBelowIt()
+    {
+        Dictionary<string, long> unflushed = new(StringComparer.Ordinal);
+        PreparedIntentStore store = new();
+        store.AttachUnflushedRowProbe(ProbeOver(unflushed));
+
+        PreparedIntent first = Intent("acct/1", revision: 9, value: [1], txn: 1_000);
+        PreparedIntent second = Intent("acct/1", revision: 10, value: [2], txn: 1_020);
+        // A delete reuses the revision number of the set it follows; the commit timestamp orders them.
+        PreparedIntent tombstone = Intent("acct/1", revision: 10, value: null, txn: 1_040, state: KeyValueState.Deleted);
+
+        foreach (PreparedIntent intent in new[] { first, second, tombstone })
+        {
+            store.Apply(new PrepareIntentCommand(intent));
+            unflushed["acct/1"] = intent.Revision;
+            Settle(store, intent, commit: true);
+        }
+
+        Assert.Equal(3, store.SettledIntentsAwaitingFlushCount);
+
+        // A head strictly below every retained row releases nothing.
+        store.ReleaseSettledIntentsAwaitingFlush("acct/1", flushedRevision: 8, flushedLastModified: Ts(999_999));
+        Assert.Equal(3, store.SettledIntentsAwaitingFlushCount);
+
+        // The first row's flush releases the first intent alone.
+        store.ReleaseSettledIntentsAwaitingFlush("acct/1", flushedRevision: 9, flushedLastModified: first.CommitTimestamp);
+        Assert.Equal(2, store.SettledIntentsAwaitingFlushCount);
+        Assert.False(store.TryGetSettledIntentAwaitingFlush(first.TransactionId, first.Epoch, "acct/1", out _));
+
+        // The set at revision 10 flushed; the later delete at the same revision is still queued.
+        store.ReleaseSettledIntentsAwaitingFlush("acct/1", flushedRevision: 10, flushedLastModified: second.CommitTimestamp);
+        Assert.Equal(1, store.SettledIntentsAwaitingFlushCount);
+        Assert.False(store.TryGetSettledIntentAwaitingFlush(second.TransactionId, second.Epoch, "acct/1", out _));
+        Assert.True(store.TryGetSettledIntentAwaitingFlush(tombstone.TransactionId, tombstone.Epoch, "acct/1", out _));
+
+        store.ReleaseSettledIntentsAwaitingFlush("acct/1", flushedRevision: 10, flushedLastModified: tombstone.CommitTimestamp);
+        Assert.Equal(0, store.SettledIntentsAwaitingFlushCount);
+
+        // An unknown key is a no-op.
+        store.ReleaseSettledIntentsAwaitingFlush("acct/2", flushedRevision: 100, flushedLastModified: Ts(1));
     }
 
     // ── restorer: the replay window starts between the prepare and the record ──
@@ -430,6 +478,77 @@ public sealed class TestSettledIntentFlushRetention : IDisposable
         Assert.Equal(1, after.SettledIntentsAwaitingFlushCount);
     }
 
+    /// <summary>
+    /// The shape of a busy key inside a long replay window: two of its commits settled before the checkpoint
+    /// with their rows still queued, so both intents were retained. The replay resolves the first record and
+    /// re-queues its row; the writer flushes that row before the second record is reached. The release that
+    /// flush triggers must drop only the first intent — the second record still has to resolve from its own.
+    /// (CamusDB fault soak sn2, 2026-09-30: a per-key release here dropped every retained intent of the key on
+    /// the first flush, and the key's remaining ~40 records in the window all found nothing.)
+    /// </summary>
+    [Fact]
+    public async Task Restorer_FlushConfirmedBetweenTwoRecordsOfOneKey_ResolvesBothFromTheirRetainedIntents()
+    {
+        Dictionary<string, long> unflushed = new(StringComparer.Ordinal);
+        PreparedIntentStore before = new(dir, "rev", null);
+        before.AttachPartitionResolver(_ => PartitionId);
+        before.AttachUnflushedRowProbe(ProbeOver(unflushed));
+
+        PreparedIntent first = Intent("acct/1", revision: 9, value: [1], txn: 1_000);
+        PreparedIntent second = Intent("acct/1", revision: 10, value: [2], txn: 1_020);
+
+        before.Apply(new PrepareIntentCommand(first));
+        unflushed["acct/1"] = 9;
+        Settle(before, first, commit: true);
+
+        before.Apply(new PrepareIntentCommand(second));
+        unflushed["acct/1"] = 10;
+        Settle(before, second, commit: true);
+
+        Assert.Equal(2, before.SettledIntentsAwaitingFlushCount);
+        Assert.True(before.PersistSnapshot(PartitionId, appliedThroughIndex: 400));
+
+        PreparedIntentStore after = new(dir, "rev", null);
+        after.AttachPartitionResolver(_ => PartitionId);
+        Assert.Equal(2, after.SettledIntentsAwaitingFlushCount);
+
+        using RestorerHarness harness = new(after);
+
+        // Production wiring: the overlay's confirmed-flush signal releases the store's retained intents.
+        after.AttachUnflushedRowProbe((key, revision) => harness.Overlay.TryGet(key, out UnflushedKeyValueWrite w) && w.Revision >= revision);
+        harness.Overlay.AttachReleaseObserver(after.ReleaseSettledIntentsAwaitingFlush);
+
+        byte[] firstRecord = PreparedIntentMaterializer.ToKeyValueRecord(
+            first with { Resolution = PreparedIntentResolution.Committed }, new KeyValueMessage(), byReference: true);
+        byte[] secondRecord = PreparedIntentMaterializer.ToKeyValueRecord(
+            second with { Resolution = PreparedIntentResolution.Committed }, new KeyValueMessage(), byReference: true);
+
+        long missed = await MeasureCounter(MissCounter, () =>
+        {
+            Assert.True(harness.Restorer.Restore(PartitionId, KvLog(200, firstRecord)));
+            Settle(after, first, commit: true);
+
+            // The writer flushes the first record's row before the replay reaches the second record.
+            Assert.True(harness.Overlay.TryGet("acct/1", out UnflushedKeyValueWrite queued));
+            Assert.Equal(9, queued.Revision);
+            harness.Overlay.RemoveFlushed("acct/1", flushedRevision: 9, flushedLastModified: queued.LastModified);
+            Assert.False(harness.Overlay.TryGet("acct/1", out _));
+
+            Assert.True(harness.Restorer.Restore(PartitionId, KvLog(210, secondRecord)));
+            Settle(after, second, commit: true);
+            return Task.CompletedTask;
+        });
+
+        Assert.Equal(0, missed);
+        Assert.True(harness.Overlay.TryGet("acct/1", out UnflushedKeyValueWrite replayed));
+        Assert.Equal(10, replayed.Revision);
+        Assert.Equal(new byte[] { 2 }, replayed.Value);
+
+        // The first intent's row is durable; the second's is queued again and stays retained until its flush.
+        Assert.False(after.TryGetSettledIntentAwaitingFlush(first.TransactionId, first.Epoch, "acct/1", out _));
+        Assert.True(after.TryGetSettledIntentAwaitingFlush(second.TransactionId, second.Epoch, "acct/1", out _));
+    }
+
     [Fact]
     public async Task Restorer_RetainedIntentAtADifferentRevision_StillRefusesTheApply()
     {
@@ -523,7 +642,7 @@ public sealed class TestSettledIntentFlushRetention : IDisposable
         }
     }
 
-    private static EmbeddedKahunaOptions PersistentOptions(string storagePath, string walPath, Func<IPersistenceBackend, IPersistenceBackend>? decorator) => new()
+    private static EmbeddedKahunaOptions PersistentOptions(string storagePath, string walPath, Func<IPersistenceBackend, IPersistenceBackend>? decorator, bool materializeOnResolve = false) => new()
     {
         InitialPartitions = 1,
         Storage = "sqlite",
@@ -534,12 +653,199 @@ public sealed class TestSettledIntentFlushRetention : IDisposable
         WalRevision = "settled-retention-wal",
         WalSyncWrites = true,
         DurableMaterializeByReference = true,
+        DurableMaterializeOnResolve = materializeOnResolve,
         // No periodic flush: every flush is explicit, so the state at the kill is exactly "replicated and
         // settled, row never in the backend".
         DirtyObjectsWriterDelay = 600_000,
         CollectionInterval = TimeSpan.FromMinutes(10),
         PersistenceBackendDecorator = decorator
     };
+
+    /// <summary>
+    /// The shape of the second incident on one node, in both materialization shapes. A plain write whose flush is
+    /// refused pins the partition's durability floor below everything that follows; a durable transaction then
+    /// commits and settles, and the explicit flush cycle rewrites the intent snapshot certifying the position it
+    /// applied through — above the transaction's prepare, materialization and settle. The node is killed. The
+    /// restart's replay starts at the floor, so the whole transaction lies inside the history window: its
+    /// replayed prepare must install nothing live, and its materialization must still resolve — from the replayed
+    /// prepare itself — so the committed values read back, nothing is reported unresolved, nothing is gated, and
+    /// no history outlives the replay.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Restart_ReplayStartingBelowThePrepare_ResolvesTheWindowsMaterializationsFromTheReplayedPrepares(bool materializeOnResolve)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        string storagePath = CreateTempDir("kahuna-window-store-");
+        string walPath = CreateTempDir("kahuna-window-wal-");
+
+        const string pin = "window/pin";
+        const string k1 = "window/row-1";
+        const string k2 = "window/row-2";
+
+        try
+        {
+            {
+                // ── Phase 1: pin the floor, commit and settle, checkpoint past it, kill. ──
+                {
+                    FlushFailingBackend? blocker = null;
+                    await using EmbeddedKahunaNode node = new(
+                        PersistentOptions(storagePath, walPath, inner => blocker = new FlushFailingBackend(inner), materializeOnResolve), loggerFactory);
+                    await node.StartAsync(ct);
+                    await node.WaitForLeaderForKeyAsync(k1, ct);
+
+                    KahunaManager kahuna = (KahunaManager)node.Kahuna;
+                    PreparedIntentStore intents = kahuna.DurablePreparedIntentStore;
+
+                    // A durable write first, so the floor the replay starts from is a real position in the log.
+                    (KeyValueResponseType warmed, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+                        HLCTimestamp.Zero, "window/warm", Encoding.UTF8.GetBytes("warm"), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+                    Assert.Equal(KeyValueResponseType.Set, warmed);
+                    await node.FlushAsync();
+                    long floorBefore = kahuna.DurabilityProvider.GetDurablyAppliedIndex(1);
+                    Assert.True(floorBefore > 0, "the warm-up flush was expected to persist a durability floor");
+
+                    blocker!.FailKeyValueFlushes = true;
+
+                    // The pin: a committed row that never flushes, below the transaction in the log.
+                    (KeyValueResponseType pinned, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+                        HLCTimestamp.Zero, pin, Encoding.UTF8.GetBytes("pin"), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+                    Assert.Equal(KeyValueResponseType.Set, pinned);
+
+                    KeyValueTransactionResult result = await node.Kahuna.TryExecuteTransactionScript(
+                        Encoding.UTF8.GetBytes($"BEGIN SET `{k1}` 'alpha' SET `{k2}` 'beta' COMMIT END"), null, null);
+                    Assert.Equal(KeyValueResponseType.Set, result.Type);
+
+                    await WaitUntil(() => intents.Get(k1) is null && intents.Get(k2) is null, ct);
+
+                    // The flush cannot land any row; it still persists the floors and the intent snapshot, which
+                    // certifies the position applied through the store — past the transaction's settle.
+                    await Assert.ThrowsAsync<IOException>(() => node.FlushAsync());
+                    Assert.True(blocker.FailedBatches > 0, "the key-value flush was expected to be refused");
+
+                    long floor = kahuna.DurabilityProvider.GetDurablyAppliedIndex(1);
+                    long certified = intents.GetAppliedLogIndex(1);
+                    Assert.True(floor >= floorBefore, $"the floor {floor} was expected at or above the warm-up floor {floorBefore}");
+                    Assert.True(certified > floor, $"the certified position {certified} was expected above the floor {floor}");
+                }
+
+                // ── Phase 2: restart over the same durable state with a healthy backend. ──
+                {
+                    await using EmbeddedKahunaNode node = new(PersistentOptions(storagePath, walPath, decorator: null, materializeOnResolve), loggerFactory);
+                    await node.StartAsync(ct);
+                    await node.WaitForLeaderForKeyAsync(k1, ct);
+
+                    Assert.Equal("alpha", await ReadAsync(node, k1, ct));
+                    Assert.Equal("beta", await ReadAsync(node, k2, ct));
+                    Assert.Equal("pin", await ReadAsync(node, pin, ct));
+
+                    KahunaManager kahuna = (KahunaManager)node.Kahuna;
+                    PreparedIntentStore intents = kahuna.DurablePreparedIntentStore;
+
+                    // The window's prepares were history for the intent set: no live intent, no phantom, and
+                    // nothing kept past the replay. Nothing was gated.
+                    Assert.Null(intents.Get(k1));
+                    Assert.Null(intents.Get(k2));
+                    Assert.Equal(0, intents.ReplayHistoryIntentCount);
+                    Assert.False(kahuna.KeyValues.DivergenceContainment.IsGated(1));
+                    Assert.False(node.Raft.IsCandidacyWithheld(1));
+
+                    // Both keys' materializations resolved from the replayed prepares (the by-reference records, or
+                    // the materializing settle's installs) — the source that no release can take away — and the
+                    // restart left nothing unresolved.
+                    KeyValueRestorer.RestoreSummary? summary = kahuna.KeyValues.GetRestoreSummary(1);
+                    Assert.NotNull(summary);
+                    Assert.Equal(2, summary.Value.FromHistory);
+                    Assert.Equal(0, summary.Value.Unresolved);
+
+                    await node.FlushAsync();
+                    Assert.Equal(0, intents.SettledIntentsAwaitingFlushCount);
+                }
+            }
+        }
+        finally
+        {
+            TryDeleteDir(storagePath);
+            TryDeleteDir(walPath);
+        }
+    }
+
+    /// <summary>
+    /// A restart whose replay reaches a by-reference record no source can resolve — here the intent snapshot that
+    /// carried the retained settled intents is gone, and the replay starts above the prepare — must not serve or
+    /// lead the partition from its holes: the record is counted unresolved, the partition is gated on this node
+    /// and its candidacy is withheld until a whole-partition snapshot re-seeds it.
+    /// </summary>
+    [Fact]
+    public async Task Restart_WithAMaterializationNoSourceCanResolve_GatesThePartitionAndWithholdsCandidacy()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        string storagePath = CreateTempDir("kahuna-gate-store-");
+        string walPath = CreateTempDir("kahuna-gate-wal-");
+
+        const string k1 = "gate/row-1";
+        const string k2 = "gate/row-2";
+
+        try
+        {
+            {
+                FlushFailingBackend? blocker = null;
+                await using EmbeddedKahunaNode node = new(
+                    PersistentOptions(storagePath, walPath, inner => blocker = new FlushFailingBackend(inner)), loggerFactory);
+                await node.StartAsync(ct);
+                await node.WaitForLeaderForKeyAsync(k1, ct);
+
+                KahunaManager kahuna = (KahunaManager)node.Kahuna;
+                PreparedIntentStore intents = kahuna.DurablePreparedIntentStore;
+
+                blocker!.FailKeyValueFlushes = true;
+
+                KeyValueTransactionResult result = await node.Kahuna.TryExecuteTransactionScript(
+                    Encoding.UTF8.GetBytes($"BEGIN SET `{k1}` 'alpha' SET `{k2}` 'beta' COMMIT END"), null, null);
+                Assert.Equal(KeyValueResponseType.Set, result.Type);
+
+                await WaitUntil(() => intents.Get(k1) is null && intents.Get(k2) is null, ct);
+                Assert.Equal(2, intents.SettledIntentsAwaitingFlushCount);
+
+                await Assert.ThrowsAsync<IOException>(() => node.FlushAsync());
+                Assert.True(kahuna.DurabilityProvider.GetDurablyAppliedIndex(1) > 0, "the flush cycle was expected to persist a durability floor");
+            }
+
+            // The retained settled intents were the records' only source; take them away.
+            string[] snapshots = Directory.GetFiles(storagePath, "preparedintent_*_p1.snapshot");
+            Assert.NotEmpty(snapshots);
+            foreach (string snapshot in snapshots)
+                File.Delete(snapshot);
+
+            {
+                await using EmbeddedKahunaNode node = new(PersistentOptions(storagePath, walPath, decorator: null), loggerFactory);
+
+                // The gated partition withholds this node's candidacy, and it is the only voter: the start's
+                // wait for that partition's leader runs out its election budget. That is the point.
+                await Assert.ThrowsAsync<RaftException>(() => node.StartAsync(ct));
+
+                KahunaManager kahuna = (KahunaManager)node.Kahuna;
+
+                await WaitUntil(() => kahuna.KeyValues.DivergenceContainment.IsGated(1), ct);
+                Assert.True(node.Raft.IsCandidacyWithheld(1));
+                Assert.False(kahuna.KeyValues.DivergenceContainment.IsGated(0));
+
+                KeyValueRestorer.RestoreSummary? summary = kahuna.KeyValues.GetRestoreSummary(1);
+                Assert.NotNull(summary);
+                Assert.Equal(2, summary.Value.Unresolved);
+                Assert.Equal(2, summary.Value.UnresolvedKeys);
+                Assert.Equal(0, summary.Value.FromHistory + summary.Value.FromLive + summary.Value.FromRetained);
+            }
+        }
+        finally
+        {
+            TryDeleteDir(storagePath);
+            TryDeleteDir(walPath);
+        }
+    }
 
     /// <summary>
     /// The incident's shape on one node. A by-reference transaction commits and settles; the row's flush is

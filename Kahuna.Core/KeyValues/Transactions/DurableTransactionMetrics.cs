@@ -674,6 +674,29 @@ internal static class DurableTransactionMetrics
             "kahuna.kv.materialization_intent_missing",
             description: "By-reference materialization records whose prepared intent was absent and whose value is not durable here.");
 
+    /// <summary>
+    /// By-reference materializations (records and materializing resolves) a restart replay resolved, tagged by
+    /// the source the value came from: <c>live</c> (the intent was still live in the reloaded set), <c>history</c>
+    /// (a prepare inside the history window the replay kept for it), <c>retained</c> (a settled intent retained
+    /// until its row is durable), or <c>durable</c> (nothing to resolve from, but the row is already queued or
+    /// flushed here — a second producer's duplicate).
+    /// </summary>
+    internal static readonly Counter<long> RestoreByReferenceResolved =
+        Meter.CreateCounter<long>(
+            "kahuna.kv.restore_by_reference_resolved",
+            description: "By-reference materializations a restart replay resolved or dismissed as already durable, by source.");
+
+    /// <summary>
+    /// By-reference materializations a restart replay could not resolve from any source and whose row is not
+    /// durable on this node: the value is missing here after the restart. Every occurrence is logged with the full
+    /// identity, and the partition's restore summary names the count, the entry range and the distinct keys; a
+    /// non-zero count gates the partition on this node until a whole-partition snapshot re-seeds it.
+    /// </summary>
+    internal static readonly Counter<long> RestoreByReferenceUnresolved =
+        Meter.CreateCounter<long>(
+            "kahuna.kv.restore_by_reference_unresolved",
+            description: "By-reference materializations a restart replay could not resolve and whose value is not durable on this node.");
+
     internal static readonly Counter<long> SameRevisionDivergentApplies =
         Meter.CreateCounter<long>(
             "kahuna.kv.same_revision_divergent_applies",

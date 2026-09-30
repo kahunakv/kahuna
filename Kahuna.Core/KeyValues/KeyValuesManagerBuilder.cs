@@ -397,8 +397,14 @@ internal sealed class KeyValuesManagerBuilder
         }
 
         // The restorer resolves a by-reference materialization record against the same prepared-intent store the
-        // replay rebuilds from its snapshot and the replayed prepare deltas.
-        restorer = new(backgroundWriter, raft, completionReceiptStore, logger, unflushedWrites, durabilityTracker, preparedIntentStore);
+        // replay rebuilds from its snapshot and the replayed prepare deltas. The backend point read is its last
+        // proof that a record with no intent is a flushed duplicate rather than a missing value; it runs only on
+        // that path, synchronously on the replay thread (the backends take their own read locks).
+        restorer = new(backgroundWriter, raft, completionReceiptStore, logger, unflushedWrites, durabilityTracker, preparedIntentStore,
+            readDurableRow: persistenceBackend.GetKeyValue,
+            // A miss for a key whose range moved out of the partition after the floor is the un-host purge's
+            // doing, not a hole; the same routing the store's checkpoint attributes intents with.
+            keyOwner: key => locator.LocateRange(key).PartitionId);
         replicator = new(backgroundWriter, routers.Persistent, raft, writeFrequencyRegistry, keySpaceRegistry, completionReceiptStore, logger, unflushedWrites, durabilityTracker,
             // Off-actor hydration for the durable commit-apply's non-resident cold path: the point read runs
             // on the queued backend read scheduler HERE (the sender side), never inside the owning actor's

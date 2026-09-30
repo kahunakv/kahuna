@@ -1,5 +1,6 @@
 using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues;
 
@@ -35,4 +36,7 @@ internal sealed class ResolvedIntentInstaller : IResolvedIntentInstaller
         else
             replicator.CompleteResolvedIntentEntry(partitionId, logIndex);
     }
+
+    public void NoteUnresolvedOnReplay(int partitionId, long logIndex, HLCTimestamp transactionId, long epoch, string key, HLCTimestamp commitTimestamp) =>
+        restorer.NoteUnresolvedMaterializingResolve(partitionId, logIndex, transactionId, epoch, key, commitTimestamp);
 }

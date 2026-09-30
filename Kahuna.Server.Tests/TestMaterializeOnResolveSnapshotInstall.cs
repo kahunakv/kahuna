@@ -56,6 +56,9 @@ public sealed class TestMaterializeOnResolveSnapshotInstall : BaseCluster
         }
 
         public void CompleteEntry(int partitionId, long logIndex, bool replay) => inner.CompleteEntry(partitionId, logIndex, replay);
+
+        public void NoteUnresolvedOnReplay(int partitionId, long logIndex, HLCTimestamp transactionId, long epoch, string key, HLCTimestamp commitTimestamp) =>
+            inner.NoteUnresolvedOnReplay(partitionId, logIndex, transactionId, epoch, key, commitTimestamp);
     }
 
     private static async Task<int> LeaderIndexOf(IRaft[] rafts, CancellationToken ct)
