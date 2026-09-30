@@ -370,6 +370,12 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-snapshot-max-pending-bytes", Required = false, HelpText = "Cap on total buffered bytes across all in-progress snapshot-receive sessions. The primary memory bound on the receive path.", Default = 512L * 1024 * 1024)]
     public long RaftSnapshotMaxPendingBytes { get; set; } = 512L * 1024 * 1024;
 
+    [Option("raft-snapshot-staging-directory", Required = false, HelpText = "Node-private directory where snapshot-receive sessions spill to disk once staging them in memory would exceed the staging memory budget. Unset keeps every session in memory, so the max-pending-bytes cap is then also the largest snapshot the node can receive.")]
+    public string? RaftSnapshotStagingDirectory { get; set; }
+
+    [Option("raft-snapshot-staging-memory-bytes", Required = false, HelpText = "Memory budget for staged snapshot bytes across all receive sessions when a staging directory is set. Zero stages every session on disk. Ignored without a staging directory.", Default = 64L * 1024 * 1024)]
+    public long RaftSnapshotStagingMemoryBytes { get; set; } = 64L * 1024 * 1024;
+
     [Option("raft-allow-legacy-snapshot-senders", Required = false, HelpText = "Accept snapshot chunks that leave the sender's session-metadata fields empty, treating them as a sender that pre-dates those fields. Temporary compatibility switch for a mixed-version cluster.", Default = false)]
     public bool RaftAllowLegacySnapshotSenders { get; set; }
 

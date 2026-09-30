@@ -78,6 +78,8 @@ public sealed class TestKommanderConfigurationSurface
         [nameof(RaftConfiguration.SnapshotReceiveSessionTtl)] = nameof(KahunaCommandLineOptions.RaftSnapshotReceiveSessionTtl),
         [nameof(RaftConfiguration.SnapshotMaxPendingSessions)] = nameof(KahunaCommandLineOptions.RaftSnapshotMaxPendingSessions),
         [nameof(RaftConfiguration.SnapshotMaxPendingBytes)] = nameof(KahunaCommandLineOptions.RaftSnapshotMaxPendingBytes),
+        [nameof(RaftConfiguration.SnapshotStagingDirectory)] = nameof(KahunaCommandLineOptions.RaftSnapshotStagingDirectory),
+        [nameof(RaftConfiguration.SnapshotStagingMemoryBytes)] = nameof(KahunaCommandLineOptions.RaftSnapshotStagingMemoryBytes),
         [nameof(RaftConfiguration.AllowLegacySnapshotSenders)] = nameof(KahunaCommandLineOptions.RaftAllowLegacySnapshotSenders),
         [nameof(RaftConfiguration.SnapshotTransferStepTimeout)] = nameof(KahunaCommandLineOptions.RaftSnapshotTransferStepTimeout),
         [nameof(RaftConfiguration.SnapshotChunkAckTimeout)] = nameof(KahunaCommandLineOptions.RaftSnapshotChunkAckTimeout),
