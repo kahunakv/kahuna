@@ -43,16 +43,51 @@ internal sealed class TryExistsHandler : BaseHandler
         // A transaction that has already snapshotted or written this key in its own MVCC must see that view
         // (read-your-own-write / snapshot isolation), never a concurrent foreign intent — otherwise a
         // committed-but-unsettled intent from another transaction would preempt this transaction's own staged write.
+        //
+        // A transactional latest read without an MVCC entry yet skips the overlay too: the MVCC path records its pin
+        // from the committed intent (DurableSnapshotSource), where the overlay would answer and leave no pin behind.
         bool readerHasOwnMvcc = message.TransactionId != HLCTimestamp.Zero
             && entry?.MvccEntries is { } readerMvcc && readerMvcc.ContainsKey(message.TransactionId);
+        bool transactionalLatestRead = message.TransactionId != HLCTimestamp.Zero && message.ReadTimestamp.IsNull();
 
+        PreparedIntent? foreignIntent = null;
+        ReadVisibilityAction foreignAction = ReadVisibilityAction.UseExisting;
         if (!readerHasOwnMvcc
-            && context.PreparedIntentStore?.Get(message.Key) is { } foreignIntent
-            && foreignIntent.TransactionId != message.TransactionId
-            && !ResidentHeadSupersedesIntent(message, entry, foreignIntent))
+            && !transactionalLatestRead
+            && context.PreparedIntentStore?.Get(message.Key) is { } candidateIntent
+            && candidateIntent.TransactionId != message.TransactionId)
         {
             HLCTimestamp readTs = message.ReadTimestamp.IsNull() ? HLCTimestamp.Zero : message.ReadTimestamp;
-            switch (DurableReadVisibility.Resolve(context, foreignIntent, readTs, message.ForeignDecisionHint))
+            ReadVisibilityAction action = DurableReadVisibility.Resolve(context, candidateIntent, readTs, message.ForeignDecisionHint);
+
+            // A later committed write may have moved the head past a committed intent (a non-transactional write
+            // proceeds over a committed-but-unsettled intent, which lingers until settlement). On a persistent cache
+            // miss only the backend knows the head, so load it before serving the intent. The intent covers the
+            // committed history up to its own revision, so a row behind it is ordinary settlement lag.
+            if (action == ReadVisibilityAction.UseIntentValue
+                && !inCache && message.Durability == KeyValueDurability.Persistent)
+            {
+                (KeyValueEntry? hydrated, bool stale) = await HydratePersistentHead(message.Key, currentTime, candidateIntent.Revision);
+                if (stale)
+                    return KeyValueStaticResponses.MustRetryResponse;
+
+                if (hydrated is not null)
+                {
+                    entry = hydrated;
+                    inCache = true;
+                }
+            }
+
+            if (!ResidentHeadSupersedesIntent(entry, candidateIntent))
+            {
+                foreignIntent = candidateIntent;
+                foreignAction = action;
+            }
+        }
+
+        if (foreignIntent is not null)
+        {
+            switch (foreignAction)
             {
                 case ReadVisibilityAction.Retry:
                     return KeyValueStaticResponses.WaitingForReplicationResponse;
@@ -131,57 +166,64 @@ internal sealed class TryExistsHandler : BaseHandler
         {
             if (!inCache && message.Durability == KeyValueDurability.Persistent)
             {
-                KeyValueEntry? diskEntry = await context.BackendReadScheduler.EnqueueBatchableTask(
-                    ResolvePartition(message.Key),
-                    message.Key,
-                    context.PointReadExecutor);
+                (KeyValueEntry? hydrated, bool stale) = await HydratePersistentHead(
+                    message.Key, currentTime,
+                    CommittedForeignIntentRevision(message.Key, message.TransactionId, message.ForeignDecisionHint));
 
                 // Same stale-base refusal as the transactional TryGet: an existence check below the
                 // committed-head memory can wrongly report absent (or a stale revision) and become
                 // a conditional write's base. Refuse and let the convergence repair land first.
-                if (HydratedRowProvablyStale(message.Key, diskEntry))
+                if (stale)
                     return KeyValueStaticResponses.MustRetryResponse;
 
-                if (diskEntry is not null)
+                if (hydrated is not null)
+                    entry = hydrated;
+            }
+
+            KeyValueMvccEntry? mvccEntry = null;
+            if (entry?.MvccEntries is null || !entry.MvccEntries.TryGetValue(message.TransactionId, out mvccEntry))
+            {
+                // First read of the key by this transaction: pin the committed state it observes, exactly as the
+                // transactional TryGet does (see DurableSnapshotSource).
+                SnapshotDecision decision = DurableSnapshotSource.Resolve(
+                    context, message.Key, message.TransactionId, entry, currentTime,
+                    out KeyValueMvccEntry intentSnapshot, message.ForeignDecisionHint);
+
+                if (decision == SnapshotDecision.Retry)
+                    return KeyValueStaticResponses.WaitingForReplicationResponse;
+
+                if (entry is null)
                 {
-                    diskEntry.FlushedRevision = diskEntry.Revision;
-                    diskEntry.LastUsed = currentTime;
-                    context.InsertStoreEntry(message.Key, diskEntry);
-                    entry = diskEntry;
+                    entry = new() { Bucket = GetBucket(message.Key), State = KeyValueState.Undefined, Revision = -1 };
+                    context.InsertStoreEntry(message.Key, entry);
                 }
-            }
 
-            if (entry is null)
-            {
-                entry = new() { Bucket = GetBucket(message.Key), State = KeyValueState.Undefined, Revision = -1 };
-                context.InsertStoreEntry(message.Key, entry);
-            }
+                mvccEntry = decision == SnapshotDecision.UseIntent
+                    ? intentSnapshot
+                    : new()
+                    {
+                        Value = entry.Value,
+                        Revision = entry.Revision,
+                        Expires = entry.Expires,
+                        LastUsed = entry.LastUsed,
+                        LastModified = entry.LastModified,
+                        State = entry.State
+                    };
 
-            entry.MvccEntries ??= new();
-
-            if (!entry.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? mvccEntry))
-            {
+                entry.MvccEntries ??= new();
                 bool mvccDictJustCreated = entry.MvccEntries.Count == 0;
-                mvccEntry = new()
-                {
-                    Value = entry.Value,
-                    Revision = entry.Revision,
-                    Expires = entry.Expires,
-                    LastUsed = entry.LastUsed,
-                    LastModified = entry.LastModified,
-                    State = entry.State
-                };
-
                 entry.MvccEntries.Add(message.TransactionId, mvccEntry);
                 context.AdjustEstimatedEntryBytes(entry, KeyValueStoreAccounting.MvccEntryAddedBytes(mvccDictJustCreated, mvccEntry.Value));
             }
 
+            // The conflict check comes first, as in TryGet: a key this transaction observed as absent and another
+            // transaction has since created must abort, not keep reporting the pinned absence.
+            if (entry.Revision > mvccEntry.Revision)
+                return KeyValueStaticResponses.AbortedResponse;
+
             if (mvccEntry.State is KeyValueState.Undefined or KeyValueState.Deleted
                 || (mvccEntry.Expires != HLCTimestamp.Zero && mvccEntry.Expires - currentTime < TimeSpan.Zero))
                 return KeyValueStaticResponses.DoesNotExistContextResponse;
-
-            if (entry.Revision > mvccEntry.Revision)
-                return KeyValueStaticResponses.AbortedResponse;
 
             return new(KeyValueResponseType.Exists, new ReadOnlyKeyValueEntry(
                 null, mvccEntry.Revision, mvccEntry.Expires,

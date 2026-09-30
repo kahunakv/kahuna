@@ -49,6 +49,10 @@ internal sealed class RangeScanContinuation : ReadContinuation
     private readonly HLCTimestamp currentTime;
     private readonly bool isSnapshotRead;
 
+    // Head revisions of rows this scan evaluated and left out of its page, kept across disk pages for the intent
+    // merge. Allocated only while prepared intents linger (see DurableSnapshotSource.RecordExcludedHead).
+    private Dictionary<string, long>? excludedHeads;
+
     /// <summary>Canonical decisions routed off-mailbox for the still-pending foreign intents this scan's window
     /// meets (keyed by intent identity). Null on the first attempt; populated when the manager re-issues the scan
     /// after resolving a committed-but-unsettled remote-anchor intent so the overlay serves it instead of retrying.</summary>
@@ -305,7 +309,14 @@ internal sealed class RangeScanContinuation : ReadContinuation
             KeyValueResponse? response = EvaluateKeySync(context, keyToProcess, entry, diskProjections);
 
             if (response is null || response.Type == KeyValueResponseType.DoesNotExist)
+            {
+                // A head the page leaves out (a delete, an expired value) still supersedes an older committed intent
+                // on the key; remember it for the intent merge, which otherwise sees no row and would inject the
+                // intent's older value.
+                if (!isSnapshotRead && entry is not null)
+                    DurableSnapshotSource.RecordExcludedHead(context, ref excludedHeads, keyToProcess, entry.Revision);
                 continue;
+            }
 
             if (response.Type != KeyValueResponseType.Get || response.Entry is null)
             {
@@ -405,7 +416,8 @@ internal sealed class RangeScanContinuation : ReadContinuation
                 PreparedIntentScanMerge.ScanMergeResult merge = PreparedIntentScanMerge.Merge(
                     accumulated, ranged, snapshotTs, currentTime, limit, kvHasMore, kvCeilingKey,
                     i => DurableReadVisibility.ScanDecision(context, routedDecisions, i),
-                    k => DurableSnapshotSource.ReaderHasOwnVersion(context, k, transactionId));
+                    k => DurableSnapshotSource.ReaderHasOwnVersion(context, k, transactionId),
+                    i => DurableSnapshotSource.HeadSupersedesIntent(context, i, excludedHeads));
                 if (merge.MustRetry)
                 {
                     Resolve(new(KeyValueResponseType.MustRetry,
@@ -533,7 +545,7 @@ internal sealed class RangeScanContinuation : ReadContinuation
                 // intent supersedes the resident base, so snapshot its committed value instead — otherwise this
                 // transaction binds a stale base and its later reads of the key return DoesNotExist or OCC-Aborted.
                 KeyValueMvccEntry newMvcc;
-                switch (DurableSnapshotSource.Resolve(context, key, transactionId, currentTime, out KeyValueMvccEntry intentSnapshot))
+                switch (DurableSnapshotSource.Resolve(context, key, transactionId, entry, currentTime, out KeyValueMvccEntry intentSnapshot))
                 {
                     case SnapshotDecision.Retry:
                         return KeyValueStaticResponses.WaitingForReplicationResponse;

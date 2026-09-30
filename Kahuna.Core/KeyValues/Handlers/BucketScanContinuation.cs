@@ -103,6 +103,10 @@ internal sealed class BucketScanContinuation : ReadContinuation
 
         List<(string, ReadOnlyKeyValueEntry)> items = inMemoryItems;
 
+        // Heads of rows left out of the page that are not resident (foreign key-space rows are never cached here),
+        // for the intent overlay: such a head can still supersede an older committed intent on the key.
+        Dictionary<string, long>? excludedHeads = null;
+
         if (ScanDiskResult is not null)
         {
             foreach ((string key, ReadOnlyKeyValueEntry diskEntry) in ScanDiskResult)
@@ -139,6 +143,9 @@ internal sealed class BucketScanContinuation : ReadContinuation
                     // invalidated and would shadow the persisted head on every later scan. Serve the row
                     // from the page without touching the store; the intent overlay below still reconciles it.
                     result = EvaluateForeignRow(key, diskEntry);
+
+                    if ((result is null || result.Type == KeyValueResponseType.DoesNotExist) && readTimestamp.IsNull())
+                        DurableSnapshotSource.RecordExcludedHead(context, ref excludedHeads, key, diskEntry.Revision);
                 }
 
                 if (result is null || result.Type == KeyValueResponseType.DoesNotExist)
@@ -161,7 +168,7 @@ internal sealed class BucketScanContinuation : ReadContinuation
         // Durable-intent bucket visibility: overlay prepared intents belonging to this bucket, so a committed
         // insert/override/delete not yet materialized is reflected exactly as it would be in the equivalent range
         // scan. No-op off the durable path.
-        (items, bool mustRetry) = OverlayBucketIntents(context, prefix, items, currentTime, readTimestamp, transactionId, routedDecisions);
+        (items, bool mustRetry) = OverlayBucketIntents(context, prefix, items, currentTime, readTimestamp, transactionId, routedDecisions, excludedHeads);
         if (mustRetry)
         {
             Resolve(KeyValueStaticResponses.MustRetryResponse);
@@ -185,7 +192,8 @@ internal sealed class BucketScanContinuation : ReadContinuation
         HLCTimestamp currentTime,
         HLCTimestamp readTimestamp,
         HLCTimestamp transactionId,
-        IReadOnlyDictionary<(HLCTimestamp TransactionId, long Epoch), TransactionDecision>? routedDecisions = null)
+        IReadOnlyDictionary<(HLCTimestamp TransactionId, long Epoch), TransactionDecision>? routedDecisions = null,
+        Dictionary<string, long>? excludedHeads = null)
     {
         if (context.PreparedIntentStore is not { } intentStore)
             return (items, false);
@@ -200,7 +208,8 @@ internal sealed class BucketScanContinuation : ReadContinuation
             items, bucketIntents, snapshotTs, currentTime,
             limit: KeyValueScanLimits.MaxPrefixScanResults, kvHasMore: false, kvCeilingKey: null,
             i => DurableReadVisibility.ScanDecision(context, routedDecisions, i),
-            k => DurableSnapshotSource.ReaderHasOwnVersion(context, k, transactionId));
+            k => DurableSnapshotSource.ReaderHasOwnVersion(context, k, transactionId),
+            i => DurableSnapshotSource.HeadSupersedesIntent(context, i, excludedHeads));
 
         return (merge.Items, merge.MustRetry);
     }
@@ -289,7 +298,7 @@ internal sealed class BucketScanContinuation : ReadContinuation
             {
                 // A committed-but-unsettled foreign intent supersedes the resident base: snapshot its committed
                 // value so this transaction's later reads of the key stay consistent instead of binding a stale base.
-                switch (DurableSnapshotSource.Resolve(context, key, transactionId, currentTime, out KeyValueMvccEntry intentSnapshot))
+                switch (DurableSnapshotSource.Resolve(context, key, transactionId, entry, currentTime, out KeyValueMvccEntry intentSnapshot))
                 {
                     case SnapshotDecision.Retry:
                         return KeyValueStaticResponses.WaitingForReplicationResponse;
