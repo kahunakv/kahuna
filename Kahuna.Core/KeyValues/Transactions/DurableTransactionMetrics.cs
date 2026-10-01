@@ -71,8 +71,35 @@ internal enum OnePhaseGateOutcome
     /// whose writes never feed the committed-head ledger.</summary>
     NonPersistentRead,
 
+    /// <summary>Apply-time validation off, multi-process group: the transaction holds a lock, which lives only
+    /// in a partition leader's memory. Without apply-time validation the bundle cannot prove at apply that the
+    /// leader that granted it still led when the bundle was proposed, so the two-phase flow runs and checks the
+    /// locks after its prepares are durable.</summary>
+    HeldLock,
+
     MultiPartition,
     AnchorOffPartition
+}
+
+/// <summary>How the coordinator learned that a lock a transaction was granted may no longer be held; the tag
+/// of <see cref="DurableTransactionMetrics.LostLockAborts"/>.</summary>
+internal enum LostLockDetection
+{
+    /// <summary>A later lock grant on the partition reported another leadership term.</summary>
+    Regrant,
+
+    /// <summary>The partition's confirmed leader is in another term at commit.</summary>
+    CommitProbe,
+
+    /// <summary>The key the lock is checked through no longer routes to the partition that granted it.</summary>
+    RangeMoved,
+
+    /// <summary>No leader confirmed the term, so the lock cannot be proven held.</summary>
+    Unconfirmed,
+
+    /// <summary>A one-phase commit was proposed by a leader of another term than the one that granted the
+    /// transaction's locks on the anchor partition.</summary>
+    BundleApply
 }
 
 /// <summary>Why an entered one-phase attempt fell back to the two-phase flow; the tag of
@@ -797,6 +824,60 @@ internal static class DurableTransactionMetrics
             description: "Commits refused because the transaction lost a confirmed staging to a leader change.");
 
     /// <summary>
+    /// Times the coordinator saw two lock grants of one transaction on one partition report different
+    /// leadership terms: the partition changed leader under the open transaction, and the later request — a
+    /// renewal, a Shared-to-Exclusive upgrade, a new acquire — was answered by the new leader as a fresh grant.
+    /// The locks granted before the change lived only in the deposed leader's memory and are gone. The
+    /// transaction is refused at commit (<see cref="LostLockAborts"/>); a firing without a matching abort is a
+    /// transaction the client rolled back on its own.
+    /// </summary>
+    internal static readonly Counter<long> LockGrantTermChanges =
+        Meter.CreateCounter<long>(
+            "kahuna.transactions.lock_grant_term_changes",
+            description: "Transactions whose lock grants on one partition reported two leadership terms.");
+
+    /// <summary>
+    /// Commits refused because the transaction could not prove that a lock it was granted is still in force.
+    /// A point, prefix or range lock lives only in the memory of the partition leader that granted it, so the
+    /// coordinator checks at commit that each partition it holds locks on is still led under the term of the
+    /// grant. Each refusal is a prevented anomaly: a lost update when the transaction wrote a value computed
+    /// from what it read under the lost lock, a non-repeatable or non-atomic read when it only read. The
+    /// <c>detected</c> tag says how the loss surfaced: <c>regrant</c> (a later grant on the partition reported
+    /// another term), <c>commit_probe</c> (the partition's confirmed leader is in another term at commit),
+    /// <c>range_moved</c> (the lock's key no longer routes to the partition that granted it),
+    /// <c>unconfirmed</c> (no leader would confirm the term, so the lock cannot be proven held), or
+    /// <c>bundle_apply</c> (a one-phase commit was proposed by a leader of another term).
+    /// </summary>
+    internal static readonly Counter<long> LostLockAborts =
+        Meter.CreateCounter<long>(
+            "kahuna.transactions.lost_lock_aborts",
+            description: "Commits refused because a lock the transaction was granted could not be proven still held after a partition leader change.");
+
+    private static readonly KeyValuePair<string, object?> LostLockRegrant = new("detected", "regrant");
+    private static readonly KeyValuePair<string, object?> LostLockCommitProbe = new("detected", "commit_probe");
+    private static readonly KeyValuePair<string, object?> LostLockRangeMoved = new("detected", "range_moved");
+    private static readonly KeyValuePair<string, object?> LostLockUnconfirmed = new("detected", "unconfirmed");
+    private static readonly KeyValuePair<string, object?> LostLockBundleApply = new("detected", "bundle_apply");
+
+    private static long lostLockAborts;
+
+    /// <summary>Process-wide count behind <see cref="LostLockAborts"/>, readable for tests.</summary>
+    internal static long LostLockAbortsCount => Interlocked.Read(ref lostLockAborts);
+
+    internal static void LostLockAborted(LostLockDetection detection)
+    {
+        Interlocked.Increment(ref lostLockAborts);
+        LostLockAborts.Add(1, detection switch
+        {
+            LostLockDetection.Regrant => LostLockRegrant,
+            LostLockDetection.CommitProbe => LostLockCommitProbe,
+            LostLockDetection.RangeMoved => LostLockRangeMoved,
+            LostLockDetection.BundleApply => LostLockBundleApply,
+            _ => LostLockUnconfirmed
+        });
+    }
+
+    /// <summary>
     /// Scans that exhausted the per-page retry budget: one page kept answering
     /// MustRetry/WaitingForReplication for the whole budget, so the scan failed loudly instead of
     /// hanging. The paired error log names the range and the cursor. A firing means some key in the
@@ -962,6 +1043,7 @@ internal static class DurableTransactionMetrics
     private static readonly KeyValuePair<string, object?> GatePredicateRead = new("outcome", "predicate_read");
     private static readonly KeyValuePair<string, object?> GateOffPartitionRead = new("outcome", "off_partition_read");
     private static readonly KeyValuePair<string, object?> GateNonPersistentRead = new("outcome", "non_persistent_read");
+    private static readonly KeyValuePair<string, object?> GateHeldLock = new("outcome", "held_lock");
     private static readonly KeyValuePair<string, object?> GateMultiPartition = new("outcome", "multi_partition");
     private static readonly KeyValuePair<string, object?> GateAnchorOff = new("outcome", "anchor_off_partition");
     private static readonly KeyValuePair<string, object?> FallbackForeignIntent = new("reason", "foreign_intent");
@@ -979,6 +1061,7 @@ internal static class DurableTransactionMetrics
             OnePhaseGateOutcome.PredicateRead => GatePredicateRead,
             OnePhaseGateOutcome.OffPartitionRead => GateOffPartitionRead,
             OnePhaseGateOutcome.NonPersistentRead => GateNonPersistentRead,
+            OnePhaseGateOutcome.HeldLock => GateHeldLock,
             OnePhaseGateOutcome.MultiPartition => GateMultiPartition,
             _ => GateAnchorOff
         });
@@ -1123,6 +1206,18 @@ internal static class DurableTransactionMetrics
         Meter.CreateCounter<long>(
             "kahuna.durable_tx.one_phase_gated_commit_stale_read_rejections",
             description: "One-phase bundled commits rejected at apply because a read-only dependency moved before the bundle applied.");
+
+    /// <summary>
+    /// One-phase bundled commits rejected at apply because the bundle was proposed in another Raft term than
+    /// the one the transaction's locks on the partition were granted under: the attempt was re-driven to a new
+    /// leader after a leader change dropped those locks. Each occurrence is a prevented commit on an exclusion
+    /// nobody held; the proposing finalizer drives a truthful conflict abort from it. Counted on every replica
+    /// that applies the rejection.
+    /// </summary>
+    internal static readonly Counter<long> OnePhaseGatedCommitLeaderChangeRejections =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.one_phase_gated_commit_leader_change_rejections",
+            description: "One-phase bundled commits rejected at apply because a leader of another term than the one that granted the transaction's locks proposed them.");
 
     private static long onePhaseGatedCommitStaleBaseRejections;
 

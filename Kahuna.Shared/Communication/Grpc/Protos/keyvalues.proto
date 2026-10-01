@@ -410,6 +410,15 @@ message GrpcTryAcquireExclusiveLockRequest {
   GrpcTransactionConflictPolicy ConflictPolicy = 10;
 }
 
+// The leadership a lock was granted under: the partition whose leader holds the lock in its memory, the Raft
+// term that leader was confirmed in, and a key that routes to the partition. The holder checks at commit that
+// the partition is still led under this term; a different term means a leader change dropped the lock.
+message GrpcLockGrantTerm {
+  int32  PartitionId = 1;
+  int64  Term        = 2;
+  string RoutingKey  = 3;
+}
+
 message GrpcTryAcquireExclusiveLockResponse {
   optional string ServedFrom              = 1;
   GrpcKeyValueResponseType Type           = 2;
@@ -420,6 +429,8 @@ message GrpcTryAcquireExclusiveLockResponse {
   bool   BaseObserved                     = 6;
   // The key's committed revision at the grant, or -1 when the key was absent.
   int64  BaseRevision                     = 7;
+  // The leadership the lock was granted under: set only on a Locked answer.
+  repeated GrpcLockGrantTerm GrantTerms   = 8;
 }
 
 message GrpcTryCheckWriteIntentRequest {
@@ -448,13 +459,15 @@ message GrpcTryCheckManyWriteIntentsRequestItem {
   string Key = 1;
   GrpcKeyValueDurability Durability = 2;
   // KeyValueConflictChecks bit set: which conflict classes to answer for this key
-  // (1 = concurrent write intent, 2 = foreign range lock, 4 = staged base moved). Selected per key
+  // (1 = concurrent write intent, 2 = foreign range lock, 4 = staged base moved, 8 = pin own intent,
+  // 16 = leader term changed). Selected per key
   // because one probe carries a transaction's read set and its write set, which ask different questions.
   uint32 Checks = 3;
   // For the staged-base check (4): the committed base the caller's read-modify-write of this key was
   // validated against — the revision when the base existed, or -1 when the validated base was
-  // "key does not exist". Ignored by every other check. Absent on the wire (0) only when the staged-base
-  // check is not requested, so the -1 sentinel is always explicit when it matters.
+  // "key does not exist". For the leader-term check (16): the Raft term the key's partition must still be
+  // led under. Ignored by every other check. Absent on the wire (0) only when neither check is requested,
+  // so the -1 sentinel is always explicit when it matters.
   sint64 BaseRevision = 4;
 }
 
@@ -487,6 +500,8 @@ message GrpcTryAcquireExclusivePrefixLockResponse {
   int32  HolderTransactionIdNode          = 3;
   int64  HolderTransactionIdPhysical      = 4;
   uint32 HolderTransactionIdCounter       = 5;
+  // The leadership the lock was granted under: set only on a Locked answer.
+  repeated GrpcLockGrantTerm GrantTerms   = 6;
 }
 
 message GrpcTryAcquireManyExclusiveLocksRequest {
@@ -501,6 +516,8 @@ message GrpcTryAcquireManyExclusiveLocksRequest {
 message GrpcTryAcquireManyExclusiveLocksResponse {
   optional string ServedFrom = 1;
   repeated GrpcTryAcquireManyExclusiveLocksResponseItem Items = 2;
+  // The leaderships the Locked items were granted under, one entry per partition and term.
+  repeated GrpcLockGrantTerm GrantTerms = 3;
 }
 
 message GrpcTryAcquireManyExclusiveLocksRequestItem {
@@ -594,6 +611,8 @@ message GrpcTryAcquireExclusiveRangeLockResponse {
   int32  HolderTransactionIdNode          = 3;
   int64  HolderTransactionIdPhysical      = 4;
   uint32 HolderTransactionIdCounter       = 5;
+  // The leaderships the lock was granted under, one entry per partition it covers: set only on a Locked answer.
+  repeated GrpcLockGrantTerm GrantTerms   = 6;
 }
 
 message GrpcTryReleaseExclusiveRangeLockRequest {
@@ -1042,6 +1061,8 @@ message GrpcCompleteOperationRequest
   repeated GrpcTransactionModifiedKey ModifiedKeys = 22;
   repeated GrpcStagedMutationEffect StagedMutations = 23;
   repeated GrpcTransactionModifiedKey AcquiredPointLocks = 24;
+  // The leaderships the acquired locks of this operation were granted under.
+  repeated GrpcLockGrantTerm LockGrantTerms = 25;
   GrpcKeyValueDurability Durability = 16;
   GrpcKeyValueResponseType CachedType = 17;
   int64 CachedRevision = 18;

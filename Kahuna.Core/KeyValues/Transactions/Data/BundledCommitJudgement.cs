@@ -21,7 +21,11 @@ internal enum BundledCommitVerdict
 
     /// <summary>A read-only dependency is held by a foreign undecided or committed intent, or the ledger's head
     /// for it moved past the observed state.</summary>
-    StaleRead
+    StaleRead,
+
+    /// <summary>The bundle was proposed in another Raft term than the one the transaction's locks on the
+    /// partition were granted under: a leader that never held those locks proposed it.</summary>
+    LeaderChanged
 }
 
 /// <summary>A bundled commit verdict with the reason a rejection was given (null on admit).</summary>

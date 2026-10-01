@@ -150,6 +150,82 @@ internal sealed class KeyValueLocator
         RangeRouting.Locate(keySpaceRegistry, manager.RangeMapStore.Current, dataPartitionRouter, KeyValueKeySpace.OfPrefix(prefix) + "/").PartitionId;
 
     /// <summary>
+    /// The term a lock about to be granted on <paramref name="partitionId"/> is reported under
+    /// (<see cref="LockGrantTerm"/>), or 0 when no capture is open and nobody will read it.
+    ///
+    /// <para>Read <b>before</b> the leadership confirmation that admits the grant, and the order is what makes
+    /// the value safe to report. The confirmation proves this node led the partition at some later instant, in
+    /// a term at or above the one read here. A holder that later finds the confirmed leader still in this very
+    /// term therefore knows the grant was made in it too, by that leader. Read after the confirmation, a node
+    /// deposed in between would report the new leader's term for a lock that lives only in its own memory, and
+    /// the holder's check would pass against a leader that never saw the lock.</para>
+    /// </summary>
+    private long LockGrantTermBeforeConfirmation(int partitionId) =>
+        LockGrantScope.Current is null ? 0 : raft.GetPartitionTerm(partitionId);
+
+    /// <summary>
+    /// A key of the locked range that routes to <paramref name="partitionId"/>, so a commit-time probe of the
+    /// partition's leadership (<see cref="KeyValueConflictChecks.LeaderTerm"/>) reaches the leader that granted
+    /// the range lock: the range's start when it is bounded there, otherwise the first key of the key space,
+    /// otherwise the range's end. Null when none of them routes to the partition.
+    /// </summary>
+    private string? RangeLockRoutingKey(int partitionId, string prefix, string? startKey, string? endKey)
+    {
+        if (startKey is not null && RoutesTo(startKey, partitionId))
+            return startKey;
+
+        string firstKeyOfSpace = KeyValueKeySpace.OfPrefix(prefix) + "/";
+        if (RoutesTo(firstKeyOfSpace, partitionId))
+            return firstKeyOfSpace;
+
+        return endKey is not null && RoutesTo(endKey, partitionId) ? endKey : null;
+    }
+
+    /// <summary>
+    /// Answers the <see cref="KeyValueConflictChecks.LeaderTerm"/> check for the partition <paramref name="key"/>
+    /// routes to: whether this node is that partition's confirmed leader, still in <paramref name="term"/>.
+    /// <list type="bullet">
+    /// <item><c>DoesNotExist</c> — it is: the leadership the holder's locks were granted under is unbroken.</item>
+    /// <item><c>Aborted</c> — the partition is past that term. Terms only advance, so this is proof of a leader
+    /// change whether or not this node leads, and needs no confirmation.</item>
+    /// <item><c>MustRetry</c> — this node cannot say: it is behind the term, or a quorum did not confirm that
+    /// it leads. The caller asks again, which re-resolves the leader.</item>
+    /// </list>
+    ///
+    /// <para>The confirmation runs here, on the node that answers, and not only in the caller that routed the
+    /// probe: a probe that arrives over the wire is served locally, on the sender's belief of who leads, and a
+    /// follower that has not yet heard of a newer term would otherwise vouch for a leadership that has ended.
+    /// The term is read again after the confirmation, so the value compared is at or above the term this node
+    /// was confirmed in; equality with the holder's term then pins both to one uninterrupted leadership.</para>
+    /// </summary>
+    internal async ValueTask<KeyValueResponseType> CheckLeaderTerm(string key, long term, CancellationToken cancellationToken)
+    {
+        int partitionId = RouteKey(key);
+        long current = raft.GetPartitionTerm(partitionId);
+
+        if (current > term)
+            return KeyValueResponseType.Aborted;
+
+        if (current < term || !await ConfirmLeadershipIfHosted(partitionId, cancellationToken))
+            return KeyValueResponseType.MustRetry;
+
+        return raft.GetPartitionTerm(partitionId) == term ? KeyValueResponseType.DoesNotExist : KeyValueResponseType.Aborted;
+    }
+
+    private bool RoutesTo(string key, int partitionId)
+    {
+        try
+        {
+            return RouteKey(key) == partitionId;
+        }
+        catch (KahunaServerException)
+        {
+            // No range descriptor covers the key: it is outside the partition's range by definition.
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Resolves the partition leader, mapping the retryable Raft resolution failures — a node that
     /// has not finished cluster initialization after a (re)join (<see cref="RaftNodeNotReadyException"/>),
     /// a leader still undecided within the election budget, or a failed partition restore — to a
@@ -1292,8 +1368,18 @@ internal sealed class KeyValueLocator
         if (!raft.Joined)
             return (KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero, PointLockBase.None);
 
+        long grantTerm = LockGrantTermBeforeConfirmation(partitionId);
+
         if (await ConfirmLeadershipForActorMutation(partitionId, cancelationToken))
-            return await manager.TryAcquireExclusiveLockObserved(transactionId, key, expiresMs, durability);
+        {
+            (KeyValueResponseType, string, KeyValueDurability, HLCTimestamp, long) granted =
+                await manager.TryAcquireExclusiveLockObserved(transactionId, key, expiresMs, durability);
+
+            if (granted.Item1 == KeyValueResponseType.Locked)
+                LockGrantScope.Record(partitionId, grantTerm, key);
+
+            return granted;
+        }
 
         string? leader = await TryWaitForLeader(partitionId, cancelationToken);
         if (leader is null || leader == raft.GetLocalEndpoint())
@@ -1338,9 +1424,18 @@ internal sealed class KeyValueLocator
         if (!raft.Joined)
             return KeyValueResponseType.MustRetry;
 
+        long grantTerm = LockGrantTermBeforeConfirmation(partitionId);
+
         if (await ConfirmLeadershipForActorMutation(partitionId, cancellationToken))
-            return await manager.TryAcquireExclusivePrefixLock(transactionId, prefixKey, expiresMs, durability);
-            
+        {
+            KeyValueResponseType granted = await manager.TryAcquireExclusivePrefixLock(transactionId, prefixKey, expiresMs, durability);
+
+            if (granted == KeyValueResponseType.Locked)
+                LockGrantScope.Record(partitionId, grantTerm, KeyValueKeySpace.OfPrefix(prefixKey) + "/");
+
+            return granted;
+        }
+
         string? leader = await TryWaitForLeader(partitionId, cancellationToken);
         if (leader is null || leader == raft.GetLocalEndpoint())
             return KeyValueResponseType.MustRetry;
@@ -1413,6 +1508,17 @@ internal sealed class KeyValueLocator
 
         if (leader == localNode)
         {
+            // The terms are read before the leadership confirmation, as for a single lock, and only for the
+            // partitions this node is about to grant on.
+            Dictionary<int, long>? grantTerms = null;
+            if (LockGrantScope.Current is not null)
+            {
+                grantTerms = new(leaderByPartition.Count);
+                foreach ((int partitionId, string partitionLeader) in leaderByPartition)
+                    if (partitionLeader == leader)
+                        grantTerms[partitionId] = raft.GetPartitionTerm(partitionId);
+            }
+
             if (!await ConfirmLeadershipForGroupMutation(leader, leaderByPartition, cancellationToken))
             {
                 lock (lockSync)
@@ -1425,6 +1531,19 @@ internal sealed class KeyValueLocator
             }
 
             List<(KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp holder, long baseRevision)> acquireResponses = await manager.TryAcquireManyExclusiveLocksObserved(transactionId, xkeys);
+
+            if (grantTerms is not null)
+            {
+                foreach ((KeyValueResponseType type, string key, KeyValueDurability _, HLCTimestamp _, long _) in acquireResponses)
+                {
+                    if (type != KeyValueResponseType.Locked)
+                        continue;
+
+                    int partitionId = RouteKey(key);
+                    if (grantTerms.TryGetValue(partitionId, out long grantTerm))
+                        LockGrantScope.Record(partitionId, grantTerm, key);
+                }
+            }
 
             lock (lockSync)
             {
@@ -1757,8 +1876,25 @@ internal sealed class KeyValueLocator
         RangeLockMode mode,
         CancellationToken cancellationToken)
     {
+        long grantTerm = LockGrantTermBeforeConfirmation(partitionId);
+
         if (!raft.Joined || await ConfirmLeadershipForActorMutation(partitionId, cancellationToken))
-            return await manager.TryAcquireRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, mode);
+        {
+            (KeyValueResponseType, HLCTimestamp) granted =
+                await manager.TryAcquireRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, mode);
+
+            if (granted.Item1 == KeyValueResponseType.Locked && LockGrantScope.Current is not null)
+            {
+                if (RangeLockRoutingKey(partitionId, prefix, startKey, endKey) is { } routingKey)
+                    LockGrantScope.Record(partitionId, grantTerm, routingKey);
+                else
+                    logger.LogWarning(
+                        "ACQUIRE-RANGE-LOCK {Prefix} P{Pid}: no key of the locked range routes to the granting partition, so a leader change that drops this lock will not be detected at commit",
+                        prefix, partitionId);
+            }
+
+            return granted;
+        }
 
         string? leader = await TryWaitForLeader(partitionId, cancellationToken);
         if (leader is null || leader == raft.GetLocalEndpoint())

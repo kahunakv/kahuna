@@ -15,6 +15,11 @@ namespace Kahuna.Server.KeyValues;
 /// A registered range-lock acquire records the lock into the transaction's working set through the completion
 /// payload; losing that record loses the lock when the coordinator hands the transaction on. The
 /// <c>WithHook</c> variants exist so tests can interleave a split or merge into the acquire window.
+///
+/// Every registered acquire also reports the leadership the lock was granted under
+/// (<see cref="LockGrantTerm"/>), collected from the locator through <see cref="LockGrantScope"/>. A lock lives
+/// only in the granting leader's memory, so that report is what lets the coordinator prove at commit that the
+/// lock was not dropped by a leader change.
 /// </summary>
 internal sealed class RoutedLockOperations
 {
@@ -135,9 +140,12 @@ internal sealed class RoutedLockOperations
         long baseRevision;
 
         // This frame is the registration's only completer, so a throw from the work must release it.
+        LockGrantCapture grants;
+
         try
         {
             using (YieldingIntentPolicyScope.Enter(sessionPolicy))
+            using (LockGrantScope.Begin(out grants))
                 (type, resultKey, resultDurability, holder, baseRevision) =
                     await locator.LocateAndTryAcquireExclusiveLock(transactionId, key, expiresMs, durability, cancellationToken);
         }
@@ -157,6 +165,7 @@ internal sealed class RoutedLockOperations
         // the write's validated base, so a commit over a base another transaction moved (possible only when the
         // lock was lost to a leader change) is refused instead of silently replacing that commit.
         payload.Read = acquired ? PointLockBase.ToObservation(key, durability, baseRevision) : null;
+        payload.LockGrantTerms = acquired ? grants.Take() : null;
         payload.Durability = durability;
         payload.CachedType = type;
 
@@ -241,9 +250,12 @@ internal sealed class RoutedLockOperations
         KeyValueResponseType type;
 
         // This frame is the registration's only completer, so a throw from the work must release it.
+        LockGrantCapture grants;
+
         try
         {
-            type = await locator.LocateAndTryAcquireExclusivePrefixLock(transactionId, prefixKey, expiresMs, durability, cancellationToken);
+            using (LockGrantScope.Begin(out grants))
+                type = await locator.LocateAndTryAcquireExclusivePrefixLock(transactionId, prefixKey, expiresMs, durability, cancellationToken);
         }
         catch
         {
@@ -255,6 +267,7 @@ internal sealed class RoutedLockOperations
 
         OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
         payload.AcquiredPrefixLock = acquired ? prefixKey : null;
+        payload.LockGrantTerms = acquired ? grants.Take() : null;
         payload.Durability = durability;
         payload.CachedType = type;
 
@@ -318,9 +331,12 @@ internal sealed class RoutedLockOperations
         List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId, long BaseRevision)> responses;
 
         // This frame is the registration's only completer, so a throw from the work must release it.
+        LockGrantCapture grants;
+
         try
         {
             using (YieldingIntentPolicyScope.Enter(sessionPolicy))
+            using (LockGrantScope.Begin(out grants))
                 responses =
                     await locator.LocateAndTryAcquireManyExclusiveLocks(transactionId, keys, cancellationToken);
         }
@@ -351,6 +367,7 @@ internal sealed class RoutedLockOperations
         OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
         payload.AcquiredPointLocks = acquired.Count > 0 ? acquired : null;
         payload.ReadObservations = observations;
+        payload.LockGrantTerms = acquired.Count > 0 ? grants.Take() : null;
         // A batch that acquired at least one lock completes terminally so its held locks fold. A
         // batch that acquired nothing must NOT be cached as a terminal success — that would let a
         // same-id retry replay the false success forever instead of re-registering. Mark it
@@ -602,9 +619,12 @@ internal sealed class RoutedLockOperations
         HLCTimestamp holder;
 
         // This frame is the registration's only completer, so a throw from the work must release it.
+        LockGrantCapture grants;
+
         try
         {
-            (type, holder) = await locator.LocateAndTryAcquireRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, mode, afterSnapshot, cancellationToken);
+            using (LockGrantScope.Begin(out grants))
+                (type, holder) = await locator.LocateAndTryAcquireRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, mode, afterSnapshot, cancellationToken);
         }
         catch
         {
@@ -619,6 +639,7 @@ internal sealed class RoutedLockOperations
 
         OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
         payload.AcquiredRangeLock = acquired ? (range, mode) : null;
+        payload.LockGrantTerms = acquired ? grants.Take() : null;
         payload.Durability = durability;
         payload.CachedType = type;
 

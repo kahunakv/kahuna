@@ -81,6 +81,15 @@ public sealed class OperationCompletionPayload
     /// </summary>
     public IReadOnlyList<StagedMutationEffect>? StagedMutations { get; set; }
 
+    /// <summary>
+    /// The leaderships the locks this operation acquired were granted under (<see cref="LockGrantTerm"/>): one
+    /// entry per partition and term. The coordinator keeps them and proves at commit that each partition is
+    /// still led under its term, which is the only evidence it has that the locks, held in the granting
+    /// leader's memory alone, are still in force. Null when the operation acquired no lock, or when the node
+    /// that granted it predates the report.
+    /// </summary>
+    internal IReadOnlyList<LockGrantTerm>? LockGrantTerms { get; set; }
+
     /// <summary>Durability shared by the effect keys/locks above.</summary>
     public KeyValueDurability Durability { get; set; }
 
@@ -128,6 +137,7 @@ public sealed class OperationCompletionPayload
         Read = null;
         ReadObservations = null;
         StagedMutations = null;
+        LockGrantTerms = null;
         Durability = default;
         CachedType = default;
         CachedRevision = 0;

@@ -627,15 +627,22 @@ internal sealed class ScriptTransactionExecutor
 
                 if (!ranInActorTurn)
                 {
-                    await AcquireLocksPessimistically(
-                        context,
-                        ephemeralLocksToAcquire,
-                        persistentLocksToAcquire,
-                        ephemeralPrefixLocksToAcquire,
-                        persistentPrefixLocksToAcquire,
-                        timeout,
-                        cts.Token
-                    );
+                    // The locks are acquired outside the operation registry, so the leadership each one was
+                    // granted under is collected here and handed to the context directly. The commit proves
+                    // from it that no partition changed leader, and dropped the locks, while the script ran.
+                    LockGrantCapture lockGrants;
+                    using (LockGrantScope.Begin(out lockGrants))
+                        await AcquireLocksPessimistically(
+                            context,
+                            ephemeralLocksToAcquire,
+                            persistentLocksToAcquire,
+                            ephemeralPrefixLocksToAcquire,
+                            persistentPrefixLocksToAcquire,
+                            timeout,
+                            cts.Token
+                        );
+
+                    context.RecordLockGrantTerms(lockGrants.Take());
                 }
             }
 

@@ -50,5 +50,16 @@ public enum KeyValueConflictChecks
     /// when the intent is missing, foreign, or recorded as taken over — the loser must never commit a write
     /// to a key it lost. Has no effect on a key whose intent is already durably prepared.
     /// </summary>
-    PinOwnIntent = 1 << 3
+    PinOwnIntent = 1 << 3,
+
+    /// <summary>
+    /// The partition that serves the key is no longer led under the Raft term the probe carries
+    /// (<c>KeyValueConflictProbe.BaseRevision</c>). A lock — a point lock, a prefix lock, a range lock — lives
+    /// only in the memory of the leader that granted it, and a leader change drops it without telling its
+    /// holder. The grant reports the term it was issued under; this check, asked at commit of the confirmed
+    /// current leader, proves that leadership has not changed since, and so that every lock the transaction
+    /// was granted on the partition is still in force. Answers <see cref="KeyValueResponseType.Aborted"/>
+    /// when the term differs. Asked alone, never combined with another check: the key only routes the probe.
+    /// </summary>
+    LeaderTerm = 1 << 4
 }

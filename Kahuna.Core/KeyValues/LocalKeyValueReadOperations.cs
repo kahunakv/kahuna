@@ -337,7 +337,8 @@ internal sealed class LocalKeyValueReadOperations
     /// foreign range lock covering the key (the decide-time fence applied to a write set), and/or a moved
     /// staged base (the post-prepare fence for a read-modify-write key, compared against
     /// <paramref name="baseRevision"/>). Returns Aborted for an intent/range-lock conflict, NotSet for a
-    /// staged-base mismatch; DoesNotExist otherwise.
+    /// staged-base mismatch; DoesNotExist otherwise. The leader-term check is answered alone, by
+    /// <see cref="KeyValueLocator.CheckLeaderTerm"/>, against the term <paramref name="baseRevision"/> carries.
     /// </summary>
     public async Task<KeyValueResponseType> TryCheckWriteIntentValue(
         HLCTimestamp transactionId,
@@ -349,6 +350,12 @@ internal sealed class LocalKeyValueReadOperations
     {
         if (IsGatedKey(key))
             return KeyValueResponseType.MustRetry;
+
+        // The leader-term check asks about the partition, not the key: the key only routed the probe here. No
+        // actor holds the answer, so the locator gives it from the Raft term, after it confirmed that this
+        // node leads the partition.
+        if ((checks & KeyValueConflictChecks.LeaderTerm) != 0)
+            return await locator.CheckLeaderTerm(key, baseRevision, CancellationToken.None);
 
         KeyValueRequest request = KeyValueRequestPool.Rent(
             KeyValueRequestType.TryCheckWriteIntent,

@@ -95,6 +95,58 @@ with `Aborted` and the reason `Lost staging: …`. The counters are `kahuna.kv.s
 earlier staging of the key needs no fence: it is last-writer-wins by design, and a write under a
 point lock carries the lock's committed base, which the prepare compares with the head.
 
+### Locks lost at a leader change
+
+The purge also drops every lock of the partition: point locks (a point lock is a write intent), prefix
+locks, and range locks in every mode. A lock is what makes a pessimistic transaction's reads one
+consistent cut, and nothing tells the transaction that it is gone. Its coordinator still lists the lock.
+The new leader answers a renewal, a Shared-to-Exclusive upgrade or a repeated acquire as a fresh grant.
+In between, the new leader grants the same keys to another transaction.
+
+The committed base a point lock reports does not cover this. A consumer that reads a row under a Shared
+range lock, then upgrades and takes the exclusive point lock, has its base observed at that last grant.
+When the Shared lock was lost before it, the base is the competitor's commit, every base check passes,
+and the value written was computed from the row as it was before. A transaction that only reads has no
+base at all.
+
+So the lock itself is proven, by the Raft term:
+
+- **Every lock grant reports the term it was issued under.** The locator reads `GetPartitionTerm`
+  before the leadership confirmation that admits the grant, and reports it with the partition and a key
+  that routes to it (`LockGrantTerm`). The value travels through an ambient capture (`LockGrantScope`),
+  across the gRPC lock responses, and into the operation's completion, so the coordinator folds it with
+  the lock. The read comes before the confirmation on purpose: a node deposed in between would otherwise
+  report the new leader's term for a lock that exists only in its own memory.
+- **The coordinator keeps one term per partition.** The first grant on a partition fixes it. A later
+  grant on the same partition under another term marks the transaction: the leadership changed, and the
+  locks granted before it are gone. The coordinator's own range-lock renewals are folded the same way.
+- **The commit proves the term.** A probe with the `LeaderTerm` check asks the confirmed leader of each
+  partition whether it is still in that term. A term has one leader, and a node that stops leading can
+  only lead again in a later term, so the same term means the same leader, uninterrupted since the grant,
+  with the lock still in its memory. The node that answers confirms its own leadership with a quorum
+  first: a follower shares the leader's term and must not vouch for it. A node already past the term
+  answers the change at once, and a node that cannot confirm answers `MustRetry`. The probe runs in the commit-conflict barrier: for the two-phase
+  flow that is after the prepares are durable, when replicated intents have taken over the protection of
+  the written keys. A transaction with no writes runs it as its whole commit.
+- **The one-phase bundle carries the term.** The bundle validates before it proposes, so a leader change
+  between the two would let a leader that never held the locks accept it. With
+  `OnePhaseApplyTimeValidation` the bundled commit carries the term of the anchor partition's grants
+  (`lockGrantTerm`), and every replica rejects it at apply unless the log entry itself was proposed in
+  that term. Without apply-time validation a multi-process group sends a transaction that holds a lock
+  through the two-phase flow (gate outcome `held_lock`).
+
+A failed proof refuses the commit with `Aborted` and the reason `Lost lock: …`. Nothing the transaction
+staged was committed, so the client restarts it. The proof also fails closed when the lock's key now
+routes to another partition (the range moved) and when no leader confirms the term after a few attempts.
+
+```
+Refusing to commit transaction HLC(1:…): partition 2 is no longer led under term 3, in which it granted this transaction a lock; the lock was dropped by the leader change
+```
+
+Two limits. A lock whose lease lapses without a leader change is not covered by this proof; the base
+checks on the written keys still are. A node that predates the term report answers none, and the locks
+it granted are not checked.
+
 ### What to look for in the logs
 
 A node that refuses an actor-only mutation because it believes it leads but its quorum did not
@@ -263,6 +315,9 @@ Completion of committed durable entry #4917 on partition 2 (PreparedIntent) did 
 | `kahuna.keyvalues.apply_divergence_contained{action}` | counter | Containment actions on this node: `gated`, `transferred`, `stepped_down`, `relinquish_failed` |
 | `kahuna.keyvalues.apply_divergence_repaired` | counter | Gated partitions whose projection a whole-partition install replaced |
 | `kahuna.transactions.recordless_intents_stale_detected` | counter | Record-less holds a majority of the replica set had already settled (transaction lifecycle guide, §6.7) |
+| `kahuna.transactions.lock_grant_term_changes` | counter | Transactions whose lock grants on one partition reported two leadership terms |
+| `kahuna.transactions.lost_lock_aborts{detected}` | counter | Commits refused because a lock could not be proven held: `regrant`, `commit_probe`, `range_moved`, `unconfirmed`, `bundle_apply` |
+| `kahuna.durable_tx.one_phase_gated_commit_leader_change_rejections` | counter | One-phase bundled commits rejected at apply because another term than the lock grants' proposed them |
 | `kahuna.range.split.incomplete_source_refusals` | counter | Splits refused because the source leader's state was incomplete |
 | `kahuna.durable_tx.ordered_apply_waits_released_on_leadership_loss` | counter | Durable completions released because the node stopped leading the partition |
 | `kahuna.durable_tx.ordered_apply_wait_timeouts` | counter | Durable completions that never saw the ordered apply of their committed entry |

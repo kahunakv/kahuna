@@ -10,7 +10,9 @@ namespace Kahuna.Shared.KeyValue;
 /// <param name="Checks">The conflict classes to answer. <see cref="KeyValueConflictChecks.None"/> answers no conflict.</param>
 /// <param name="BaseRevision">For <see cref="KeyValueConflictChecks.StagedBase"/>: the committed base this
 /// transaction's read-modify-write of the key was validated against — the revision when the base existed, or
-/// <c>-1</c> when the validated base was "key does not exist". Ignored by every other check.</param>
+/// <c>-1</c> when the validated base was "key does not exist". For
+/// <see cref="KeyValueConflictChecks.LeaderTerm"/>: the Raft term the key's partition must still be led under.
+/// Ignored by every other check.</param>
 public readonly record struct KeyValueConflictProbe(
     string Key,
     KeyValueDurability Durability,

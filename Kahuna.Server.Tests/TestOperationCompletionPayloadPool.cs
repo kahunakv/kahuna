@@ -17,13 +17,13 @@ namespace Kahuna.Server.Tests;
 public class TestOperationCompletionPayloadPool
 {
     /// <summary>
-    /// The number of settable public instance properties <see cref="OperationCompletionPayload"/>
+    /// The number of settable instance properties, public and internal, <see cref="OperationCompletionPayload"/>
     /// currently declares. A read-only computed property (like <see cref="OperationCompletionPayload.HasWorkingSetEffect"/>)
     /// derives from the settable ones and needs no slot in <see cref="OperationCompletionPayload.Clear"/>, so it
     /// is excluded from this count. When a new settable property is added, it must join
     /// <see cref="OperationCompletionPayload.Clear"/> and the population + assertions below, then this count.
     /// </summary>
-    private const int ExpectedPropertyCount = 16;
+    private const int ExpectedPropertyCount = 17;
 
     private static OperationCompletionPayload FullyPopulated()
     {
@@ -43,6 +43,7 @@ public class TestOperationCompletionPayloadPool
             Read = new KeyValueTransactionReadKey { Key = "k", Durability = KeyValueDurability.Persistent, Exists = true, Revision = 1 },
             ReadObservations = [new KeyValueTransactionReadKey { Key = "k", Durability = KeyValueDurability.Persistent, Exists = true, Revision = 1 }],
             StagedMutations = [new StagedMutationEffect("k", [1], KeyValueState.Set, 1, 1, true)],
+            LockGrantTerms = [new LockGrantTerm(1, 3, "k")],
             Durability = KeyValueDurability.Ephemeral,
             CachedType = KeyValueResponseType.Locked,
             CachedRevision = 7,
@@ -69,6 +70,7 @@ public class TestOperationCompletionPayloadPool
         Assert.Null(payload.Read);
         Assert.Null(payload.ReadObservations);
         Assert.Null(payload.StagedMutations);
+        Assert.Null(payload.LockGrantTerms);
         Assert.Equal(default, payload.Durability);
         Assert.Equal(default, payload.CachedType);
         Assert.Equal(0, payload.CachedRevision);
@@ -79,13 +81,13 @@ public class TestOperationCompletionPayloadPool
     public void PropertyCount_MatchesClearCoverage()
     {
         PropertyInfo[] settableProperties = typeof(OperationCompletionPayload)
-            .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
             .Where(property => property.CanWrite)
             .ToArray();
 
         Assert.True(
             settableProperties.Length == ExpectedPropertyCount,
-            $"OperationCompletionPayload declares {settableProperties.Length} settable public properties but " +
+            $"OperationCompletionPayload declares {settableProperties.Length} settable properties but " +
             $"the recycle contract covers {ExpectedPropertyCount}. Add the new property to Clear() and to this " +
             "test, then update ExpectedPropertyCount.");
     }

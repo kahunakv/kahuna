@@ -906,6 +906,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             return (KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero, PointLockBase.None);
 
         GrpcTryAcquireExclusiveLockResponse remoteResponse = response.TryAcquireExclusiveLock!;
+        RecordLockGrantTerms(remoteResponse.GrantTerms);
 
         HLCTimestamp holder = new(remoteResponse.HolderTransactionIdNode, remoteResponse.HolderTransactionIdPhysical, remoteResponse.HolderTransactionIdCounter);
         long baseRevision = remoteResponse.BaseObserved ? remoteResponse.BaseRevision : PointLockBase.None;
@@ -949,7 +950,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             return KeyValueResponseType.MustRetry;
 
         GrpcTryAcquireExclusivePrefixLockResponse remoteResponse = response.TryAcquireExclusivePrefixLock!;
-        
+        RecordLockGrantTerms(remoteResponse.GrantTerms);
 
         return (KeyValueResponseType)remoteResponse.Type;
     }
@@ -998,6 +999,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         }
 
         GrpcTryAcquireManyExclusiveLocksResponse remoteResponse = response.TryAcquireManyExclusiveLocks!;
+        RecordLockGrantTerms(remoteResponse.GrantTerms);
 
         lock (lockSync)
         {
@@ -1008,6 +1010,17 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
                 responses.Add(((KeyValueResponseType)item.Type, item.Key, (KeyValueDurability)item.Durability, holder, baseRevision));
             }
         }
+    }
+
+    /// <summary>
+    /// Replays the leaderships a remote node granted locks under into the capture the caller opened, as the
+    /// local grant path writes them directly. A node that predates the field answers none, and the locks it
+    /// granted are then not checked at commit.
+    /// </summary>
+    internal static void RecordLockGrantTerms(RepeatedField<GrpcLockGrantTerm> grantTerms)
+    {
+        foreach (GrpcLockGrantTerm grant in grantTerms)
+            LockGrantScope.Record(grant.PartitionId, grant.Term, grant.RoutingKey);
     }
     
     internal static void AddAcquireLockRequestItems(RepeatedField<GrpcTryAcquireManyExclusiveLocksRequestItem> target, List<(string key, int expiresMs, KeyValueDurability durability)> xkeys)
@@ -1126,6 +1139,8 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero);
 
         GrpcTryAcquireExclusiveRangeLockResponse remoteResponse = response.TryAcquireExclusiveRangeLock!;
+        RecordLockGrantTerms(remoteResponse.GrantTerms);
+
         HLCTimestamp holder = new(remoteResponse.HolderTransactionIdNode, remoteResponse.HolderTransactionIdPhysical, remoteResponse.HolderTransactionIdCounter);
         return ((KeyValueResponseType)remoteResponse.Type, holder);
     }
@@ -1838,6 +1853,13 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             ReserveItemCapacity(request.AcquiredPointLocks, payload.AcquiredPointLocks.Count);
             foreach ((string Key, KeyValueDurability Durability) l in payload.AcquiredPointLocks)
                 request.AcquiredPointLocks.Add(new GrpcTransactionModifiedKey { Key = l.Key, Durability = (GrpcKeyValueDurability)l.Durability });
+        }
+
+        if (payload.LockGrantTerms is not null)
+        {
+            ReserveItemCapacity(request.LockGrantTerms, payload.LockGrantTerms.Count);
+            foreach (LockGrantTerm grant in payload.LockGrantTerms)
+                request.LockGrantTerms.Add(new GrpcLockGrantTerm { PartitionId = grant.PartitionId, Term = grant.Term, RoutingKey = grant.RoutingKey });
         }
 
         return request;

@@ -75,6 +75,14 @@ message TransactionRecordCommandMessage {
   // live intent set (a foreign undecided intent on the key rejects) and the committed-head ledger (a head
   // above the observed revision, or a value where absence was observed, rejects).
   repeated BundledReadDependencyMessage bundledReadDependencies = 28;
+
+  // commit only, with bundledPrepareKeys: the Raft term the transaction's locks on this partition were granted
+  // under, or 0 for none. The locks live only in the granting leader's memory, and the bundle was validated
+  // against them before it was proposed; the transition is legal only if the log entry that carries it was
+  // proposed in this very term, which every replica reads off the entry itself. A bundle re-driven to a later
+  // leader, which never held the locks, is rejected exactly as a rejected prepare is. An applier that predates
+  // this field ignores it, so the producer sets it under the same condition as applyTimeValidation.
+  int64 lockGrantTerm = 29;
 }
 
 // One read-only dependency carried by a one-phase bundled commit (see bundledReadDependencies).

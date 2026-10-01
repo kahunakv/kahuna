@@ -962,18 +962,27 @@ internal sealed class TransactionCoordinator : IDisposable
 
                 // Pass the sweep deadline token into the acquire so a slow/stuck participant is cancelled at
                 // the budget instead of blocking Task.WhenAll (and therefore the reaper) indefinitely.
-                await manager.LocateAndTryAcquireRangeLock(
-                    ctx.TransactionId, 
-                    range.Prefix, 
-                    range.StartKey, 
-                    range.StartInclusive,
-                    range.EndKey, 
-                    range.EndInclusive, 
-                    renewalTtlMs, 
-                    range.Durability, 
-                    mode, 
-                    sweepToken
-                );
+                //
+                // A renewal that meets a new leader is answered as a fresh grant: the lock the session held
+                // was dropped with the old leadership, and this request silently plants a new one. The term
+                // the grant reports is what exposes that, so it is folded like any other grant and the
+                // session's commit is refused (see TransactionContext.LockGrantTermChange).
+                LockGrantCapture grants;
+                using (LockGrantScope.Begin(out grants))
+                    await manager.LocateAndTryAcquireRangeLock(
+                        ctx.TransactionId,
+                        range.Prefix,
+                        range.StartKey,
+                        range.StartInclusive,
+                        range.EndKey,
+                        range.EndInclusive,
+                        renewalTtlMs,
+                        range.Durability,
+                        mode,
+                        sweepToken
+                    );
+
+                ctx.RecordLockGrantTerms(grants.Take());
             }
             catch (OperationCanceledException)
             {
@@ -1358,12 +1367,20 @@ internal sealed class TransactionCoordinator : IDisposable
             // any read a decided commit has already made stale. Failure sets the Aborted result.
             if (RequiresReadSetValidation(context) && (context.ReadObservationConflict || context.ReadKeys is { Count: > 0 }))
             {
+                // The probe also proves the transaction's locks are still held (see LocksStillInForce).
                 if (!await CheckCommitConflicts(context, cancellationToken))
                     return;
 
                 await ValidateReadSet(context, cancellationToken);
+                return;
             }
 
+            // A pessimistic transaction validates no read set: its locks are what make its reads one
+            // consistent cut. They are only that if they were held from each read to this moment, and a lock
+            // lives in one partition leader's memory, where a leader change drops it silently. Without this
+            // proof a reader whose lock was lost commits a view no serial order explains — one key read at two
+            // committed states, or two keys read on either side of another transaction's commit.
+            await LocksStillInForce(context, cancellationToken);
             return;
         }
 
@@ -1387,6 +1404,16 @@ internal sealed class TransactionCoordinator : IDisposable
             DurableTransactionMetrics.StagedChainBreakAborts.Add(1);
             logger.LogWarning("Refusing to commit transaction {TransactionId}: {Break}", context.TransactionId, stagedChainBreak);
             context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Lost staging: " + stagedChainBreak };
+            return;
+        }
+
+        // The same leader change drops the transaction's locks, and with them the exclusion its reads and its
+        // base observations were made under. A later lock grant on the partition that reports another
+        // leadership term is the proof, known before anything is prepared; the commit-time probe covers a
+        // transaction that asked for no further lock after the change (see LocksStillInForce).
+        if (context.LockGrantTermChange is { } lockGrantTermChange)
+        {
+            RefuseLostLock(context, new LostLock(LostLockDetection.Regrant, lockGrantTermChange));
             return;
         }
 
@@ -1484,9 +1511,16 @@ internal sealed class TransactionCoordinator : IDisposable
             // One ephemeral key led by this node: the prepare, the range-lock probe and the commit below all go
             // to the same actor, so they run as one turn of it. Anything else, and a key led elsewhere, falls
             // through to the three messages.
-            if (CanFinalizeInOneActorTurn(context, out string onlyKey)
-                && await TryFinalizeInOneActorTurn(context, onlyKey, cancellationToken))
-                return;
+            if (CanFinalizeInOneActorTurn(context, out string onlyKey))
+            {
+                // The single turn skips the commit-conflict probe, so the lock proof that rides in it is
+                // asked for here.
+                if (!await LocksStillInForce(context, cancellationToken))
+                    return;
+
+                if (await TryFinalizeInOneActorTurn(context, onlyKey, cancellationToken))
+                    return;
+            }
 
             // Place write intents before probing for commit conflicts so that a racing peer's own probe sees
             // them and aborts — preventing write-skew anomalies. The probe also fences these writes against a
@@ -1859,7 +1893,8 @@ internal sealed class TransactionCoordinator : IDisposable
                 cancellationToken,
                 readSetExclusion: eligibility.ReadSetExclusion,
                 applyTimeValidation: eligibility.ApplyTimeValidation,
-                bundledReadDependencies: eligibility.OnPartitionReadDependencies).ConfigureAwait(false);
+                bundledReadDependencies: eligibility.OnPartitionReadDependencies,
+                bundledLockGrantTerm: eligibility.AnchorLockGrantTerm).ConfigureAwait(false);
         }
         catch (Exception)
         {
@@ -2070,10 +2105,14 @@ internal sealed class TransactionCoordinator : IDisposable
     /// <param name="OnPartitionReadDependencies">The read-only point dependencies routed to the anchor
     /// partition, carried into the bundled commit for that apply-time check; null when none, when the check
     /// is off, or when the read set is excluded (the 2PC flow validates the whole read set from the context).</param>
+    /// <param name="AnchorLockGrantTerm">The leadership term the transaction's locks on the anchor partition
+    /// were granted under, carried into the bundled commit so its apply can refuse a bundle proposed by a
+    /// leader of another term; 0 when the transaction holds no lock there or the check is off.</param>
     private readonly record struct OnePhaseEligibility(
         OnePhaseGateOutcome? ReadSetExclusion,
         bool ApplyTimeValidation,
-        IReadOnlyList<BundledReadDependency>? OnPartitionReadDependencies);
+        IReadOnlyList<BundledReadDependency>? OnPartitionReadDependencies,
+        long AnchorLockGrantTerm = 0);
 
     /// <summary>
     /// Decides which of the transaction's validated dependencies keep the one-phase bundle closed and which
@@ -2117,6 +2156,14 @@ internal sealed class TransactionCoordinator : IDisposable
         // in-process residual for every one of them (see the summary) and still carries what it can check.
         bool closesBundle = !configuration.SingleProcessRaftGroup;
 
+        // A lock is held in the granting leader's memory only. The bundle is validated before it is proposed,
+        // so a leader change between that validation and the propose would let a new leader, which never saw
+        // the locks, accept the bundle. With apply-time validation the bundled commit carries the term the
+        // anchor partition's locks were granted under and every replica refuses it unless a leader of that
+        // very term proposed it. Without it nothing at apply can tell, so a multi-process group sends the
+        // transaction through the two-phase flow, whose validation runs after its prepares are durable.
+        List<LockGrantTerm>? lockGrants = context.SnapshotLockGrantTerms();
+
         if (!configuration.OnePhaseApplyTimeValidation)
         {
             OnePhaseGateOutcome? exclusion = null;
@@ -2127,13 +2174,25 @@ internal sealed class TransactionCoordinator : IDisposable
                     exclusion = OnePhaseGateOutcome.ReadSetBeyondWrites;
                 else if (context.WrittenBaseObservations is { Count: > 0 })
                     exclusion = OnePhaseGateOutcome.ValidatedBase;
+                else if (lockGrants is not null)
+                    exclusion = OnePhaseGateOutcome.HeldLock;
             }
 
             return new OnePhaseEligibility(exclusion, ApplyTimeValidation: false, OnPartitionReadDependencies: null);
         }
 
+        long anchorLockGrantTerm = 0;
+        if (lockGrants is not null)
+        {
+            foreach (LockGrantTerm grant in lockGrants)
+            {
+                if (grant.PartitionId == input.AnchorPartitionId)
+                    anchorLockGrantTerm = grant.Term;
+            }
+        }
+
         if (!RequiresReadSetValidation(context))
-            return new OnePhaseEligibility(ReadSetExclusion: null, ApplyTimeValidation: true, OnPartitionReadDependencies: null);
+            return new OnePhaseEligibility(ReadSetExclusion: null, ApplyTimeValidation: true, OnPartitionReadDependencies: null, anchorLockGrantTerm);
 
         if (closesBundle && (context.PrefixLocksAcquired is { Count: > 0 } || context.RangeLocksAcquired is { Count: > 0 }))
             return new OnePhaseEligibility(OnePhaseGateOutcome.PredicateRead, ApplyTimeValidation: true, OnPartitionReadDependencies: null);
@@ -2170,7 +2229,7 @@ internal sealed class TransactionCoordinator : IDisposable
             }
         }
 
-        return new OnePhaseEligibility(ReadSetExclusion: null, ApplyTimeValidation: true, OnPartitionReadDependencies: onPartitionReads);
+        return new OnePhaseEligibility(ReadSetExclusion: null, ApplyTimeValidation: true, OnPartitionReadDependencies: onPartitionReads, anchorLockGrantTerm);
     }
 
     /// <summary>
@@ -2524,6 +2583,169 @@ internal sealed class TransactionCoordinator : IDisposable
     }
 
     /// <summary>
+    /// The commit barrier's two questions, asked side by side: whether every lock the transaction was granted
+    /// is still in force (<see cref="FindLostLock"/>), and whether a conflict that must not exist at commit does
+    /// (<see cref="ProbeCommitConflicts"/>). False sets the Aborted result.
+    /// </summary>
+    private async Task<bool> CheckCommitConflicts(TransactionContext context, CancellationToken cancellationToken)
+    {
+        // The lock proof runs beside the conflict probe: both ask the same leaders, and neither depends on the
+        // other's answer. This barrier is where it has to run for the two-phase flow — after the prepares are
+        // durable — because from there on the written keys are protected by replicated intents, so the locks
+        // only had to hold until now. The two answers are kept apart rather than merged into one probe, since a
+        // lock's routing key can be a written key and the answers would be indistinguishable.
+        Task<LostLock?> lostLock = FindLostLock(context, cancellationToken);
+        Task<bool> conflictFree = ProbeCommitConflicts(context, cancellationToken);
+
+        await Task.WhenAll(lostLock, conflictFree).ConfigureAwait(false);
+
+        // A lost lock is reported over a conflict found beside it: it is the cause, and the conflict (a foreign
+        // range lock on a written key, say) is usually its consequence.
+        if (await lostLock.ConfigureAwait(false) is { } lost)
+        {
+            RefuseLostLock(context, lost);
+            return false;
+        }
+
+        return await conflictFree.ConfigureAwait(false);
+    }
+
+    /// <summary>A lock the transaction was granted that can no longer be proven held, and how that surfaced.</summary>
+    private readonly record struct LostLock(LostLockDetection Detection, string Reason);
+
+    /// <summary>How many times the lock proof asks again when a leader answers that it cannot say right now.</summary>
+    private const int LockProofAttempts = 3;
+
+    /// <summary>
+    /// Proves that every lock the transaction was granted is still in force, or sets the Aborted result and
+    /// returns false. See <see cref="FindLostLock"/>.
+    /// </summary>
+    private async Task<bool> LocksStillInForce(TransactionContext context, CancellationToken cancellationToken)
+    {
+        if (await FindLostLock(context, cancellationToken).ConfigureAwait(false) is not { } lost)
+            return true;
+
+        RefuseLostLock(context, lost);
+        return false;
+    }
+
+    /// <summary>
+    /// Refuses the commit of a transaction that lost a lock: nothing it staged was committed, so the client
+    /// restarts it. Counted once per transaction, however many finalize stages reach the same verdict.
+    /// </summary>
+    private void RefuseLostLock(TransactionContext context, LostLock lost)
+    {
+        if (!context.LostLockRefused)
+        {
+            context.LostLockRefused = true;
+            DurableTransactionMetrics.LostLockAborted(lost.Detection);
+            logger.LogWarning("Refusing to commit transaction {TransactionId}: {Reason}", context.TransactionId, lost.Reason);
+        }
+
+        context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Lost lock: " + lost.Reason };
+    }
+
+    /// <summary>
+    /// Looks for a lock the transaction was granted that may no longer be held. Returns null when every lock is
+    /// proven in force (or the transaction holds none that reported its leadership).
+    ///
+    /// <para>A point, prefix or range lock is in-memory state of the partition leader that granted it. A leader
+    /// change drops it, and nothing tells the holder: its coordinator still lists the lock, and the new leader
+    /// answers a later renewal or upgrade as a fresh grant. Meanwhile the new leader grants the same keys to
+    /// another transaction. Each grant reported the Raft term it was issued under
+    /// (<see cref="LockGrantTerm"/>), and the proof is that the partition's <b>confirmed</b> leader is still in
+    /// that term: a term has one leader, and a node that stops leading can only lead again in a later term, so
+    /// the same term means the same leader, uninterrupted since the grant, with the lock still in its memory.</para>
+    ///
+    /// <para>Three outcomes fail the proof. A different term: the leadership changed. A key that now routes to
+    /// another partition than the one that granted the lock: the range moved, and the term of its new partition
+    /// says nothing about the old grant. No confirmed answer after a few attempts: an election is probably in
+    /// progress, which changes the term anyway. Failing closed costs a retryable abort; failing open would
+    /// commit on an exclusion nobody holds.</para>
+    /// </summary>
+    private async Task<LostLock?> FindLostLock(TransactionContext context, CancellationToken cancellationToken)
+    {
+        if (context.LockGrantTermChange is { } termChange)
+            return new LostLock(LostLockDetection.Regrant, termChange);
+
+        if (context.SnapshotLockGrantTerms() is not { } grants)
+            return null;
+
+        List<KeyValueConflictProbe> probes = new(grants.Count);
+
+        foreach (LockGrantTerm grant in grants)
+        {
+            int routedPartition;
+            try
+            {
+                routedPartition = manager.LocateDurablePartition(grant.RoutingKey).PartitionId;
+            }
+            catch (KahunaServerException)
+            {
+                // No range descriptor covers the key any more.
+                routedPartition = -1;
+            }
+
+            if (routedPartition != grant.PartitionId)
+                return new LostLock(
+                    LostLockDetection.RangeMoved,
+                    $"a lock was granted on partition {grant.PartitionId} in term {grant.Term}, and its key now routes to partition {routedPartition}");
+
+            probes.Add(new(grant.RoutingKey, KeyValueDurability.Persistent, KeyValueConflictChecks.LeaderTerm, grant.Term));
+        }
+
+        Dictionary<string, KeyValueResponseType> byKey = new(probes.Count, StringComparer.Ordinal);
+
+        for (int attempt = 1; ; attempt++)
+        {
+            // The variant without a confirmation round in the locator: the leader-term check confirms the
+            // leadership of the node that answers it by itself (KeyValueLocator.CheckLeaderTerm), so a round
+            // here would be a second one, and it would run after the first instead of beside the conflict
+            // probe's. Under load that costs the commit a whole durable round.
+            List<(KeyValueResponseType type, string key, KeyValueDurability durability)> results =
+                await manager.LocateAndTryCheckManyWriteIntentsUnconfirmed(context.TransactionId, probes, cancellationToken).ConfigureAwait(false);
+
+            byKey.Clear();
+            foreach ((KeyValueResponseType type, string key, KeyValueDurability _) in results)
+                byKey[key] = type;
+
+            bool undecided = false;
+
+            foreach (LockGrantTerm grant in grants)
+            {
+                if (!byKey.TryGetValue(grant.RoutingKey, out KeyValueResponseType type))
+                    type = KeyValueResponseType.Errored;
+
+                switch (type)
+                {
+                    // The confirmed leader is still in the term of the grant.
+                    case KeyValueResponseType.DoesNotExist:
+                        continue;
+
+                    case KeyValueResponseType.Aborted:
+                        return new LostLock(
+                            LostLockDetection.CommitProbe,
+                            $"partition {grant.PartitionId} is no longer led under term {grant.Term}, in which it granted this transaction a lock; the lock was dropped by the leader change");
+
+                    default:
+                        undecided = true;
+                        break;
+                }
+            }
+
+            if (!undecided)
+                return null;
+
+            if (attempt >= LockProofAttempts)
+                return new LostLock(
+                    LostLockDetection.Unconfirmed,
+                    "no partition leader confirmed that it still leads under the term in which it granted this transaction a lock");
+
+            await Task.Delay(attempt * 10, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
     /// Probes for the two conflicts that must not exist when the transaction commits, in one batched call:
     ///
     /// <list type="bullet">
@@ -2540,7 +2762,7 @@ internal sealed class TransactionCoordinator : IDisposable
     /// The two sets are disjoint — a read key that was also written is validated as a write — so a flagged
     /// answer is attributed by which set the key came from.
     /// </summary>
-    private async Task<bool> CheckCommitConflicts(TransactionContext context, CancellationToken cancellationToken)
+    private async Task<bool> ProbeCommitConflicts(TransactionContext context, CancellationToken cancellationToken)
     {
         List<KeyValueConflictProbe> probeKeys = [];
 

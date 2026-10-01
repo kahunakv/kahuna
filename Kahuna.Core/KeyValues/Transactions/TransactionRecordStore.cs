@@ -195,7 +195,16 @@ internal sealed class TransactionRecordStore
     /// <summary>Applies one transition that arrived through <paramref name="partitionId"/>'s log and reflects
     /// the result in the map. This is the single apply entry point shared by local proposal apply, follower
     /// replication, and restore.</summary>
-    public TransactionRecordApplyResult Apply(TransactionRecordCommand command, int partitionId)
+    public TransactionRecordApplyResult Apply(TransactionRecordCommand command, int partitionId) => Apply(command, partitionId, logTerm: 0);
+
+    /// <summary>
+    /// As <see cref="Apply(TransactionRecordCommand, int)"/>, with the Raft term of the log entry that carries
+    /// the command (<paramref name="logTerm"/>), which the bundled commit gate compares against
+    /// <see cref="CommitTransactionCommand.LockGrantTerm"/>. Zero means the apply has no log entry behind it
+    /// (a direct apply, or a local projection of a forwarded delta), so there is no term to compare and that
+    /// part of the gate does not run.
+    /// </summary>
+    public TransactionRecordApplyResult Apply(TransactionRecordCommand command, int partitionId, long logTerm)
     {
         (HLCTimestamp, long) key = KeyOf(command);
 
@@ -226,9 +235,15 @@ internal sealed class TransactionRecordStore
                 if (existing.WasBundledCommitRejected(bundledCommit.OpId))
                     return new(TransactionApplyOutcome.Rejected, existing, "bundled commit already rejected at its first apply");
 
-                BundledCommitJudgement judgement = bundledCommitJudge is null
-                    ? new(BundledCommitVerdict.PrepareMissing, "no bundled commit judge attached")
-                    : bundledCommitJudge(partitionId, bundledCommit);
+                // The term comparison comes first and needs no judge: it reads only the command and the log
+                // entry that carries it, both identical on every replica.
+                BundledCommitJudgement judgement =
+                    logTerm != 0 && bundledCommit.LockGrantTerm != 0 && logTerm != bundledCommit.LockGrantTerm
+                        ? new(BundledCommitVerdict.LeaderChanged,
+                            $"the bundle was proposed in term {logTerm}, and the transaction's locks on the partition were granted in term {bundledCommit.LockGrantTerm}")
+                    : bundledCommitJudge is null
+                        ? new(BundledCommitVerdict.PrepareMissing, "no bundled commit judge attached")
+                        : bundledCommitJudge(partitionId, bundledCommit);
 
                 if (!judgement.IsAdmit)
                 {
@@ -239,6 +254,9 @@ internal sealed class TransactionRecordStore
                             break;
                         case BundledCommitVerdict.StaleRead:
                             DurableTransactionMetrics.OnePhaseGatedCommitStaleReadRejected();
+                            break;
+                        case BundledCommitVerdict.LeaderChanged:
+                            DurableTransactionMetrics.OnePhaseGatedCommitLeaderChangeRejections.Add(1);
                             break;
                         default:
                             DurableTransactionMetrics.OnePhaseGatedCommitRejections.Add(1);
@@ -321,7 +339,7 @@ internal sealed class TransactionRecordStore
         if (locallyProposedDeltas.TryTake(log.LogData, out TransactionRecordCommand[]? proposed))
         {
             foreach (TransactionRecordCommand command in proposed)
-                Apply(command, partitionId);
+                Apply(command, partitionId, log.Term);
 
             return true;
         }
@@ -329,7 +347,7 @@ internal sealed class TransactionRecordStore
         TransactionRecordDeltaMessage delta = ReplicationSerializer.UnserializeTransactionRecordDeltaMessage(log.LogData);
 
         foreach (TransactionRecordCommandMessage message in delta.Commands)
-            Apply(ToCommand(message), partitionId);
+            Apply(ToCommand(message), partitionId, log.Term);
 
         return true;
     }
@@ -438,6 +456,7 @@ internal sealed class TransactionRecordStore
                         m.BundledPrepareKeys.Add(bundledKey);
 
                 m.ApplyTimeValidation = c.ApplyTimeValidation;
+                m.LockGrantTerm = c.LockGrantTerm;
 
                 if (c.BundledReadDependencies is not null)
                     foreach (BundledReadDependency read in c.BundledReadDependencies)
@@ -516,7 +535,8 @@ internal sealed class TransactionRecordStore
                     new HLCTimestamp(m.AttemptNode, m.AttemptPhysical, m.AttemptCounter),
                     m.BundledPrepareKeys.Count > 0 ? m.BundledPrepareKeys.ToArray() : null,
                     m.ApplyTimeValidation,
-                    reads);
+                    reads,
+                    m.LockGrantTerm);
             }
 
             case TransactionRecordCommandKindMessage.TransactionRecordAbort:

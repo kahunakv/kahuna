@@ -366,6 +366,9 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     /// check (<see cref="Configuration.KahunaConfiguration.OnePhaseApplyTimeValidation"/>).</param>
     /// <param name="bundledReadDependencies">The read-only point dependencies routed to the anchor partition, with
     /// the committed state the transaction observed, carried into the bundled commit for its apply-time check.</param>
+    /// <param name="bundledLockGrantTerm">The Raft term the transaction's locks on the anchor partition were
+    /// granted under, carried into the bundled commit so its apply refuses a bundle proposed in another term;
+    /// 0 when the transaction holds no lock there. Carried only with <paramref name="applyTimeValidation"/>.</param>
     public async Task<DurableFinalizeOutcome> FinalizeAsync(
         DurableFinalizeInput input,
         Func<CancellationToken, Task<bool>> validateReadSet,
@@ -373,7 +376,8 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         CancellationToken cancellationToken,
         OnePhaseGateOutcome? readSetExclusion = null,
         bool applyTimeValidation = false,
-        IReadOnlyList<BundledReadDependency>? bundledReadDependencies = null)
+        IReadOnlyList<BundledReadDependency>? bundledReadDependencies = null,
+        long bundledLockGrantTerm = 0)
     {
         long startTicks = Stopwatch.GetTimestamp();
 
@@ -503,7 +507,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         if (gate == OnePhaseGateOutcome.Entered)
         {
             (DurableFinalizeOutcome? onePhase, OnePhaseFallbackReason fallback) = await TryOnePhaseFinalizeAsync(
-                input, initDelta, prepareDeltas[0], validateReadSet, opId, applyTimeValidation, bundledReadDependencies, cancellationToken).ConfigureAwait(false);
+                input, initDelta, prepareDeltas[0], validateReadSet, opId, applyTimeValidation, bundledReadDependencies, bundledLockGrantTerm, cancellationToken).ConfigureAwait(false);
 
             if (onePhase is { } fastOutcome)
             {
@@ -875,6 +879,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         HLCTimestamp opId,
         bool applyTimeValidation,
         IReadOnlyList<BundledReadDependency>? bundledReadDependencies,
+        long bundledLockGrantTerm,
         CancellationToken cancellationToken)
     {
         // Every admitted attempt records its pre-submission wall time exactly once: at a pre-propose exit
@@ -976,7 +981,8 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             new CommitTransactionCommand(
                 input.TransactionId, input.Epoch, input.ManifestHash, opId, attemptHlc, bundledPrepareKeys,
                 ApplyTimeValidation: applyTimeValidation,
-                BundledReadDependencies: applyTimeValidation && bundledReadDependencies is { Count: > 0 } ? bundledReadDependencies : null)]);
+                BundledReadDependencies: applyTimeValidation && bundledReadDependencies is { Count: > 0 } ? bundledReadDependencies : null,
+                LockGrantTerm: applyTimeValidation ? bundledLockGrantTerm : 0)]);
 
         Writes.DurableOnePhaseReply? proposed = await replicateOnePhaseBundle!(
             partition.PartitionId, initDelta, anchorPrepareDelta, decisionDelta,
@@ -1040,6 +1046,14 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             switch (reply.GatedVerdict)
             {
                 case BundledCommitVerdict.StaleBase or BundledCommitVerdict.StaleRead:
+                    return (await DecideAsync(input, commit: false, TransactionAbortClass.Conflict, opId, cancellationToken).ConfigureAwait(false), OnePhaseFallbackReason.None);
+
+                case BundledCommitVerdict.LeaderChanged:
+                    // The anchor partition changed leader between the validation and the propose, so the locks
+                    // the validation relied on were gone when the bundle was proposed. Final like a stale base:
+                    // terms only advance, so no retry of this transaction can be proposed in the term of its
+                    // grants again.
+                    DurableTransactionMetrics.LostLockAborted(LostLockDetection.BundleApply);
                     return (await DecideAsync(input, commit: false, TransactionAbortClass.Conflict, opId, cancellationToken).ConfigureAwait(false), OnePhaseFallbackReason.None);
 
                 case BundledCommitVerdict.PrepareMissing:

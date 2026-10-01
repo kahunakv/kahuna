@@ -70,6 +70,7 @@ public sealed class TestCompleteOperationGrpcWire
                 new("batch-a", "v"u8.ToArray(), KeyValueState.Set, 6, 30_000, false),
                 new("batch-b", null, KeyValueState.Deleted, 7, 0, true)
             ],
+            LockGrantTerms = [new LockGrantTerm(3, 12, "lock-single"), new LockGrantTerm(4, 7, "pfx/")],
             Durability = KeyValueDurability.Persistent,
             CachedType = KeyValueResponseType.Set,
             CachedRevision = 42,
@@ -94,6 +95,7 @@ public sealed class TestCompleteOperationGrpcWire
         Assert.NotNull(restored.ReadObservations);
         Assert.Equal(payload.ReadObservations!.Count, restored.ReadObservations!.Count);
         AssertStagedMutationsEqual(payload.StagedMutations!, restored.StagedMutations);
+        Assert.Equal(payload.LockGrantTerms, restored.LockGrantTerms);
         Assert.Equal(payload.Durability, restored.Durability);
         Assert.Equal(payload.CachedType, restored.CachedType);
         Assert.Equal(payload.CachedRevision, restored.CachedRevision);

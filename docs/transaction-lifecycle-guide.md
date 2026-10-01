@@ -409,6 +409,14 @@ coordinator closes that hole: it holds every staged revision, and it refuses the
 point read of a staged key answers anything but the staged revision. See
 `docs/leadership-fencing-and-apply-fingerprint-guide.md`.
 
+The same leader change drops the transaction's locks, and the pin of a key it only read with them. A
+reader whose Shared range lock was lost re-pins at the new head on its next read and sees a second
+committed state of the key; a writer that read under that lock and then upgrades is granted a fresh lock
+over a competitor's commit. Neither case leaves a staging to compare, so the coordinator proves the locks
+instead: every lock grant reports the Raft term it was issued under, and the commit is refused (`Aborted`,
+`Lost lock: …`) unless every partition the transaction holds a lock on is still led under that term. The
+same guide describes the proof and its counters.
+
 **Cross-node.** The decision record lives on the anchor partition, which may be led by another node. When
 the decision is not resolvable locally, the read routes a lookup to the anchor leader
 (`LookupDurableRecordRouted` via `TryRouteForeignDecision`) and re-issues with the terminal decision, rather

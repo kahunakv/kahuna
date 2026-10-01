@@ -961,6 +961,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             };
         
         using YieldingIntentPolicyScope.Scope lockPolicyScope = YieldingIntentPolicyScope.Enter(TransactionConflictPolicyWire.FromGrpc(request.ConflictPolicy));
+        using LockGrantScope.Scope grantScope = LockGrantScope.Begin(out LockGrantCapture grants);
         (KeyValueResponseType type, _, _, HLCTimestamp holder, long baseRevision) = await keyValues.LocateAndTryAcquireExclusiveLockObserved(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
             request.Key,
@@ -973,7 +974,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
 
         bool baseObserved = baseRevision != PointLockBase.None;
 
-        return new()
+        GrpcTryAcquireExclusiveLockResponse response = new()
         {
             Type = (GrpcKeyValueResponseType)type,
             HolderTransactionIdNode     = holder.N,
@@ -982,6 +983,24 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             BaseObserved = baseObserved,
             BaseRevision = baseObserved ? baseRevision : 0
         };
+
+        AddLockGrantTerms(response.GrantTerms, grants);
+
+        return response;
+    }
+
+    /// <summary>
+    /// Copies the leaderships the locks of the served request were granted under into its response, so the
+    /// node that forwarded the request can hand them to the transaction's coordinator. Empty when the request
+    /// was registered with a coordinator here, which already received them with the operation's completion.
+    /// </summary>
+    private static void AddLockGrantTerms(RepeatedField<GrpcLockGrantTerm> target, LockGrantCapture grants)
+    {
+        if (grants.Take() is not { } taken)
+            return;
+
+        foreach (LockGrantTerm grant in taken)
+            target.Add(new GrpcLockGrantTerm { PartitionId = grant.PartitionId, Term = grant.Term, RoutingKey = grant.RoutingKey });
     }
     
     /// <summary>
@@ -1012,6 +1031,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 Type = GrpcKeyValueResponseType.TypeInvalidInput
             };
         
+        using LockGrantScope.Scope grantScope = LockGrantScope.Begin(out LockGrantCapture grants);
         KeyValueResponseType type = await keyValues.LocateAndTryAcquireExclusivePrefixLock(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
             request.PrefixKey,
@@ -1022,10 +1042,14 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
         );
 
-        return new()
+        GrpcTryAcquireExclusivePrefixLockResponse response = new()
         {
             Type = (GrpcKeyValueResponseType)type
         };
+
+        AddLockGrantTerms(response.GrantTerms, grants);
+
+        return response;
     }
 
     /// <summary>
@@ -1048,6 +1072,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     private async Task<GrpcTryAcquireManyExclusiveLocksResponse> TryAcquireManyExclusiveLocksCore(GrpcTryAcquireManyExclusiveLocksRequest request, ServerCallContext context)
     {
         using YieldingIntentPolicyScope.Scope manyLockPolicyScope = YieldingIntentPolicyScope.Enter(TransactionConflictPolicyWire.FromGrpc(request.ConflictPolicy));
+        using LockGrantScope.Scope grantScope = LockGrantScope.Begin(out LockGrantCapture grants);
         List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp, long)> responses = await keyValues.LocateAndTryAcquireManyExclusiveLocksObserved(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
             GetRequestLocksItems(request.Items),
@@ -1057,6 +1082,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         GrpcTryAcquireManyExclusiveLocksResponse response = new();
 
         AddResponseLocksItems(response.Items, responses);
+        AddLockGrantTerms(response.GrantTerms, grants);
 
         return response;
     }
@@ -1205,6 +1231,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         string? startKey = request.HasStartKey ? request.StartKey : null;
         string? endKey   = request.HasEndKey   ? request.EndKey   : null;
 
+        using LockGrantScope.Scope grantScope = LockGrantScope.Begin(out LockGrantCapture grants);
         (KeyValueResponseType type, HLCTimestamp holder) = await keyValues.LocateAndTryAcquireRangeLock(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
             request.Prefix,
@@ -1218,13 +1245,17 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
         );
 
-        return new()
+        GrpcTryAcquireExclusiveRangeLockResponse response = new()
         {
             Type = (GrpcKeyValueResponseType)type,
             HolderTransactionIdNode     = holder.N,
             HolderTransactionIdPhysical = holder.L,
             HolderTransactionIdCounter  = holder.C
         };
+
+        AddLockGrantTerms(response.GrantTerms, grants);
+
+        return response;
     }
 
     public override async Task<GrpcTryReleaseExclusiveRangeLockResponse> TryReleaseExclusiveRangeLock(
@@ -2224,6 +2255,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         payload.ModifiedKeys = request.ModifiedKeys.Count == 0 ? null : request.ModifiedKeys.Select(m => (m.Key, (KeyValueDurability)m.Durability)).ToList();
         payload.StagedMutations = request.StagedMutations.Count == 0 ? null : request.StagedMutations.Select(FromGrpcStagedMutation).ToList();
         payload.AcquiredPointLocks = request.AcquiredPointLocks.Count == 0 ? null : request.AcquiredPointLocks.Select(l => (l.Key, (KeyValueDurability)l.Durability)).ToList();
+        payload.LockGrantTerms = request.LockGrantTerms.Count == 0 ? null : request.LockGrantTerms.Select(g => new LockGrantTerm(g.PartitionId, g.Term, g.RoutingKey)).ToList();
         payload.Durability = (KeyValueDurability)request.Durability;
         payload.CachedType = (KeyValueResponseType)request.CachedType;
         payload.CachedRevision = request.CachedRevision;

@@ -51,6 +51,14 @@ internal sealed record InitializeTransactionCommand(
 /// lost update or a write skew. The flag travels with the command so every current applier runs the same
 /// checks whatever its local configuration; an applier that predates the field skips them, which is why the
 /// producer sets it only once every node in the group applies it.</para>
+///
+/// <para><see cref="LockGrantTerm"/> ties the bundle to the leadership that granted the transaction's locks on
+/// the partition. Those locks are what excluded competing writers and readers while the bundle was validated,
+/// and they live only in the granting leader's memory. When non-zero, the transition is additionally legal only
+/// if the log entry carrying it was proposed in that Raft term — a fact every replica reads off the entry, so
+/// the verdict is the same everywhere. A bundle that a later leader proposed (the attempt was re-driven after a
+/// leader change dropped the locks) is rejected. Set under the same condition as
+/// <see cref="ApplyTimeValidation"/>, for the same reason.</para>
 /// </summary>
 internal sealed record CommitTransactionCommand(
     HLCTimestamp TransactionId,
@@ -60,7 +68,8 @@ internal sealed record CommitTransactionCommand(
     HLCTimestamp AttemptHlc,
     IReadOnlyList<string>? BundledPrepareKeys = null,
     bool ApplyTimeValidation = false,
-    IReadOnlyList<BundledReadDependency>? BundledReadDependencies = null) : TransactionRecordCommand;
+    IReadOnlyList<BundledReadDependency>? BundledReadDependencies = null,
+    long LockGrantTerm = 0) : TransactionRecordCommand;
 
 /// <summary>
 /// One read-only point dependency carried by a one-phase bundled commit: the key and the committed state the

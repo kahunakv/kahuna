@@ -161,6 +161,13 @@ internal class TransactionContext
     internal bool LateCommitRejected { get; set; }
 
     /// <summary>
+    /// True once a finalize attempt of this transaction was refused because a lock it was granted could not be
+    /// proven still held. Lets the coordinator count and log the refusal once per transaction, whichever
+    /// finalize stages reach the verdict. Accessed only while holding the session's single finalize slot.
+    /// </summary>
+    internal bool LostLockRefused { get; set; }
+
+    /// <summary>
     /// Point locks acquired during execution.
     /// </summary>
     public HashSet<(string, KeyValueDurability)>? LocksAcquired { get; set; }
@@ -340,6 +347,8 @@ internal class TransactionContext
     private bool renewalExcluded;
     private bool readObservationConflict;
     private string? stagedChainBreak;
+    private Dictionary<int, LockGrantTerm>? lockGrantTerms;
+    private string? lockGrantTermChange;
     private int pendingOperationCount;
     private int retainedOperationCount;
 
@@ -394,6 +403,74 @@ internal class TransactionContext
     internal string? StagedChainBreak
     {
         get { lock (registryLock) return stagedChainBreak; }
+    }
+
+    /// <summary>
+    /// Non-null once two lock grants on one partition reported different leadership terms. Every lock this
+    /// transaction holds lives in the memory of the partition leader that granted it, and a leader change drops
+    /// it without a word; the next leader then answers a renewal, an upgrade or a new acquire as a fresh grant.
+    /// The term each grant reports is what gives that away: the first grant on a partition fixes the term, and a
+    /// later grant under another term proves the leadership changed in between, so the locks granted before it
+    /// are gone and whatever was read or computed under them is unprotected. The text names the partition and
+    /// both terms. A transaction with a change must not commit.
+    /// </summary>
+    internal string? LockGrantTermChange
+    {
+        get { lock (registryLock) return lockGrantTermChange; }
+    }
+
+    /// <summary>
+    /// The leadership each partition's locks were first granted under, one entry per partition, for the
+    /// commit-time proof that the partition is still led under it. Null when the transaction was granted no
+    /// lock that reported its term. The returned list is a copy.
+    /// </summary>
+    internal List<LockGrantTerm>? SnapshotLockGrantTerms()
+    {
+        lock (registryLock)
+            return lockGrantTerms is { Count: > 0 } ? [.. lockGrantTerms.Values] : null;
+    }
+
+    /// <summary>
+    /// Records the leaderships lock grants were issued under, from a path that does not flow through the
+    /// operation registry: the script executor's direct lock commands and the coordinator's own range-lock
+    /// renewals. Takes <see cref="registryLock"/> to stay consistent with concurrent registry folds.
+    /// </summary>
+    internal void RecordLockGrantTerms(IReadOnlyList<LockGrantTerm>? grants)
+    {
+        if (grants is null || grants.Count == 0)
+            return;
+
+        lock (registryLock)
+        {
+            foreach (LockGrantTerm grant in grants)
+                FoldLockGrantTermLocked(grant);
+        }
+    }
+
+    /// <summary>
+    /// Caller must hold <see cref="registryLock"/>. Keeps the first term reported for a partition and flags a
+    /// later grant under another one (see <see cref="LockGrantTermChange"/>). A grant without a usable term —
+    /// the granting node does not host the partition's Raft group, which cannot happen for a real grant —
+    /// carries no evidence and is ignored.
+    /// </summary>
+    private void FoldLockGrantTermLocked(LockGrantTerm grant)
+    {
+        if (grant.Term <= 0)
+            return;
+
+        lockGrantTerms ??= [];
+
+        if (!lockGrantTerms.TryGetValue(grant.PartitionId, out LockGrantTerm first))
+        {
+            lockGrantTerms[grant.PartitionId] = grant;
+            return;
+        }
+
+        if (first.Term == grant.Term || lockGrantTermChange is not null)
+            return;
+
+        DurableTransactionMetrics.LockGrantTermChanges.Add(1);
+        lockGrantTermChange = $"partition {grant.PartitionId} granted a lock in term {first.Term} and another in term {grant.Term}; the locks granted before the leader change are no longer held";
     }
 
     /// <summary>
@@ -601,6 +678,12 @@ internal class TransactionContext
         {
             foreach (KeyValueTransactionReadKey observed in reads)
                 FoldReadObservationLocked(observed, fromRead);
+        }
+
+        if (payload.LockGrantTerms is { } grants)
+        {
+            foreach (LockGrantTerm grant in grants)
+                FoldLockGrantTermLocked(grant);
         }
     }
 
