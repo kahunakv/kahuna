@@ -34,12 +34,15 @@ public sealed class TestMaterializeIntentByReference : BaseCluster, IDisposable
 
     private readonly ILoggerFactory loggerFactory;
 
+    private readonly RecordingLogProvider logLines = new();
+
     private readonly string tempRoot =
         Path.Combine(Path.GetTempPath(), "kahuna_byref_" + Guid.NewGuid().ToString("N"));
 
     public TestMaterializeIntentByReference(ITestOutputHelper outputHelper)
     {
         loggerFactory = TestLogFactory.Create(outputHelper);
+        loggerFactory.AddProvider(logLines);
     }
 
     public void Dispose()
@@ -456,6 +459,111 @@ public sealed class TestMaterializeIntentByReference : BaseCluster, IDisposable
         });
 
         Assert.Equal(1, missed);
+    }
+
+    private const string LiveMissLine = "found no prepared intent";
+
+    [Fact]
+    public async Task Replicator_VerifiedMiss_HandsThePartitionToTheContainment()
+    {
+        // A miss nothing dismisses is a committed value this node does not have: beyond the counter and the
+        // error line, the replicator names the partition and the entry so the node stops serving and leading it.
+        KeyValueEntry stale = new() { Revision = 8, Value = [1], State = KeyValueState.Set, LastModified = Ts(1_000) };
+
+        TaskCompletionSource<(int Partition, long LogIndex, string Key, long Revision)> reported =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        KeyValueReplicator replicator = new(
+            null!, null!, null!, null!, null!, null!, loggerFactory.CreateLogger<IKahuna>(),
+            hydrateFromBackend: (_, _) => Task.FromResult<KeyValueEntry?>(stale),
+            keyOwner: _ => PartitionId,
+            materializationMissing: (partition, logIndex, key, revision) => reported.TrySetResult((partition, logIndex, key, revision)));
+
+        PreparedIntent intent = Intent("acct/contain", revision: 9, value: [4, 5, 6]);
+        byte[] record = PreparedIntentMaterializer.ToKeyValueRecord(intent, new KeyValueMessage(), byReference: true);
+
+        Assert.True(replicator.Replicate(PartitionId, KvLog(10, record)));
+
+        Assert.Equal(
+            (PartitionId, 10L, "acct/contain", 9L),
+            await reported.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken));
+        Assert.Single(logLines.Containing(LiveMissLine), line => line.Level == LogLevel.Error && line.Message.Contains("acct/contain"));
+    }
+
+    [Fact]
+    public async Task Replicator_MissForAKeyThePartitionNoLongerOwns_IsDismissed()
+    {
+        // The key's range moved out before a lagging apply reached the record, and the un-host purge took the
+        // key's rows and intents: nothing is missing here, so nothing is reported and nothing is gated.
+        TaskCompletionSource verified = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        int reported = 0;
+
+        KeyValueReplicator replicator = new(
+            null!, null!, null!, null!, null!, null!, loggerFactory.CreateLogger<IKahuna>(),
+            hydrateFromBackend: (_, _) =>
+            {
+                verified.TrySetResult();
+                return Task.FromResult<KeyValueEntry?>(null);
+            },
+            keyOwner: _ => PartitionId + 1,
+            materializationMissing: (_, _, _, _) => Interlocked.Increment(ref reported));
+
+        PreparedIntent intent = Intent("acct/moved", revision: 9, value: [4, 5, 6]);
+        byte[] record = PreparedIntentMaterializer.ToKeyValueRecord(intent, new KeyValueMessage(), byReference: true);
+
+        Assert.True(replicator.Replicate(PartitionId, KvLog(10, record)));
+        await verified.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+        await Task.Delay(300, TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, Volatile.Read(ref reported));
+        Assert.DoesNotContain(logLines.Containing(LiveMissLine), line => line.Message.Contains("acct/moved"));
+    }
+
+    [Fact]
+    public async Task Replicator_VerifiedMissOnAnEntryTheInstalledStateReflects_IsNotHandedToTheContainment()
+    {
+        // The node's state was installed (or checkpointed) through entry 10: an entry at or below it replays over
+        // that state, and a miss verified there — including one whose backend read started before an install
+        // landed — must not gate the partition again. The first entry above it is the node's own apply.
+        string storeDir = Path.Combine(tempRoot, "reflected");
+        Directory.CreateDirectory(storeDir);
+
+        PreparedIntentStore checkpointed = new(storeDir, "rev", null);
+        checkpointed.AttachPartitionResolver(_ => PartitionId);
+        Assert.True(checkpointed.PersistSnapshot(PartitionId, appliedThroughIndex: 10));
+
+        PreparedIntentStore store = new(storeDir, "rev", null);
+        store.AttachPartitionResolver(_ => PartitionId);
+        Assert.True(store.IsHistoricalApply(PartitionId, 10));
+        Assert.False(store.IsHistoricalApply(PartitionId, 11));
+
+        KeyValueEntry stale = new() { Revision = 8, Value = [1], State = KeyValueState.Set, LastModified = Ts(1_000) };
+        List<long> reported = [];
+        TaskCompletionSource live = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        KeyValueReplicator replicator = new(
+            null!, null!, null!, null!, null!, null!, loggerFactory.CreateLogger<IKahuna>(),
+            hydrateFromBackend: (_, _) => Task.FromResult<KeyValueEntry?>(stale),
+            preparedIntentStore: store,
+            keyOwner: _ => PartitionId,
+            materializationMissing: (_, logIndex, _, _) =>
+            {
+                lock (reported)
+                    reported.Add(logIndex);
+                live.TrySetResult();
+            });
+
+        PreparedIntent intent = Intent("acct/reflected", revision: 9, value: [4, 5, 6]);
+        byte[] record = PreparedIntentMaterializer.ToKeyValueRecord(intent, new KeyValueMessage(), byReference: true);
+
+        Assert.True(replicator.Replicate(PartitionId, KvLog(10, record)));
+        await WaitUntilAsync(() => logLines.Containing(LiveMissLine).Count(line => line.Message.Contains("acct/reflected")) == 1);
+
+        Assert.True(replicator.Replicate(PartitionId, KvLog(11, record)));
+        await live.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+
+        lock (reported)
+            Assert.Equal([11L], reported);
     }
 
     [Fact]

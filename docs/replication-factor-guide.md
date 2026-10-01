@@ -224,6 +224,49 @@ plus two map commits — and, because each stage is decided on a separate pass, 
 faster at the cost of more concurrent backfill traffic; shorten the pass interval when the tick
 term dominates, which it does whenever ranges are small.
 
+The receiver verifies the complete data-partition snapshot before mutation, then streams rows and
+receipt/record entries into the stores. Partial application is purge-and-retry recoverable; it is not
+one backend transaction. The intent/ledger section and the installed stores still occupy memory.
+See the [snapshot and Raft recovery guide](snapshot-and-raft-recovery-guide.md) for exact failure,
+restart limitations, and the new replication/retention settings.
+
+**Snapshot staging memory.** A node receiving a whole-partition snapshot stages all of it before
+installing it, and a leader that retries a slow transfer can open a fresh session while the old one is
+still staged. `--raft-snapshot-max-pending-bytes` (embedded: `RaftSnapshotMaxPendingBytes`; default
+512 MB) caps those staged bytes across all sessions. Size it **above** the largest whole-partition
+snapshot this node will receive (key-value rows and locks plus the partition's retained transaction
+records, receipts and intents), ideally about twice that, so a retry can stage while an install runs. A
+snapshot larger than the cap can never be staged, and a replica that falls below the leader's
+compaction floor then cannot be re-seeded.
+
+Where the staged bytes live depends on the staging directory:
+
+- **With a staging directory** (`--raft-snapshot-staging-directory`; embedded:
+  `RaftSnapshotStagingDirectory`), staged bytes above `--raft-snapshot-staging-memory-bytes` (embedded:
+  `RaftSnapshotStagingMemoryBytes`; default 64 MB) spill to files there. The pending-bytes cap then
+  bounds disk and memory together, and only the staging memory budget is resident, so the cap can be
+  sized to the largest partition without sizing memory to match. An embedded node with a sqlite or
+  rocksdb backend and a `StoragePath` stages under `{StoragePath}/snapshot-staging_{StorageRevision}`
+  unless told otherwise. The directory must be private to one node: Kommander deletes every spill file
+  it finds there at startup.
+- **Without one** (the server default, and an embedded memory-only node), every staged byte is on the
+  managed heap, most of it on the large-object heap. The cap must then also sit **well below** the
+  memory the process may use on top of its steady state; on a memory-limited container the default can
+  be a large share of the headroom.
+
+`--raft-snapshot-max-pending-sessions` (embedded: `RaftSnapshotMaxPendingSessions`; default 8) caps the
+number of concurrent sessions.
+
+**Slow installs.** A follower acknowledges the last chunk of a snapshot only once the install has
+finished, and the leader waits `--raft-snapshot-chunk-ack-timeout` (embedded:
+`RaftSnapshotChunkAckTimeout`; default 15 s) for that acknowledgement. An install that takes longer,
+such as a large partition on a busy disk, reads to the leader as a rejected transfer. The leader then
+exports again at a newer index while the follower is still importing the first snapshot, and every
+round costs a full export and a staged copy. Set the timeout on every node, above the slowest install
+you expect. A chunk's acknowledgement is bounded by the smaller of this and
+`--raft-snapshot-transfer-step-timeout` (embedded: `RaftSnapshotTransferStepTimeout`; default 2 min), so
+raise both to go past 2 min; the embedded node refuses a chunk-ack timeout above its step timeout.
+
 ---
 
 ## 7. What to watch

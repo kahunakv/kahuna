@@ -857,7 +857,13 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         // state is exact at the commit's position once the entries between them are re-applied. The reverse
         // order could restore an intent set from after a later competitor took the key — a replay would then
         // refuse a commit the live apply admitted.
-        bool intents = preparedIntentStore?.PersistSnapshot(partitionId) ?? true;
+        //
+        // The intent ceiling travels into the file as the position the intent set is exact for: a restart
+        // replays from the partition's durability floor, which can sit far below this checkpoint (the flush
+        // channel lags on a slow disk), and the entries between the two must replay as history the reloaded
+        // set already reflects — a prepare the live apply refused because a competitor held its key must not
+        // install a phantom holder now that the competitor has settled (see PreparedIntentStore.PersistSnapshot).
+        bool intents = preparedIntentStore?.PersistSnapshot(partitionId, Math.Max(0, intentCeiling)) ?? true;
         bool records = transactionRecordStore?.PersistSnapshot(partitionId) ?? true;
 
         if (receipts)

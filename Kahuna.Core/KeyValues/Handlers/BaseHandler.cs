@@ -396,13 +396,17 @@ internal abstract class BaseHandler
     /// while a hydration below the head has no pending message that will fix it. A null <paramref name="hydrated"/>
     /// is stale only against a head whose state is <see cref="KeyValueState.Set"/> — a deleted or pruned head
     /// legitimately hydrates as absent.</para>
+    ///
+    /// <para><paramref name="coveredThrough"/> is the revision of a committed foreign intent the caller answers
+    /// from: that intent is itself the newest committed state up to its revision, so a row behind it is the ordinary
+    /// deferred-settlement lag, not lost history, and only a recorded head beyond it proves staleness.</para>
     /// </summary>
-    protected bool HydratedRowProvablyStale(string key, KeyValueEntry? hydrated) =>
-        HydratedRowProvablyStale(context, key, hydrated);
+    protected bool HydratedRowProvablyStale(string key, KeyValueEntry? hydrated, long coveredThrough = -1) =>
+        HydratedRowProvablyStale(context, key, hydrated, coveredThrough);
 
-    /// <summary>Static form of <see cref="HydratedRowProvablyStale(string, KeyValueEntry?)"/> for read
+    /// <summary>Static form of <see cref="HydratedRowProvablyStale(string, KeyValueEntry?, long)"/> for read
     /// continuations, which carry the context as a parameter rather than a field.</summary>
-    internal static bool HydratedRowProvablyStale(KeyValueContext context, string key, KeyValueEntry? hydrated)
+    internal static bool HydratedRowProvablyStale(KeyValueContext context, string key, KeyValueEntry? hydrated, long coveredThrough = -1)
     {
         Transactions.PreparedIntentStore? intentStore = context.PreparedIntentStore;
         if (intentStore is null || !intentStore.TryGetCommittedHead(key, out long headRevision, out KeyValueState headState))
@@ -410,7 +414,7 @@ internal abstract class BaseHandler
 
         long observedRevision = hydrated?.Revision ?? -1;
 
-        if (headRevision <= observedRevision)
+        if (headRevision <= observedRevision || headRevision <= coveredThrough)
             return false;
 
         if (hydrated is null && headState != KeyValueState.Set)
@@ -830,16 +834,61 @@ internal abstract class BaseHandler
     }
 
     /// <summary>
-    /// Whether a snapshot read must skip the durable prepared-intent overlay and take the ordinary read path:
-    /// the resident head already carries a revision newer than the intent, so the intent was materialized here
-    /// (or superseded by a later committed write) and the head plus its archive answer for every snapshot. Serving
-    /// the lingering intent instead would answer with an older value than a committed revision at or below the
-    /// snapshot, and a later read — after the intent settles and leaves the store — would answer differently.
-    /// Strictly newer only: an extend reuses the base revision number, so an equal revision is not proof of
-    /// materialization.
+    /// Whether a read must skip the durable prepared-intent overlay and take the ordinary read path: the resident
+    /// head already carries a revision newer than the intent, so a later committed write superseded it (a
+    /// non-transactional write proceeds over a committed-but-unsettled intent, and the intent lingers until its
+    /// settlement) and the head plus its archive answer for the latest read and for every snapshot. Serving the
+    /// lingering intent instead would answer with an older value than the committed head — a client could write a key
+    /// and read the previous value back — and a later read, after the intent settles and leaves the store, would
+    /// answer differently. Strictly newer only: an extend reuses the base revision number, so an equal revision is
+    /// not proof of materialization.
     /// </summary>
-    protected static bool ResidentHeadSupersedesIntent(KeyValueRequest message, KeyValueEntry? entry, PreparedIntent intent) =>
-        !message.ReadTimestamp.IsNull() && entry is not null && entry.Revision > intent.Revision;
+    protected static bool ResidentHeadSupersedesIntent(KeyValueEntry? entry, PreparedIntent intent) =>
+        entry is not null && entry.Revision > intent.Revision;
+
+    /// <summary>
+    /// Loads a persistent key's committed head from the backend on the actor and makes it resident, for the read
+    /// paths that must compare against it before answering (a transactional read's MVCC base, or a read met by a
+    /// durable intent that a newer head may have superseded). Returns <c>Stale</c> when the hydrated row is provably
+    /// behind this node's committed-head memory — it must not become a base or supersede anything, and the caller
+    /// answers <c>MustRetry</c> so the scheduled convergence repair lands first. A null entry means no row on disk.
+    /// <paramref name="coveredThrough"/> is the revision of a committed foreign intent the caller answers from (see
+    /// <see cref="HydratedRowProvablyStale(string, KeyValueEntry?, long)"/>), or -1.
+    /// </summary>
+    protected async ValueTask<(KeyValueEntry? Entry, bool Stale)> HydratePersistentHead(string key, HLCTimestamp currentTime, long coveredThrough = -1)
+    {
+        KeyValueEntry? diskEntry = await context.BackendReadScheduler.EnqueueBatchableTask(
+            ResolvePartition(key),
+            key,
+            context.PointReadExecutor);
+
+        if (HydratedRowProvablyStale(key, diskEntry, coveredThrough))
+            return (null, true);
+
+        if (diskEntry is not null)
+        {
+            diskEntry.FlushedRevision = diskEntry.Revision;
+            diskEntry.LastUsed = currentTime;
+            context.InsertStoreEntry(key, diskEntry);
+        }
+
+        return (diskEntry, false);
+    }
+
+    /// <summary>
+    /// The revision of a committed-but-unsettled durable intent of another transaction on <paramref name="key"/>, or
+    /// -1 when there is none (no intent, the reader's own, undecided, or aborted). A transactional first read pins
+    /// such an intent, so it is the authoritative committed state up to its revision when the read hydrates the key.
+    /// </summary>
+    protected long CommittedForeignIntentRevision(string key, HLCTimestamp readerTransactionId, ForeignDecisionHint hint)
+    {
+        if (context.PreparedIntentStore?.Get(key) is not { } foreign || foreign.TransactionId == readerTransactionId)
+            return -1;
+
+        return DurableReadVisibility.Resolve(context, foreign, HLCTimestamp.Zero, hint) == ReadVisibilityAction.UseIntentValue
+            ? foreign.Revision
+            : -1;
+    }
 
     /// <summary>
     /// Whether a transactional latest read whose transaction already holds an MVCC entry (a pin, or its own staged

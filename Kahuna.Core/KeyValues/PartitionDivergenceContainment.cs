@@ -8,8 +8,9 @@ namespace Kahuna.Server.KeyValues;
 
 /// <summary>
 /// Contains a partition whose apply projection on this node is known to be incomplete — the
-/// fingerprint comparison found a peer holding more at the same applied kv log id, or recovery proved
-/// that a prepared intent this node still holds was settled on a quorum of its peers. Detection alone
+/// fingerprint comparison found a peer holding more at the same applied kv log id, recovery proved
+/// that a prepared intent this node still holds was settled on a quorum of its peers, or a committed
+/// materialization (replayed at restart or applied live) named a value this node cannot produce. Detection alone
 /// changed nothing in the fault soaks that found these shapes: the short replica led, served reads that
 /// missed acknowledged writes, held settled intents as read-only keys, and the partition went read-only
 /// within minutes. Containment is what turns the detection into an outcome:
@@ -79,7 +80,7 @@ internal sealed class PartitionDivergenceContainment
     /// <param name="partitionId">The partition whose local projection is incomplete.</param>
     /// <param name="fullerPeer">The replica the evidence names as complete; the preferred successor.</param>
     /// <param name="evidence">What proved the divergence, for the log line.</param>
-    /// <param name="moment">Where it was detected (promotion, recovery), for the log line and the metric tag.</param>
+    /// <param name="moment">Where it was detected (promotion, recovery, restart, apply), for the log line.</param>
     internal async Task ContainAsync(int partitionId, string fullerPeer, string evidence, string moment)
     {
         GatedPartition state = new(fullerPeer, evidence, DateTime.UtcNow, new CancellationTokenSource());
@@ -101,6 +102,39 @@ internal sealed class PartitionDivergenceContainment
         }
 
         await RelinquishIfLeadingAsync(partitionId, fullerPeer).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Gates the partition from a path that cannot await the containment: the restore-finished callback and the
+    /// committed-entry apply. The gate and the withheld candidacy stand when this returns — both precede the
+    /// first await of <see cref="ContainAsync"/> — so the node cannot campaign from the incomplete projection
+    /// between the detection and the gate; only the relinquish and the re-seed requests run detached. These
+    /// paths know no fuller peer, so a node that leads steps down instead of transferring.
+    /// </summary>
+    internal void ContainDetached(int partitionId, string evidence, string moment)
+    {
+        _ = ContainAsync(partitionId, fullerPeer: string.Empty, evidence, moment).ContinueWith(
+            static (task, state) => ((ILogger<IKahuna>)state!).LogError(task.Exception, "Failed to relinquish a partition gated for a committed value missing on this node"),
+            logger, TaskContinuationOptions.OnlyOnFaulted);
+    }
+
+    /// <summary>
+    /// A committed-entry apply proved a committed value missing on this node: the by-reference materialization
+    /// at <paramref name="logIndex"/> named an intent this node does not hold, and neither its queued writes nor
+    /// its durable row reach <paramref name="revision"/>. Every later commit of the key builds on a base this
+    /// node does not have, so the partition is gated at the first such entry rather than when some later check
+    /// (a leader-change fingerprint, a recovery-held intent aging past the retention horizon) happens to notice.
+    /// The entries that follow on an already gated partition add nothing and return on the gate check.
+    /// </summary>
+    internal void ContainMissingMaterialization(int partitionId, long logIndex, string key, long revision)
+    {
+        if (IsGated(partitionId))
+            return;
+
+        ContainDetached(
+            partitionId,
+            $"the by-reference materialization of key {key} at revision {revision} (log entry {logIndex}) found no prepared intent on this node and its durable state is below that revision",
+            "apply");
     }
 
     /// <summary>

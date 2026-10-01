@@ -137,6 +137,13 @@ public sealed class EmbeddedKahunaCluster : IAsyncDisposable
             options.NodeId = i + 1;
             options.NodeName = $"{baseOptions.NodeName}-{i + 1}";
             options.Port = basePort + i;
+
+            // Kommander deletes every spill file in its staging directory at startup, so members sharing
+            // the base directory would delete one another's live snapshots whenever one restarts. A blank
+            // directory is left for the node's own validation to refuse.
+            if (!string.IsNullOrWhiteSpace(baseOptions.RaftSnapshotStagingDirectory))
+                options.RaftSnapshotStagingDirectory = Path.Combine(baseOptions.RaftSnapshotStagingDirectory, options.NodeName);
+
             nodeOptions[i] = options;
         }
 

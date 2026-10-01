@@ -136,7 +136,8 @@ internal sealed class TryGetByRangeHandler : BaseHandler
                 PreparedIntentScanMerge.ScanMergeResult merge = PreparedIntentScanMerge.Merge(
                     items, ranged, snapshotTs, currentTime, limit, kvHasMore, kvCeilingKey,
                     i => DurableReadVisibility.ScanDecision(context, message.ForeignScanDecisions, i),
-                    k => DurableSnapshotSource.ReaderHasOwnVersion(context, k, message.TransactionId));
+                    k => DurableSnapshotSource.ReaderHasOwnVersion(context, k, message.TransactionId),
+                    i => DurableSnapshotSource.HeadSupersedesIntent(context, i, excludedHeads: null));
                 if (merge.MustRetry)
                     return new(KeyValueResponseType.MustRetry,
                         new KeyValueGetByRangeResult(KeyValueResponseType.MustRetry, [], null, false));
@@ -507,7 +508,7 @@ internal sealed class TryGetByRangeHandler : BaseHandler
                 // value so this transaction's later reads of the key stay consistent instead of binding a stale base.
                 // entry.MvccEntries is already initialised (??= new() in the block above).
                 KeyValueMvccEntry newMvcc;
-                switch (DurableSnapshotSource.Resolve(context, key, transactionId, currentTime, out KeyValueMvccEntry intentSnapshot))
+                switch (DurableSnapshotSource.Resolve(context, key, transactionId, entry, currentTime, out KeyValueMvccEntry intentSnapshot))
                 {
                     case SnapshotDecision.Retry:
                         return KeyValueStaticResponses.WaitingForReplicationResponse;

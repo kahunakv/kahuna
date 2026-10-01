@@ -1,4 +1,5 @@
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues.Transactions;
 
@@ -19,4 +20,11 @@ internal interface IResolvedIntentInstaller
     /// <summary>Called once after the last install of the entry at <paramref name="logIndex"/>, so the artifacts
     /// the entry derives as a whole (the completion receipts of every installed key) are certified together.</summary>
     void CompleteEntry(int partitionId, long logIndex, bool replay);
+
+    /// <summary>A restart replay reached the materializing resolve of the given transaction attempt at
+    /// <paramref name="key"/> (entry <paramref name="logIndex"/>) with no intent to install from: not live, not
+    /// kept as replay history, not retained after its settle. The installer decides whether the value is already
+    /// durable here (the row's last-modified is the commit timestamp, and a key's commits are HLC-ordered) or the
+    /// restart left it missing.</summary>
+    void NoteUnresolvedOnReplay(int partitionId, long logIndex, HLCTimestamp transactionId, long epoch, string key, HLCTimestamp commitTimestamp);
 }

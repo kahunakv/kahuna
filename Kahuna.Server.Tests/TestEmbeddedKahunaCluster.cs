@@ -1,5 +1,8 @@
+using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Diagnostics.Metrics;
 using System.Text;
+using Kommander;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
@@ -312,8 +315,8 @@ public sealed class TestEmbeddedKahunaCluster
 }
 
 /// <summary>
-/// Counts Kommander's process-wide election counter, so it must not share the process with other
-/// clusters: the collection disables parallelisation and runs on its own.
+/// Reads Kommander's process-wide meters for its failure report, so it must not share the process with
+/// other clusters: the collection disables parallelisation and runs on its own.
 /// </summary>
 [CollectionDefinition("ExclusiveElectionMeasurement", DisableParallelization = true)]
 public sealed class ExclusiveElectionMeasurementCollection { }
@@ -322,11 +325,29 @@ public sealed class ExclusiveElectionMeasurementCollection { }
 /// Three nodes on one thread share every heartbeat and election timer. A heartbeat that runs late
 /// behind the other nodes' work looks like a dead leader and starts a needless election. With the
 /// embedded default timings, leadership must stay stable for a minute under a light write load.
+/// <para>
+/// Stability is measured on the nodes under test: a Raft term moves only when an election starts, so
+/// the per-node, per-partition terms must not change over the window. Kommander's election counter is
+/// process-wide and tagged only by partition id; a Raft node that an earlier test left running, or a
+/// cluster from a test in another collection, keeps counting into it. The counter is reported for
+/// diagnostics only, per partition id: a partition this cluster does not have names a foreign node.
+/// </para>
 /// </summary>
 [Collection("ExclusiveElectionMeasurement")]
 public sealed class TestEmbeddedKahunaClusterStability
 {
     private static readonly TimeSpan StableWindow = TimeSpan.FromSeconds(60);
+
+    /// <summary>
+    /// How long every node must have held the same view of a partition's leader before the window
+    /// opens. The first elections, and a follower that adopts the leader late, are start-up, not
+    /// instability; the embedded election timeout tops out at 1.5 s, so 2 s covers a last split vote.
+    /// </summary>
+    private static readonly TimeSpan SettleWindow = TimeSpan.FromSeconds(2);
+
+    private static readonly TimeSpan SettleDeadline = TimeSpan.FromSeconds(60);
+
+    private static readonly TimeSpan WritePause = TimeSpan.FromMilliseconds(250);
 
     private readonly ITestOutputHelper output;
 
@@ -348,37 +369,188 @@ public sealed class TestEmbeddedKahunaClusterStability
             await using EmbeddedKahunaCluster cluster = await EmbeddedKahunaCluster.CreateInMemoryAsync(
                 3, TestEmbeddedKahunaCluster.ClusterOptions(), loggerFactory, cts.Token);
 
-            long elections = 0;
-            double maxHeartbeatDelayMs = 0;
+            string[] leaders = await WaitForSettledLeadershipAsync(cluster, cts.Token);
 
-            using MeterListener listener = new();
+            using ProcessWideRaftMeters meters = new();
+
+            long[][] terms = ReadTerms(cluster);
+            List<string> termChanges = [];
+            Stopwatch clock = Stopwatch.StartNew();
+            int writes = 0;
+
+            while (clock.Elapsed < StableWindow)
+            {
+                EmbeddedKahunaNode node = cluster.GetNode(writes % cluster.NodeCount);
+                await TestEmbeddedKahunaCluster.CommitWriteAsync(node, $"stable/key-{writes % 16}", $"v{writes}", cts.Token);
+                writes++;
+
+                RecordTermChanges(cluster, terms, clock.ElapsedMilliseconds, termChanges);
+
+                await Task.Delay(WritePause, cts.Token);
+            }
+
+            RecordTermChanges(cluster, terms, clock.ElapsedMilliseconds, termChanges);
+
+            string report =
+                $"writes={writes} leaders=[{string.Join(", ", leaders)}] termChanges={termChanges.Count} " +
+                $"processWideElections=[{meters.DescribeElections()}] maxHeartbeatDelayMs={meters.MaxHeartbeatDelayMs:F0}";
+
+            output.WriteLine(report);
+
+            if (termChanges.Count > 0)
+            {
+                Assert.Fail(
+                    $"Leadership of the cluster under test changed during the stable window: {string.Join("; ", termChanges)}. " +
+                    $"Process-wide election starts by partition: [{meters.DescribeElections()}]; " +
+                    $"largest gap between two heartbeats of a leader: {meters.MaxHeartbeatDelayMs:F0} ms.");
+            }
+        }, StableWindow + TimeSpan.FromMinutes(3));
+    }
+
+    /// <summary>
+    /// Waits until every node has seen the same non-empty leader for every partition for at least
+    /// <see cref="SettleWindow"/>, and returns that leader per partition. A node that does not host a
+    /// partition has no view of it and is skipped.
+    /// </summary>
+    private static async Task<string[]> WaitForSettledLeadershipAsync(EmbeddedKahunaCluster cluster, CancellationToken ct)
+    {
+        string[] leaders = new string[cluster.PartitionCount];
+
+        while (true)
+        {
+            bool agreed = true;
+
+            for (int partitionId = 0; partitionId < cluster.PartitionCount; partitionId++)
+            {
+                leaders[partitionId] = "";
+
+                for (int i = 0; i < cluster.NodeCount; i++)
+                {
+                    string leader;
+
+                    try
+                    {
+                        leader = await cluster.GetNode(i).Raft.WaitForLeaderStableAsync(partitionId, SettleWindow, SettleDeadline, ct);
+                    }
+                    catch (PartitionNotHostedException)
+                    {
+                        continue;
+                    }
+
+                    if (leaders[partitionId].Length == 0)
+                        leaders[partitionId] = leader;
+                    else if (!string.Equals(leaders[partitionId], leader, StringComparison.Ordinal))
+                        agreed = false;
+                }
+            }
+
+            if (agreed)
+                return leaders;
+
+            await Task.Delay(100, ct);
+        }
+    }
+
+    /// <summary>The current term of every partition on every node; -1 where the node does not host the partition.</summary>
+    private static long[][] ReadTerms(EmbeddedKahunaCluster cluster)
+    {
+        long[][] terms = new long[cluster.NodeCount][];
+
+        for (int i = 0; i < cluster.NodeCount; i++)
+        {
+            terms[i] = new long[cluster.PartitionCount];
+
+            for (int partitionId = 0; partitionId < cluster.PartitionCount; partitionId++)
+                terms[i][partitionId] = cluster.GetNode(i).Raft.GetPartitionTerm(partitionId);
+        }
+
+        return terms;
+    }
+
+    /// <summary>
+    /// Appends one entry per term that moved since <paramref name="terms"/> was last read, and updates
+    /// <paramref name="terms"/> to the current values.
+    /// </summary>
+    private static void RecordTermChanges(EmbeddedKahunaCluster cluster, long[][] terms, long elapsedMs, List<string> changes)
+    {
+        for (int i = 0; i < cluster.NodeCount; i++)
+        {
+            IRaft raft = cluster.GetNode(i).Raft;
+
+            for (int partitionId = 0; partitionId < cluster.PartitionCount; partitionId++)
+            {
+                long term = raft.GetPartitionTerm(partitionId);
+                if (term == terms[i][partitionId])
+                    continue;
+
+                changes.Add($"+{elapsedMs} ms node {i} partition {partitionId} term {terms[i][partitionId]} -> {term}");
+                terms[i][partitionId] = term;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Kommander's process-wide election counter and heartbeat-gap histogram, for the failure report.
+    /// Every Raft node in the process feeds them, and the counter carries only a partition id.
+    /// </summary>
+    private sealed class ProcessWideRaftMeters : IDisposable
+    {
+        private readonly MeterListener listener = new();
+
+        private readonly ConcurrentDictionary<string, long> electionsByPartition = new(StringComparer.Ordinal);
+
+        private readonly Lock gate = new();
+
+        private double maxHeartbeatDelayMs;
+
+        public ProcessWideRaftMeters()
+        {
             listener.InstrumentPublished = (instrument, meterListener) =>
             {
                 if (instrument.Meter.Name == "Kommander" && instrument.Name is "raft.elections_started_total" or "raft.heartbeat_delay_ms")
                     meterListener.EnableMeasurementEvents(instrument);
             };
-            listener.SetMeasurementEventCallback<long>((_, value, _, _) => Interlocked.Add(ref elections, value));
+
+            listener.SetMeasurementEventCallback<long>((_, value, tags, _) =>
+                electionsByPartition.AddOrUpdate(PartitionTag(tags), value, (_, sum) => sum + value));
+
             listener.SetMeasurementEventCallback<double>((_, value, _, _) =>
             {
-                lock (listener)
+                lock (gate)
                     maxHeartbeatDelayMs = Math.Max(maxHeartbeatDelayMs, value);
             });
+
             listener.Start();
+        }
 
-            DateTime end = DateTime.UtcNow + StableWindow;
-            int writes = 0;
-
-            while (DateTime.UtcNow < end)
+        public double MaxHeartbeatDelayMs
+        {
+            get
             {
-                EmbeddedKahunaNode node = cluster.GetNode(writes % cluster.NodeCount);
-                await TestEmbeddedKahunaCluster.CommitWriteAsync(node, $"stable/key-{writes % 16}", $"v{writes}", cts.Token);
-                writes++;
-                await Task.Delay(250, cts.Token);
+                lock (gate)
+                    return maxHeartbeatDelayMs;
+            }
+        }
+
+        public string DescribeElections()
+        {
+            if (electionsByPartition.IsEmpty)
+                return "none";
+
+            return string.Join(", ", electionsByPartition.OrderBy(kv => kv.Key, StringComparer.Ordinal).Select(kv => $"partition {kv.Key}: {kv.Value}"));
+        }
+
+        public void Dispose() => listener.Dispose();
+
+        private static string PartitionTag(ReadOnlySpan<KeyValuePair<string, object?>> tags)
+        {
+            foreach (KeyValuePair<string, object?> tag in tags)
+            {
+                if (tag.Key == "partition_id")
+                    return tag.Value?.ToString() ?? "?";
             }
 
-            output.WriteLine($"writes={writes} elections={Interlocked.Read(ref elections)} maxHeartbeatDelayMs={maxHeartbeatDelayMs:F0}");
-
-            Assert.Equal(0, Interlocked.Read(ref elections));
-        }, StableWindow + TimeSpan.FromMinutes(3));
+            return "?";
+        }
     }
 }

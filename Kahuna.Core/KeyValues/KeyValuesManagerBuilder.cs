@@ -397,8 +397,14 @@ internal sealed class KeyValuesManagerBuilder
         }
 
         // The restorer resolves a by-reference materialization record against the same prepared-intent store the
-        // replay rebuilds from its snapshot and the replayed prepare deltas.
-        restorer = new(backgroundWriter, raft, completionReceiptStore, logger, unflushedWrites, durabilityTracker, preparedIntentStore);
+        // replay rebuilds from its snapshot and the replayed prepare deltas. The backend point read is its last
+        // proof that a record with no intent is a flushed duplicate rather than a missing value; it runs only on
+        // that path, synchronously on the replay thread (the backends take their own read locks).
+        restorer = new(backgroundWriter, raft, completionReceiptStore, logger, unflushedWrites, durabilityTracker, preparedIntentStore,
+            readDurableRow: persistenceBackend.GetKeyValue,
+            // A miss for a key whose range moved out of the partition after the floor is the un-host purge's
+            // doing, not a hole; the same routing the store's checkpoint attributes intents with.
+            keyOwner: key => locator.LocateRange(key).PartitionId);
         replicator = new(backgroundWriter, routers.Persistent, raft, writeFrequencyRegistry, keySpaceRegistry, completionReceiptStore, logger, unflushedWrites, durabilityTracker,
             // Off-actor hydration for the durable commit-apply's non-resident cold path: the point read runs
             // on the queued backend read scheduler HERE (the sender side), never inside the owning actor's
@@ -423,7 +429,12 @@ internal sealed class KeyValuesManagerBuilder
                 preparedIntentStore.TryGetCommittedHead(key, out long headRevision, out _) ? headRevision : -1,
             // The authority a by-reference materialization record resolves its value from: the record names an
             // intent this store already holds, so the committed value never travels through the log twice.
-            preparedIntentStore: preparedIntentStore);
+            preparedIntentStore: preparedIntentStore,
+            // The same ownership rule the restorer dismisses a replayed miss with: a record applied after the
+            // key's range moved out names nothing this partition should still hold.
+            keyOwner: key => locator.LocateRange(key).PartitionId,
+            // A record verified missing gates the partition at that entry: candidacy withheld, MustRetry, re-seed.
+            materializationMissing: divergenceContainment.ContainMissingMaterialization);
 
         // A materializing resolve installs the committed value from the intent at its own apply, in log order and
         // before the settle removes the intent — live through the replicator, on a restart replay through the

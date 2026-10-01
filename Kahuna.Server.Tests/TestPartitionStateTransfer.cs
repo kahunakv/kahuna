@@ -424,6 +424,192 @@ public sealed class TestPartitionStateTransfer : IDisposable
         Assert.Equal(4, target.Backend.GetKeyValue("ranged1/a")!.Revision);
     }
 
+    // ── bounded, streamed install ────────────────────────────────────────────────
+
+    private static PersistenceRequestItem[] RangedRows(int from, int to)
+    {
+        PersistenceRequestItem[] rows = new PersistenceRequestItem[to - from];
+        for (int i = from; i < to; i++)
+            rows[i - from] = KvItem($"ranged1/k{i:D6}", revision: i + 1);
+        return rows;
+    }
+
+    [Fact]
+    public async Task Import_ManyRows_AreWrittenInSeveralBoundedBatches_AndAllLand()
+    {
+        Node source = MakeNode();
+        Assert.True(source.Backend.StoreKeyValues([.. RangedRows(0, 10_000)]));
+        byte[] snapshot = await Export(source, 2);
+
+        FailingStoreBackend counting = new(new MemoryPersistenceBackend());
+        Node target = MakeNode(backend: counting);
+        await Import(target, 2, snapshot);
+
+        // 10,000 rows cannot go to the backend in one write: the install streams them in batches.
+        Assert.True(counting.StoreKeyValuesCalls >= 3, $"expected several batched writes, saw {counting.StoreKeyValuesCalls}");
+        Assert.True(counting.LargestStoreKeyValuesBatch <= 4_096, $"a batch of {counting.LargestStoreKeyValuesBatch} rows exceeds the bound");
+
+        for (int i = 0; i < 10_000; i += 997)
+            Assert.Equal(i + 1, target.Backend.GetKeyValue($"ranged1/k{i:D6}")!.Revision);
+        Assert.Equal(10_000, target.Backend.GetKeyValue("ranged1/k009999")!.Revision);
+    }
+
+    [Fact]
+    public async Task Import_AcceptsANonSeekableStream()
+    {
+        Node source = MakeNode();
+        PopulateStores(source, ownedIntents: 3, ownedRecords: 50, ownedReceipts: 50, foreignPerSpace: 5);
+        Assert.True(source.Backend.StoreKeyValues([KvItem("ranged1/a", 7)]));
+        byte[] snapshot = await Export(source, 2);
+
+        Node target = MakeNode();
+        await target.Transfer.ImportPartitionState(2, new NonSeekableStream(new MemoryStream(snapshot)), TestContext.Current.CancellationToken);
+
+        Assert.Equal(7, target.Backend.GetKeyValue("ranged1/a")!.Revision);
+        Assert.Equal(TransactionDecision.Commit, target.Records.Get(Ts(20_000), 1)!.Decision);
+        Assert.True(target.Receipts.Contains(Ts(30_000), "ranged1/r000000", KeyValueDurability.Persistent));
+        Assert.NotNull(target.Intents.Get("ranged1/i000000"));
+    }
+
+    [Fact]
+    public async Task FailureAfterAPartialBatch_TheRetryPurgesWhatTheFailedAttemptApplied()
+    {
+        // The first attempt writes one batch of rows (and nothing of the durable stores) before the backend
+        // refuses the second batch: the partition is left half-applied and marked incomplete.
+        Node first = MakeNode();
+        Assert.True(first.Backend.StoreKeyValues([.. RangedRows(0, 10_000)]));
+        AddRecord(first.Records, Ts(40_000), "ranged1/stale-anchor", commit: true);
+        byte[] older = await Export(first, 2);
+
+        FailingStoreBackend failing = new(new MemoryPersistenceBackend()) { FailStoreKeyValuesOnCall = 2 };
+        Node target = MakeNode(backend: failing, storagePath: tempDir);
+
+        await Assert.ThrowsAsync<KahunaServerException>(() => Import(target, 2, older));
+        Assert.True(target.Transfer.IsInstallIncomplete(2));
+        Assert.NotNull(target.Backend.GetKeyValue("ranged1/k000000"));
+
+        // The retry carries a newer state in which the first 5,000 rows and the stale record are gone. Whatever
+        // the failed attempt applied must not survive underneath it.
+        Node second = MakeNode();
+        Assert.True(second.Backend.StoreKeyValues([.. RangedRows(5_000, 10_000)]));
+        byte[] newer = await Export(second, 2, upToIndex: 50);
+
+        await Import(target, 2, newer);
+
+        Assert.False(target.Transfer.IsInstallIncomplete(2));
+        Assert.Null(target.Backend.GetKeyValue("ranged1/k000000"));
+        Assert.Null(target.Backend.GetKeyValue("ranged1/k004095"));
+        Assert.Equal(5_001, target.Backend.GetKeyValue("ranged1/k005000")!.Revision);
+        Assert.Null(target.Records.Get(Ts(40_000), 1));
+    }
+
+    [Fact]
+    public async Task ASecondInstallOfTheSamePartition_WhileOneRuns_IsRefused()
+    {
+        Node source = MakeNode();
+        Assert.True(source.Backend.StoreKeyValues([KvItem("ranged1/a", 4)]));
+        byte[] snapshot = await Export(source, 2);
+
+        TaskCompletionSource entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        Node target = MakeNode(storagePath: tempDir);
+        target.Transfer.AddResidentStateInvalidationHook(async partitionId =>
+        {
+            if (partitionId != 2)
+                return;
+
+            entered.TrySetResult();
+            await release.Task;
+        });
+
+        Task running = Import(target, 2, snapshot);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+
+        KahunaServerException refused = await Assert.ThrowsAsync<KahunaServerException>(() => Import(target, 2, snapshot));
+        Assert.Contains("already running", refused.Message);
+
+        // Another partition is not blocked by it.
+        await Import(target, 1, await Export(source, 1));
+
+        release.SetResult();
+        await running;
+        Assert.False(target.Transfer.IsInstallIncomplete(2));
+
+        // The refusal did not leave the partition locked out: the next delivery installs normally.
+        await Import(target, 2, snapshot);
+        Assert.Equal(4, target.Backend.GetKeyValue("ranged1/a")!.Revision);
+    }
+
+    /// <summary>The snapshot with its store section rebuilt around the given payloads, checksum recomputed, so
+    /// the only defect is in the payload contents themselves.</summary>
+    private static byte[] WithStorePayloads(byte[] snapshot, byte[]? receipts = null, byte[]? records = null)
+    {
+        byte[] section = StoreSectionOf(snapshot);
+        PartitionStateStoreSection parsed = PartitionStateStoreSection.Parser.ParseDelimitedFrom(new MemoryStream(section));
+
+        if (receipts is not null)
+            parsed.CompletionReceipts = ByteString.CopyFrom(receipts);
+        if (records is not null)
+            parsed.TransactionRecords = ByteString.CopyFrom(records);
+
+        KvStateMachineTransfer.FnvHashStream hasher = new();
+        hasher.Write(parsed.CompletionReceipts.Span);
+        hasher.Write(parsed.TransactionRecords.Span);
+        hasher.Write(parsed.PreparedIntents.Span);
+        parsed.Checksum = hasher.Hash;
+
+        using MemoryStream output = new();
+        output.Write(snapshot, 0, snapshot.Length - section.Length);
+        parsed.WriteDelimitedTo(output);
+        return output.ToArray();
+    }
+
+    [Fact]
+    public async Task UndecodableStorePayloadUnderAValidChecksum_IsRefusedBeforeAnythingChanges()
+    {
+        Node source = MakeNode();
+        PopulateStores(source, ownedIntents: 2, ownedRecords: 20, ownedReceipts: 20, foreignPerSpace: 2);
+        Assert.True(source.Backend.StoreKeyValues([KvItem("ranged1/a", 4)]));
+        byte[] snapshot = await Export(source, 2);
+
+        Node target = MakeNode(storagePath: tempDir);
+        Assert.True(target.Backend.StoreKeyValues([KvItem("ranged1/prior", 1)]));
+        AddRecord(target.Records, Ts(90_000), "ranged1/prior-anchor", commit: true);
+
+        // A record entry that claims more bytes than the payload holds: the stream decode fails part-way.
+        await Assert.ThrowsAsync<KahunaServerException>(() => Import(target, 2, WithStorePayloads(snapshot, records: [0x0A, 0x7F, 0x08])));
+
+        // A receipt batch flagged Forget is not a snapshot slice.
+        byte[] forget = CompletionReceiptStore.SerializeImport(
+            [new CompletionReceiptRecord(Ts(1), "ranged1/r", null, KeyValueDurability.Persistent)], 2, forget: true);
+        await Assert.ThrowsAsync<KahunaServerException>(() => Import(target, 2, WithStorePayloads(snapshot, receipts: forget)));
+
+        // Both were refused during verification: nothing was purged or applied, and no install began.
+        Assert.NotNull(target.Backend.GetKeyValue("ranged1/prior"));
+        Assert.Null(target.Backend.GetKeyValue("ranged1/a"));
+        Assert.NotNull(target.Records.Get(Ts(90_000), 1));
+        Assert.False(target.Transfer.IsInstallIncomplete(2));
+
+        // The untampered snapshot still installs.
+        await Import(target, 2, snapshot);
+        Assert.Equal(4, target.Backend.GetKeyValue("ranged1/a")!.Revision);
+    }
+
+    private sealed class NonSeekableStream(Stream inner) : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override int Read(byte[] buffer, int offset, int count) => inner.Read(buffer, offset, count);
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
     // ── replay convergence above the boundary ────────────────────────────────────
 
     [Fact]
@@ -772,9 +958,19 @@ public sealed class TestPartitionStateTransfer : IDisposable
     {
         public bool FailNextStoreKeyValues;
 
+        /// <summary>Fails the Nth StoreKeyValues call (1-based) once; 0 disables.</summary>
+        public int FailStoreKeyValuesOnCall;
+
+        public int StoreKeyValuesCalls;
+
+        public int LargestStoreKeyValuesBatch;
+
         public bool StoreKeyValues(List<PersistenceRequestItem> items)
         {
-            if (FailNextStoreKeyValues)
+            StoreKeyValuesCalls++;
+            LargestStoreKeyValuesBatch = Math.Max(LargestStoreKeyValuesBatch, items.Count);
+
+            if (FailNextStoreKeyValues || StoreKeyValuesCalls == FailStoreKeyValuesOnCall)
             {
                 FailNextStoreKeyValues = false;
                 return false;

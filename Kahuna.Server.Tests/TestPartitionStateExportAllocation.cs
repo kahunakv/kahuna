@@ -70,21 +70,46 @@ public sealed class TestPartitionStateExportAllocation
         await using (Stream warmUp = await transfer.ExportPartitionState(2, 42, ct))
             Assert.True(warmUp.Length > 8 * 1024 * 1024);
 
-        GC.Collect();
-        GC.WaitForPendingFinalizers();
-        GC.Collect();
+        // The number is process-wide: the export's page scan hops threads, so per-thread accounting cannot
+        // isolate it, and anything else the process does meanwhile (a straggling teardown of an earlier
+        // test's cluster, the finalizer thread) is charged to the export. That noise is bursty, not sustained,
+        // so the export is measured several times and the smallest attempt is the one judged: a doubling
+        // ladder costs at least 2x on every attempt, so the minimum still catches it, while one attempt hit
+        // by unrelated allocation no longer fails the test. The ambient rate is sampled first and reported
+        // with every attempt so a failure says whether the export or its neighbours allocated.
+        long ambientBefore = GC.GetTotalAllocatedBytes(precise: true);
+        await Task.Delay(100, ct);
+        long ambientPerSecond = (GC.GetTotalAllocatedBytes(precise: true) - ambientBefore) * 10;
 
-        long before = GC.GetTotalAllocatedBytes(precise: true);
-        await using Stream stream = await transfer.ExportPartitionState(2, 42, ct);
-        long allocated = GC.GetTotalAllocatedBytes(precise: true) - before;
+        const int attempts = 5;
+        long[] allocatedPerAttempt = new long[attempts];
+        long length = 0;
+
+        for (int attempt = 0; attempt < attempts; attempt++)
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+
+            long before = GC.GetTotalAllocatedBytes(precise: true);
+            await using Stream stream = await transfer.ExportPartitionState(2, 42, ct);
+            allocatedPerAttempt[attempt] = GC.GetTotalAllocatedBytes(precise: true) - before;
+
+            Assert.IsType<SegmentedBufferStream>(stream);
+            length = stream.Length;
+        }
+
+        long allocated = allocatedPerAttempt.Min();
+
+        string report =
+            $"exporting a {length} B snapshot allocated at best {allocated} B ({(double)allocated / length:F2}x); " +
+            $"attempts: {string.Join(", ", allocatedPerAttempt.Select(a => $"{a} B ({(double)a / length:F2}x)"))}; " +
+            $"ambient allocation before measuring: {ambientPerSecond} B/s";
 
         // A doubling buffer allocates at least 2x the final size (the sum of the ladder); the segmented build
         // allocates at most the size itself plus the per-page message objects, and less once the pool is warm.
-        TestContext.Current.TestOutputHelper?.WriteLine(
-            $"exporting a {stream.Length} B snapshot allocated {allocated} B ({(double)allocated / stream.Length:F2}x)");
+        TestContext.Current.TestOutputHelper?.WriteLine(report);
 
-        Assert.IsType<SegmentedBufferStream>(stream);
-        Assert.True(allocated < 1.6 * stream.Length,
-            $"exporting a {stream.Length} B snapshot allocated {allocated} B ({(double)allocated / stream.Length:F2}x)");
+        Assert.True(allocated < 1.6 * length, report);
     }
 }

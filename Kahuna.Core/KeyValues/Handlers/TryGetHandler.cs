@@ -42,16 +42,52 @@ internal sealed class TryGetHandler : BaseHandler
         // (read-your-own-write / snapshot isolation), never a concurrent foreign intent: otherwise a
         // committed-but-unsettled intent from another transaction would preempt this transaction's own staged
         // write and serve the prior value. The transactional MVCC path below is authoritative in that case.
+        //
+        // A transactional latest read without an MVCC entry yet skips the overlay too: the MVCC path records its
+        // pin from the committed intent (DurableSnapshotSource), which the overlay would answer from and leave no
+        // pin behind — and without a pin a later read or write of the key cannot detect a competing commit early.
         bool readerHasOwnMvcc = message.TransactionId != HLCTimestamp.Zero
             && entry?.MvccEntries is { } readerMvcc && readerMvcc.ContainsKey(message.TransactionId);
+        bool transactionalLatestRead = message.TransactionId != HLCTimestamp.Zero && message.ReadTimestamp.IsNull();
 
+        PreparedIntent? foreignIntent = null;
+        ReadVisibilityAction foreignAction = ReadVisibilityAction.UseExisting;
         if (!readerHasOwnMvcc
-            && context.PreparedIntentStore?.Get(message.Key) is { } foreignIntent
-            && foreignIntent.TransactionId != message.TransactionId
-            && !ResidentHeadSupersedesIntent(message, entry, foreignIntent))
+            && !transactionalLatestRead
+            && context.PreparedIntentStore?.Get(message.Key) is { } candidateIntent
+            && candidateIntent.TransactionId != message.TransactionId)
         {
             HLCTimestamp readTs = message.ReadTimestamp.IsNull() ? HLCTimestamp.Zero : message.ReadTimestamp;
-            switch (DurableReadVisibility.Resolve(context, foreignIntent, readTs, message.ForeignDecisionHint))
+            ReadVisibilityAction action = DurableReadVisibility.Resolve(context, candidateIntent, readTs, message.ForeignDecisionHint);
+
+            // A later committed write may have moved the head past a committed intent (a non-transactional write
+            // proceeds over a committed-but-unsettled intent, which lingers until settlement). On a persistent cache
+            // miss only the backend knows the head, so load it before serving the intent. The intent covers the
+            // committed history up to its own revision, so a row behind it is ordinary settlement lag.
+            if (action == ReadVisibilityAction.UseIntentValue
+                && !inCache && message.Durability == KeyValueDurability.Persistent)
+            {
+                (KeyValueEntry? hydrated, bool stale) = await HydratePersistentHead(message.Key, currentTime, candidateIntent.Revision);
+                if (stale)
+                    return KeyValueStaticResponses.MustRetryResponse;
+
+                if (hydrated is not null)
+                {
+                    entry = hydrated;
+                    inCache = true;
+                }
+            }
+
+            if (!ResidentHeadSupersedesIntent(entry, candidateIntent))
+            {
+                foreignIntent = candidateIntent;
+                foreignAction = action;
+            }
+        }
+
+        if (foreignIntent is not null)
+        {
+            switch (foreignAction)
             {
                 case ReadVisibilityAction.Retry:
                     return KeyValueStaticResponses.WaitingForReplicationResponse;
@@ -135,48 +171,55 @@ internal sealed class TryGetHandler : BaseHandler
             {
                 // Transactional reads must never detach: load synchronously so the MVCC
                 // snapshot always reflects the committed state of the key.
-                KeyValueEntry? diskEntry = await context.BackendReadScheduler.EnqueueBatchableTask(
-                    ResolvePartition(message.Key),
-                    message.Key,
-                    context.PointReadExecutor);
+                (KeyValueEntry? hydrated, bool stale) = await HydratePersistentHead(
+                    message.Key, currentTime,
+                    CommittedForeignIntentRevision(message.Key, message.TransactionId, message.ForeignDecisionHint));
 
                 // A hydrated row below this node's committed-head memory must not become a
                 // transaction's MVCC base: the missing committed writes would be silently
                 // discarded by the read-modify-write built on it. Refuse and let the scheduled
-                // convergence repair advance the local state before the client's retry.
-                if (HydratedRowProvablyStale(message.Key, diskEntry))
+                // convergence repair advance the local state before the client's retry. A committed
+                // foreign intent the read pins instead covers the history up to its revision.
+                if (stale)
                     return KeyValueStaticResponses.MustRetryResponse;
 
-                if (diskEntry is not null)
+                if (hydrated is not null)
+                    entry = hydrated;
+            }
+
+            KeyValueMvccEntry? mvccEntry = null;
+            if (entry?.MvccEntries is null || !entry.MvccEntries.TryGetValue(message.TransactionId, out mvccEntry))
+            {
+                // First read of the key by this transaction: pin the committed state it observes. A committed
+                // but unsettled foreign intent supersedes a resident head that does not include it yet, and an
+                // undecided one means the read must wait for the decision.
+                SnapshotDecision decision = DurableSnapshotSource.Resolve(
+                    context, message.Key, message.TransactionId, entry, currentTime,
+                    out KeyValueMvccEntry intentSnapshot, message.ForeignDecisionHint);
+
+                if (decision == SnapshotDecision.Retry)
+                    return KeyValueStaticResponses.WaitingForReplicationResponse;
+
+                if (entry is null)
                 {
-                    diskEntry.FlushedRevision = diskEntry.Revision;
-                    diskEntry.LastUsed = currentTime;
-                    context.InsertStoreEntry(message.Key, diskEntry);
-                    entry = diskEntry;
+                    entry = new() { Bucket = GetBucket(message.Key), State = KeyValueState.Undefined, Revision = -1 };
+                    context.InsertStoreEntry(message.Key, entry);
                 }
-            }
 
-            if (entry is null)
-            {
-                entry = new() { Bucket = GetBucket(message.Key), State = KeyValueState.Undefined, Revision = -1 };
-                context.InsertStoreEntry(message.Key, entry);
-            }
+                mvccEntry = decision == SnapshotDecision.UseIntent
+                    ? intentSnapshot
+                    : new()
+                    {
+                        Value = entry.Value,
+                        Revision = entry.Revision,
+                        Expires = entry.Expires,
+                        LastUsed = entry.LastUsed,
+                        LastModified = entry.LastModified,
+                        State = entry.State
+                    };
 
-            entry.MvccEntries ??= new();
-
-            if (!entry.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? mvccEntry))
-            {
+                entry.MvccEntries ??= new();
                 bool mvccDictJustCreated = entry.MvccEntries.Count == 0;
-                mvccEntry = new()
-                {
-                    Value = entry.Value,
-                    Revision = entry.Revision,
-                    Expires = entry.Expires,
-                    LastUsed = entry.LastUsed,
-                    LastModified = entry.LastModified,
-                    State = entry.State
-                };
-
                 entry.MvccEntries.Add(message.TransactionId, mvccEntry);
                 context.AdjustEstimatedEntryBytes(entry,
                     KeyValueStoreAccounting.MvccEntryAddedBytes(mvccDictJustCreated, mvccEntry.Value));

@@ -624,9 +624,14 @@ internal sealed class KvStateMachineTransfer : IRaftStateMachineTransfer
     /// <summary>FNV-1a 64 over the serialized entries (order-sensitive), for per-page integrity.</summary>
     internal static ulong ChecksumOf(IEnumerable<RangeSnapshotEntry> entries)
     {
+        // One coded stream for the whole page: each entry's bytes are identical to what a per-entry
+        // WriteTo(Stream) would produce, but a per-entry call allocates its own 4 KB encoder buffer, which
+        // on a page of a few hundred rows adds more garbage than the page itself.
         FnvHashStream hasher = new();
+        using CodedOutputStream output = new(hasher, leaveOpen: true);
         foreach (RangeSnapshotEntry entry in entries)
-            entry.WriteTo(hasher);
+            entry.WriteTo(output);
+        output.Flush();
         return hasher.Hash;
     }
 

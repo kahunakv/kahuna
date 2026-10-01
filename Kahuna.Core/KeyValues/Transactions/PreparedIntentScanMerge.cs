@@ -11,6 +11,12 @@ namespace Kahuna.Server.KeyValues.Transactions;
 /// intent is invisible, and any undecided intent within the snapshot makes the whole page retry. It is only invoked
 /// when at least one intent covers the window (the caller keeps its own pagination off the durable path).
 ///
+/// <para>A committed intent is only the newest committed state of its key until a later committed write moves the
+/// head past it: a non-transactional write proceeds over a committed-but-unsettled intent (it materializes it and
+/// writes the next revision), and the intent lingers until its settlement removes it. Such an intent is ignored —
+/// a page row strictly newer than the intent stands, and so does a head the caller knows of for a key the page
+/// excluded (a newer delete) — so the page never goes back to the older committed value.</para>
+///
 /// <para>Pagination is owned here, not by the caller's sentinel logic: the visible intents are merge-inserted into
 /// the KV rows in ordinal order, the union is capped at exactly <c>limit</c>, and the next-page cursor is derived
 /// from the merged sequence — so an injected key counts toward the page and can itself become the cursor, and no
@@ -45,6 +51,11 @@ internal static class PreparedIntentScanMerge
     /// <param name="decisionLookup">Resolves the canonical decision of a still-pending intent's transaction (from the
     /// transaction record) so a committed value is visible before it settles under deferred settlement. Null leaves
     /// pending intents at retry.</param>
+    /// <param name="readerHasOwnVersion">True for a key the scanning transaction holds its own MVCC version of; the
+    /// page already reflects that version and no foreign intent may change it.</param>
+    /// <param name="supersededByHead">True when the caller knows a committed head of the intent's key strictly newer
+    /// than the intent — for a key the page holds no row for (a newer delete, or a row outside what the page drew).
+    /// A row the page does hold is compared by the merge itself.</param>
     public static ScanMergeResult Merge(
         List<(string Key, ReadOnlyKeyValueEntry Entry)> items,
         IReadOnlyList<PreparedIntent> intents,
@@ -54,12 +65,12 @@ internal static class PreparedIntentScanMerge
         bool kvHasMore,
         string? kvCeilingKey,
         Func<PreparedIntent, TransactionDecision>? decisionLookup = null,
-        Func<string, bool>? readerHasOwnVersion = null)
+        Func<string, bool>? readerHasOwnVersion = null,
+        Func<PreparedIntent, bool>? supersededByHead = null)
     {
-        // Both sets are small (the window is clamped to the page) and usually empty, so they are
-        // allocated on first use only.
-        List<PreparedIntent>? overrides = null;
-        HashSet<string>? excludes = null;
+        // Small (the window is clamped to the page) and usually empty, so allocated on first use only. Dead marks a
+        // committed delete or an expired committed value: it removes the key rather than overriding it.
+        List<(PreparedIntent Intent, bool Dead)>? overrides = null;
 
         foreach (PreparedIntent intent in intents)
         {
@@ -81,12 +92,15 @@ internal static class PreparedIntentScanMerge
                     return new(items, MustRetry: true, HasMore: false, NextCursorKey: null);
 
                 case ReadVisibilityAction.UseIntentValue:
+                    // A later committed write already moved the head past this intent: the page's own view of the
+                    // key (its row, or its absence) is newer and stands.
+                    if (supersededByHead is not null && supersededByHead(intent))
+                        break;
+
                     // A committed delete, or a committed value whose TTL has elapsed, removes the key from the page —
                     // the same result an expired MVCC head entry produces on the ordinary scan.
-                    if (intent.State == KeyValueState.Deleted || PreparedIntentVisibility.IsExpired(intent, currentTime))
-                        (excludes ??= []).Add(intent.Key);
-                    else
-                        (overrides ??= []).Add(intent);
+                    (overrides ??= []).Add((intent,
+                        intent.State == KeyValueState.Deleted || PreparedIntentVisibility.IsExpired(intent, currentTime)));
                     break;
 
                 case ReadVisibilityAction.UseExisting:
@@ -110,7 +124,7 @@ internal static class PreparedIntentScanMerge
             items.Sort(static (a, b) => string.CompareOrdinal(a.Key, b.Key));
         }
 
-        overrides?.Sort(static (a, b) => string.CompareOrdinal(a.Key, b.Key));
+        overrides?.Sort(static (a, b) => string.CompareOrdinal(a.Intent.Key, b.Intent.Key));
 
         int rowCount = items.Count;
         int overrideCount = overrides?.Count ?? 0;
@@ -124,36 +138,32 @@ internal static class PreparedIntentScanMerge
         {
             if (j >= overrideCount)
             {
-                (string key, ReadOnlyKeyValueEntry entry) = items[i++];
-                if (excludes is null || !excludes.Contains(key))
-                    result.Add((key, entry));
+                result.Add(items[i++]);
                 continue;
             }
 
-            PreparedIntent ov = overrides![j];
+            (PreparedIntent ov, bool dead) = overrides![j];
 
-            if (i >= rowCount)
-            {
-                result.Add((ov.Key, ToEntry(ov))); // intent-only committed key injected at its ordinal position.
-                j++;
-                continue;
-            }
-
-            int cmp = string.CompareOrdinal(items[i].Key, ov.Key);
+            int cmp = i >= rowCount ? 1 : string.CompareOrdinal(items[i].Key, ov.Key);
             if (cmp < 0)
             {
-                (string key, ReadOnlyKeyValueEntry entry) = items[i++];
-                if (excludes is null || !excludes.Contains(key))
-                    result.Add((key, entry));
+                result.Add(items[i++]);
             }
             else if (cmp > 0)
             {
-                result.Add((ov.Key, ToEntry(ov)));
+                // Intent-only committed key injected at its ordinal position; a dead one has nothing to inject.
+                if (!dead)
+                    result.Add((ov.Key, ToEntry(ov)));
                 j++;
             }
             else
             {
-                result.Add((ov.Key, ToEntry(ov))); // committed override of an existing row.
+                // A row strictly newer than the intent was committed after it and stands. Otherwise the committed
+                // intent overrides the row, or removes it when dead.
+                if (items[i].Entry.Revision > ov.Revision)
+                    result.Add(items[i]);
+                else if (!dead)
+                    result.Add((ov.Key, ToEntry(ov)));
                 i++;
                 j++;
             }

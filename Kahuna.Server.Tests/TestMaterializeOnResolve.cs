@@ -203,6 +203,8 @@ public sealed class TestMaterializeOnResolve : BaseCluster, IDisposable
             Installs.Add((logIndex, intent, replay, store.GetByIdentity(intent.TransactionId, intent.Epoch, intent.Key) is not null));
 
         public void CompleteEntry(int partitionId, long logIndex, bool replay) => Completed.Add((logIndex, replay));
+
+        public void NoteUnresolvedOnReplay(int partitionId, long logIndex, HLCTimestamp transactionId, long epoch, string key, HLCTimestamp commitTimestamp) { }
     }
 
     private static (PreparedIntentStore Store, RecordingInstaller Installer) PreparedStore(params PreparedIntent[] intents)
@@ -317,6 +319,9 @@ public sealed class TestMaterializeOnResolve : BaseCluster, IDisposable
         }
 
         public void CompleteEntry(int partitionId, long logIndex, bool replay) => inner.CompleteEntry(partitionId, logIndex, replay);
+
+        public void NoteUnresolvedOnReplay(int partitionId, long logIndex, HLCTimestamp transactionId, long epoch, string key, HLCTimestamp commitTimestamp) =>
+            inner.NoteUnresolvedOnReplay(partitionId, logIndex, transactionId, epoch, key, commitTimestamp);
     }
 
     private sealed class RestorerInstaller(KeyValueRestorer restorer) : IResolvedIntentInstaller
@@ -326,6 +331,9 @@ public sealed class TestMaterializeOnResolve : BaseCluster, IDisposable
 
         public void CompleteEntry(int partitionId, long logIndex, bool replay) =>
             restorer.CompleteResolvedIntentEntry(partitionId, logIndex);
+
+        public void NoteUnresolvedOnReplay(int partitionId, long logIndex, HLCTimestamp transactionId, long epoch, string key, HLCTimestamp commitTimestamp) =>
+            restorer.NoteUnresolvedMaterializingResolve(partitionId, logIndex, transactionId, epoch, key, commitTimestamp);
     }
 
     [Fact]

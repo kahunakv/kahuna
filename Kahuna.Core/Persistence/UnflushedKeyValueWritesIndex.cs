@@ -44,17 +44,22 @@ internal sealed class UnflushedKeyValueWritesIndex
 {
     private readonly ConcurrentDictionary<string, UnflushedKeyValueWrite> entries = new(StringComparer.Ordinal);
 
-    // Invoked with the key after a confirmed flush removed its overlay entry — i.e. once every queued head of
-    // the key is durable. The prepared-intent store releases the settled intents it retains for that key's
-    // unflushed materialization on this signal. Runs on the flush path; must be cheap and must not throw.
-    private Action<string>? onKeyReleased;
+    // Invoked with the key and the flushed head (revision, commit HLC) after a confirmed flush of that key —
+    // whether the flush emptied the key's overlay entry or only advanced past an older queued revision. The
+    // writer persists a key's revisions in queue order, so the confirmed head proves every queued head at or
+    // below it durable, and nothing above it. The prepared-intent store releases the settled intents it retains
+    // for the key's unflushed materializations at or below that head on this signal — never the whole key: a
+    // restart replay re-queues a key's materializations one record at a time, and a flush confirmed between two
+    // of them must not release the intent the second record still has to resolve from. Runs on the flush path;
+    // must be cheap and must not throw.
+    private Action<string, long, HLCTimestamp>? onFlushed;
 
     /// <summary>True when the overlay currently holds no unflushed writes (fast path for reads).</summary>
     public bool IsEmpty => entries.IsEmpty;
 
-    /// <summary>Wires the observer notified whenever a confirmed flush removes a key's overlay entry (manager
-    /// construction). One observer; a later attach replaces the earlier one.</summary>
-    public void AttachReleaseObserver(Action<string> observer) => onKeyReleased = observer;
+    /// <summary>Wires the observer notified with the flushed (revision, commit HLC) head after every confirmed
+    /// flush of a key (manager construction). One observer; a later attach replaces the earlier one.</summary>
+    public void AttachReleaseObserver(Action<string, long, HLCTimestamp> observer) => onFlushed = observer;
 
     /// <summary>
     /// Records a committed write queued for persistence. Keeps the newest head per key: same-revision
@@ -85,7 +90,9 @@ internal sealed class UnflushedKeyValueWritesIndex
     /// Removes the overlay entry for <paramref name="key"/> after a confirmed flush, unless a strictly
     /// newer head was queued meanwhile — that newer head is still unflushed and must stay covered. In that
     /// case the oldest queued revision advances past the flushed one: the writer persists a key's
-    /// revisions in queue order, so a confirmed revision proves every lower one is on disk too.
+    /// revisions in queue order, so a confirmed revision proves every lower one is on disk too. Either way
+    /// the release observer learns the flushed head, so what depends on the durability of the revisions at or
+    /// below it (the retained settled intents) is released exactly that far.
     /// </summary>
     public void RemoveFlushed(string key, long flushedRevision, HLCTimestamp flushedLastModified)
     {
@@ -93,13 +100,17 @@ internal sealed class UnflushedKeyValueWritesIndex
         {
             if (IsNewer(current, flushedRevision, flushedLastModified))
             {
+                // An earlier confirmation already advanced past this revision and signalled it.
                 if (current.OldestRevision > flushedRevision)
                     return;
 
                 // Conditional update: a concurrent Record lowers or replaces the entry, and the loop
                 // re-reads it rather than overwriting that newer state.
                 if (entries.TryUpdate(key, current with { OldestRevision = flushedRevision + 1 }, current))
+                {
+                    onFlushed?.Invoke(key, flushedRevision, flushedLastModified);
                     return;
+                }
 
                 continue;
             }
@@ -108,7 +119,7 @@ internal sealed class UnflushedKeyValueWritesIndex
             // so a concurrent Record of a newer head is never lost.
             if (entries.TryRemove(new KeyValuePair<string, UnflushedKeyValueWrite>(key, current)))
             {
-                onKeyReleased?.Invoke(key);
+                onFlushed?.Invoke(key, flushedRevision, flushedLastModified);
                 return;
             }
         }

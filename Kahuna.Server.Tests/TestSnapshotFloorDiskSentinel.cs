@@ -172,7 +172,11 @@ public sealed class TestSnapshotFloorDiskSentinel : RaftTrackingTest
                 CheckLeaderInterval = TimeSpan.FromMilliseconds(25),
                 StartElectionTimeout = 50,
                 EndElectionTimeout   = 150,
-                EnableQuiescence = false, PartitionExecutorPoolSize = 1
+                EnableQuiescence = false, PartitionExecutorPoolSize = 1,
+                // The witnesses ack in-process, so check-quorum can only ever trip on this node's own tick
+                // running late; with a 50 ms window one garbage-collection pause on a loaded runner deposes
+                // the leader and fails the next write with MustRetry (as the standalone embedded node does).
+                EnableCheckQuorum = false
             },
             new StaticDiscovery(EmbeddedRaftCommunication.Witnesses),
             new InMemoryWAL(raftLogger),

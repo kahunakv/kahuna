@@ -306,9 +306,11 @@ internal sealed class PreparedIntentStore
         }
     }
 
-    // The pair of stamps a partition's snapshot file was written under: the mutation tick it covered and the
-    // routing stamp it routed with. A checkpoint skips the rewrite only when both still match.
-    private readonly record struct PersistedStamp(long Version, long RoutingVersion);
+    // The stamps a partition's snapshot file was written under: the mutation tick it covered, the routing stamp
+    // it routed with, and the applied position it certified as fully reflected. A checkpoint skips the rewrite
+    // only when all three still match — a file whose position fell behind the store's would replay the entries
+    // in between through the live path on the next restart (see PersistSnapshot).
+    private readonly record struct PersistedStamp(long Version, long RoutingVersion, long AppliedThroughIndex);
 
     // Invoked (outside the apply gate) with the committed intent whenever a commit settlement (resolve or
     // removal of a committed intent) applies on this node — the convergence hook: the same apply position
@@ -335,14 +337,17 @@ internal sealed class PreparedIntentStore
     //
     // Retention is decided at the settle apply from the unflushed overlay, the same witness the settle-time
     // convergence check uses: an overlay head at or above the intent's revision means the row is queued but not
-    // durable. Release is driven by the overlay dropping the key after a confirmed flush. Both the probe-and-retain
-    // and the release run under settledGate, so a flush confirmed between the probe and the retention still finds
-    // the entry when its release runs. Entries loaded from a snapshot are re-checked once the partition's restart
-    // replay completes: those whose row the replay did not re-queue were durable before the crash, because the
-    // replay window started above their record.
+    // durable. Release is driven by the overlay's confirmed flushes of the key, each releasing the retained intents
+    // whose row is at or below the flushed head and no other (see ReleaseSettledIntentsAwaitingFlush for why the
+    // whole key must never be released at once). Both the probe-and-retain and the release run under settledGate,
+    // so a flush confirmed between the probe and the retention still finds the entry when its release runs.
+    // Entries loaded from a snapshot are re-checked once the partition's restart replay completes: those whose
+    // row the replay did not re-queue were durable before the crash, because the replay window started above
+    // their record.
     //
     // Never part of the live set: invisible to Get/GetByIdentity, the recovery sweep, admission accounting and
-    // every fence. The only reader is the restart restorer, by exact identity, which also checks the revision.
+    // every fence. The only readers are the restart restorer and the replayed materializing resolve, by exact
+    // identity (the restorer also checks the revision), and only after the live set and the replay history.
 
     private readonly Dictionary<string, List<PreparedIntent>> settledAwaitingFlush = new(StringComparer.Ordinal);
 
@@ -435,20 +440,54 @@ internal sealed class PreparedIntentStore
         }
     }
 
-    /// <summary>Drops every retained settled intent of <paramref name="key"/>: a confirmed flush removed the key
-    /// from the unflushed overlay, so each queued head of the key — the materialized rows included — is durable.
-    /// Invoked by the overlay on the flush path.</summary>
-    public void ReleaseSettledIntentsAwaitingFlush(string key)
+    /// <summary>
+    /// Drops the retained settled intents of <paramref name="key"/> whose materialized row is at or below the
+    /// head a confirmed flush just made durable — (<paramref name="flushedRevision"/>,
+    /// <paramref name="flushedLastModified"/>), ordered exactly as the overlay orders heads: the writer persists a
+    /// key's revisions in queue order, so the confirmed head proves every row at or below it durable and nothing
+    /// above it. Invoked by the overlay on the flush path.
+    ///
+    /// <para>Never the whole key. A restart replay re-queues a key's materializations one record at a time,
+    /// resolving each from its own retained intent, and the writer flushes the first row before the replay
+    /// reaches the second record: a release keyed by the key alone dropped every retained intent of the key on
+    /// that first flush, and every later record of the key in the replay window found nothing (CamusDB fault
+    /// soak sn2, 2026-09-30: 82,536 records over 2,000 keys on one restart).</para>
+    /// </summary>
+    public void ReleaseSettledIntentsAwaitingFlush(string key, long flushedRevision, HLCTimestamp flushedLastModified)
     {
         lock (settledGate)
         {
-            if (settledAwaitingFlush.Count == 0 || !settledAwaitingFlush.Remove(key))
+            if (settledAwaitingFlush.Count == 0 || !settledAwaitingFlush.TryGetValue(key, out List<PreparedIntent>? retained))
                 return;
+
+            int released = 0;
+            for (int i = retained.Count - 1; i >= 0; i--)
+            {
+                if (IsRowAtOrBelowFlushedHead(retained[i], flushedRevision, flushedLastModified))
+                {
+                    retained.RemoveAt(i);
+                    released++;
+                }
+            }
+
+            if (released == 0)
+                return;
+
+            if (retained.Count == 0)
+                settledAwaitingFlush.Remove(key);
         }
 
         // The partition's snapshot must drop the entry on its next rewrite.
         StampDirty(key);
     }
+
+    // A retained intent's row is (Revision, CommitTimestamp) — the materialization stamps last-modified with the
+    // commit timestamp — and it is durable once a confirmed flush's head is at or beyond it in the overlay's
+    // newest-head order (revision first, commit HLC as the same-revision tiebreak: a delete or an extend reuses
+    // a revision number).
+    private static bool IsRowAtOrBelowFlushedHead(PreparedIntent retained, long flushedRevision, HLCTimestamp flushedLastModified) =>
+        retained.Revision < flushedRevision
+        || (retained.Revision == flushedRevision && retained.CommitTimestamp <= flushedLastModified);
 
     /// <summary>
     /// Drops the retained settled intents of <paramref name="partitionId"/> whose row this node holds no unflushed
@@ -559,6 +598,68 @@ internal sealed class PreparedIntentStore
             }
 
             return collected;
+        }
+    }
+
+    // ── replay history: the fully reflected window's prepares, kept for the records that name them ─────────
+    //
+    // A restart replays the partition's log from its application-durability floor, and the entries between
+    // that floor and the position the node's own checkpoint certified are history the reloaded intent set already
+    // reflects: a replayed prepare there that finds no live intent installs nothing (see Apply), which is what
+    // keeps a prepare the live apply refused from becoming a phantom holder. But the window's data side is NOT
+    // reflected anywhere on this node — the floor sits below it precisely because those rows never reached the
+    // backend — and a commit in the window is materialized by a by-reference record (or a materializing
+    // resolve) that carries no value and names the intent the replay just declined to install. The value would
+    // then exist nowhere here. So the folded prepare is kept in this side table, by identity, for exactly that
+    // reader: present for a materialization to resolve from, never a holder — invisible to Get/GetByIdentity, the
+    // recovery sweep, admission accounting, the settled-identity memory and every fence. A replayed removal drops
+    // the entry (the record precedes the settle in the log, so it has resolved by then); the partition's
+    // restore-finished hook clears whatever is left (a prepare the live apply refused, whose commit was rejected
+    // and never produced a record). Fed and read on the partition's replay thread only; the concurrent map is
+    // for the counter and the clear, which run elsewhere.
+    private readonly ConcurrentDictionary<int, ConcurrentDictionary<(HLCTimestamp TransactionId, long Epoch, string Key), PreparedIntent>> replayHistory = new();
+
+    private void RememberReplayHistoryIntent(int partitionId, PreparedIntent intent)
+    {
+        ConcurrentDictionary<(HLCTimestamp, long, string), PreparedIntent> slice =
+            replayHistory.GetOrAdd(partitionId, static _ => new ConcurrentDictionary<(HLCTimestamp, long, string), PreparedIntent>());
+
+        slice[(intent.TransactionId, intent.Epoch, intent.Key)] = intent;
+    }
+
+    private void ForgetReplayHistoryIntent(int partitionId, HLCTimestamp transactionId, long epoch, string key)
+    {
+        if (replayHistory.TryGetValue(partitionId, out ConcurrentDictionary<(HLCTimestamp, long, string), PreparedIntent>? slice))
+            slice.TryRemove((transactionId, epoch, key), out _);
+    }
+
+    /// <summary>The prepare of the given transaction attempt at <paramref name="key"/> that the restart replay of
+    /// <paramref name="partitionId"/> folded as fully reflected history, if its settle has not replayed yet. The
+    /// restorer's source for a by-reference materialization record (and the materializing resolve's, on replay)
+    /// whose prepare lies inside the history window; the caller checks the revision.</summary>
+    internal bool TryGetReplayHistoryIntent(int partitionId, HLCTimestamp transactionId, long epoch, string key, out PreparedIntent? intent)
+    {
+        intent = null;
+
+        return replayHistory.TryGetValue(partitionId, out ConcurrentDictionary<(HLCTimestamp, long, string), PreparedIntent>? slice)
+            && slice.TryGetValue((transactionId, epoch, key), out intent);
+    }
+
+    /// <summary>Drops every prepare the restart replay of <paramref name="partitionId"/> kept as history, once
+    /// the replay is complete; returns how many were left. Nothing above the history window is ever kept here,
+    /// so what is left is a prepare whose transaction never materialized on this partition's log.</summary>
+    internal int ClearReplayHistory(int partitionId) =>
+        replayHistory.TryRemove(partitionId, out ConcurrentDictionary<(HLCTimestamp, long, string), PreparedIntent>? slice) ? slice.Count : 0;
+
+    /// <summary>Prepares currently kept as replay history across every partition (observability / tests).</summary>
+    internal int ReplayHistoryIntentCount
+    {
+        get
+        {
+            int count = 0;
+            foreach (ConcurrentDictionary<(HLCTimestamp, long, string), PreparedIntent> slice in replayHistory.Values)
+                count += slice.Count;
+            return count;
         }
     }
 
@@ -694,7 +795,8 @@ internal sealed class PreparedIntentStore
             // removal. A prepare that finds no intent here is therefore either a transaction the installed
             // state already settled, or one the exporter rejected — installing it would create, out of history,
             // a phantom holder no replica of the partition ever had. Folded as a no-op; the entry's later
-            // transitions fold the same way.
+            // transitions fold the same way. On a restart replay the caller keeps the folded prepare as replay
+            // history (see replayHistory): the window's materializations name it and have no other source.
             if (window == HistoryWindow.FullyReflected && existing is null && command is PrepareIntentCommand)
                 return new PreparedIntentApplyResult(TransactionApplyOutcome.IdempotentNoop, null, null);
 
@@ -1722,24 +1824,32 @@ internal sealed class PreparedIntentStore
     internal long GetLedgerReflectedThroughIndex(int partitionId) =>
         ledgers.TryGetValue(partitionId, out PartitionLedger? ledger) ? Volatile.Read(ref ledger.ReflectedThroughIndex) : 0;
 
-    /// <summary>Records <paramref name="logIndex"/> as applied through this store on <paramref name="partitionId"/>'s
-    /// log and reports where the entry sits relative to the installed snapshot. An unindexed log (the
-    /// pure/in-memory test configuration) is never history.</summary>
-    private HistoryWindow NoteApplied(int partitionId, long logIndex)
+    /// <summary>Reports where the entry at <paramref name="logIndex"/> on <paramref name="partitionId"/>'s log sits
+    /// relative to the partition's installed snapshot. An unindexed log (the pure/in-memory test configuration)
+    /// is never history.</summary>
+    private HistoryWindow WindowOf(int partitionId, long logIndex)
     {
-        if (logIndex <= 0)
-            return HistoryWindow.Live;
-
-        appliedLogIndexByPartition.AddOrUpdate(
-            partitionId, static (_, index) => index, static (_, current, index) => index > current ? index : current, logIndex);
-
-        if (!ledgers.TryGetValue(partitionId, out PartitionLedger? ledger))
+        if (logIndex <= 0 || !ledgers.TryGetValue(partitionId, out PartitionLedger? ledger))
             return HistoryWindow.Live;
 
         if (logIndex <= Volatile.Read(ref ledger.FullyReflectedThroughIndex))
             return HistoryWindow.FullyReflected;
 
         return logIndex <= Volatile.Read(ref ledger.ReflectedThroughIndex) ? HistoryWindow.Reflected : HistoryWindow.Live;
+    }
+
+    /// <summary>Records <paramref name="logIndex"/> as applied through this store on <paramref name="partitionId"/>'s
+    /// log. Called AFTER the entry's commands are in the map, never before: the position is what an exporter or a
+    /// checkpoint reads before walking the intents to certify "every intent prepared at or below this position is
+    /// in the walk", and a position published while its own entry was still mid-apply would let the walk miss
+    /// that entry's intent — which a replay at or below the fully reflected position then never re-installs.</summary>
+    private void MarkApplied(int partitionId, long logIndex)
+    {
+        if (logIndex <= 0)
+            return;
+
+        appliedLogIndexByPartition.AddOrUpdate(
+            partitionId, static (_, index) => index, static (_, current, index) => index > current ? index : current, logIndex);
     }
 
     /// <summary>
@@ -1945,10 +2055,12 @@ internal sealed class PreparedIntentStore
     /// <summary>
     /// Installs the committed value a materializing resolve names, when this node holds it. Returns whether an
     /// install ran. The source is the live intent of the same transaction attempt, unless it is already aborted
-    /// (the state machine refuses the commit then). On a restart replay the live set may no longer hold it — the
-    /// snapshot was written after the settle — and the source is then the settled intent retained until its row
-    /// is durable. Absent from both, the value is already durable here: the settle applied before, and the row
-    /// flushed before the snapshot dropped the retained copy.
+    /// (the state machine refuses the commit then). On a restart replay the live set may no longer hold it: the
+    /// prepare lay inside the history window and was kept as replay history (see <see cref="TryGetReplayHistoryIntent"/>),
+    /// or the snapshot was written after the settle and the source is the settled intent retained until its row
+    /// is durable. Absent from all three on a replay, the installer verifies the row is already durable here
+    /// (the settle applied before the crash and the row flushed before the snapshot dropped the retained copy)
+    /// and otherwise counts the entry as an unresolved materialization of the restart.
     /// </summary>
     private bool TryInstallOnResolve(int partitionId, long logIndex, ResolveIntentCommand resolve, bool replay)
     {
@@ -1963,11 +2075,18 @@ internal sealed class PreparedIntentStore
             && live.Epoch == resolve.Epoch
             && live.Resolution != PreparedIntentResolution.Aborted)
             source = live;
+        else if (replay && TryGetReplayHistoryIntent(partitionId, resolve.TransactionId, resolve.Epoch, resolve.Key, out PreparedIntent? history))
+            source = history;
         else if (replay && TryGetSettledIntentAwaitingFlush(resolve.TransactionId, resolve.Epoch, resolve.Key, out PreparedIntent? settled))
             source = settled;
 
         if (source is null)
+        {
+            if (replay)
+                installer.NoteUnresolvedOnReplay(partitionId, logIndex, resolve.TransactionId, resolve.Epoch, resolve.Key, resolve.CommitTimestamp);
+
             return false;
+        }
 
         installer.Install(partitionId, logIndex, source, replay);
         return true;
@@ -2073,7 +2192,7 @@ internal sealed class PreparedIntentStore
         // History below an installed snapshot's reflected position applies without the advisory fence: the
         // ledger is ahead of these entries by construction, so a verdict here could only be a false refusal and
         // a false veto (see IsHistoricalApply).
-        HistoryWindow window = NoteApplied(partitionId, log.Id);
+        HistoryWindow window = WindowOf(partitionId, log.Id);
         bool installed = false;
 
         foreach (PreparedIntentCommand command in commands)
@@ -2099,6 +2218,8 @@ internal sealed class PreparedIntentStore
                     : Writes.PrepareRejectionKind.KeyHeld);
             }
         }
+
+        MarkApplied(partitionId, log.Id);
 
         if (installed)
             resolvedIntentInstaller!.CompleteEntry(partitionId, log.Id, replay: false);
@@ -2130,7 +2251,7 @@ internal sealed class PreparedIntentStore
         if (!locallyProposedDeltas.TryTake(log.LogData, out PreparedIntentCommand[]? commands))
             commands = DecodeDelta(log.LogData);
 
-        HistoryWindow window = NoteApplied(partitionId, log.Id);
+        HistoryWindow window = WindowOf(partitionId, log.Id);
         bool installed = false;
 
         foreach (PreparedIntentCommand command in commands)
@@ -2138,8 +2259,28 @@ internal sealed class PreparedIntentStore
             if (command is ResolveIntentCommand resolve && TryInstallOnResolve(partitionId, log.Id, resolve, replay))
                 installed = true;
 
-            Apply(command, partitionId, window);
+            PreparedIntentApplyResult result = Apply(command, partitionId, window);
+
+            if (!replay)
+                continue;
+
+            // A prepare the fully reflected fence folded (a no-op that left no intent) is history for the intent
+            // set but the only copy this node has of the value its materialization names: keep it as replay
+            // history until its settle replays. The no-op-with-no-intent shape is the fence's alone — the state
+            // machine installs a prepare over an empty key and answers a same-identity re-prepare with the
+            // existing intent.
+            if (command is PrepareIntentCommand prepare)
+            {
+                if (window == HistoryWindow.FullyReflected && result is { Outcome: TransactionApplyOutcome.IdempotentNoop, Intent: null })
+                    RememberReplayHistoryIntent(partitionId, prepare.Intent);
+            }
+            else if (command is RemoveIntentCommand remove)
+            {
+                ForgetReplayHistoryIntent(partitionId, remove.TransactionId, remove.Epoch, remove.Key);
+            }
         }
+
+        MarkApplied(partitionId, log.Id);
 
         if (installed)
             resolvedIntentInstaller!.CompleteEntry(partitionId, log.Id, replay);
@@ -2750,7 +2891,25 @@ internal sealed class PreparedIntentStore
     /// <summary>Atomically rewrites this partition's on-disk intent snapshot. Returns true (durable) so the WAL
     /// checkpoint may discard the covered tail; false on write failure gates the checkpoint. No-op (true) when
     /// persistence or the resolver is not configured.</summary>
-    public bool PersistSnapshot(int partitionId)
+    /// <param name="appliedThroughIndex">
+    /// The partition's log position the caller certifies as applied through this store BEFORE the call: every
+    /// prepared-intent entry at or below it has completed its apply (the durability tracker's prepared-intent
+    /// ceiling, which is raised after each apply returns). The file records it as the slice's fully reflected
+    /// position, and the position read after the intent walk as its reflected one, exactly as a whole-partition
+    /// section carries the exporter's positions — so a restart's replay of the entries at or below them is
+    /// history the reloaded set already reflects, not live catch-up.
+    ///
+    /// <para>Without it a restart replayed history through the live path against an intent set captured later
+    /// than the replay's start: the application-durability floor the WAL replays from can sit hundreds of
+    /// thousands of entries below the checkpoint (a flusher behind on a stalled disk), and a prepare that the
+    /// live apply had rejected because a competitor held its key found the key free in the replay — the holder
+    /// had settled before the checkpoint — and installed a phantom holder no replica ever had. Every later
+    /// transaction of the key was then refused here as foreign-held, its by-reference materialization found no
+    /// intent, and the key's head froze below its peers'; when the node led next it served the frozen value
+    /// (CamusDB fault soak sn1, 2026-09-30: two rows lost ~100 s of commits). Zero means the caller certifies
+    /// nothing, and the file keeps only whatever positions the slice was installed with.</para>
+    /// </param>
+    public bool PersistSnapshot(int partitionId, long appliedThroughIndex = 0)
     {
         if (snapshotDirectory is null || snapshotPrefix is null || resolvePartition is null)
             return true;
@@ -2758,14 +2917,18 @@ internal sealed class PreparedIntentStore
         // Unchanged since this partition's last durable write: the file already holds exactly this content, so
         // the checkpoint may proceed without scanning or rewriting anything. The stamp is captured before the
         // scan and recorded only after a successful write, so a failed write or a mutation racing the scan
-        // always leaves the partition due for a rewrite.
+        // always leaves the partition due for a rewrite. The certified position is part of the stamp: an
+        // unchanged set at a later position still needs its file to say so, or the entries in between replay
+        // as live history on the next restart.
         long observedVersion = Math.Max(
             Interlocked.Read(ref allPartitionsVersion),
             partitionVersion.TryGetValue(partitionId, out long dirtyTick) ? dirtyTick : 0);
         long observedRouting = routingVersion?.Invoke() ?? 0;
+        long certifiedThroughIndex = Math.Max(0, appliedThroughIndex);
 
         if (persistedVersion.TryGetValue(partitionId, out PersistedStamp last)
-            && last.Version == observedVersion && last.RoutingVersion == observedRouting)
+            && last.Version == observedVersion && last.RoutingVersion == observedRouting
+            && last.AppliedThroughIndex == certifiedThroughIndex)
             return true;
 
         string path = Path.Combine(snapshotDirectory, $"{snapshotPrefix}_p{partitionId}.snapshot");
@@ -2788,6 +2951,12 @@ internal sealed class PreparedIntentStore
                 string tmp = path + ".tmp";
 
                 LedgerCapture? ledger = CaptureLedger(partitionId);
+
+                // The position the file certifies as fully reflected: what the caller certified, never below
+                // what the slice was installed with. Read BEFORE the walk (the caller's ceiling is raised only
+                // after an apply returns, so every intent an entry at or below it prepared is in the map when
+                // the walk starts) — the same cut a whole-partition export takes (see WritePartitionSection).
+                long fullyReflected = Math.Max(certifiedThroughIndex, ledger?.FullyReflectedThroughIndex ?? 0);
 
                 // Settled intents whose materialized row is still queued for the flush ride in the same file, in
                 // their own field: a reader must never install them as live intents.
@@ -2818,15 +2987,20 @@ internal sealed class PreparedIntentStore
                         }
                     }
 
-                    // The checkpoint persists the slice's reflected positions as installed, so a restart mid
-                    // catch-up after a snapshot install keeps treating the remaining window as history.
-                    WriteLedgerSection(output, partitionId, ledger, ledger?.ReflectedThroughIndex ?? 0, ledger?.FullyReflectedThroughIndex ?? 0);
+                    // The checkpoint persists the slice's positions: the ones it was installed with (so a restart
+                    // mid catch-up after a snapshot install keeps treating the remaining window as history) raised
+                    // to this node's own — the certified cut as fully reflected, and the position applied through
+                    // this store by the end of the walk as reflected. Entries between the two are the walk's tear
+                    // window: an intent prepared there may be missing from the file, so its replayed prepare must
+                    // still install, while the advisory fence stays silent on it.
+                    long reflected = Math.Max(fullyReflected, Math.Max(AppliedLogIndexOf(partitionId), ledger?.ReflectedThroughIndex ?? 0));
+                    WriteLedgerSection(output, partitionId, ledger, reflected, fullyReflected);
                 }
 
                 File.Move(tmp, path, overwrite: true);
             }
 
-            persistedVersion[partitionId] = new PersistedStamp(observedVersion, observedRouting);
+            persistedVersion[partitionId] = new PersistedStamp(observedVersion, observedRouting, certifiedThroughIndex);
             return true;
         }
         catch (Exception ex)
@@ -2847,26 +3021,27 @@ internal sealed class PreparedIntentStore
 
         foreach (string path in files)
         {
-            byte[] data;
-            try
-            {
-                lock (fileLock)
-                    data = File.ReadAllBytes(path);
-            }
-            catch (Exception ex)
-            {
-                throw new IOException($"Failed to read prepared-intent snapshot {path}; refusing to start with a possibly incomplete intent set", ex);
-            }
-
+            // Parsed straight off the file rather than read into one array first, so loading a file never holds
+            // its bytes and its decoded message at once. The message itself is kept whole: the ledger slice it
+            // carries is installed as one unit, and the file's size is bounded by in-flight intents and the
+            // ledger's retention window rather than by throughput.
             PreparedIntentSnapshotMessage message;
 
             try
             {
-                message = ReplicationSerializer.UnserializePreparedIntentSnapshotMessage(data);
+                lock (fileLock)
+                {
+                    using FileStream file = new(path, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024);
+                    message = PreparedIntentSnapshotMessage.Parser.ParseFrom(file);
+                }
             }
-            catch (Exception ex)
+            catch (InvalidProtocolBufferException ex)
             {
                 throw new InvalidDataException($"Corrupt prepared-intent snapshot {path}; refusing to start empty and lose a prepared intent", ex);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                throw new IOException($"Failed to read prepared-intent snapshot {path}; refusing to start with a possibly incomplete intent set", ex);
             }
 
             foreach (PreparedIntentCommandMessage entry in message.Intents)
@@ -3306,10 +3481,16 @@ internal sealed class PreparedIntentStore
 
     /// <summary>Decodes a section written by <see cref="SerializePartitionIntents"/> (or, with a null ledger,
     /// by the ledgerless <see cref="SerializeIntents"/> of an older build).</summary>
-    public static PartitionIntentSection DeserializePartitionIntents(byte[] data)
-    {
-        PreparedIntentSnapshotMessage message = ReplicationSerializer.UnserializePreparedIntentSnapshotMessage(data);
+    public static PartitionIntentSection DeserializePartitionIntents(byte[] data) =>
+        PartitionIntentSectionOf(ReplicationSerializer.UnserializePreparedIntentSnapshotMessage(data));
 
+    /// <summary>Decodes a section written by <see cref="SerializePartitionIntents"/> straight off
+    /// <paramref name="payload"/> (read to its end), without first copying the section into one array.</summary>
+    public static PartitionIntentSection DeserializePartitionIntents(Stream payload) =>
+        PartitionIntentSectionOf(PreparedIntentSnapshotMessage.Parser.ParseFrom(payload));
+
+    private static PartitionIntentSection PartitionIntentSectionOf(PreparedIntentSnapshotMessage message)
+    {
         List<PreparedIntent> result = new(message.Intents.Count);
         foreach (PreparedIntentCommandMessage entry in message.Intents)
             result.Add(IntentOf(entry));

@@ -15,8 +15,8 @@ public static partial class KahunaLoggerExtensions
     [LoggerMessage(Level = LogLevel.Information, Message = "Exported whole-partition state of partition #{PartitionId} at index {UpToIndex} ({Bytes} bytes)")]
     public static partial void LogExportedPartitionState(this ILogger<IKahuna> logger, int partitionId, long upToIndex, long bytes);
 
-    [LoggerMessage(Level = LogLevel.Information, Message = "Imported whole-partition state of partition #{PartitionId}: {KeyValues} key-values, {Locks} locks, {Records} records, {Intents} intents")]
-    public static partial void LogImportedPartitionState(this ILogger<IKahuna> logger, int partitionId, int keyValues, int locks, int records, int intents);
+    [LoggerMessage(Level = LogLevel.Information, Message = "Imported whole-partition state of partition #{PartitionId}: {KeyValues} key-values, {Locks} locks, {Records} records, {Receipts} receipts, {Intents} intents ({Bytes} snapshot bytes)")]
+    public static partial void LogImportedPartitionState(this ILogger<IKahuna> logger, int partitionId, int keyValues, int locks, int records, int receipts, int intents, long bytes);
 
     [LoggerMessage(Level = LogLevel.Debug, Message = "KeyValueActor Took: {Actor} {Type} Key={Key} Response={Response} Revision={Revision} Time={Elapsed}ms")]
     public static partial void LogKeyValueActorTook(this ILogger<IKahuna> logger, string actor, KeyValueRequestType type, string key, KeyValueResponseType? response, long? revision, long elapsed);
@@ -376,6 +376,12 @@ public static partial class KahunaLoggerExtensions
 
     [LoggerMessage(Level = LogLevel.Error, Message = "Recovery: prepared intent for key {Key} of transaction {TransactionId} (epoch {Epoch}) on partition {PartitionId} is held record-less past the retention horizon, but {NotHolding} of {Consulted} consulted replicas ({Peers}) at or past this node's applied kv log id {AppliedLogId} no longer hold it: the settlement landed in the log and this replica missed it. The intent stays held (its outcome is not presumed locally) and the partition is treated as diverged")]
     public static partial void LogRecordlessIntentStale(this ILogger<IKahuna> logger, string key, HLCTimestamp transactionId, long epoch, int partitionId, int notHolding, int consulted, string peers, long appliedLogId);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "KeyValueRestorer: partition {PartitionId} restore on {Node} replayed {Records} by-reference materialization(s): {FromLive} from live intents, {FromHistory} from prepares kept as replay history, {FromRetained} from settled intents retained for their flush, {Durable} already durable here, {Foreign} for keys the partition no longer owns, {Unresolved} unresolved over {UnresolvedKeys} distinct key(s) (unresolved log entries {FirstLogIndex}..{LastLogIndex}; -1 when none)")]
+    public static partial void LogRestoreByReferenceSummary(this ILogger<IKahuna> logger, int partitionId, string node, long records, long fromLive, long fromHistory, long fromRetained, long durable, long foreign, long unresolved, int unresolvedKeys, long firstLogIndex, long lastLogIndex);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "KeyValueRestorer: partition {PartitionId} restore on {Node} left {Unresolved} by-reference materialization(s) unresolved over {Keys} distinct key(s) (log entries {FirstLogIndex}..{LastLogIndex}): their committed values are missing on this node. The partition is gated here — every locally served operation answers MustRetry, candidacy is withheld, and the leader is asked for a whole-partition snapshot — until an install replaces the projection")]
+    public static partial void LogRestoreByReferenceUnresolved(this ILogger<IKahuna> logger, int partitionId, string node, long unresolved, int keys, long firstLogIndex, long lastLogIndex);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "RangeSplitter: refusing to split {Space} at {Key}: the source partition {PartitionId} leader {Leader} holds {LeaderHeads} committed heads while replica {Peer} holds {PeerHeads} at the same applied kv log id {AppliedLogId}. A copy from an incomplete source would move the loss into the new partition")]
     public static partial void LogRangeSplitRefusedIncompleteSource(this ILogger<IKahuna> logger, string space, string key, int partitionId, string leader, long leaderHeads, string peer, long peerHeads, long appliedLogId);

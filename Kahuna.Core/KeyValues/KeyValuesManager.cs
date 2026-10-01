@@ -242,6 +242,17 @@ internal sealed partial class KeyValuesManager : IDisposable
     }
 
     /// <summary>
+    /// Test-only injection point: invoked with (destination partition, log type, entry bytes) before each chunk of a
+    /// split/merge record or intent handoff is replicated; returning true reports that chunk not durable. Never
+    /// wired in production paths.
+    /// </summary>
+    internal Func<int, string, int, bool>? DurableHandoffEntryFault
+    {
+        get => rangeStateTransfer.DurableHandoffEntryFault;
+        set => rangeStateTransfer.DurableHandoffEntryFault = value;
+    }
+
+    /// <summary>
     /// Test-only injection point: when set, receives (partition, real fingerprint or null when not hosted)
     /// and answers what this node reports in its place, so a fixture can make one replica report a
     /// diverged committed-head count without corrupting a real apply stream. Never wired in production paths.
@@ -557,11 +568,70 @@ internal sealed partial class KeyValuesManager : IDisposable
 
             if (released > 0 && logger.IsEnabled(LogLevel.Debug))
                 logger.LogDebug("Released {Count} settled prepared intents of partition #{PartitionId} whose materialized rows were durable before the restart", released, partitionId);
+
+            // Prepares the replay kept as history for the window's materializations have served their reader;
+            // what is left never materialized on this log (a prepare the live apply refused, whose commit was
+            // rejected) and must not outlive the replay.
+            int history = preparedIntentStore.ClearReplayHistory(partitionId);
+
+            if (history > 0 && logger.IsEnabled(LogLevel.Debug))
+                logger.LogDebug("Dropped {Count} prepare(s) the restart replay of partition #{PartitionId} kept as history and never materialized", history, partitionId);
         }
         catch (Exception ex)
         {
             // Over-retention is safe; the release is a memory/snapshot-size concern, never a correctness one.
             logger.LogError(ex, "Failed to release settled prepared intents of partition #{PartitionId} after its restore", partitionId);
+        }
+
+        GradeRestoredMaterializations(partitionId);
+    }
+
+    // The last restart's verdict per partition, for diagnostics and tests.
+    private readonly ConcurrentDictionary<int, KeyValueRestorer.RestoreSummary> restoreSummaries = new();
+
+    /// <summary>What this node's last restart replay of <paramref name="partitionId"/> did with its by-reference
+    /// materializations, or null when the partition has not been restored in this process.</summary>
+    internal KeyValueRestorer.RestoreSummary? GetRestoreSummary(int partitionId) =>
+        restoreSummaries.TryGetValue(partitionId, out KeyValueRestorer.RestoreSummary summary) ? summary : null;
+
+    /// <summary>
+    /// The restart's verdict on <paramref name="partitionId"/>: one summary line of where the replay resolved its
+    /// by-reference materializations from, and containment when any could not be resolved — the value those name
+    /// is missing on this node, so it must not serve or lead the partition from its own projection until a
+    /// whole-partition snapshot re-seeds it (the same gate a proven apply divergence takes). The gate and the
+    /// withheld candidacy stand before this returns, so the node cannot win an election from the replayed state.
+    /// </summary>
+    private void GradeRestoredMaterializations(int partitionId)
+    {
+        try
+        {
+            KeyValueRestorer.RestoreSummary summary = restorer.CompleteRestore(partitionId);
+            restoreSummaries[partitionId] = summary;
+            string node = raft.GetLocalEndpoint();
+
+            // The verdict has to be readable when it is clean too: the alarm counters are published at zero, and
+            // the summary line is a Warning so a host that filters this category below it still shows one line
+            // per restored partition that replayed materializations.
+            DurableTransactionMetrics.PublishMaterializationAlarms();
+
+            if (summary.Records > 0)
+                logger.LogRestoreByReferenceSummary(partitionId, node, summary.Records, summary.FromLive, summary.FromHistory, summary.FromRetained, summary.Durable, summary.Foreign, summary.Unresolved, summary.UnresolvedKeys, summary.FirstUnresolvedLogIndex, summary.LastUnresolvedLogIndex);
+
+            if (summary.Unresolved == 0)
+                return;
+
+            logger.LogRestoreByReferenceUnresolved(partitionId, node, summary.Unresolved, summary.UnresolvedKeys, summary.FirstUnresolvedLogIndex, summary.LastUnresolvedLogIndex);
+
+            // No fuller peer is known at restart; the containment steps down instead of transferring should
+            // this node lead, and asks whoever leads for the snapshot.
+            runtime.DivergenceContainment.ContainDetached(
+                partitionId,
+                $"the restart replay left {summary.Unresolved} by-reference materialization(s) unresolved over {summary.UnresolvedKeys} key(s) (log entries {summary.FirstUnresolvedLogIndex}..{summary.LastUnresolvedLogIndex})",
+                "restart");
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Failed to grade the restart replay of partition #{PartitionId}", partitionId);
         }
     }
 

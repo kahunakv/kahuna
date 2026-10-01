@@ -10,8 +10,9 @@ namespace Kahuna.Server.Tests;
 /// Differential tests for <see cref="PreparedIntentScanMerge.Merge"/>: the ordered two-way merge must produce
 /// exactly what the previous tree-rebuilding union produced — items, versions, retry verdict, has-more flag and
 /// cursor — over randomized pages and intent sets that cover every visibility outcome, pagination shape and
-/// caller-supplied predicate. The reference implementation below is that previous union, kept verbatim as the
-/// oracle.
+/// caller-supplied predicate. The reference implementation below is that previous union, kept as the oracle with one
+/// rule added: a committed intent superseded by a strictly newer head — a page row with a higher revision, or a head
+/// the caller reports — is ignored, so the row (or its absence) stands.
 /// </summary>
 public sealed class TestPreparedIntentScanMergeDifferential
 {
@@ -36,10 +37,11 @@ public sealed class TestPreparedIntentScanMergeDifferential
         bool kvHasMore,
         string? kvCeilingKey,
         Func<PreparedIntent, TransactionDecision>? decisionLookup,
-        Func<string, bool>? readerHasOwnVersion)
+        Func<string, bool>? readerHasOwnVersion,
+        Func<PreparedIntent, bool>? supersededByHead)
     {
         Dictionary<string, PreparedIntent> overrides = [];
-        HashSet<string> excludes = [];
+        Dictionary<string, long> excludes = [];
 
         foreach (PreparedIntent intent in intents)
         {
@@ -56,8 +58,10 @@ public sealed class TestPreparedIntentScanMergeDifferential
                     return new(items, MustRetry: true, HasMore: false, NextCursorKey: null);
 
                 case ReadVisibilityAction.UseIntentValue:
+                    if (supersededByHead is not null && supersededByHead(intent))
+                        break;
                     if (intent.State == KeyValueState.Deleted || PreparedIntentVisibility.IsExpired(intent, currentTime))
-                        excludes.Add(intent.Key);
+                        excludes[intent.Key] = intent.Revision;
                     else
                         overrides[intent.Key] = intent;
                     break;
@@ -71,9 +75,13 @@ public sealed class TestPreparedIntentScanMergeDifferential
 
         foreach ((string key, ReadOnlyKeyValueEntry entry) in items)
         {
-            if (excludes.Contains(key))
+            // A row strictly newer than the key's committed intent was committed after it and stands.
+            if (excludes.TryGetValue(key, out long deletedAt) && entry.Revision <= deletedAt)
                 continue;
-            merged[key] = overrides.TryGetValue(key, out PreparedIntent? ov) ? ToEntry(ov) : entry;
+            if (overrides.TryGetValue(key, out PreparedIntent? ov) && entry.Revision <= ov.Revision)
+                merged[key] = ToEntry(ov);
+            else
+                merged[key] = entry;
         }
 
         foreach ((string key, PreparedIntent ov) in overrides)
@@ -199,11 +207,14 @@ public sealed class TestPreparedIntentScanMergeDifferential
             Func<string, bool>? readerHasOwnVersion = random.Next(2) == 0
                 ? null
                 : k => k[^1] % 2 == 0;
+            Func<PreparedIntent, bool>? supersededByHead = random.Next(2) == 0
+                ? null
+                : i => i.Key[^2] % 2 == 1 && i.Revision < 5;
 
             PreparedIntentScanMerge.ScanMergeResult expected = ReferenceMerge(
-                items, intents, snapshotTs, now, limit, kvHasMore, ceiling, decisionLookup, readerHasOwnVersion);
+                items, intents, snapshotTs, now, limit, kvHasMore, ceiling, decisionLookup, readerHasOwnVersion, supersededByHead);
             PreparedIntentScanMerge.ScanMergeResult actual = PreparedIntentScanMerge.Merge(
-                items, intents, snapshotTs, now, limit, kvHasMore, ceiling, decisionLookup, readerHasOwnVersion);
+                items, intents, snapshotTs, now, limit, kvHasMore, ceiling, decisionLookup, readerHasOwnVersion, supersededByHead);
 
             AssertSameResult(expected, actual);
         }
@@ -266,9 +277,53 @@ public sealed class TestPreparedIntentScanMergeDifferential
         PreparedIntent[] intents = [Intent("k/02", PreparedIntentResolution.Committed, KeyValueState.Set, [9], default, 2)];
 
         List<(string Key, ReadOnlyKeyValueEntry Entry)> sorted = misordered.OrderBy(static i => i.Key, StringComparer.Ordinal).ToList();
-        PreparedIntentScanMerge.ScanMergeResult expected = ReferenceMerge(sorted, intents, HLCTimestamp.Zero, default, 10, false, null, null, null);
+        PreparedIntentScanMerge.ScanMergeResult expected = ReferenceMerge(sorted, intents, HLCTimestamp.Zero, default, 10, false, null, null, null, null);
         PreparedIntentScanMerge.ScanMergeResult actual = PreparedIntentScanMerge.Merge(misordered, intents, HLCTimestamp.Zero, default, 10, false, null);
 
         AssertSameResult(expected, actual);
+    }
+
+    [Fact]
+    public void RowNewerThanACommittedIntent_Stands_ForAnOverrideAndForADelete()
+    {
+        // A later committed write moved each row past the lingering intent on its key: the row is served, and a
+        // committed delete older than the row does not remove it.
+        List<(string Key, ReadOnlyKeyValueEntry Entry)> items =
+        [
+            ("k/01", new ReadOnlyKeyValueEntry([1], 5, default, default, default, KeyValueState.Set)),
+            ("k/02", new ReadOnlyKeyValueEntry([2], 5, default, default, default, KeyValueState.Set)),
+            ("k/03", new ReadOnlyKeyValueEntry([3], 2, default, default, default, KeyValueState.Set)),
+        ];
+        PreparedIntent[] intents =
+        [
+            Intent("k/01", PreparedIntentResolution.Committed, KeyValueState.Set, [9], default, 4),
+            Intent("k/02", PreparedIntentResolution.Committed, KeyValueState.Deleted, null, default, 4),
+            Intent("k/03", PreparedIntentResolution.Committed, KeyValueState.Set, [9], default, 2), // equal: intent wins
+        ];
+
+        PreparedIntentScanMerge.ScanMergeResult result = PreparedIntentScanMerge.Merge(
+            items, intents, HLCTimestamp.Zero, default, limit: 10, kvHasMore: false, kvCeilingKey: null);
+
+        Assert.Equal(["k/01", "k/02", "k/03"], result.Items.Select(static i => i.Key).ToList());
+        Assert.Equal([1], result.Items[0].Entry.Value);
+        Assert.Equal(5, result.Items[0].Entry.Revision);
+        Assert.Equal([2], result.Items[1].Entry.Value);
+        Assert.Equal([9], result.Items[2].Entry.Value);
+    }
+
+    [Fact]
+    public void IntentOnlyKey_SupersededByAKnownHead_IsNotInjected()
+    {
+        // The page holds no row for k/02 (its head is a newer delete the caller knows of): the older committed
+        // intent must not bring the key back.
+        List<(string Key, ReadOnlyKeyValueEntry Entry)> items =
+            [("k/01", new ReadOnlyKeyValueEntry([1], 1, default, default, default, KeyValueState.Set))];
+        PreparedIntent[] intents = [Intent("k/02", PreparedIntentResolution.Committed, KeyValueState.Set, [9], default, 3)];
+
+        PreparedIntentScanMerge.ScanMergeResult result = PreparedIntentScanMerge.Merge(
+            items, intents, HLCTimestamp.Zero, default, limit: 10, kvHasMore: false, kvCeilingKey: null,
+            supersededByHead: i => i.Key == "k/02");
+
+        Assert.Equal(["k/01"], result.Items.Select(static i => i.Key).ToList());
     }
 }

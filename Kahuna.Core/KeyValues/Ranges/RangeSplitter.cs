@@ -418,44 +418,28 @@ internal sealed class RangeSplitter
             // reads this node's stores, which every replica of P's group populated. Neither
             // handoff is best-effort: a lost receipt, decision or unresolved intent would strand
             // its transaction, so a non-durable step aborts the split before cutover.
-            IReadOnlyCollection<CompletionReceiptRecord> movedReceipts;
-            IReadOnlyList<Kahuna.Server.KeyValues.Transactions.Data.TransactionRecord> movedRecords;
-            IReadOnlyList<Kahuna.Server.KeyValues.Transactions.Data.PreparedIntent> movedIntents;
+            // The gather is pipelined with the handoff, one page at a time, so the split never holds the moving
+            // range's whole transaction state.
+            RangeStateTransferService.RangeTransactionStateTransferOutcome transferred =
+                await manager.TransferRangeTransactionStateAsync(descriptor.PartitionId, placedSource, splitKey, movingEndKey, newPartitionId, ct);
 
-            if (placedSource)
+            switch (transferred)
             {
-                bool gathered;
-                (gathered, movedReceipts, movedRecords, movedIntents) =
-                    await manager.GetRangeTransactionStateFromPartitionLeaderAsync(
-                        descriptor.PartitionId, splitKey, movingEndKey, ct);
-
-                if (!gathered)
-                {
+                case RangeStateTransferService.RangeTransactionStateTransferOutcome.GatherFailed:
                     logger.LogError(
                         "RangeSplitter: could not gather the moving range's transaction state from P{Source}'s leader — aborting split before cutover",
                         descriptor.PartitionId);
                     return SplitOutcome.TransferFailedAt("the moving range's transaction state could not be gathered from the source leader");
-                }
-            }
-            else
-            {
-                movedReceipts = manager.GetLocalCompletionReceiptsForRange(splitKey, movingEndKey);
-                movedRecords = manager.GetLocalTransactionRecordsForRange(splitKey, movingEndKey);
-                movedIntents = manager.GetLocalPreparedIntentsForRange(splitKey, movingEndKey);
-            }
 
-            if (!await manager.ImportCompletionReceiptsToPartitionLeaderAsync(newPartitionId, movedReceipts, ct))
-            {
-                logger.LogError(
-                    "RangeSplitter: completion-receipt handoff to P{New} not durable — aborting split before cutover", newPartitionId);
-                return SplitOutcome.TransferFailedAt("the completion-receipt handoff to the destination was not durable");
-            }
+                case RangeStateTransferService.RangeTransactionStateTransferOutcome.ReceiptHandoffFailed:
+                    logger.LogError(
+                        "RangeSplitter: completion-receipt handoff to P{New} not durable — aborting split before cutover", newPartitionId);
+                    return SplitOutcome.TransferFailedAt("the completion-receipt handoff to the destination was not durable");
 
-            if (!await manager.ImportDurableTransactionStateToPartitionLeaderAsync(newPartitionId, movedRecords, movedIntents, ct))
-            {
-                logger.LogError(
-                    "RangeSplitter: durable transaction-state handoff to P{New} not durable — aborting split before cutover", newPartitionId);
-                return SplitOutcome.TransferFailedAt("the transaction-state handoff to the destination was not durable");
+                case RangeStateTransferService.RangeTransactionStateTransferOutcome.StateHandoffFailed:
+                    logger.LogError(
+                        "RangeSplitter: durable transaction-state handoff to P{New} not durable — aborting split before cutover", newPartitionId);
+                    return SplitOutcome.TransferFailedAt("the transaction-state handoff to the destination was not durable");
             }
 
             // Test seam: let the caller race an operation into the quiesce window.
