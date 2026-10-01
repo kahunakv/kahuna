@@ -18,7 +18,7 @@ cd kahuna
 
 ### Setting Up Your Development Environment
 
-1. Ensure you have .NET SDK installed. You can download it [here](https://dotnet.microsoft.com/download).
+1. Ensure you have the .NET 10 SDK installed. You can download it [here](https://dotnet.microsoft.com/download).
 2. Restore dependencies:
 ```bash
 dotnet restore
@@ -30,10 +30,22 @@ dotnet build
 
 ### Running Tests
 
-1. Ensure all tests pass before making any changes:
+Run affected in-process tests first; no Docker cluster is required:
+
 ```bash
-dotnet test
+dotnet test Kahuna.Server.Tests/Kahuna.Server.Tests.csproj -c Debug \
+  --logger "trx;LogFileName=server-tests.trx" \
+  --logger "console;verbosity=normal" 2>&1 | tee /tmp/kahuna-server-tests.log
 ```
+
+Add `--filter` to scope a change's verification. Run only one `dotnet test` process at a time: embedded
+nodes and timing-sensitive state make concurrent runs interfere. A full server run takes about
+20 minutes; capture its TRX and console output and extract every failure from that run.
+
+`Kahuna.Client.Tests` requires the Docker cluster at the configured HTTPS endpoints. See the
+[README test instructions](README.md#running-tests) for startup and teardown. Do not use a solution-wide
+`dotnet test` unless that cluster is up. When using `tee` in automation, enable pipeline failure
+propagation in your shell to preserve the test exit status.
 
 ## Making Changes
 

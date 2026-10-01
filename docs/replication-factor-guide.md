@@ -224,6 +224,12 @@ plus two map commits — and, because each stage is decided on a separate pass, 
 faster at the cost of more concurrent backfill traffic; shorten the pass interval when the tick
 term dominates, which it does whenever ranges are small.
 
+The receiver verifies the complete data-partition snapshot before mutation, then streams rows and
+receipt/record entries into the stores. Partial application is purge-and-retry recoverable; it is not
+one backend transaction. The intent/ledger section and the installed stores still occupy memory.
+See the [snapshot and Raft recovery guide](snapshot-and-raft-recovery-guide.md) for exact failure,
+restart limitations, and the new replication/retention settings.
+
 **Snapshot staging memory.** A node receiving a whole-partition snapshot stages all of it before
 installing it, and a leader that retries a slow transfer can open a fresh session while the old one is
 still staged. `--raft-snapshot-max-pending-bytes` (embedded: `RaftSnapshotMaxPendingBytes`; default

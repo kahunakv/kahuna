@@ -41,7 +41,7 @@ There are two families of multi-key reads, with different scaling characteristic
 ## In-memory cache, budgets, and eviction
 
 Each `KeyValueActor` keeps its shard's hot keys in an in-memory `BTree<string, KeyValueEntry>`.
-For `Persistent` keys this is a write-through cache over the persistence backend; for `Ephemeral`
+For `Persistent` keys this is a cache with asynchronous backend flushes over the persistence backend; for `Ephemeral`
 keys it is the only copy. Memory is capped per actor by `MaxEntriesPerActor` and `MaxBytesPerActor`,
 and reclaimed by the collector (`TryCollectHandler`), which runs every `CollectThreshold` operations
 but only while the actor is over budget, doing at most `CollectBatchMax` evictions per cycle.
@@ -70,10 +70,14 @@ Maintenance invariants for anyone editing this code:
   `entry.LastUsed =` assignment (except the pre-insert disk-load initializer). `TouchEntry` is a
   no-op for entries not in the store (`StoreKey == null`), so scan reads that resolve from disk
   without caching (`populateCache: false`) must not be assumed to be linked.
-- Revision history is trimmed to `RevisionRetention` at archive time, and expired sibling MVCC
+- Revision history is trimmed toward `RevisionRetention` at archive time, retaining unflushed
+  revisions and a registered snapshot hold's boundary even beyond that limit, and expired sibling MVCC
   entries are trimmed at transaction resolve time (commit / rollback / lock release). The collector
   does **not** trim metadata — these inline trims are the only enforcement, so any new
   archive/resolve path must call them.
 
 For a conceptual, beginner-friendly walkthrough of all of this, see
 [`docs/keyvalue-caching-and-eviction-guide.md`](../../docs/keyvalue-caching-and-eviction-guide.md).
+
+For latest transaction reads, committed-intent overlays, fixed-timestamp reads and lock conflict
+semantics, see [transaction reads and locks](../../docs/transaction-read-and-lock-semantics-guide.md).

@@ -22,7 +22,7 @@ keeps reading it that way for days or weeks while the parent evolves.
 Two things have to be true for that to work reliably:
 
 1. **The version that was current at `T` must survive** — reclamation (the machinery that trims old
-   history to bound memory and disk) must not throw it away while someone still cares about it.
+   history to control memory and disk use) must not throw it away while someone still cares about it.
 2. **Every read shape must be able to find it** — a point read, a range scan, and a bucket/prefix
    scan at `readTimestamp = T` must all return the as-of version, wherever it happens to live.
 
@@ -37,7 +37,7 @@ The rest of this guide covers both halves.
 
 ## 2. Where a key's history lives
 
-Every persistent key has its history spread across three layers, from hottest to coldest:
+A persistent key that retains revisions has its history spread across three layers, from hottest to coldest:
 
 - **The live value** — the current committed version (`Value` / `Revision` / `LastModified`).
 - **A bounded in-memory revision archive** — the newest `RevisionRetention` revisions (default
@@ -61,12 +61,14 @@ A client protects history by acquiring a **hold**:
   **hold id** and the lease expiry.
 - Holds are **refcounted**: many independent holds may protect the same or different timestamps.
 - Holds are **leased**: a hold must be renewed before its lease expires, so a client that crashes and
-  never releases cannot pin history forever. Lease expiry is measured on the **cluster HLC**, never a
+  never releases is eventually removed by the reaper. Lease expiry is measured on the **cluster HLC**, never a
   node's wall clock, so a leader change can't mis-expire a hold.
 
-The **effective floor** is the single value that reclamation cares about: the **minimum timestamp
-among all currently live holds**, or "no floor" when none are live. Releasing a hold raises the floor
-only when the *lowest* hold goes away — protecting `T1 < T2` and releasing the `T2` hold does not free
+The reported **effective floor** is the **minimum timestamp among all currently live holds**,
+or "no floor" when none are live. It is distinct from the protective floor:
+reclamation uses the minimum timestamp of **all registered holds**, including expired holds, until
+a replicated release or reaper removal commits. Releasing a hold raises the floor
+only when the *lowest registered* hold goes away — protecting `T1 < T2` and releasing the `T2` hold does not free
 anything between `T1` and `T2`; releasing the `T1` hold does.
 
 Holds are **replicated cluster state**, not per-node memory. They live on the Raft system partition
@@ -80,19 +82,22 @@ commit it.
 
 ## 4. What the floor protects, and where
 
-While a floor is set, reclamation is constrained at **both** places it would otherwise drop history:
+While a protective floor is set, reclamation is constrained at **both** places it would otherwise drop history:
 
 - **In-memory trim.** The archive keeps its normal newest 16 revisions **plus one more**: the single
   newest revision at or before the floor — the **floor-boundary revision**. That boundary is the exact
   version an as-of read at the floor needs, so keeping it in memory lets those reads hit memory for the
-  boundary without disk I/O. The archive stays bounded at 16 + 1 per protected key regardless of how
-  long a branch lives or how much the parent churns.
+  boundary without disk I/O. In addition, revisions not yet confirmed flushed are retained even
+  beyond the count limit.
+  The archive can therefore exceed 16 + 1 while persistence lags; its size depends on the key's
+  write rate and flush progress.
 - **Persistent prune.** The background revision sweep never deletes, per key, the floor-boundary
   revision or anything newer than it — no matter how aggressive the persistent retention settings are.
 
 The deliberate division of labor: **the boundary lives in memory; the deep run of revisions between
 the boundary and now lives on disk.** Reads reach that deep run through the disk fallbacks in the next
-section. When no hold is live the floor is unset and reclamation behaves exactly as it always has.
+section. When the registry is empty the protective floor is unset. An expired but still registered hold
+continues protecting history until its removal commits.
 
 ---
 
@@ -110,8 +115,8 @@ key was overwritten past the 16-revision window), fall back to on-disk history v
 Two implementation rules keep this safe and fast, and developers changing these paths must preserve
 them:
 
-- **Disk lookups run off the actor thread.** Each partition is a single-threaded actor; blocking it on
-  per-key disk I/O would stall every other request for that partition. So the as-of disk resolution
+- **Disk lookups run off the actor thread.** A key-value actor shard is single-threaded; blocking it on
+  per-key disk I/O would stall its other keys, potentially across multiple Raft partitions. As-of resolution
   happens in the off-actor read stage, and the on-actor stage only consumes the already-resolved
   result. Never move a `GetKeyValueRevisionAtOrBefore` call onto the actor thread.
 - **Pagination is driven by the raw page, not the projected one.** A range scan fetches a page of
@@ -119,6 +124,26 @@ them:
   `T`. The "is there another page?" decision and the next cursor must come from the **unprojected**
   page — otherwise a page made entirely of too-new keys projects to empty and the scan wrongly stops
   before later, visible keys.
+
+### Read fences and repeatability
+
+A snapshot read waits when another live writer may commit at or before `T`, including when a
+committed intent supplies the candidate value. The serving actor folds `T` into its HLC before
+answering; durable commit timestamps are minted above every participant's staged timestamp.
+If `T` is more than **5 seconds ahead** of the serving node's HLC, the read is served without this
+clock fence and `kahuna.kv.snapshot_clock_fence_skipped_total` increments. Such a future timestamp
+can include writes that start after the first read. Use cluster-minted timestamps.
+
+Persisted history may lag committed state. The archive retains unflushed revisions, and a disk
+fallback that could omit a queued revision answers `MustRetry` until flush progress makes it safe.
+A retained floor-boundary revision is not treated as an authoritative answer for timestamps in a
+trimmed gap above it; those reads consult disk. These safeguards do not create history for
+`SetNoRevision` writes, which deliberately suppress revision storage. TTL filtering also uses the
+current read time, so an as-of timestamp does not freeze expiration.
+
+See [transaction reads and locks](transaction-read-and-lock-semantics-guide.md) for per-key latest-read
+pins and their distinction from fixed-timestamp reads. The read-fence counters are
+`kahuna.kv.revisions.retained_unflushed_total` and `kahuna.kv.revisions.history_reads_fenced_total`.
 
 A read that finds no version at or before `T` correctly returns "does not exist" / omits the key —
 that is the right answer when the key didn't exist at `T` or its history below the floor was already
@@ -133,42 +158,48 @@ Four operations, exposed over gRPC and REST and on the in-process client:
 | Operation | Purpose | Returns |
 |-----------|---------|---------|
 | `AcquireSnapshotHold(holderId, timestamp, leaseMs)` | Acquire or renew a hold protecting revisions at/after `timestamp`. Idempotent by `(holderId, timestamp)` — a repeat returns the same hold id and renews the lease. | `(type, holdId, leaseExpiry)` |
-| `RenewSnapshotHold(holdId, leaseMs)` | Extend an existing hold's lease. Fails if it already expired or was released. | `(type, leaseExpiry)` |
+| `RenewSnapshotHold(holdId, leaseMs)` | Extend an existing hold's lease. Revives an expired hold if it is still registered; returns `DoesNotExist` after release or purge. | `(type, leaseExpiry)` |
 | `ReleaseSnapshotHold(holdId)` | Release a hold; the floor rises when the lowest hold is released. | `type` |
-| `GetSnapshotFloor()` | Introspection: current effective floor and live hold count. Floor is "zero" when no hold is live. | `(effectiveFloor, liveHolds)` |
+| `GetSnapshotFloor()` | Introspection: current effective floor and live hold count. Floor is "zero" when no hold is live. | `(type, effectiveFloor, liveHolds)` |
 
 `leaseMs` must be **greater than zero** — a zero or negative lease is rejected as invalid input rather
 than accepted as an already-expired hold.
 
 **Consumer responsibility.** Kahuna owns only the floor primitive. The client owns the hold lifecycle:
 acquire when the long-lived view begins (e.g. a branch is created), **renew on a timer well inside the
-lease** while it lives, and release when it ends. If you stop renewing, the hold lapses and its
-protection is gone.
+lease** while it lives, and release when it ends. If you stop renewing, the hold becomes purge-eligible.
+Protection ends when that removal commits;
+do not rely on the delay between expiry and purge.
 
 ---
 
 ## 7. Recovery: crashes, restarts, and leader changes
 
 - **A crashed holder is cleaned up automatically.** A background reaper periodically purges holds whose
-  lease has expired, so a client that dies without releasing stops pinning history after at most one
-  lease interval — no operator action required.
+  lease has expired. A client that dies without releasing stops pinning history when the replicated
+  purge commits. Reaper cadence and quorum availability
+  can delay removal beyond the lease interval.
 - **Holds survive restart and failover.** Because holds are replicated Raft state (and also written to
-  a local snapshot file), a restarting node reloads them before serving dependent reads, and a new
-  leader after a failover reports the same floor and live-hold set.
+  a local snapshot file), a restarting node reloads them before serving dependent reads. Floor
+  introspection confirms leadership/application catch-up before answering. Loaded holds
+  are exempt from expiry purge during `SnapshotHoldStartupGraceWindow` (default 5 minutes),
+  allowing renewal after downtime longer than a lease. Renewal of a lapsed hold confirms the
+  meta-partition application before proving that the hold is still registered.
 
 ---
 
 ## 8. Observability
 
-The subsystem publishes three instruments under the `Kahuna` meter scope:
+The subsystem publishes these instruments under the `Kahuna` meter scope:
 
 | Metric | Kind | Meaning |
 |--------|------|---------|
 | `kahuna.snapshot_floor.live_holds` | gauge | Number of currently live (non-expired) holds. |
 | `kahuna.snapshot_floor.effective_floor_ms` | gauge | Physical (millisecond) component of the effective floor, or 0 when no hold is live. |
+| `kahuna.snapshot_floor.prune_skipped_unconfirmed_total` | counter | Prune cycles skipped because local meta-partition catch-up could not be confirmed; work is retried later. |
 | `kahuna.snapshot_floor.missing_protected_version_total` | counter | **Must stay 0.** Increments if reclamation ever schedules a floor-protected version for deletion. |
 
-The counter is the **fault signal**. It is wired at both reclamation sites: the in-memory trim (if the
+`missing_protected_version_total` is the **fault signal**. It is wired at both reclamation sites: the in-memory trim (if the
 computed removal set would ever include the floor-boundary revision) and the persistent prune (if a
 backend reports it deleted a revision at or above the floor boundary — the backends audit their own
 deletions independently of their clamp to detect exactly this). In correct operation nothing protected
@@ -211,18 +242,18 @@ rows as well as before every key.
   disk) and is overwritten more than `RevisionRetention` times has no disk history to fall back to, so
   an as-of read below the window omits it. Persistent-durability data does not hit this (its deep
   history is on disk), and held timestamps keep the boundary revision in memory regardless.
-- **A very narrow prune/acquire window.** The background prune samples the effective floor immediately
-  before it deletes. A hold acquired in the microsecond-to-low-millisecond gap between that sample and
-  the delete completing may not be seen by that one prune batch. In practice this is not reachable for
-  the intended usage (holds are taken at recent timestamps, well above the prune horizon), and the
-  window was reduced from a much larger one; closing it entirely would require serializing acquire
-  against the prune delete, which is deliberately deferred.
-- **Hold-registry replication cost.** Each acquire/renew/release replicates the hold registry through
-  the system-partition Raft log. Floor *checks* are O(1) (a cached floor is refreshed on each
-  mutation), but the replicated *payload* grows with the number of live holds. This is comfortable for
-  the expected scale (a bounded number of long-lived branches); if hold counts were to grow very large,
-  frequent lease renewals would produce sizable log entries. Prefer coarse-enough lease TTLs that
-  renewals are not hot.
+- **Acquisition overlapping pruning.** Targeted cleanup and full sweeps sample the protective floor
+  under `BeginPrune` and close the delete window with `EndPrune`. A local acquisition whose
+  replication/commit overlaps that window returns `MustRetry`, even if its hold was committed.
+  Retry with the same `(holderId, timestamp)`; acquisition cannot restore history already deleted.
+  Before destructive pruning, each node confirms meta-partition application catch-up. An unconfirmed
+  node skips pruning and retains the work for a later cycle. This is not a cluster-wide atomic barrier:
+  a remote hold can still commit between that confirmation and the local floor sample.
+- **Hold-registry replication cost.** Routine acquire/renew/release mutations replicate keyed
+  upsert/remove **deltas** through the system-partition Raft log, rather than the entire registry.
+  Floor checks use cached minima; registry copies and local snapshot writes still grow with the
+  registered hold count. P0 state transfer carries the complete registry. Prefer lease TTLs that
+  keep renewal traffic manageable.
 
 ---
 
@@ -262,10 +293,12 @@ General guidance:
 A client pins a point in time by taking a leased, refcounted **hold** at timestamp `T`; the **effective
 floor** is the lowest live hold, replicated on the system partition so it survives restart and
 failover, and acquire/renew/release are routed to the partition leader. While the floor is set,
-reclamation keeps — in memory — the newest 16 revisions plus the one boundary revision at or before the
-floor, and — on disk — everything at or after that boundary, refusing to prune it however aggressive
+reclamation keeps — in memory — the newest 16 revisions, unflushed revisions, and the boundary revision at or before the
+protective floor, and — on disk — everything at or after that boundary, refusing to prune it however aggressive
 retention is. Every as-of read (point, range, bucket) answers from the in-memory archive when it can
 and falls back to on-disk history off the actor thread when it can't, so the protected version is
-always reachable. A crashed holder's lease lapses and a reaper reclaims it; a fault-signal counter stays
-at 0 unless enforcement ever slips. The result is a store where a long-lived reader can keep seeing data
-exactly as it was at `T`, for as long as it keeps its hold alive, without freezing the rest of the store.
+reachable subject to retained history and the read fences in §5. A crashed holder's lease lapses and a replicated
+reaper removal ends protection; a fault-signal counter stays
+at 0 unless enforcement ever slips. A continuously registered hold preserves history for a long-lived reader without stopping writes;
+TTL filtering, clock bounds, history suppression and the cross-node acquisition window remain
+limitations of that view.

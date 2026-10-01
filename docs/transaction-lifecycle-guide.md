@@ -125,9 +125,14 @@ Inside the owning `KeyValueActor`, a *transactional* write (one carrying a non-z
 - a **write intent** (`entry.WriteIntent`) with a lease (`DefaultTxCompleteTimeout`, 15 s), so concurrent
   transactions can detect the pending write during their own validation.
 
-Reads inside the transaction see their own MVCC entry (read-your-own-write). A `SET` bumps the staged
-revision; a `DELETE` sets state `Deleted` **without** bumping the revision — a small asymmetry that matters
-later (§9).
+Reads inside the transaction see their own MVCC entry (read-your-own-write). Both `SET` and `DELETE`
+advance the staged revision; a delete stages a `Deleted` tombstone at the next revision, preserving the
+previous live revision for historical reads. `EXTEND` changes expiry without advancing the revision.
+
+A first latest transactional `GET` or `EXISTS` pins the committed state, including a committed-but-unsettled
+intent. If a competing commit advances the head, a follow-up read or write can answer `Aborted` immediately;
+commit-time read validation is still required. This pin is per key, not a cluster-wide historical snapshot.
+A fixed `ReadTimestamp` uses the separate as-of revision path.
 
 Non-transactional writes skip all of this and go straight to a proposal (§7).
 
@@ -195,8 +200,11 @@ still be durably aborted), while `Commit` **cannot** — a commit requires an `U
 4. **Decide.** Compare-and-set the canonical record: `Commit` only if every prepare is durable *and*
    validation passed; otherwise `Abort`. This is the point of no return. The finalizer reports whatever the
    record actually *became* — a concurrent recovery abort can win the race.
-5. **Resolve** — materialize each committed intent into visible KV state, then settle (resolve + remove)
-   the intent. **When** this runs is §8.
+5. **Resolve** — install committed values and settle (resolve + remove) their intents, or discard aborted
+   staging and settle aborted intents. By default commits write materialization records before settlement;
+   with `DurableMaterializeOnResolve`, the settlement apply installs the values itself. **When** this runs
+   is §8; the two encodings and their upgrade requirements are in the
+   [durable settlement guide](durable-settlement-guide.md).
 
 #### 6.3.1 The one-phase bundle and its gate
 
@@ -406,11 +414,9 @@ the decision is not resolvable locally, the read routes a lookup to the anchor l
 (`LookupDurableRecordRouted` via `TryRouteForeignDecision`) and re-issues with the terminal decision, rather
 than spinning until settlement propagates.
 
-> **A sharp edge worth knowing.** A durable `DELETE` sets state `Deleted` *without bumping the revision*
-> (§5), so a committed delete intent carries the **same** revision as the value it deletes. The write-path
-> materialization guard must therefore treat "same revision, different state" as *not yet materialized* —
-> otherwise a conditional write such as `SET … NX` issued right after a committed-but-unsettled delete sees
-> the pre-delete value and wrongly reports the key as still existing.
+A committed delete intent is an absent base for conditional writes such as `SET … NX`, even before
+settlement. Its tombstone has a new revision. Equal revision alone is still insufficient to prove
+materialization: an expiry extension retains the revision, so expiry and state must also agree.
 
 ---
 
@@ -421,8 +427,9 @@ coordinator. Per partition leader, for intents whose recovery deadline has passe
 
 - **Committed record** → resolve committed and materialize.
 - **Abort record** → resolve aborted, no materialization.
-- **Undecided past deadline**, or an **orphan prepare with no record** → drive a presumed abort (the abort
-  tombstone-from-absence transition), then resolve aborted.
+- **Undecided past deadline**, or an **orphan prepare with no record within the outcome-retention horizon**
+  → drive a presumed abort (the abort tombstone-from-absence transition), then resolve to the canonical
+  winner. An absent record past the retention horizon instead follows the receipt/hold rules in §6.7.
 - **Undecided within deadline** → skip; the live coordinator may still decide.
 
 Recovery always takes the winner the record actually became — a concurrent commit is honoured even while
@@ -452,9 +459,11 @@ Two WAL behaviours are worth knowing because they dominate commit latency:
 
 `Kahuna.Server` exposes all three on the command line; embedded consumers set them on
 `EmbeddedKahunaOptions` (`RaftMaxWalGroupBatchPartitions`, `RaftWalGroupCommitLingerMs`,
-`RaftWalSingleFsyncCommit`). The embedded defaults deliberately mirror **Kommander's** defaults, not the
-server's — notably single-fsync is **off** there, because changing durability/recovery timing for every
-embedded consumer is an explicit decision, not a silent one.
+`RaftWalSingleFsyncCommit`). Check the host's effective configuration rather than assuming the server
+and embedded defaults match:
+`RaftWalSingleFsyncCommit` is **false** by default on `EmbeddedKahunaOptions`, whereas the server's
+`--raft-wal-single-fsync-commit` defaults to **true**. New replication scheduling and retention controls
+are described in the [snapshot and Raft recovery guide](snapshot-and-raft-recovery-guide.md#replication-scheduling-and-log-retention).
 
 **Storage.** Raft durability and *backend* persistence are separate. Committed state reaches the
 key/value backend asynchronously through `BackgroundWriterActor`, which batches dirty entries to the
@@ -498,12 +507,14 @@ Every path maps onto three outcomes, and the distinction is load-bearing:
 | Outcome | Meaning | Caller action |
 |---|---|---|
 | `Committed` / `Set` / `Get` … | Succeeded | Proceed |
-| **`Aborted`** | A genuine **conflict** — validation found a stale read or a concurrent writer | Re-plan; retrying immediately will likely conflict again |
-| **`MustRetry`** | Retryable: nothing durable was decided by this attempt | Safe to retry |
+| **`Aborted`** | A conflict, lost staging, or a terminal durable abort (including `PresumedAbort`) | Start a new transaction; this transaction cannot commit |
+| **`MustRetry`** | This attempt did not establish a terminal outcome | Interactive finalize: retry with the same identity; a failed script statement: re-run the script |
 | `Errored` / `InvalidInput` | Malformed input or an internal error | Fix the request |
 
-A prepare that did not replicate, an admission rejection and every infrastructural failure are
-`MustRetry`, so a caller never sees a false conflict for a transient failure. An `Aborted` carries the
+Admission and unresolved infrastructure failures are retryable rather than fabricated conflicts.
+`MustRetry` does **not** prove that no record or prepare was replicated: a frozen durable finalize may
+have initialized its record and prepared some participants. Retry its finalize with the same identity;
+do not infer rollback from a missing acknowledgement. An `Aborted` carries the
 abort class in its reason: `Transaction conflict` for a genuine conflict, and `Transaction aborted:
 PresumedAbort` when the frozen decision deadline passed before the commit could be decided (§6.4) — the
 record is then durably aborted, so retrying the commit cannot succeed and the caller restarts the
@@ -567,3 +578,6 @@ value *visible* — materializing each intent and settling it — happens afterw
 any read or write that meets a still-pending intent in that window resolves it against the canonical record
 (locally, or routed to the anchor leader) rather than serving a stale value. If the coordinator dies at any
 point, the participant leaders finish or presume-abort the transaction from the same durable record.
+
+For latest-read pins, historical-read fences and transaction lock behavior, see
+[transaction reads and locks](transaction-read-and-lock-semantics-guide.md).
