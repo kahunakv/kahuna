@@ -667,7 +667,8 @@ internal static class DurableTransactionMetrics
     /// be proven redundant — the key's newest durable write is still below the record's revision. Every other
     /// miss is the benign duplicate (a second producer's record arriving after the settle removed the intent)
     /// and is not counted. A non-zero count means one replica is missing a committed value the rest of the
-    /// cluster has: the paired error log names the transaction, the epoch, the key and the log index.
+    /// cluster has: the paired error log names the transaction, the epoch, the key and the log index, and the
+    /// partition is gated on this node (no serving, no candidacy) until a whole-partition snapshot re-seeds it.
     /// </summary>
     internal static readonly Counter<long> MaterializationIntentMissing =
         Meter.CreateCounter<long>(
@@ -696,6 +697,18 @@ internal static class DurableTransactionMetrics
         Meter.CreateCounter<long>(
             "kahuna.kv.restore_by_reference_unresolved",
             description: "By-reference materializations a restart replay could not resolve and whose value is not durable on this node.");
+
+    /// <summary>
+    /// Publishes the two missing-value alarms at their current value. A counter that never recorded exports no
+    /// series, so a scrape of a healthy process could not tell "zero" from "not measured" — and these two are
+    /// graded on being zero. Called when a partition's restart replay finishes: the restart is the event the
+    /// zero is a statement about, and by then the host's metrics pipeline is listening.
+    /// </summary>
+    internal static void PublishMaterializationAlarms()
+    {
+        MaterializationIntentMissing.Add(0);
+        RestoreByReferenceUnresolved.Add(0);
+    }
 
     internal static readonly Counter<long> SameRevisionDivergentApplies =
         Meter.CreateCounter<long>(

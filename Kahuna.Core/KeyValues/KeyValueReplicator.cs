@@ -72,6 +72,17 @@ internal sealed class KeyValueReplicator
     // makes every by-reference record a miss, which the miss path reports.
     private readonly Transactions.PreparedIntentStore? preparedIntentStore;
 
+    // The data partition a key currently routes to. A by-reference materialization that finds nothing here for a
+    // key this partition no longer owns — its range moved out, and the un-host purge took the key's rows and
+    // intents with it, before a lagging apply reached the record — is not a value this node is missing. Null
+    // (bare unit-test construction) or a resolver that throws means ownership is unknown, and the miss counts.
+    private readonly Func<string, int>? keyOwner;
+
+    // Told of every by-reference materialization verified missing on this node (partition, log entry, key,
+    // revision), so the partition stops being served and led from a projection that lacks a committed value.
+    // Null (bare unit-test construction) leaves the miss to its counter and its error line.
+    private readonly Action<int, long, string, long>? materializationMissing;
+
     public KeyValueReplicator(
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         KeyValueActorRing persistentRouter,
@@ -86,9 +97,13 @@ internal sealed class KeyValueReplicator
         Func<int, string, long, Task<KeyValueEntry?>>? hydrateRevisionFromBackend = null,
         Func<HLCTimestamp, long, bool>? transactionLocallyAborted = null,
         Func<string, long>? committedHeadRevisionProbe = null,
-        Transactions.PreparedIntentStore? preparedIntentStore = null)
+        Transactions.PreparedIntentStore? preparedIntentStore = null,
+        Func<string, int>? keyOwner = null,
+        Action<int, long, string, long>? materializationMissing = null)
     {
         this.preparedIntentStore        = preparedIntentStore;
+        this.keyOwner                   = keyOwner;
+        this.materializationMissing     = materializationMissing;
         this.backgroundWriter           = backgroundWriter;
         this.persistentRouter           = persistentRouter;
         this.raft                       = raft;
@@ -1031,7 +1046,7 @@ internal sealed class KeyValueReplicator
 
         if (hydrate is null)
         {
-            ReportMaterializationMiss(logIndex, transactionId, epoch, key, revision);
+            ReportMaterializationMiss(partitionId, logIndex, transactionId, epoch, key, revision);
             return;
         }
 
@@ -1050,17 +1065,57 @@ internal sealed class KeyValueReplicator
                     key);
             }
 
-            ReportMaterializationMiss(logIndex, transactionId, epoch, key, revision);
+            ReportMaterializationMiss(partitionId, logIndex, transactionId, epoch, key, revision);
         });
     }
 
+    /// <summary>
+    /// The verdict on a by-reference miss nothing could dismiss: the committed value is missing on this node.
+    /// Counted, logged with the full identity, and handed to the containment, which gates the partition on the
+    /// first one — a node in this state must not win a term and serve from the hole. A key the partition no
+    /// longer owns is the one exception: its absence is the un-host purge's doing.
+    /// </summary>
     private void ReportMaterializationMiss(
-        long logIndex, HLCTimestamp transactionId, long epoch, string key, long revision)
+        int partitionId, long logIndex, HLCTimestamp transactionId, long epoch, string key, long revision)
     {
+        if (IsForeign(partitionId, key))
+        {
+            if (logger.IsEnabled(LogLevel.Debug))
+                logger.LogDebug(
+                    "By-reference materialization for key {Key} at revision {Revision} (transaction {TransactionId} epoch {Epoch}) has no source on partition {PartitionId} (log entry {LogIndex}); the key routes to another partition",
+                    key, revision, transactionId, epoch, partitionId, logIndex);
+            return;
+        }
+
         Transactions.DurableTransactionMetrics.MaterializationIntentMissing.Add(1);
         logger.LogError(
             "By-reference materialization for key {Key} at revision {Revision} found no prepared intent for transaction {TransactionId} epoch {Epoch}, and this node's durable state is below that revision (log entry {LogIndex})",
             key, revision, transactionId, epoch, logIndex);
+
+        // An entry the installed snapshot already reflects is replayed over the installer's projection, not
+        // built by this apply: a verdict on it — reached here, or reached late by a read that started before
+        // the install landed — describes nothing a second install from the same source would change.
+        if (preparedIntentStore is not null && preparedIntentStore.IsHistoricalApply(partitionId, logIndex))
+            return;
+
+        materializationMissing?.Invoke(partitionId, logIndex, key, revision);
+    }
+
+    /// <summary>Whether <paramref name="key"/> is known to route to a partition other than <paramref name="partitionId"/>.</summary>
+    private bool IsForeign(int partitionId, string key)
+    {
+        Func<string, int>? owner = keyOwner;
+        if (owner is null)
+            return false;
+
+        try
+        {
+            return owner(key) != partitionId;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     /// <summary>

@@ -598,7 +598,8 @@ internal sealed partial class KeyValuesManager : IDisposable
     /// The restart's verdict on <paramref name="partitionId"/>: one summary line of where the replay resolved its
     /// by-reference materializations from, and containment when any could not be resolved — the value those name
     /// is missing on this node, so it must not serve or lead the partition from its own projection until a
-    /// whole-partition snapshot re-seeds it (the same gate a proven apply divergence takes).
+    /// whole-partition snapshot re-seeds it (the same gate a proven apply divergence takes). The gate and the
+    /// withheld candidacy stand before this returns, so the node cannot win an election from the replayed state.
     /// </summary>
     private void GradeRestoredMaterializations(int partitionId)
     {
@@ -608,21 +609,25 @@ internal sealed partial class KeyValuesManager : IDisposable
             restoreSummaries[partitionId] = summary;
             string node = raft.GetLocalEndpoint();
 
+            // The verdict has to be readable when it is clean too: the alarm counters are published at zero, and
+            // the summary line is a Warning so a host that filters this category below it still shows one line
+            // per restored partition that replayed materializations.
+            DurableTransactionMetrics.PublishMaterializationAlarms();
+
             if (summary.Records > 0)
-                logger.LogRestoreByReferenceSummary(partitionId, node, summary.Records, summary.FromLive, summary.FromHistory, summary.FromRetained, summary.Durable, summary.Foreign, summary.Unresolved);
+                logger.LogRestoreByReferenceSummary(partitionId, node, summary.Records, summary.FromLive, summary.FromHistory, summary.FromRetained, summary.Durable, summary.Foreign, summary.Unresolved, summary.UnresolvedKeys, summary.FirstUnresolvedLogIndex, summary.LastUnresolvedLogIndex);
 
             if (summary.Unresolved == 0)
                 return;
 
             logger.LogRestoreByReferenceUnresolved(partitionId, node, summary.Unresolved, summary.UnresolvedKeys, summary.FirstUnresolvedLogIndex, summary.LastUnresolvedLogIndex);
 
-            string evidence = $"the restart replay left {summary.Unresolved} by-reference materialization(s) unresolved over {summary.UnresolvedKeys} key(s) (log entries {summary.FirstUnresolvedLogIndex}..{summary.LastUnresolvedLogIndex})";
-
             // No fuller peer is known at restart; the containment steps down instead of transferring should
             // this node lead, and asks whoever leads for the snapshot.
-            _ = runtime.DivergenceContainment.ContainAsync(partitionId, fullerPeer: string.Empty, evidence, "restart").ContinueWith(
-                static (task, state) => ((ILogger<IKahuna>)state!).LogError(task.Exception, "Failed to gate a partition whose restart replay left materializations unresolved"),
-                logger, TaskContinuationOptions.OnlyOnFaulted);
+            runtime.DivergenceContainment.ContainDetached(
+                partitionId,
+                $"the restart replay left {summary.Unresolved} by-reference materialization(s) unresolved over {summary.UnresolvedKeys} key(s) (log entries {summary.FirstUnresolvedLogIndex}..{summary.LastUnresolvedLogIndex})",
+                "restart");
         }
         catch (Exception ex)
         {

@@ -429,7 +429,12 @@ internal sealed class KeyValuesManagerBuilder
                 preparedIntentStore.TryGetCommittedHead(key, out long headRevision, out _) ? headRevision : -1,
             // The authority a by-reference materialization record resolves its value from: the record names an
             // intent this store already holds, so the committed value never travels through the log twice.
-            preparedIntentStore: preparedIntentStore);
+            preparedIntentStore: preparedIntentStore,
+            // The same ownership rule the restorer dismisses a replayed miss with: a record applied after the
+            // key's range moved out names nothing this partition should still hold.
+            keyOwner: key => locator.LocateRange(key).PartitionId,
+            // A record verified missing gates the partition at that entry: candidacy withheld, MustRetry, re-seed.
+            materializationMissing: divergenceContainment.ContainMissingMaterialization);
 
         // A materializing resolve installs the committed value from the intent at its own apply, in log order and
         // before the settle removes the intent — live through the replicator, on a restart replay through the

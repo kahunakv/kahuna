@@ -38,14 +38,21 @@ public sealed class TestSettledIntentFlushRetention : IDisposable
 
     private const string MissCounter = "kahuna.kv.materialization_intent_missing";
 
+    private const string UnresolvedCounter = "kahuna.kv.restore_by_reference_unresolved";
+
+    // The restore summary line of data partition 1, as a host that filters this category below Warning sees it.
+    private const string RestoreSummaryLine = "KeyValueRestorer: partition 1 restore on";
 
     private readonly ILoggerFactory loggerFactory;
+
+    private readonly RecordingLogProvider logLines = new();
 
     private readonly string dir = Path.Combine(Path.GetTempPath(), "kahuna-settled-retention-" + Guid.NewGuid().ToString("N"));
 
     public TestSettledIntentFlushRetention(ITestOutputHelper outputHelper)
     {
         loggerFactory = TestLogFactory.Create(outputHelper);
+        loggerFactory.AddProvider(logLines);
         Directory.CreateDirectory(dir);
     }
 
@@ -733,9 +740,21 @@ public sealed class TestSettledIntentFlushRetention : IDisposable
 
                 // ── Phase 2: restart over the same durable state with a healthy backend. ──
                 {
+                    using MetricCapture alarms = new("source", MissCounter, UnresolvedCounter);
+
                     await using EmbeddedKahunaNode node = new(PersistentOptions(storagePath, walPath, decorator: null, materializeOnResolve), loggerFactory);
                     await node.StartAsync(ct);
                     await node.WaitForLeaderForKeyAsync(k1, ct);
+
+                    // A clean restart says so where it can be graded: both alarm counters are published (at
+                    // zero, so the series exists), and the summary line survives a Warning-level filter with
+                    // the unresolved count, its distinct keys and its entry range.
+                    Assert.NotEmpty(alarms.Samples(MissCounter));
+                    Assert.NotEmpty(alarms.Samples(UnresolvedCounter));
+
+                    (LogLevel level, string line) = Assert.Single(logLines.Containing(RestoreSummaryLine), l => l.Message.Contains("replayed", StringComparison.Ordinal));
+                    Assert.Equal(LogLevel.Warning, level);
+                    Assert.Contains("0 unresolved over 0 distinct key(s) (unresolved log entries -1..-1", line);
 
                     Assert.Equal("alpha", await ReadAsync(node, k1, ct));
                     Assert.Equal("beta", await ReadAsync(node, k2, ct));
@@ -838,6 +857,67 @@ public sealed class TestSettledIntentFlushRetention : IDisposable
                 Assert.Equal(2, summary.Value.Unresolved);
                 Assert.Equal(2, summary.Value.UnresolvedKeys);
                 Assert.Equal(0, summary.Value.FromHistory + summary.Value.FromLive + summary.Value.FromRetained);
+
+                // The summary line carries the same verdict for a harness that only has the log.
+                (LogLevel level, string line) = Assert.Single(logLines.Containing(RestoreSummaryLine), l => l.Message.Contains("replayed", StringComparison.Ordinal));
+                Assert.Equal(LogLevel.Warning, level);
+                Assert.Contains(
+                    $"2 unresolved over 2 distinct key(s) (unresolved log entries {summary.Value.FirstUnresolvedLogIndex}..{summary.Value.LastUnresolvedLogIndex}",
+                    line);
+                Assert.True(summary.Value.FirstUnresolvedLogIndex > 0 && summary.Value.LastUnresolvedLogIndex >= summary.Value.FirstUnresolvedLogIndex);
+            }
+        }
+        finally
+        {
+            TryDeleteDir(storagePath);
+            TryDeleteDir(walPath);
+        }
+    }
+
+    /// <summary>
+    /// The containment's contract for the paths that cannot await it — the restore-finished callback and the
+    /// committed-entry apply: when the call returns the partition is gated and its candidacy withheld, so there
+    /// is no window in which the node could campaign from the projection the evidence indicts. A later entry of
+    /// the same gated partition changes nothing.
+    /// </summary>
+    [Fact]
+    public async Task MissingMaterialization_GatesThePartitionAndWithholdsCandidacyBeforeTheCallReturns()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        string storagePath = CreateTempDir("kahuna-live-gate-store-");
+        string walPath = CreateTempDir("kahuna-live-gate-wal-");
+
+        try
+        {
+            await using EmbeddedKahunaNode node = new(PersistentOptions(storagePath, walPath, decorator: null), loggerFactory);
+            await node.StartAsync(ct);
+            await node.WaitForLeaderForKeyAsync("live-gate/row", ct);
+
+            KahunaManager kahuna = (KahunaManager)node.Kahuna;
+            PartitionDivergenceContainment containment = kahuna.KeyValues.DivergenceContainment;
+            Assert.False(containment.IsGated(1));
+
+            containment.ContainMissingMaterialization(1, logIndex: 42, "live-gate/row", revision: 7);
+
+            Assert.True(containment.IsGated(1));
+            Assert.True(node.Raft.IsCandidacyWithheld(1));
+            Assert.False(containment.IsGated(0));
+
+            (LogLevel level, string line) = Assert.Single(logLines.Containing("partition 1 is gated"));
+            Assert.Equal(LogLevel.Error, level);
+            Assert.Contains("after apply", line);
+            Assert.Contains("live-gate/row at revision 7 (log entry 42)", line);
+
+            containment.ContainMissingMaterialization(1, logIndex: 43, "live-gate/other", revision: 3);
+            Assert.Single(logLines.Containing("partition 1 is gated"));
+
+            // The only voter gated itself: it gives the partition up rather than serve it.
+            long deadline = Environment.TickCount64 + 30_000;
+            while (await node.Raft.AmILeaderIfHosted(1, ct))
+            {
+                Assert.True(Environment.TickCount64 < deadline, "the gated node kept leading the partition");
+                await Task.Delay(50, ct);
             }
         }
         finally
