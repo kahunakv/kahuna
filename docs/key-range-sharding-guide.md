@@ -380,7 +380,8 @@ Step by step:
 
 4. **Quiesce** the range during the catch-up→cutover window so no write is lost. Two layers,
    complementary rather than redundant:
-   - The **exclusive range lock** on `[K, E)`. It is installed by a message on the source
+   - The **WriteFence range lock** on `[K, E)`. It coexists with Shared readers and plants
+     no per-key write intents. It is installed by a message on the source
      partition leader's key-value actor, which is the same single-threaded mailbox every write for
      that key space passes through — so it is exactly ordered against writes already in flight: one
      admitted before the lock is already proposed, one admitted after is refused. It blocks 2PC
@@ -410,14 +411,23 @@ Step by step:
    sends `[K, E)` traffic to P'. In-flight requests against P for `[K, E)` fail the generation
    fence and retry onto P'. The quiesce is released in the cutover `finally`.
 
+The transaction-state handoff used by both split and merge gathers and replicates receipts, records
+and intents one page at a time before cutover. Replicated handoff chunks contain at most 512 items;
+intent chunks also target at most 1 MiB of value bytes, allowing a single oversized intent to progress.
+Gather pages keep all entries sharing one range key together, so the 512-item gather target can be
+exceeded for that key. These are batching targets, not a guarantee that arbitrary values fit transport
+limits. Any failed gather or handoff prevents cutover. Whole-partition replica seeding is a separate
+path; see the [snapshot and Raft recovery guide](snapshot-and-raft-recovery-guide.md).
+
 ### Two things to know about the current implementation
 
 - **The persistence backend is node-global, keyed by the full key string** — *not* physically
   partitioned. This is the single most important thing to understand about the current state.
-  It means the "transfer" in step 3 is largely **vestigial**: the data is already present on
-  every node (it arrived via Raft replication of the original writes). "Import into P'" just
-  means writing the keys into the same shared local store. Splits today move **routing**, not
-  physical bytes.
+  Under **full replication**, the rows are already present on every replica, and local import
+  writes into that same store. Under **per-partition placement**, source and destination can have
+  different replica sets: the destination copy and replicated transaction-state handoff are required
+  to make the upper range available on its new hosts. Shared local storage does not imply that a
+  different node already has the data.
 
 - Because of that, after cutover the source `P` does **not** delete `[K, E)` — it **orphan-
   retains** those rows. They become unreachable through routing (everything for `[K,E)` now
@@ -425,8 +435,7 @@ Step by step:
   also remove P''s copy. Orphan retention is harmless-but-wasteful, and it's also what makes
   certain mid-scan-split cases read correctly (a stale descriptor query still finds the data).
 
-These two facts are why **partition-scoped storage** (see §11) is the load-bearing piece of future
-work.
+Partition-scoped storage (see §11) would make physical cleanup independent of shared rows and routing.
 
 ---
 
@@ -440,6 +449,8 @@ With split in place, the rest of the system is about *using* and *maintaining* t
 both under the minimum size, coalesce them. It bulk-exports `[B,C)` to the survivor P1, does an
 atomic `MutateMapAsync` cutover replacing the two descriptors with one `[A,C)@P1` at a bumped
 generation, and returns the retired partition id so the caller can `RemovePartitionAsync` it.
+Before copying, merge acquires a `WriteFence` on `[B,C)` and publishes descriptor quiesce; it settles
+decided intents and transfers transaction state before cutover. A failure prevents cutover.
 The same cutover entry lists P2 in the map's `RetiredPartitionIds`, so the pending removal is
 part of the committed map rather than a memory of the node that merged. The generation fence
 covers stale routing exactly as in split.
@@ -552,39 +563,34 @@ Every call exists on REST, on gRPC, and in `kahuna-cli`, and all three reach the
 | Split at a key | `POST /v1/ranges/split` | `--split-range <space> --split-key <key>` |
 | Run the merge pass | `POST /v1/ranges/merge` | `--merge-ranges` |
 
-### Registration is per node — the mistake everyone makes once
+### Registration and propagation
 
-Registration does two things, and only one of them is replicated:
+Registration changes the local routing registry and seeds a covering `[-inf,+inf)` descriptor on
+P0. A nonleader forwards the seed request to the meta leader and waits for the descriptor to become
+locally visible. The routing registry is in memory, but it is **reconciled from the committed range
+map** at startup, restore, live range-map apply and P0 snapshot install. Nodes learn committed
+registrations through that map; operators need not manually recreate the registry after restart.
 
-- the **routing-mode flip** (`hash` → `key-range`) is node-local, in-memory, and **not replicated**;
-- the **seed descriptor** (`[-inf, +inf)`) is a single meta-partition write that *is* replicated.
-
-So you must register on **every node**. Register on one and you get a cluster where that node routes
-the space by key order while the rest still hash it — the two disagree about which partition owns a
-key, and 2PC prepares land on the wrong partition. The CLI does this for you: `--register-key-range`
-fans out to every configured endpoint and exits non-zero if any node refused. `--node` targets a
-single node and says so, because that leaves the cluster half-configured.
-
-Because the seed is forwarded to the partition that owns the map, registration is **not**
-leader-only: any node accepts it. The response tells you which half you got:
+The CLI still fans registration out to all configured endpoints and fails if any refuses. `--node`
+targets one endpoint. Fan-out verifies visibility on those endpoints; it is not the replication
+mechanism. `GET /v1/ranges` reports each node's current projection, so views can differ while a map
+update is still applying.
 
 | `status` | Meaning |
 |---|---|
-| `Seeded` | This call committed the whole-space descriptor. Exactly one call ever gets this. |
-| `AlreadySeeded` | A descriptor already existed. Still a success — the node-local flip happened. |
-| `Indeterminate` | The mode flipped, but no descriptor is visible here yet. It may still arrive; re-read `GET /v1/ranges`. |
+| `Seeded` | This call committed the initial whole-space descriptor. |
+| `AlreadySeeded` | A covering descriptor was already visible; registration succeeded. |
+| `Indeterminate` | A descriptor is not yet visible locally. The proposal or forwarded request may have succeeded; re-read the map and retry rather than assuming rollback. |
 | `InvalidInput` | Empty key space, or a `/meta` schema-log space (never key-range routed). |
-| `KeyRangeDisabled` | The cluster has no data partition to seed onto. Permanent. |
+| `KeyRangeDisabled` | No data partition is available for seeding. |
 
-`GET /v1/ranges` reports `routingMode` **per node**, which is how you check the fan-out actually
-landed: ask each node and compare. A key space listed with `routingMode: KeyRange` and zero
-descriptors is the broken middle state — routed by key order with nothing to route to, so every
-write to it throws.
+A local pre-flip can transiently leave `KeyRange` routing with no descriptor while seeding is
+unresolved. It is not a usable registration until the covering descriptor is visible.
 
 ### A worked sequence
 
 ```sh
-# 1. Register on every node (the CLI fans out; over REST, loop yourself).
+# 1. Register the space (the CLI fans out to verify each configured endpoint).
 kahuna-cli --register-key-range users
 
 # 2. Write some keys.
@@ -700,7 +706,7 @@ Putting it all together, here's a write to a key-range space, start to finish:
 
 6. RangeSplitter, on the P0 leader (system + meta):
      - creates partition 8 (CreatePartitionAsync, P0 leader),
-     - quiesces [users/0500, users/0700) (range lock on P6's leader + a replicated
+     - quiesces [users/0500, users/0700) (WriteFence on P6's leader + a replicated
        QuiescedUntil deadline on the descriptor, visible on every node),
      - bulk + catch-up exports that slice to P8,
      - MutateAsync cutover on P0: P6 keeps [0250,0500) gen 43,
@@ -716,54 +722,30 @@ Putting it all together, here's a write to a key-range space, start to finish:
 
 ## 11. Current limitations and where to take this next
 
-The system as it stands delivers **logical range routing + range-scoped locking** — fully
-working and tested. What it does **not** yet deliver is *physical* load/space distribution,
-because of the node-global store. Be honest about this when reasoning about the system.
+The backend is still **node-global and keyed by full key string**, rather than partition-prefixed.
+That limits physical cleanup, but it no longer means that every node stores every partition.
+With replication factor 0, voter nodes host all partitions. An explicit replication factor assigns
+per-partition replica sets; a split or merge can move a range onto nodes that did not hold it before.
+The [replication factor guide](replication-factor-guide.md) describes placement and replica moves.
 
-The foundational gap and its consequences:
+Split and merge copy the moving rows to the destination replicas and hand off transaction state
+before routing cutover. Both use a WriteFence range lock plus replicated descriptor quiesce; the
+merge late-write window is not justified by shared storage. Quiesce deadlines and generation checks
+must still hold when the source and destination leaders change during the move.
 
-- **The persistence backend is node-global, keyed by key string.** Every node holds every
-  key's data (it arrived via Raft). Splitting changes routing, not physical placement. So a
-  split spreads *which leader coordinates* a range, but not *where the bytes live* — every node
-  still stores everything.
-
-- Because of that, several correctness windows are currently **masked rather than fixed**:
-  - The **merge** late-write window is masked. `RangeMerger` takes no quiesce of any kind, and its
-    class summary justifies that with the shared store. That justification does not hold once a
-    replication factor places the two partitions on different nodes, which is exactly what makes
-    the loss observable — see the split-side note below.
-  - The **split** direct-write window is closed (§6 step 4), not masked. It was worth re-checking
-    on a replication-factor fixture rather than trusting the shared-store argument: with each data
-    partition on its own node, a write stranded on the source is genuinely unreachable after
-    cutover, and that is the fixture the split quiesce is tested against.
-  - Orphan retention "works" only because the source's copy is the same physical row P' reads.
-
-### The next major piece: partition-scoped storage
-
-The highest-leverage future work is making the persistence backend **partition-scoped** so a
-partition's data is physically distinct and removable. The recommended approach is **composite
-keying**: prefix every stored key with its partition id (`{partitionId}\x00{key}`) in the
-existing store, so `RemovePartition` becomes a bounded prefix-range delete. (The alternative is
-a separate store per partition — cleaner isolation, heavier lifecycle.)
-
-Once storage is partition-scoped, the follow-on work becomes *real* instead of vestigial:
-
-- **Real transfer into P'** — install `[K,E)` into P''s Raft-replicated state across all its
-  replicas, not just the executor's local store. Then killing the executor still leaves the data
-  readable from another P' replica.
-- **Re-enable the source delete** — drop `[K,E)` from P after a *successful* cutover, partition-
-  scoped and prefix-bounded, replacing orphan retention.
-- **Re-validate the masked windows** — the merge window becomes a genuine loss window (the split's
-  is already closed and tested against a replication-factor fixture); confirm a quiesce closes it.
+The remaining storage limitation is **orphan cleanup**. Source rows are retained after cutover:
+a delete in a node-global backend could also remove rows the destination owns on the same node.
+Partition-scoped storage would allow bounded physical removal without depending on current routing.
+The current un-host purge filters rows by ownership rather than issuing a partition-prefix delete.
 
 ### Other deferred work
 
-- **Load-based split** — split a *hot* range, not just a large one. Needs a per-range load
-  signal (ops/sec, p99). For insert-heavy tables, a "hash-shard a hot prefix" knob.
-- **Rebalance** — move a range's *replicas* across nodes for space/load. **Blocked upstream:**
-  Kommander only exposes cluster-wide `JoinCluster`; this needs per-group
-  `AddServer`/`RemoveServer`. Per Kahuna's rule, that's a Kommander capability to add, not a
-  Kahuna workaround.
+- **Load and placement policy limits.** Load-based splitting and per-partition replica balancing
+  are implemented; they are not deferred primitives. They remain subject to configured thresholds,
+  admissible moves, cooldowns and transfer capacity. See the
+  [load-based splitting guide](load-based-range-splitting-guide.md) and
+  [replication factor guide](replication-factor-guide.md). Adding nodes does not guarantee a
+  proportional increase in useful capacity.
 - **Meta-range sharding** — if the meta partition (P0) itself gets hot, shard the descriptor map
   across several meta partitions (CRDB-style meta/meta ranges).
 - **Serializability (SSI)** — the per-range locks are the foundation for a serializable

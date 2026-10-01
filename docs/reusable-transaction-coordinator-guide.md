@@ -16,8 +16,8 @@ with the example below and then read the lifecycle sections in order.
 > the end-to-end execution path — how a request travels from gRPC/REST/embedded through routing and
 > staging into durable-intent 2PC, out through the partition write aggregator to the Raft WAL and the
 > persistence backend, and what happens in the deferred-settlement window afterwards — read
-> **`transaction-lifecycle-guide.md`**. For the aggregator's batching and backpressure knobs in depth,
-> read **`partition-write-coalescing-guide.md`**.
+> [transaction lifecycle guide](transaction-lifecycle-guide.md). For the aggregator's batching and backpressure knobs in depth,
+> read [partition write-coalescing guide](partition-write-coalescing-guide.md).
 
 ---
 
@@ -384,12 +384,13 @@ this path.
 3. **Validate** the read set (revision comparison plus a concurrent-writer probe, read through the
    intent-aware path) — only meaningful once every prepare is durable.
 4. **Decision barrier** — compare-and-set the canonical record: `Commit` only when every prepare is
-   durable **and** validation passed; otherwise `Abort`. A failed prepare is a *retryable* abort; a
-   failed validation is a *conflict* abort.
-5. **Resolve** — apply the terminal decision to every intent: on commit, materialize each intent as an
-   ordinary key/value record (so the normal replicator makes followers converge) and apply it on the
-   leader; on abort, clear the staged write intent/MVCC. Then settle each intent (resolve + remove in
-   one atomic delta).
+   durable **and** validation passed; otherwise drive an abort with the appropriate class. An unresolved
+   proposal remains `MustRetry`; a canonical terminal abort is reported as `Aborted`.
+5. **Resolve** — on commit, install values through materialization records and then settle the intents,
+   or let the settlement apply install them when `DurableMaterializeOnResolve` is enabled. On abort,
+   clear staged write intent/MVCC before settling. Settlement resolves and removes intents in one delta.
+   See the [durable settlement guide](durable-settlement-guide.md) for encoding, persistence and upgrade
+   requirements.
 
 The decision compare-and-set is the point of no return. Because the record is the single authority, the
 finalizer reports whatever the record actually became after apply — a concurrent recovery abort can win
@@ -403,16 +404,26 @@ rolling estimate of real finalize latency (measured with a monotonic stopwatch �
 a distributed event), so the deadline tracks load instead of a fixed guess: too small spuriously aborts
 slow-but-alive coordinators, too large delays recovery of dead ones. During warmup the floor applies.
 
-A commit attempt whose HLC has already passed the frozen deadline is rejected by the record state
-machine (the record stays `Undecided`) and yields to presumed-abort recovery; that rejection increments
-a `late_commit_rejections` counter. A rising rate means the deadline is too tight for current latency.
+A commit attempt whose HLC has passed the frozen deadline is rejected by the record state machine;
+that rejection increments `kahuna.durable_tx.late_commit_rejections`. The finalizer then drives the
+presumed-abort CAS itself and reports the canonical winner: `Aborted` with class `PresumedAbort`, or
+`Committed` if a prior commit already applied. It does not leave a permanently expired finalize in a
+retry loop. A rising rejection rate means the deadline is too tight for current latency.
 
 ### Abort classification
 
-The outcome maps onto the `MustRetry`/`Aborted` contract: only a **conflict** abort (validation found a
-concurrent writer or a stale read) is reported as `Aborted`. Every other abort — a prepare that did not
-replicate, a deadline expiry, a presumed abort — and every infrastructural failure is `MustRetry`, so a
-caller never sees a false conflict for a transient failure.
+`Aborted` includes conflict aborts, lost staging and canonical terminal aborts such as `PresumedAbort`.
+The reason distinguishes `Transaction conflict`, `Lost staging: …`, and `Transaction aborted: …`.
+Start a new transaction after an abort. `MustRetry` means the finalize has not established a terminal
+outcome; it can already have durable initialization and prepares, so retry finalize with the same
+identity rather than assuming nothing happened.
+
+The coordinator checks staging continuity before commit. A restaged set/delete must advance exactly
+one revision beyond the previous staged mutation, an extend must retain it, and a registered point read
+of a staged key must report its staged revision. A leader change can discard participant-local staging
+before prepare; a broken chain then refuses commit with `Aborted` instead of silently dropping an earlier
+write. Point locks also contribute their observed committed base to the read set, so losing an exclusion
+does not authorize committing a value computed from a stale base.
 
 ### Settlement timing
 
@@ -443,9 +454,12 @@ recovery deadline it looks up the transaction's canonical record and:
 - record says `Abort` → discard, then settle the intent;
 - record `Undecided` but still within its decision deadline → leave it; the coordinator may still be
   finalizing;
-- record `Undecided` past its deadline, or **no record at all** (an orphan prepare that outlived a
-  failed initialization) → drive an idempotent presumed-abort at the anchor, then resolve the intent to
-  whatever the record actually became (a concurrent in-flight commit can still win).
+- record `Undecided` past its deadline, or **no record within the outcome-retention horizon** → drive an
+  idempotent presumed-abort at the anchor, then resolve to the canonical winner;
+- **no record past the retention horizon** → use a matching completion receipt as commit proof. Without
+  one, hold the intent; never guess that a reclaimed record means abort. Replica cross-checks can detect
+  divergence and trigger containment/re-seeding. See the
+  [lifecycle guide](transaction-lifecycle-guide.md#67-record-less-intents-past-the-retention-horizon).
 
 Recovery never guesses an outcome and never resolves an intent whose record is undecided but still
 inside its window. The request path and recovery may race; initialize, prepare, decide, materialize, and
@@ -455,21 +469,23 @@ that actually wins increments `deadline_expiry_aborts`.
 ### Resolving a commit after the session is gone
 
 If a `Commit`/`Rollback` arrives for a transaction whose live session is gone (evicted, or it lived on a
-failed node), the coordinator first checks the retained terminal-outcome window, then consults the local
-canonical record: `Commit → Committed`, a conflict abort → `Aborted`, undecided or any other abort →
-`MustRetry` (recovery finishes it). A record not resident on this node stays unknown `Errored` rather
-than a fabricated conflict — a **cross-node canonical-record lookup is a follow-up**, matching the
-replication coverage the read path has today.
+failed node), the coordinator first checks the retained terminal-outcome window, then routes a canonical
+record lookup to the handle's `RecordAnchorKey`: `Commit → Committed`, terminal `Abort → Aborted`, and
+`Undecided → MustRetry` (recovery finishes it). An absent record or an unresolvable anchor leader also
+answers `MustRetry`: absence is not proof of abort. A handle with no anchor cannot consult a lost
+session's durable outcome and answers unknown `Errored`. Bound retries and report an unresolved outcome
+as indeterminate; do not convert retry exhaustion into proof that no commit happened.
 
 ### Completion receipts
 
-When an intent materializes, the participant records a `CompletionReceipt` on the same key/value commit.
+When an intent materializes, the participant records a `CompletionReceipt` at the same applied log index:
+the key/value materialization record by default, or the materializing settlement when enabled.
 A duplicate commit or a recovery re-drive can consult that receipt after the original MVCC entry and
 write intent are gone, including after replication or restart, to recognize an "already committed"
 without reapplying. A receipt lookup validates the full immutable identity — transaction, key, and
 durability — so a persistent receipt never satisfies an ephemeral request for the same logical key, and
-vice versa. Receipts are restored from the committed key/value log and snapshotted before WAL retention
-advances, and are not count-evicted.
+vice versa. Receipts are reconstructed by materialization/settlement replay and snapshotted before WAL
+retention advances, and are not count-evicted.
 
 Range split and merge hand off completion receipts to the destination partition as part of the
 pre-cutover handoff, **replicated onto the destination partition's Raft log** so every replica holds
@@ -481,16 +497,17 @@ are in-memory, non-replicated actor state); only the correctness metadata gates 
 
 Durable mode has clear boundaries:
 
-- The active in-memory **session** is not persisted: if the coordinator-partition leader is lost, the
-  session and its acquired-lock set are gone. A committed transaction is still resolvable from its
-  canonical record; an undecided one is presumed-aborted by recovery after its deadline.
+- The active in-memory **session** is not persisted: if its owning process is lost, the session and
+  its acquired-lock set are gone. A leadership change alone leaves the session on its original node;
+  finalize routes its durable work to the current participant leaders. A committed transaction is still
+  resolvable from its canonical record; an undecided one is presumed-aborted by recovery after its deadline.
 - **Ephemeral** modified keys are rejected: neither the value nor a receipt can survive process loss, so
   a durable transaction that modified an ephemeral key is aborted before any intent is staged. A durable
   transaction with modifications must also have an anchor.
 - A read-only transaction creates no record and needs no recovery.
-- A **cross-node** consult of the canonical record from a non-resident node is not yet implemented; such
-  a duplicate finalize returns `MustRetry`/`Errored` (never a false outcome) until the local record or
-  recovery resolves it.
+- An anchor-routed lookup can recover a **durable outcome**, not the session's staged but unprepared
+  operations, lock set, or read pins. If the anchor cannot be resolved or its record is absent, the
+  outcome remains `MustRetry`; a handle without an anchor remains unknown `Errored`.
 
 Unlike the retired manual ticket path (whose prepare state lived only in the participant leader's memory), a
 prepared intent is *durable* here: a participant leader change after prepare does not lose the staged value,
@@ -523,34 +540,30 @@ When the deadline passes, the reaper claims the same finalize slot as explicit f
 On the same periodic tick, the coordinator renews the range locks held by its live sessions. Renewal is
 entirely server-side — there is no client heartbeat. Each sweep re-acquires every range lock in a
 session's confirmed working set with a fresh TTL (`RangeLockRenewalTtlMs`, derived from
-`CollectionInterval`), so a lock a caller acquired with a short TTL stays effective for as long as the
-session is alive without the caller having to extend it.
+`CollectionInterval`), so callers need no client heartbeat for routine renewal. Successful renewal refreshes the TTL;
+a live session alone does not guarantee that every renewal succeeds.
 
-Two leader-local facts shape what renewal can and cannot guarantee. Neither range locks nor their write
-intents are Raft-replicated: they are in-memory state on the **range-lock partition leader** and are not
-reconstructed by a new leader. Likewise, the session and its acquired-lock set live only on the
-**coordinator-partition leader**. Renewal bridges the first of these: a range-lock acquire always routes
-to the current partition leader, so if that leader changes, the next sweep simply re-establishes the lock
-on the new leader — a range-lock-partition leader change is transparently re-covered as long as the
-session still exists.
+Range locks and their write intents are in-memory state on the **range-lock partition leader**;
+they are not reconstructed from Raft on promotion. The session and its acquired-lock set remain on
+the **original coordinator node**, rather than migrating with coordinator-partition leadership.
+A leadership change alone does not remove that session. Renewal routes each acquire to the current
+range-lock leader and can re-establish the lock if the session remains reachable.
 
-What renewal does not bridge is loss of the session itself. If the **coordinator-partition** leader
-changes, the session and its acquired-lock set are gone, renewal stops, and the range locks lapse at their
-current TTL. This is not a silent inconsistency: a commit that depended on a now-missing lock returns the
-retryable `MustRetry`, never a false all-commit, and MVCC read-set validation in the two-phase commit is
-the actual correctness backstop — range locks are a best-effort fencing and contention-reduction layer on
-top of it. This is also why an end-to-end "is the lock still held" assertion is only stable on a single
-node or a cluster with a settled leader: while leadership is still moving (for example a young in-memory
-test cluster), the authoritative copy migrates between nodes and a probe can momentarily observe a stale
-follower copy.
+Renewal is **best-effort**, not continuous exclusion across failover. Scheduling delays, denied
+re-acquires, transport failures or a participant leader change can leave an unlocked interval.
+Losing the original coordinator process loses the in-memory session and stops renewal; locks then
+lapse or are purged on leadership loss. Finalize read-set validation, point-lock base validation and
+staging-continuity checks remain the backstops. Depending on the failure, operations can answer
+`MustRetry`, or finalize can return a terminal `Aborted` conflict / `Lost staging`; a missing lock
+alone is not a promise of one particular outcome. Replicated prepares and canonical decisions remain
+recoverable independently of the session.
 
 Two details keep the sweep well-behaved. It runs under a self-imposed deadline (half the renewal TTL) with
 bounded concurrency and passes that deadline into each acquire, so one slow or stuck participant is
 cancelled at the budget instead of making the whole sweep — and therefore the reaper tick — as slow as the
 slowest RPC. And renewal continues through a finalize drain: a `Finalizing` session whose in-flight
 operations are still draining keeps renewing its locks, and renewal stops only once cleanup atomically
-takes ownership of the lock set, so the predicate lock never lapses in the gap between "finalize began" and
-"cleanup released the locks."
+takes ownership of the lock set, so the transition into finalization does not itself stop renewal before cleanup takes over.
 
 ### Relevant bounds
 
@@ -763,7 +776,7 @@ the server project does not.
 | `Kahuna.Core/KeyValues/Transactions/FinalizeLatencyEstimator.cs`, `DurableTransactionMetrics.cs` | Rolling finalize-p99 estimate that sizes decision deadlines, and the durable-path counters/histogram. |
 | `Kahuna.Core/KeyValues/Transactions/PreparedIntentVisibility.cs`, `PreparedIntentScanMerge.cs`, `Handlers/DurableReadVisibility.cs`, `Handlers/ForeignIntentWriteResolver.cs` | Reading and scanning committed-but-unmaterialized intents, and resolving a foreign intent on a conflicting write. |
 | `Kahuna.Core/KeyValues/PreparedIntentRecoveryActor.cs`, `TransactionReaperActor.cs` | Periodic prepared-intent recovery and abandoned-session cleanup triggers. |
-| `Kahuna.Core/KeyValues/Handlers/TryPrepareMutationsHandler.cs`, `TryCommitMutationsHandler.cs` | Ephemeral 2PC prepare/commit (a persistent key is rejected here — it finalizes through the durable-intent path, which materializes the committed value and records the completion receipt via the normal key/value commit apply). |
+| `Kahuna.Core/KeyValues/Handlers/TryPrepareMutationsHandler.cs`, `TryCommitMutationsHandler.cs` | Ephemeral 2PC prepare/commit; persistent keys use durable-intent finalization and materialization/settlement apply. |
 | `Kahuna.Core/KeyValues/KeyValueReplicator.cs`, `KeyValueRestorer.cs` | Receipt reconstruction on replication and WAL restore. |
 | `Kahuna.Core/Persistence/BackgroundWriterActor.cs` | Receipt snapshot ordering before partition checkpoints advance WAL retention. |
 | `Kahuna.Core/KeyValues/Ranges/RangeSplitter.cs`, `RangeMerger.cs` | Replicated, cutover-gating completion-receipt handoff across routing changes. |

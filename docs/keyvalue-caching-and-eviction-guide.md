@@ -14,8 +14,9 @@ No prior knowledge of Kahuna's internals is assumed. Concepts are introduced as 
 ## 1. The big picture
 
 Kahuna is a distributed key/value store. Keys are spread across many independent **partitions**, and
-each partition is owned by one **actor** — a single-threaded worker that processes requests for its
-keys one at a time. Because an actor is single-threaded, it never needs locks for its own data, but
+keys are also assigned to **actor shards** — single-threaded workers that process their keys one
+at a time. Actor shards and Raft partitions are different: one actor can own keys from several
+partitions, and a partition's keys can span actors. Because an actor is single-threaded, it never needs locks for its own data, but
 it also means any slow operation inside an actor stalls every other request for that partition. This
 is the single most important fact for understanding the eviction design: **all the bookkeeping below
 is built to keep per-request work small and predictable.**
@@ -70,9 +71,10 @@ The byte figure is an *estimate* — object headers and dictionary overhead are 
 than measured exactly. It also folds in the overhead of the helper structures (described next) so
 that their growth is visible to the budget and can trigger reclamation.
 
-When you run many partitions, the *total* memory ceiling is roughly `partitions × MaxBytesPerActor`.
-This is also how Kahuna scales to large datasets: a big table is split across many partitions, so no
-single actor ever holds the whole thing. Cold keys are evicted and re-read from disk on demand; hot
+Cache budgets apply to actor instances, not Raft partitions. Kahuna constructs `KeyValueWorkers`
+actors for each durability (persistent and ephemeral), so budget targets scale with those actor
+counts. They are eviction targets, not a hard process-memory ceiling: pinned/dirty entries and
+durable stores, snapshot buffers, WAL and backend caches can add memory beyond them. Cold keys are evicted and re-read from disk on demand; hot
 keys stay cached. This is the same "cache hot data, fall back to disk" model used by large-scale
 databases.
 
@@ -214,14 +216,18 @@ where they grow, so the collector never has to sweep the whole store to bound th
 
 - **Revision history.** Each entry keeps a small number of recent prior versions so that
   point-in-time ("as of") reads can be answered from memory. This history is trimmed back to
-  `RevisionRetention` (default 16) every time a new revision is archived.
+  `RevisionRetention` (default 16) every time a new revision is archived, **except** that unflushed
+  revisions and the boundary of a registered snapshot hold are retained beyond the count. Flush
+  lag can therefore grow the archive. A disk fallback that could miss an unflushed revision is
+  fenced with `MustRetry`; see the [MVCC guide](mvcc-snapshot-floor-guide.md).
 - **Transaction snapshots (MVCC).** While transactions are in flight, an entry may hold per-
   transaction snapshots used for isolation and conflict detection. When a transaction resolves
   (commits, rolls back, or releases its lock), its own snapshot is removed and any expired snapshots
   left by other transactions are cleaned up at the same time.
 
 > **Concept — MVCC.** "Multi-Version Concurrency Control." Instead of blocking, the store keeps
-> multiple versions of a value so each transaction sees a consistent snapshot. Those extra versions
+> multiple versions of a value for historical reads and per-key transaction observations. Latest
+> transactional observations do not automatically form one fixed snapshot across all keys. Those extra versions
 > must be cleaned up once no transaction needs them.
 
 > **Maintainer invariant.** Because the collector no longer trims metadata, these inline trims are
@@ -272,8 +278,8 @@ too small for the workload.
 
 | Knob | Default | Raise it to… | Lower it to… |
 |------|---------|--------------|--------------|
-| `MaxEntriesPerActor` | 50,000 | cache more keys per partition (more memory, fewer disk reads) | cap memory harder |
-| `MaxBytesPerActor` | 256 MiB | cache more/larger values per partition | cap memory harder |
+| `MaxEntriesPerActor` | 50,000 | cache more keys per actor (more memory, fewer disk reads) | cap memory harder |
+| `MaxBytesPerActor` | 256 MiB | cache more/larger values per actor | cap memory harder |
 | `CollectBatchMax` | 1,000 | reclaim faster under bursty pressure (longer pauses) | keep collect pauses shorter |
 | `RevisionRetention` | 16 | answer more "as of" reads from memory | shrink per-entry history |
 | `DirtyObjectsWriterDelay` | 1,000 ms (embedded) | batch disk writes more aggressively | flush sooner (smaller dirty window) |
@@ -281,15 +287,16 @@ too small for the workload.
 General guidance:
 
 - If reads frequently miss the cache and hit disk, the budget is too small for the working set —
-  raise `MaxEntriesPerActor` / `MaxBytesPerActor`, or add partitions so each holds less.
+  raise `MaxEntriesPerActor` / `MaxBytesPerActor` or adjust the actor-worker count. Adding Raft
+  partitions alone does not create more cache actors.
 - If collect pauses are noticeable, lower `CollectBatchMax` so each pass does less at once.
-- Remember every limit is **per actor/partition**: total memory scales with the number of partitions.
+- Remember these cache limits are **per actor**; total process memory includes other stores and buffers.
 
 ---
 
 ## 10. Mental model in one paragraph
 
-Each partition is a single-threaded actor with a sorted in-memory cache bounded by a per-actor budget.
+Each actor shard has a sorted in-memory cache with a per-actor eviction budget, separate from Raft partitions.
 Deleted keys, expired keys, and cold keys are reclaimed by a collector that consults a tombstone
 queue, an expiry heap, and an intrusive LRU list, and inspects at most a batch's worth of entries per
 cycle — resuming via a cursor and a self-scheduled follow-up rather than scanning the whole store on

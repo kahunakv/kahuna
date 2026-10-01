@@ -274,38 +274,30 @@ failure.
 
 ---
 
-## 8. The compaction floor (the one caveat that matters)
+## 8. Catch-up below the compaction floor
 
-To bound disk use, each node periodically **compacts** its log — discarding old entries it no longer
-needs. A joining Learner catches up by replaying log entries from where it left off. **If the cluster
-has already compacted past the point a Learner needs to start from, there is nothing to replay it
-forward from, and the join cannot complete.**
+A joining Learner normally catches up by replaying retained log entries. When the required entries
+have already been compacted, Kahuna supplies whole-partition state transfer: the leader seeds the
+replica from a snapshot, then backfills the retained tail. Data partitions carry key/value, persistent
+lock and transaction state; the meta partition carries the range map and snapshot-floor holds.
+Snapshot seeding is available today, including for replicas catching up after restart.
 
-> **Concept — what makes a log compactable.** Compaction never runs on its own: a partition's log can
-> only be trimmed below its most recent **checkpoint**, which the background writer takes once a
-> partition has been dirty for `--checkpoint-interval` (default 30 s) and its writes have reached
-> storage. Raise the interval and each partition keeps a longer log between trims; lower it and the
-> node pays for more frequent checkpoints. A partition that is never written to never checkpoints,
-> and it does not need to — it has nothing to trim.
+Compaction remains bounded by checkpoints and the application-durability floor. The background writer
+checkpoints dirty partitions on `--checkpoint-interval` (default 30 s), including under sustained write
+load; it does not require an idle interval. Raft's live-replica and silent-peer retention policies can
+keep additional history available for backfill.
 
-When this happens, the join does **not** hang silently or run a half-joined node — it **fails fast with
-a clear error** pointing at the compaction floor as the cause. That's the signal to use one of the two
-remedies:
+A snapshot is not guaranteed to fit or finish: insufficient receive-byte capacity, storage failures,
+unsupported snapshot state or an install slower than the acknowledgement deadline can prevent catch-up.
+If no suitable state-transfer provider is registered, a below-floor join still fails rather than
+promoting an incomplete learner. The
+[snapshot and Raft recovery guide](snapshot-and-raft-recovery-guide.md) describes installation,
+staging, deadlines and retention settings.
 
-- **The general fix** is an upstream snapshot-transfer mechanism (ship the whole state to the new node
-  instead of replaying the log). This is tracked but not yet available.
-- **The available remedy today** is to **seed the node from a recent backup** before joining. If you
-  restore the node from a point-in-time backup taken *recently enough*, its starting point lands
-  **above** the compaction floor, and the normal catch-up (backfill) finishes the job. See the
-  [backups and point-in-time recovery guide](backups-and-point-in-time-recovery-guide.md) — the
-  "restoring a node vs. adding it to the cluster" section explains how a restored image and a cluster
-  join fit together.
-
-> **Concept — why a restore + join, not just a restore.** A restored backup gives the node the *data*
-> as of some recent moment, but it does not make the node a *member* — membership is a separate
-> committed step. The restore gets the node's starting point above the compaction floor; the join
-> admits it and lets normal catch-up cover the gap since the backup. Neither alone is enough for a
-> long-down node; together they work.
+A recent backup is another way to seed data, subject to the
+[backup coverage and restore rules](backups-and-point-in-time-recovery-guide.md). Restoring an image
+does not admit a node to membership: the join remains a separate committed operation. A backup is
+no longer a mandatory workaround for all below-floor catch-up.
 
 ---
 

@@ -29,8 +29,9 @@ proposes the collected log records in **one** `ReplicateEntries` call. Writes fr
 single-key calls, and bulk (`SetMany`/`DeleteMany`) calls all meet in the same partition queue, so
 coalescing is *cross-request*, not limited to one API call.
 
-The result: N direct writes to a partition become a handful of proposals (bounded by batch-size and
-byte caps), collapsing WAL appends, quorum round trips, and `fsync`s in the same proportion.
+Coalescing reduces proposal calls when writes overlap in the queue. Actual WAL sync counts and
+latency depend on batch occupancy, Kommander group-commit settings and the device; the batch caps
+alone do not imply a proportional throughput improvement.
 
 **The scheduler is shared and heterogeneous.** The same per-partition scheduler also carries the
 durable-intent 2PC records — the canonical transaction record's initialize/decision and each prepared
@@ -147,7 +148,7 @@ All types live in `Kahuna.Core/KeyValues/Writes/`.
   the moment this node stops leading the partition — a stalled leader is stepped down within seconds and
   its apply may not advance until its device heals, while the new leader applies and judges the same
   quorum-durable entries — and a released or timed-out completion answers the producer as *unobserved*,
-  which every producer treats as "not committed, retry": the re-driven entries are idempotent in the log and
+  which producers treat as an unresolved apply outcome and retry: the re-driven entries are idempotent in the log and
   the retry resolves the leader afresh. `kahuna.durable_tx.ordered_apply_waits_released_on_leadership_loss`
   and `kahuna.durable_tx.ordered_apply_wait_timeouts` count those; `kahuna.durable_tx.redundant_applies_skipped`
   counts the completions that took the ordered apply's result, which on a busy leader is nearly all of them.
@@ -177,7 +178,8 @@ Each partition accumulates writes in a FIFO buffer. A partition's buffer flushes
 - the pending item count reaches the batch-items cap;
 - the pending serialized bytes reach the batch-bytes cap;
 - the **oldest** item's linger deadline elapses; or
-- an in-flight batch completes and a buffer accumulated behind it.
+- an in-flight batch completes and a buffer accumulated behind it, subject to the configured
+  post-completion hold for sub-threshold batches.
 
 The linger deadline is measured from the oldest queued item and is **not** reset by new arrivals, so
 sustained traffic cannot postpone a flush forever. Linger is modelled by an *epoch* rather than a wall
@@ -193,9 +195,8 @@ that, and no new atomicity promise is made.
 **At most one batch is in flight per partition.** This is not unwanted serialization — the Raft
 partition is itself the serialization point, and Kommander otherwise reports/retries a concurrent
 proposal. The important property is that *different* partitions can have Raft calls in flight and
-complete concurrently. Once an in-flight batch completes, the buffer behind it is re-driven
-immediately (a linger timer that fired during the in-flight window was ignored, so completion is the
-point that must re-dispatch).
+complete concurrently. Completion re-drives the buffer; a full batch dispatches immediately,
+while a sub-threshold batch can wait for `KeyValueWritePostCompletionHoldMs` (default 0).
 
 ---
 
@@ -270,7 +271,7 @@ options and on `EmbeddedKahunaOptions` for the embedded/standalone engine):
 |---|---:|---|
 | `KeyValueWriteLingerMs` | `1` | Delay from the oldest queued item before a partition batch is proposed. `0` dispatches an idle partition immediately (still batching work that accumulates behind an in-flight batch). |
 | `KeyValueWritePostCompletionHoldMs` | `0` | Hold after each batch completion before the next sub-threshold batch may dispatch, so arrivals accumulate into a denser batch. A full batch always dispatches at once, and queue-age releases are unaffected. `0` re-dispatches on completion immediately. |
-| `KeyValueWritePreciseWake` | `false` | Fire the flush wakes (post-completion hold, linger) on a spin-tailed high-resolution wait instead of the timer queue: the last 2 ms of each wait spin-yields on a thread-pool thread. Removes the timer's lateness from every held cycle at the cost of up to 2 ms of one thread's CPU per wake. Queue-age release wakes keep the timer queue. |
+| `KeyValueWritePreciseWake` | `false` | Fire the flush wakes (post-completion hold, linger) on a spin-tailed high-resolution wait instead of the timer queue: the last 2 ms of each wait spin-yields on a thread-pool thread. Aims to reduce the timer's lateness at the cost of up to 2 ms of one thread's CPU per wake. Queue-age release wakes keep the timer queue. |
 | `KeyValueWriteMaxBatchItems` | `512` | Maximum log entries per Raft call. |
 | `KeyValueWriteMaxBatchBytes` | `4 MiB` | Target serialized bytes per Raft call; an oversized single item dispatches alone. |
 | `KeyValueWriteMaxQueuedItemsPerPartition` | `8192` | Maximum admitted items per partition, including those in flight. |
@@ -395,6 +396,11 @@ burst it should approach the configured batch cap; a value near one means writes
 slowly to batch, or are spread across too many partitions.
 
 ---
+
+`kahuna.kv.write.stage_entries{stage}` counts log entries dispatched by their producing stage, alongside
+the cycle and submission metrics above. Materialization entries can disappear when an embedded host
+enables `DurableMaterializeOnResolve`; settlement then installs the committed values at apply instead.
+See the [durable settlement guide](durable-settlement-guide.md) for semantics and upgrade ordering.
 
 ## 8. Failure and lifecycle behavior
 

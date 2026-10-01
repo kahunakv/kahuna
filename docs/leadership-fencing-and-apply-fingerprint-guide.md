@@ -4,7 +4,8 @@ This guide explains two defenses against a write that a client saw acknowledged 
 later did not have: the **quorum-confirmed gate on actor-only mutations**, which stops a leader that
 lost its voters from staging writes and handing out locks from a memory nobody else sees, and the
 **per-partition apply fingerprint**, which makes a replica whose apply stream diverged from the log
-visible in the cluster's own signals and stops a range split from copying out of it. It is written
+visible in the cluster's own signals, contains an identified incomplete projection and stops a range
+split from copying out of an identified incomplete leader. It is written
 for operators running a clustered Kahuna deployment.
 
 Related guides: [cluster membership operations](cluster-membership-operations-guide.md),
@@ -20,7 +21,9 @@ term reaches it. In that window the other voters elect a second leader. Kahuna h
 in three layers.
 
 **Replication fails on its own.** Every direct write and every durable transaction phase is a Raft
-proposal. A proposal on the cut-off leader never reaches a quorum, so the caller gets `MustRetry`.
+proposal. While the leader cannot reach a voter quorum it cannot confirm a proposal, and the
+caller receives a retryable unresolved result such as `MustRetry`. A missing acknowledgement is
+not proof that the proposal cannot later commit; durable finalize retries retain their identity.
 This layer needs no configuration.
 
 **Reads confirm leadership through a quorum.** An authoritative read first runs a Raft read-index
@@ -48,6 +51,12 @@ fault.
 |---|---|---|---|
 | Check-quorum step-down | `--raft-enable-check-quorum` | `EmbeddedKahunaOptions.EnableCheckQuorum` | on |
 | Window, in heartbeat intervals | `--raft-check-quorum-interval-multiplier` | `EmbeddedKahunaOptions.CheckQuorumIntervalMultiplier` | 0 = derived from the election timeout |
+
+The standalone `EmbeddedKahunaNode(options)` constructor always disables check-quorum and backfill.
+Its in-process phantom witnesses auto-acknowledge but store no data and cannot become leaders; scheduler
+or GC pauses should not depose the sole real node. The cluster constructor retains the configured
+check-quorum setting, including `EmbeddedKahunaCluster` members. This is not additional failure tolerance
+for standalone hosts: only their own backend/WAL can preserve data through process loss.
 
 The server switch is a bare flag and cannot express "off". Set the environment variable
 `KAHUNA_CHECK_QUORUM=0` to turn the step-down off.
@@ -117,6 +126,10 @@ marked entries applied without delivering them, an import rewound the applicatio
 or it alone rejected a bundled commit. Such a replica misses acknowledged writes and holds settled
 transactions' intents as read-only keys, and nothing else in normal operation reveals that.
 
+This is a count-based fingerprint, **not a hash of values or a complete equivalence proof**.
+Equal counts cannot detect different values or a different key/intent set of the same size.
+An inconclusive comparison does not certify a replica.
+
 The three fields are read as one snapshot: the apply path brackets every entry with a per-partition
 version, and the read retries until it sees the same even version before and after, so an apply
 landing between the reads cannot pair one entry's counts with the previous entry's id.
@@ -181,9 +194,9 @@ A divergence that indicts the local node is confirmed by a second comparison and
   request is refused while the replica still leads, so it follows the relinquish.
 - **The gate clears when the whole-partition install replaces the projection**
   (`kahuna.keyvalues.apply_divergence_repaired`; the install boundary also moves the fingerprint's
-  applied id to the checkpoint entry, so the fingerprints line up at the next committed entry). In
-  the in-process tests the whole cycle, from detection to a repaired and re-electable replica, takes
-  well under a second.
+  applied id to the checkpoint entry, so the fingerprints line up at the next committed entry).
+  Recovery time depends on checkpoint, export, staging, installation and quorum availability; there
+  is no subsecond operational guarantee. See the [snapshot guide](snapshot-and-raft-recovery-guide.md).
 
 The split's pre-copy comparison (below) reports through the same path but does not contain: it runs
 on the meta-partition leader, not on the diverged node.

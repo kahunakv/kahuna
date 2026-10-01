@@ -301,6 +301,20 @@ Two properties make this safe to run, and safe to *re-run*:
 > from the start" is always correct. Idempotency is what turns restore from a delicate operation into
 > a routine one.
 
+### Durable transaction replay encodings
+
+Restore classifies key/value records by their encoded kind. Value-carrying materializations include
+the committed row; by-reference materializations reconstruct it from the corresponding prepared intent.
+With `DurableMaterializeOnResolve`, a committed settlement itself installs those rows, without separate
+key/value materialization records. Restore tracks prepares through the WAL segments, expands these
+resolves before their intent removals, and cuts rows on the transaction's commit HLC. The backup applied
+barrier also includes that HLC, rather than treating a settlement as timestamp-free bookkeeping.
+
+A recent duplicate materializing settlement is tolerated. A materializing resolve without its prepare
+or recognized duplicate history fails restore closed; it is not silently skipped. Reader compatibility
+must precede enabling new encodings. See the
+[durable settlement guide](durable-settlement-guide.md) for configuration and rolling upgrades.
+
 ---
 
 ## 8. Coordinated snapshots across the whole cluster
