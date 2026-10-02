@@ -4,11 +4,16 @@ namespace Kahuna.Server.Tests;
 
 /// <summary>
 /// Records every formatted log line that reaches it, with its level, so a test can assert on what a node said
-/// through the same factory (and therefore the same minimum level) its output goes through. Instance-scoped:
-/// unlike the process-wide meter, it sees only the loggers created from the factory it was added to.
+/// through the factory it was built with. Instance-scoped: unlike the process-wide meter, it sees only the
+/// loggers created from that factory. <see cref="TestLogFactory"/> filters it at <see cref="MinimumLevel"/>
+/// independently of the level the test output is filtered at, so what a test can assert on does not change
+/// with the environment the suite runs in.
 /// </summary>
 internal sealed class RecordingLogProvider : ILoggerProvider
 {
+    /// <summary>The lowest level recorded: what a host that filters its logs at Warning still sees.</summary>
+    public const LogLevel MinimumLevel = LogLevel.Warning;
+
     private readonly object gate = new();
 
     private readonly List<(LogLevel Level, string Message)> lines = [];

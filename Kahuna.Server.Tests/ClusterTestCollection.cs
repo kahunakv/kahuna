@@ -10,3 +10,13 @@ namespace Kahuna.Server.Tests;
 // this group ever pushes that counter above zero under correct behavior.
 [CollectionDefinition("SnapshotFloorMetrics")]
 public sealed class SnapshotFloorMetricsCollection { }
+
+// Groups the tests that observe the process-global "kahuna.kv.materialization_intent_missing" and
+// "kahuna.kv.restore_by_reference_unresolved" counters. They live on the same static Meter, and a test of
+// this group either drives them non-zero on purpose (a by-reference record with no source) or asserts an
+// exact total over a window in which a node restarts. Two such tests that overlap read each other's
+// increments, so all of them share one collection and run sequentially relative to each other; the
+// collection still runs in parallel with the rest of the suite, because no test outside this group pushes
+// those counters above zero under correct behavior.
+[CollectionDefinition("MaterializationMissMetrics")]
+public sealed class MaterializationMissMetricsCollection { }

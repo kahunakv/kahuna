@@ -30,6 +30,7 @@ namespace Kahuna.Server.Tests;
 /// snapshot outside the live set, and releases it once the row's flush is confirmed; the restorer resolves the
 /// record from it; and a real node killed in that window serves the committed value after its restart.
 /// </summary>
+[Collection("MaterializationMissMetrics")]
 public sealed class TestSettledIntentFlushRetention : IDisposable
 {
     private static HLCTimestamp Ts(long physical) => new(0, physical, 0);
@@ -51,8 +52,7 @@ public sealed class TestSettledIntentFlushRetention : IDisposable
 
     public TestSettledIntentFlushRetention(ITestOutputHelper outputHelper)
     {
-        loggerFactory = TestLogFactory.Create(outputHelper);
-        loggerFactory.AddProvider(logLines);
+        loggerFactory = TestLogFactory.Create(outputHelper, recorder: logLines);
         Directory.CreateDirectory(dir);
     }
 
@@ -710,9 +710,20 @@ public sealed class TestSettledIntentFlushRetention : IDisposable
                     (KeyValueResponseType warmed, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
                         HLCTimestamp.Zero, "window/warm", Encoding.UTF8.GetBytes("warm"), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
                     Assert.Equal(KeyValueResponseType.Set, warmed);
-                    await node.FlushAsync();
-                    long floorBefore = kahuna.DurabilityProvider.GetDurablyAppliedIndex(1);
-                    Assert.True(floorBefore > 0, "the warm-up flush was expected to persist a durability floor");
+
+                    // The acknowledgement precedes the apply that registers the entry with the durability
+                    // tracker, so a flush right behind it can find nothing to certify yet: flush until the
+                    // floor covers the warm-up write.
+                    long floorBefore = 0;
+                    long floorDeadline = Environment.TickCount64 + 30_000;
+                    while (floorBefore <= 0)
+                    {
+                        Assert.True(Environment.TickCount64 < floorDeadline, "the warm-up flush was expected to persist a durability floor");
+                        await node.FlushAsync();
+                        floorBefore = kahuna.DurabilityProvider.GetDurablyAppliedIndex(1);
+                        if (floorBefore <= 0)
+                            await Task.Delay(50, ct);
+                    }
 
                     blocker!.FailKeyValueFlushes = true;
 

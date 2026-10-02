@@ -27,6 +27,7 @@ namespace Kahuna.Server.Tests;
 /// reports the tally and gates the partition when anything is unresolved. CamusDB fault soak sn2 (2026-09-30):
 /// a restart that replayed a 245K-entry window logged 82,536 such misses over all 2,000 keys and then led.</para>
 /// </summary>
+[Collection("MaterializationMissMetrics")]
 public sealed class TestRestartReplayByReferenceMaterialization : IDisposable
 {
     private const int Partition = 5;

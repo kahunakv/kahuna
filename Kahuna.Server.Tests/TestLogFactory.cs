@@ -11,7 +11,15 @@ internal static class TestLogFactory
     // GB across a large suite and OOM-kills the test host ("error while writing to logger(s)"). Warning keeps
     // the output (and memory) small. Set KAHUNA_TEST_LOG_LEVEL=Debug (or Information/Trace) to opt back in when
     // diagnosing a specific test.
-    public static ILoggerFactory Create(ITestOutputHelper outputHelper, LogLevel defaultMinimumLevel = LogLevel.Warning, bool quietKommander = false)
+    //
+    // A recorder is what a test asserts on, so its level is fixed at Warning whatever the environment asks for:
+    // the variable only sizes the test output, and a run that silences the output down to Error must still
+    // record the Warning line a test grades.
+    public static ILoggerFactory Create(
+        ITestOutputHelper outputHelper,
+        LogLevel defaultMinimumLevel = LogLevel.Warning,
+        bool quietKommander = false,
+        RecordingLogProvider? recorder = null)
     {
         LogLevel minimumLevel = GetMinimumLevel(defaultMinimumLevel);
 
@@ -23,6 +31,12 @@ internal static class TestLogFactory
 
             if (quietKommander)
                 builder.AddFilter("Kommander", Max(minimumLevel, LogLevel.Warning));
+
+            if (recorder is not null)
+            {
+                builder.AddProvider(recorder);
+                builder.AddFilter<RecordingLogProvider>(null, RecordingLogProvider.MinimumLevel);
+            }
         });
     }
 

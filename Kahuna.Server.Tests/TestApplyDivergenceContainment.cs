@@ -22,6 +22,7 @@ namespace Kahuna.Server.Tests;
 /// and relinquishes at once if elected, a whole-partition install lifts the gate, and a record-less prepared
 /// intent the peers have settled is recognised as this replica's divergence instead of a permanent hold.
 /// </summary>
+[Collection("MaterializationMissMetrics")]
 public sealed class TestApplyDivergenceContainment : BaseCluster
 {
     private const int Nodes = 3;

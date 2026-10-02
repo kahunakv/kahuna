@@ -26,6 +26,7 @@ namespace Kahuna.Server.Tests;
 /// time. The tests assert the record shape, the two consumers that expand it (the replicator and the restorer),
 /// the two kinds of miss, the point-in-time-recovery expansion, and end-to-end commits with the flag on.
 /// </summary>
+[Collection("MaterializationMissMetrics")]
 public sealed class TestMaterializeIntentByReference : BaseCluster, IDisposable
 {
     private static HLCTimestamp Ts(long physical) => new(0, physical, 0);
@@ -41,8 +42,7 @@ public sealed class TestMaterializeIntentByReference : BaseCluster, IDisposable
 
     public TestMaterializeIntentByReference(ITestOutputHelper outputHelper)
     {
-        loggerFactory = TestLogFactory.Create(outputHelper);
-        loggerFactory.AddProvider(logLines);
+        loggerFactory = TestLogFactory.Create(outputHelper, recorder: logLines);
     }
 
     public void Dispose()
