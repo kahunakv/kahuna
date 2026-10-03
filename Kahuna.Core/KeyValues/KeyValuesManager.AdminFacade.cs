@@ -203,6 +203,11 @@ internal sealed partial class KeyValuesManager
     /// <summary>Invoked when a replication error occurs.</summary>
     public void OnReplicationError(RaftLog log) => replicationDispatcher.OnReplicationError(log);
 
+    /// <summary>Releases every durable completion still parked on an ordered apply, for a node whose replication
+    /// callbacks are detached and can deliver no apply any more (see
+    /// <see cref="KeyValueReplicationDispatcher.ReleaseParkedCompletionsForShutdown"/>).</summary>
+    public void ReleaseParkedDurableCompletionsForShutdown() => replicationDispatcher.ReleaseParkedCompletionsForShutdown();
+
     /// <summary>Invoked when a partition's leader changes.</summary>
     public Task<bool> OnLeaderChanged(int partitionId, string node) => replicationDispatcher.OnLeaderChanged(partitionId, node);
 

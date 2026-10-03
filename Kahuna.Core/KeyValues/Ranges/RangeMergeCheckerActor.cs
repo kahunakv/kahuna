@@ -23,14 +23,20 @@ internal sealed class RangeMergeCheckerActor : IActor<RangeMergeCheckerRequest>
     private readonly RangeMergeTrigger trigger;
     private readonly ILogger<IKahuna>  logger;
 
+    // Cancelled when the node begins to shut down; a pass caught mid-split or mid-merge stops at its next await
+    // instead of settling a Raft outcome that a disposed Raft can never deliver.
+    private readonly CancellationToken shutdown;
+
     public RangeMergeCheckerActor(
         IActorContext<RangeMergeCheckerActor, RangeMergeCheckerRequest> context,
         RangeMergeTrigger trigger,
         KahunaConfiguration configuration,
-        ILogger<IKahuna> logger)
+        ILogger<IKahuna> logger,
+        CancellationToken shutdown = default)
     {
         this.trigger = trigger;
         this.logger  = logger;
+        this.shutdown = shutdown;
 
         // Stagger at ¾ of the interval — different from the split checker (½ interval) so the
         // two background passes do not compete for the dual-leader slot simultaneously.
@@ -50,9 +56,13 @@ internal sealed class RangeMergeCheckerActor : IActor<RangeMergeCheckerRequest>
     {
         try
         {
-            int merges = await trigger.TriggerAsync();
+            int merges = await trigger.TriggerAsync(shutdown);
             if (merges > 0)
                 logger.LogRangeMergeCheckerPerformed(merges);
+        }
+        catch (OperationCanceledException) when (shutdown.IsCancellationRequested)
+        {
+            // Node shutdown interrupted the pass; nothing to report.
         }
         catch (Exception ex)
         {

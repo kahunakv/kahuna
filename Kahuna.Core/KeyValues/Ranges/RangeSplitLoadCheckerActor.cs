@@ -19,14 +19,20 @@ internal sealed class RangeSplitLoadCheckerActor : IActor<RangeSplitLoadCheckerR
     private readonly RangeSplitTrigger trigger;
     private readonly ILogger<IKahuna>  logger;
 
+    // Cancelled when the node begins to shut down; a pass caught mid-split or mid-merge stops at its next await
+    // instead of settling a Raft outcome that a disposed Raft can never deliver.
+    private readonly CancellationToken shutdown;
+
     public RangeSplitLoadCheckerActor(
         IActorContext<RangeSplitLoadCheckerActor, RangeSplitLoadCheckerRequest> context,
         RangeSplitTrigger trigger,
         KahunaConfiguration configuration,
-        ILogger<IKahuna> logger)
+        ILogger<IKahuna> logger,
+        CancellationToken shutdown = default)
     {
         this.trigger = trigger;
         this.logger  = logger;
+        this.shutdown = shutdown;
 
         TimeSpan interval = configuration.RangeSplitLoadPollInterval;
         TimeSpan initial  = TimeSpan.FromTicks(interval.Ticks / 2);
@@ -44,9 +50,13 @@ internal sealed class RangeSplitLoadCheckerActor : IActor<RangeSplitLoadCheckerR
     {
         try
         {
-            int splits = await trigger.LoadCheckAsync();
+            int splits = await trigger.LoadCheckAsync(shutdown);
             if (splits > 0)
                 logger.LogRangeSplitLoadCheckerPerformed(splits);
+        }
+        catch (OperationCanceledException) when (shutdown.IsCancellationRequested)
+        {
+            // Node shutdown interrupted the pass; nothing to report.
         }
         catch (Exception ex)
         {

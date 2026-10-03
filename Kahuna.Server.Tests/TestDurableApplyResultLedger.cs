@@ -217,6 +217,30 @@ public sealed class TestDurableApplyResultLedger
 
         Assert.Equal(DurableApplyWaitStatus.NotApplied, outcome.Status);
     }
+
+    [Fact]
+    public async Task Shutdown_ReleasesEveryParkedWait_OnEveryPartition_AndAnswersLaterWaitsAtOnce()
+    {
+        DurableApplyResultLedger ledger = new();
+
+        // Two partitions, one parked completion each: the entries committed, their applies never came.
+        ValueTask<DurableApplyWaitOutcome> first = ledger.WaitAppliedAsync(PartitionId, 5, Long, CancellationToken.None);
+        ValueTask<DurableApplyWaitOutcome> second = ledger.WaitAppliedAsync(PartitionId + 1, 9, Long, CancellationToken.None);
+        Assert.False(first.IsCompleted);
+        Assert.False(second.IsCompleted);
+
+        Assert.Equal(2, ledger.ReleaseAllForShutdown());
+
+        Assert.Equal(DurableApplyWaitStatus.LeadershipLost, (await first).Status);
+        Assert.Equal(DurableApplyWaitStatus.LeadershipLost, (await second).Status);
+
+        // A completion that arrives after the release is answered the same way without parking.
+        DurableApplyWaitOutcome late = await ledger.WaitAppliedAsync(PartitionId, 6, Long, CancellationToken.None);
+        Assert.Equal(DurableApplyWaitStatus.LeadershipLost, late.Status);
+
+        // Idempotent: nothing left to release.
+        Assert.Equal(0, ledger.ReleaseAllForShutdown());
+    }
 }
 
 /// <summary>

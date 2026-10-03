@@ -22,14 +22,20 @@ internal sealed class RangeSplitCheckerActor : IActor<RangeSplitCheckerRequest>
     private readonly RangeSplitTrigger trigger;
     private readonly ILogger<IKahuna>  logger;
 
+    // Cancelled when the node begins to shut down; a pass caught mid-split or mid-merge stops at its next await
+    // instead of settling a Raft outcome that a disposed Raft can never deliver.
+    private readonly CancellationToken shutdown;
+
     public RangeSplitCheckerActor(
         IActorContext<RangeSplitCheckerActor, RangeSplitCheckerRequest> context,
         RangeSplitTrigger trigger,
         KahunaConfiguration configuration,
-        ILogger<IKahuna> logger)
+        ILogger<IKahuna> logger,
+        CancellationToken shutdown = default)
     {
         this.trigger = trigger;
         this.logger  = logger;
+        this.shutdown = shutdown;
 
         // Stagger the first fire by half the interval so it doesn't overlap with the initial
         // collection sweep that the KeyValueCollectorActor also fires at startup.
@@ -49,9 +55,13 @@ internal sealed class RangeSplitCheckerActor : IActor<RangeSplitCheckerRequest>
     {
         try
         {
-            int splits = await trigger.TriggerAsync();
+            int splits = await trigger.TriggerAsync(shutdown);
             if (splits > 0)
                 logger.LogRangeSplitCheckerPerformed(splits);
+        }
+        catch (OperationCanceledException) when (shutdown.IsCancellationRequested)
+        {
+            // Node shutdown interrupted the pass; nothing to report.
         }
         catch (Exception ex)
         {

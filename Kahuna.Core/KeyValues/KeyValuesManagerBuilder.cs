@@ -598,7 +598,8 @@ internal sealed class KeyValuesManagerBuilder
                 "range-split-checker",
                 rangeSplitTrigger,
                 configuration,
-                logger
+                logger,
+                runtime.Shutdown.Token
             );
         }
 
@@ -611,7 +612,8 @@ internal sealed class KeyValuesManagerBuilder
                 "range-split-load-checker",
                 rangeSplitTrigger,
                 configuration,
-                logger
+                logger,
+                runtime.Shutdown.Token
             );
         }
 
@@ -622,7 +624,8 @@ internal sealed class KeyValuesManagerBuilder
                 "range-merge-checker",
                 rangeMergeTrigger,
                 configuration,
-                logger
+                logger,
+                runtime.Shutdown.Token
             );
         }
     }

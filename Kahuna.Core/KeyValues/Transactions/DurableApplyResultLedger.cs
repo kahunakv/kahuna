@@ -143,6 +143,20 @@ internal sealed class DurableApplyResultLedger
     /// here as usual.</summary>
     public void NoteLeadershipRegained(int partitionId) => StateOf(partitionId).LeadershipLost = false;
 
+    /// <summary>The node is shutting down and its replication callbacks are detached, so no ordered apply can
+    /// reach this ledger any more: releases every parked completion on every partition with
+    /// <see cref="DurableApplyWaitStatus.LeadershipLost"/> and answers later waits the same way. Without this a
+    /// completion whose entry committed in the last instant before the detach parks until its wait bound, and
+    /// whatever shutdown step awaits it (the write drain, an actor's graceful stop) runs out its whole budget.
+    /// Returns how many waits were released.</summary>
+    public int ReleaseAllForShutdown()
+    {
+        int released = 0;
+        foreach (int partitionId in partitions.Keys)
+            released += NoteLeadershipLost(partitionId);
+        return released;
+    }
+
     /// <summary>Whether this node is known to have stopped leading the partition (test seam).</summary>
     internal bool HasLostLeadership(int partitionId) =>
         partitions.TryGetValue(partitionId, out PartitionState? state) && state.LeadershipLost;

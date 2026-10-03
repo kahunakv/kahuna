@@ -661,8 +661,19 @@ internal sealed partial class KeyValuesManager : IDisposable
     /// <summary>Node-local persistent-participant completion receipts. Diagnostic/test access.</summary>
     internal CompletionReceiptStore CompletionReceiptStore => completionReceiptStore;
 
+    /// <summary>Announces that the node is shutting down: cancels <see cref="KeyValuesRuntime.Shutdown"/> so the
+    /// background range checkers abandon any split or merge pass they are inside. Called by the embedded node at
+    /// the start of its disposal, while Raft is still alive, so a pass that holds a quiesce or a range lock can
+    /// still release it on its way out; idempotent.</summary>
+    public void SignalShutdown()
+    {
+        try { runtime.Shutdown.Cancel(); } catch (ObjectDisposedException) { /* already disposed */ }
+    }
+
     public void Dispose()
     {
+        SignalShutdown();
+
         raft.OnRestoreFinished -= OnPartitionRestoreFinished;
 
         // A gated partition's re-seed renewal loop must not outlive the node.
@@ -683,5 +694,6 @@ internal sealed partial class KeyValuesManager : IDisposable
         // torn-down node will never grant.
         scriptOrderer.Dispose();
         sessionOrderer.Dispose();
+        runtime.Shutdown.Dispose();
     }
 }

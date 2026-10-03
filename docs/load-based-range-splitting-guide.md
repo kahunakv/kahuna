@@ -214,4 +214,8 @@ validated constraint — see section 5.
 - **Advisory and reversible.** The signals are advisory; a stale or imprecise value can at worst cause a
   suboptimal split decision, never a correctness problem. A split that fails mid-flight cleans up after
   itself (the partially-created partition is removed), and the range remains fully served throughout.
+- **Interrupted by node shutdown.** The split and merge checkers carry the node's shutdown token. A pass
+  caught mid-flight when the node is disposed stops at its next step instead of waiting out the settle
+  budget of a Raft proposal that the disposed Raft can never answer; the next leader's checker re-evaluates
+  the range on its own cadence, and the same mid-flight cleanup applies.
 - **Off by default.** Nothing changes until you set `RangeSplitLoadThreshold > 0`.

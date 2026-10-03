@@ -533,6 +533,16 @@ internal sealed class KeyValueReplicationDispatcher
             logger.LogDurableCompletionsReleasedOnLeadershipLoss(released, partitionId, reason);
     }
 
+    /// <summary>Shutdown counterpart of <see cref="ReleaseParkedCompletions"/>: once the node detached its
+    /// replication callbacks no apply can be recorded, so every completion still parked on any partition is
+    /// released at once (see <see cref="DurableApplyResultLedger.ReleaseAllForShutdown"/>).</summary>
+    internal void ReleaseParkedCompletionsForShutdown()
+    {
+        int released = durableApplyResults.ReleaseAllForShutdown();
+        if (released > 0)
+            logger.LogDurableCompletionsReleasedOnShutdown(released);
+    }
+
     private async Task CompareAtLeaderChangeAsync(int partitionId)
     {
         const string moment = "leader change";

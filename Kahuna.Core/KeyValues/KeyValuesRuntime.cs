@@ -30,6 +30,13 @@ internal sealed class KeyValuesRuntime
 {
     internal required ActorSystem ActorSystem { get; init; }
 
+    /// <summary>Cancelled when the node begins to shut down (<see cref="KeyValuesManager.SignalShutdown"/>), before
+    /// Raft is disposed. Background passes that drive multi-step Raft work — the range split and merge checkers —
+    /// carry its token, so a pass caught mid-flight stops at its next await instead of waiting out a settle budget
+    /// against a Raft that no longer answers; an actor that is still inside such a pass is what makes the actor
+    /// system's graceful stop run out its whole bound.</summary>
+    internal CancellationTokenSource Shutdown { get; } = new();
+
     internal required IRaft Raft { get; init; }
 
     internal required IRaftReadScheduler BackendReadScheduler { get; init; }

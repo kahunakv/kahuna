@@ -335,6 +335,12 @@ public static partial class KahunaLoggerExtensions
     [LoggerMessage(Level = LogLevel.Information, Message = "Released {Count} durable completions parked on the ordered apply of partition {PartitionId} ({Reason}); this node no longer leads it, so their producers re-drive against the current leader, where the same entries are idempotent")]
     public static partial void LogDurableCompletionsReleasedOnLeadershipLoss(this ILogger<IKahuna> logger, int count, int partitionId, string reason);
 
+    [LoggerMessage(Level = LogLevel.Information, Message = "Released {Count} durable completions parked on an ordered apply at node shutdown; the replication callbacks are detached, so no apply can reach them, and their producers are answered unobserved")]
+    public static partial void LogDurableCompletionsReleasedOnShutdown(this ILogger<IKahuna> logger, int count);
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Embedded node disposed: write drain {DrainMs} ms, Raft dispose {RaftMs} ms, actor shutdown {ActorsMs} ms")]
+    public static partial void LogEmbeddedNodeDisposeStages(this ILogger<IKahuna> logger, long drainMs, long raftMs, long actorsMs);
+
     [LoggerMessage(Level = LogLevel.Warning, Message = "Completion of committed durable entry #{LogIndex} on partition {PartitionId} ({LogType}) did not see its ordered apply within {TimeoutMs}ms while this node still led the partition; answering the producer as unobserved so it re-drives against the current leader instead of applying the entry out of log order here")]
     public static partial void LogDurableCompletionWithoutOrderedApply(this ILogger<IKahuna> logger, long logIndex, int partitionId, string logType, long timeoutMs);
 

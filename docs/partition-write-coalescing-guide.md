@@ -415,7 +415,13 @@ See the [durable settlement guide](durable-settlement-guide.md) for semantics an
   down. New admissions are rejected, each lane releases its still-pending (not yet dispatched) items as
   `MustRetry` (delivered as a priority control stop a saturated inbox cannot reject), and the drain then
   **awaits** every already-issued batch settling its Raft round trip — so no in-flight completion is dropped
-  on a disposed lane. No accepted caller is silently abandoned.
+  on a disposed lane. No accepted caller is silently abandoned. The Raft replication callbacks stay attached
+  through this drain: a durable entry's completion waits on the apply ledger for the ordered consumer apply,
+  which only `OnReplicationReceived` delivers, so detaching the callbacks first would park every completion
+  that was in flight at dispose until the drain deadline. Once the drain returns and the callbacks are
+  detached, the ledger releases any completion still parked (`ReleaseAllForShutdown`), because the leader
+  completes a proposer's reply before it runs that entry's consumer apply and no apply can arrive after the
+  detach.
 
 A released write returns `MustRetry` — never a false success and never a silently dropped write. Retrying on
 `MustRetry` is **at-least-once**: a released write may in fact have committed (a timeout or an exception around

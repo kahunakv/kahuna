@@ -15,6 +15,16 @@ public sealed partial class KahunaManager
     /// <see cref="Dispose"/> then performs a best-effort stop for any remaining state.</summary>
     public Task DrainKeyValueWritesAsync(TimeSpan timeout) => keyValues.DrainWritesAsync(timeout);
 
+    /// <summary>Releases every durable write completion still parked on an ordered apply. Called by the embedded
+    /// node right after it detaches its replication callbacks, when no apply can reach the ledger any more; a
+    /// completion left parked there would otherwise hold a shutdown step for its whole wait bound.</summary>
+    public void ReleaseParkedDurableCompletionsForShutdown() => keyValues.ReleaseParkedDurableCompletionsForShutdown();
+
+    /// <summary>Announces node shutdown to the key-value background passes (range split and merge checkers) so
+    /// one caught mid-flight stops instead of waiting out a settle budget against a Raft about to be disposed.
+    /// See <see cref="Kahuna.Server.KeyValues.KeyValuesManager.SignalShutdown"/>.</summary>
+    public void SignalShutdown() => keyValues.SignalShutdown();
+
     /// <summary>
     /// Locates the leader node for the given key and executes the TrySet request.
     /// The interior chain runs on pooled ValueTask frames; this seam materializes the

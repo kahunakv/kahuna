@@ -6,6 +6,8 @@ using Kommander.Time;
 using Kommander.WAL;
 using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.Configuration;
+using Kahuna.Server.KeyValues.Logging;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Nixie;
 
@@ -17,6 +19,8 @@ namespace Kahuna;
 /// </summary>
 public sealed class EmbeddedKahunaNode : IAsyncDisposable
 {
+    private readonly ILogger<IKahuna> nodeLogger;
+
     private readonly ActorSystem actorSystem;
 
     private readonly MemoryInterNodeCommmunication? standaloneComm;
@@ -65,6 +69,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
 
         ILogger<IRaft> raftLogger = loggerFactory.CreateLogger<IRaft>();
         ILogger<IKahuna> kahunaLogger = loggerFactory.CreateLogger<IKahuna>();
+        nodeLogger = kahunaLogger;
 
         // This constructor forms its quorum from phantom witnesses; the only real node is this one.
         ConfigurationValidator.ValidateReplicaPlacement(options.ReplicationFactor, seedNodeCount: 1, raftLogger);
@@ -171,6 +176,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
 
         ILogger<IRaft> raftLogger = loggerFactory.CreateLogger<IRaft>();
         ILogger<IKahuna> kahunaLogger = loggerFactory.CreateLogger<IKahuna>();
+        nodeLogger = kahunaLogger;
 
         // The caller owns discovery here, so the seed node count is unknown at this layer.
         ConfigurationValidator.ValidateReplicaPlacement(options.ReplicationFactor, seedNodeCount: null, raftLogger);
@@ -295,17 +301,41 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
 
         if (started)
         {
+            KahunaManager? kahunaManager = Kahuna as KahunaManager;
+            long disposeStartedTicks = Environment.TickCount64;
+
+            // Tell the background passes to stop before anything is torn down. A range split or merge caught
+            // mid-flight otherwise keeps its checker actor busy settling a Raft proposal whose outcome the
+            // disposed Raft can never deliver, and the actor system's graceful stop below then waits out its
+            // whole bound on that one actor.
+            kahunaManager?.SignalShutdown();
+
+            // Drain the direct-write aggregator FIRST, while its lane actors, Raft AND the replication
+            // callbacks below are still alive: it releases queued writes retryably and awaits in-flight
+            // batches settling their Raft round trip. Disposing the actor system or Raft before this would
+            // strand queued items and drop in-flight completions on now-dead lanes.
+            //
+            // The callbacks must stay attached through the drain. A committed durable entry is applied by
+            // the ordered consumer apply that Raft drives through OnReplicationReceived, and the write
+            // scheduler's completion for that entry waits on the apply ledger for the result it records
+            // (DurableOrderedApplyAwaiter). Detaching the callback first turned every batch that was in
+            // flight at dispose into a wait for an apply that could never arrive: the completion parked
+            // until the drain deadline cancelled it, so each such dispose cost the whole drain budget.
+            if (kahunaManager is not null)
+                await kahunaManager.DrainKeyValueWritesAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+
             Raft.OnLogRestored -= Kahuna.OnLogRestored;
             Raft.OnReplicationReceived -= Kahuna.OnReplicationReceived;
             Raft.OnReplicationError -= Kahuna.OnReplicationError;
             Raft.OnLeadershipLost -= Kahuna.OnLeadershipLost;
 
-            // Drain the direct-write aggregator FIRST, while its lane actors and Raft are still alive: it
-            // releases queued writes retryably and awaits in-flight batches settling their Raft round trip.
-            // Disposing the actor system or Raft before this would strand queued items and drop in-flight
-            // completions on now-dead lanes.
-            if (Kahuna is KahunaManager kahunaManager)
-                await kahunaManager.DrainKeyValueWritesAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+            // The leader completes a proposer's reply before it runs the consumer apply of the same entry, so a
+            // batch the drain just saw settle can still have its apply a few instructions away when the callback
+            // above is detached. From here no apply can be recorded: release whatever is still parked, so that
+            // completion answers its producer "unobserved" now rather than at its wait bound.
+            kahunaManager?.ReleaseParkedDurableCompletionsForShutdown();
+
+            long drainedTicks = Environment.TickCount64;
 
             // Skip the graceful-leave commit (CommitGracefulLeaveAsync) — in a
             // single-node embedded cluster there are no peers to notify, and the
@@ -316,10 +346,17 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             if (Raft is IDisposable disposableRaft)
                 disposableRaft.Dispose();
 
+            long raftDisposedTicks = Environment.TickCount64;
+
             // Drain all actor inboxes before disposing, so that background tasks
             // from this instance do not race with the next instance's actors on the
             // shared .NET thread pool.
             await actorSystem.GracefulShutdownAll(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+
+            // Each stage has its own bound (the drain and the actor stop both 5 s), so a dispose that ran one of
+            // them out shows which; a process that disposes many nodes pays such a stall on every one.
+            nodeLogger.LogEmbeddedNodeDisposeStages(
+                drainedTicks - disposeStartedTicks, raftDisposedTicks - drainedTicks, Environment.TickCount64 - raftDisposedTicks);
 
             actorSystem.Dispose();
 
