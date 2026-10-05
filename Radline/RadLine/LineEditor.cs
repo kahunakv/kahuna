@@ -23,6 +23,10 @@ namespace RadLine
         public ILineEditorPrompt Prompt { get; init; } = new LineEditorPrompt("[yellow]>[/]");
         public ITextCompletion? Completion { get; init; }
         public IHighlighter? Highlighter { get; init; }
+
+        // Decides whether a submit keypress ends the input. When it returns false for the current
+        // text, the keypress opens a new line instead, so an unfinished block keeps reading input.
+        public Func<string, bool>? IsInputComplete { get; init; }
         public ILineEditorHistory History => _history;
 
         public LineEditor(IAnsiConsole? terminal = null, IInputSource? source = null, IServiceProvider? provider = null)
@@ -98,7 +102,18 @@ namespace RadLine
                 }
                 else if (result.Result == SubmitAction.Submit)
                 {
-                    break;
+                    if (!MultiLine || IsInputComplete is null || IsInputComplete(state.Text))
+                    {
+                        break;
+                    }
+
+                    // The input is not finished yet: continue it on a new line after the last one.
+                    if (!state.IsLastLine)
+                    {
+                        MoveLast(state);
+                    }
+
+                    AddLine(state);
                 }
                 else if (result.Result == SubmitAction.PreviousHistory)
                 {
@@ -116,16 +131,7 @@ namespace RadLine
                 }
                 else if (result.Result == SubmitAction.NewLine && MultiLine && state.IsLastLine)
                 {
-                    // Add a new line
-                    state.AddLine();
-
-                    // Refresh
-                    var builder = new StringBuilder();
-                    builder.Append("\u001b[?25l"); // Hide cursor
-                    _renderer.AnsiBuilder.MoveDown(builder, state);
-                    _renderer.AnsiBuilder.BuildRefresh(builder, state);
-                    builder.Append("\u001b[?25h"); // Show cursor
-                    _console.WriteAnsi(builder.ToString());
+                    AddLine(state);
                 }
                 else if (result.Result == SubmitAction.Backspace && MultiLine && !state.IsFirstLine)
                 {
@@ -247,6 +253,18 @@ namespace RadLine
             }
 
             return KeyBindings.GetCommand(key.Key, key.Modifiers);
+        }
+
+        private void AddLine(LineEditorState state)
+        {
+            state.AddLine();
+
+            var builder = new StringBuilder();
+            builder.Append("\u001b[?25l"); // Hide cursor
+            _renderer.AnsiBuilder.MoveDown(builder, state);
+            _renderer.AnsiBuilder.BuildRefresh(builder, state);
+            builder.Append("\u001b[?25h"); // Show cursor
+            _console.WriteAnsi(builder.ToString());
         }
 
         // Joins two lines into one and redraws. Because the line count shrinks, we clear the

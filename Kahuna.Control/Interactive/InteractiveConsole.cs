@@ -204,7 +204,8 @@ public static class InteractiveConsole
                 Text = "",
                 Prompt = new MyLineNumberPrompt(new(foreground: Color.PaleTurquoise1)),
                 //Completion = new TestCompletion(),
-                Highlighter = worldHighlighter
+                Highlighter = worldHighlighter,
+                IsInputComplete = ScriptInputCompleteness.IsComplete
             };
 
             foreach (string item in history)
