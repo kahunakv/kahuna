@@ -365,10 +365,10 @@ internal sealed class KeyValuesManagerBuilder
         // keys between partitions, and rewrite every snapshot under the new routing.
         Func<long> routingVersion = () => rangeMapStore.MapVersion;
         transactionRecordStore.AttachAnchorResolver(locator.LocateRange, routingVersion);
-        preparedIntentStore.AttachPartitionResolver(key => locator.LocateRange(key).PartitionId, routingVersion);
+        preparedIntentStore.AttachPartitionResolver(key => locator.LocateRange(key).PartitionId, routingVersion, locator.TryLocateRange);
 
         // The receipt store's per-partition checkpoint snapshot routes each receipt by its key the same way.
-        completionReceiptStore.AttachPartitionResolver(key => locator.LocateRange(key).PartitionId, routingVersion);
+        completionReceiptStore.AttachPartitionResolver(key => locator.LocateRange(key).PartitionId, routingVersion, locator.TryLocateRange);
 
         preparedIntentRecovery = actorSystem.Spawn<PreparedIntentRecoveryActor, PreparedIntentRecoveryRequest>(
             "prepared-intent-recovery",

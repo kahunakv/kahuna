@@ -130,10 +130,39 @@ internal sealed class CompletionReceiptStore
     /// changes whenever the resolver's routing may have changed (the range-map version); null means the
     /// routing is fixed for the store's lifetime.
     /// </summary>
-    public void AttachPartitionResolver(Func<string, int> resolver, Func<long>? routingVersion = null)
+    /// <param name="probe">The same routing as <paramref name="resolver"/>, answering an unroutable key with
+    /// <see langword="false"/> instead of an exception. Null (unit tests) leaves the store catching the
+    /// resolver's exception where it tolerates an unroutable key.</param>
+    public void AttachPartitionResolver(Func<string, int> resolver, Func<long>? routingVersion = null, Ranges.PartitionProbe? probe = null)
     {
         keyToPartition = resolver;
+        probePartition = probe;
         this.routingVersion = routingVersion;
+    }
+
+    // The non-throwing form of keyToPartition, for the stamp on the replicated apply path. Null when only the
+    // throwing resolver was attached.
+    private Ranges.PartitionProbe? probePartition;
+
+    // Resolves the partition owning <paramref name="key"/> without failing: false when the key cannot be
+    // routed on this node now. The wired probe answers that with a lookup; without one the resolver's
+    // exception is caught.
+    private bool TryResolvePartition(Func<string, int> resolver, string key, out int partitionId)
+    {
+        Ranges.PartitionProbe? probe = probePartition;
+        if (probe is not null)
+            return probe(key, out partitionId);
+
+        try
+        {
+            partitionId = resolver(key);
+            return true;
+        }
+        catch
+        {
+            partitionId = -1;
+            return false;
+        }
     }
 
     // Marks the partition owning <paramref name="key"/> dirty for the checkpoint guard. Mutators call this
@@ -149,17 +178,10 @@ internal sealed class CompletionReceiptStore
         long tick = Interlocked.Increment(ref version);
 
         Func<string, int>? resolver = keyToPartition;
-        if (resolver is not null)
+        if (resolver is not null && TryResolvePartition(resolver, key, out int owner))
         {
-            try
-            {
-                partitionVersion.AddOrUpdate(resolver(key), static (_, t) => t, static (_, prev, t) => Math.Max(prev, t), tick);
-                return;
-            }
-            catch
-            {
-                // Fall through to the all-partitions stamp.
-            }
+            partitionVersion.AddOrUpdate(owner, static (_, t) => t, static (_, prev, t) => Math.Max(prev, t), tick);
+            return;
         }
 
         StampMax(ref allPartitionsVersion, tick);

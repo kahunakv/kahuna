@@ -119,6 +119,14 @@ internal sealed class KeyValueLocator
     public (int PartitionId, long Generation) LocateRange(string key) =>
         RangeRouting.Locate(keySpaceRegistry, manager.RangeMapStore.Current, dataPartitionRouter, key);
 
+    /// <summary>
+    /// <see cref="LocateRange"/> without the exception: <see langword="false"/> when the key belongs to a
+    /// key-range space that no descriptor covers on this node. For callers that resolve many keys and treat an
+    /// unroutable one as a routine answer (see <see cref="RangeRouting.TryLocate"/>).
+    /// </summary>
+    public bool TryLocateRange(string key, out int partitionId) =>
+        RangeRouting.TryLocate(keySpaceRegistry, manager.RangeMapStore.Current, dataPartitionRouter, key, out partitionId);
+
     /// <summary>Routes a key and reports its routing mode in the same single classification pass.</summary>
     private (int PartitionId, long Generation, bool IsKeyRange, RangeDescriptor? Descriptor) LocateRangeWithMode(string key) =>
         RangeRouting.LocateWithMode(keySpaceRegistry, manager.RangeMapStore.Current, dataPartitionRouter, key);

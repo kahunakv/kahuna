@@ -24,6 +24,12 @@ internal enum DirectWriteRouting
 }
 
 /// <summary>
+/// Resolves a key to its data partition without failing: <see langword="false"/> when the key cannot be routed
+/// on this node now. The non-throwing counterpart of a <c>Func&lt;string, int&gt;</c> partition resolver.
+/// </summary>
+internal delegate bool PartitionProbe(string key, out int partitionId);
+
+/// <summary>
 /// The single source of truth for resolving a key to <c>(partitionId, generation)</c>.
 /// Both partition-routing call sites must funnel through here so they can never drift:
 /// <list type="number">
@@ -81,6 +87,43 @@ internal static class RangeRouting
         DataPartitionRouter dataPartitionRouter,
         string key)
     {
+        if (TryLocateWithMode(registry, rangeMap, dataPartitionRouter, key, out (int, long, bool, RangeDescriptor?) located))
+            return located;
+
+        int separator = key.LastIndexOf('/');
+
+        throw new KahunaServerException(
+            $"No range descriptor covers key '{key}' in key-range space '{(separator < 0 ? key : key[..separator])}'.");
+    }
+
+    /// <summary>
+    /// As <see cref="Locate"/> for a caller that expects some keys to be unroutable and must not pay an
+    /// exception for each: answers <see langword="false"/> where <see cref="Locate"/> throws, when a key-range
+    /// space has no descriptor covering the key on this node. That state is routine for the durable-intent
+    /// stores (a restart replays data-partition entries before the meta partition has rebuilt the range map),
+    /// and they resolve every key they hold on each per-partition count or stamp.
+    /// </summary>
+    public static bool TryLocate(
+        KeySpaceRegistry registry,
+        RangeMap rangeMap,
+        DataPartitionRouter dataPartitionRouter,
+        string key,
+        out int partitionId)
+    {
+        bool routable = TryLocateWithMode(registry, rangeMap, dataPartitionRouter, key, out (int PartitionId, long, bool, RangeDescriptor?) located);
+        partitionId = routable ? located.PartitionId : -1;
+        return routable;
+    }
+
+    // The one classification and lookup behind both the throwing and the non-throwing resolution, so the two
+    // cannot route a key differently. Nothing is allocated on either branch.
+    private static bool TryLocateWithMode(
+        KeySpaceRegistry registry,
+        RangeMap rangeMap,
+        DataPartitionRouter dataPartitionRouter,
+        string key,
+        out (int PartitionId, long Generation, bool IsKeyRange, RangeDescriptor? Descriptor) located)
+    {
         int separator = key.LastIndexOf('/');
         ReadOnlySpan<char> keySpace = separator < 0 ? key.AsSpan() : key.AsSpan(0, separator);
 
@@ -89,14 +132,18 @@ internal static class RangeRouting
             RangeDescriptor? descriptor = rangeMap.Find(keySpace, key);
 
             if (descriptor is null)
-                throw new KahunaServerException(
-                    $"No range descriptor covers key '{key}' in key-range space '{keySpace.ToString()}'.");
+            {
+                located = default;
+                return false;
+            }
 
-            return (descriptor.PartitionId, descriptor.Generation, true, descriptor);
+            located = (descriptor.PartitionId, descriptor.Generation, true, descriptor);
+            return true;
         }
 
         // Hash-routed: Kahuna's own assignment over the data partitions (2..N); no generation fence.
-        return (dataPartitionRouter.Locate(key), 0L, false, null);
+        located = (dataPartitionRouter.Locate(key), 0L, false, null);
+        return true;
     }
 
     /// <summary>

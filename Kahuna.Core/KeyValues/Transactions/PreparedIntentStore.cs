@@ -249,10 +249,41 @@ internal sealed class PreparedIntentStore
     /// <summary>Wires the key → data-partition resolver once the locator exists (manager construction).
     /// <paramref name="routingVersion"/> reports a stamp that changes whenever the resolver's routing may have
     /// changed (the range-map version); null means the routing is fixed for the store's lifetime.</summary>
-    public void AttachPartitionResolver(Func<string, int> resolver, Func<long>? routingVersion = null)
+    /// <param name="probe">The same routing as <paramref name="resolver"/>, answering an unroutable key with
+    /// <see langword="false"/> instead of an exception. Null (unit tests) leaves the store catching the
+    /// resolver's exception where it tolerates an unroutable key.</param>
+    public void AttachPartitionResolver(Func<string, int> resolver, Func<long>? routingVersion = null, Ranges.PartitionProbe? probe = null)
     {
         resolvePartition = resolver;
+        probePartition = probe;
         this.routingVersion = routingVersion;
+    }
+
+    // The non-throwing form of resolvePartition, for the paths that tolerate an unroutable key and visit many
+    // keys per call. Null when only the throwing resolver was attached.
+    private Ranges.PartitionProbe? probePartition;
+
+    // Resolves the partition owning <paramref name="key"/> for a path that tolerates an unroutable key: false
+    // when the key cannot be routed on this node now (a restart replays data-partition entries before the meta
+    // partition has rebuilt the range map). These paths resolve every key the store holds on each call, and
+    // one of them is read repeatedly at every leader change, so an unroutable key must cost a lookup, not an
+    // exception: a store holding a few thousand such intents otherwise threw that many times per count.
+    private bool TryResolvePartition(Func<string, int> resolver, string key, out int partitionId)
+    {
+        Ranges.PartitionProbe? probe = probePartition;
+        if (probe is not null)
+            return probe(key, out partitionId);
+
+        try
+        {
+            partitionId = resolver(key);
+            return true;
+        }
+        catch
+        {
+            partitionId = -1;
+            return false;
+        }
     }
 
     // Monotonic stamp of the routing the resolver reads (RangeMapStore.MapVersion), or null when routing is
@@ -272,17 +303,10 @@ internal sealed class PreparedIntentStore
         long tick = Interlocked.Increment(ref version);
 
         Func<string, int>? resolver = resolvePartition;
-        if (resolver is not null)
+        if (resolver is not null && TryResolvePartition(resolver, key, out int owner))
         {
-            try
-            {
-                partitionVersion.AddOrUpdate(resolver(key), static (_, t) => t, static (_, prev, t) => Math.Max(prev, t), tick);
-                return;
-            }
-            catch
-            {
-                // Fall through to the all-partitions stamp.
-            }
+            partitionVersion.AddOrUpdate(owner, static (_, t) => t, static (_, prev, t) => Math.Max(prev, t), tick);
+            return;
         }
 
         StampMax(ref allPartitionsVersion, tick);
@@ -514,17 +538,7 @@ internal sealed class PreparedIntentStore
 
             foreach (KeyValuePair<string, List<PreparedIntent>> kv in settledAwaitingFlush)
             {
-                int owner;
-                try
-                {
-                    owner = resolver(kv.Key);
-                }
-                catch
-                {
-                    continue;
-                }
-
-                if (owner != partitionId)
+                if (!TryResolvePartition(resolver, kv.Key, out int owner) || owner != partitionId)
                     continue;
 
                 List<PreparedIntent> retained = kv.Value;
@@ -1418,18 +1432,7 @@ internal sealed class PreparedIntentStore
 
         foreach (KeyValuePair<string, PreparedIntent> kv in intents)
         {
-            int owner;
-
-            try
-            {
-                owner = resolver(kv.Key);
-            }
-            catch (Exception)
-            {
-                continue;
-            }
-
-            if (owner == partitionId)
+            if (TryResolvePartition(resolver, kv.Key, out int owner) && owner == partitionId)
                 count++;
         }
 
