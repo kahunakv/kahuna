@@ -45,7 +45,7 @@ internal sealed class ImportRangeLocksHandler : BaseHandler
             // Never import an already-expired lock as if it were live. A zero-deadline lock past the
             // session-owned ceiling is expired too: importing one would resurrect an orphaned lock on the
             // destination range, where nothing but the ceiling can clear it again.
-            if (!RangeLockChecks.IsLive(entry, currentTime, context.SessionOwnedIntentCeilingMs))
+            if (!RangeLockChecks.IsLive(context, entry, currentTime))
                 continue;
 
             // Deduplicate: skip if this tx already has an overlapping entry (handles re-import).
@@ -64,7 +64,10 @@ internal sealed class ImportRangeLocksHandler : BaseHandler
             }
 
             if (!duplicate)
+            {
+                RangeLockChecks.AdoptLease(entry, currentTime);
                 locks.Add(entry);
+            }
         }
 
         return KeyValueStaticResponses.LockedResponse;

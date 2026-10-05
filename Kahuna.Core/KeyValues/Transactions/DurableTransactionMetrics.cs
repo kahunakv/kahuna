@@ -97,6 +97,10 @@ internal enum LostLockDetection
     /// <summary>No leader confirmed the term, so the lock cannot be proven held.</summary>
     Unconfirmed,
 
+    /// <summary>The leader is unchanged, and answered that it stopped honoring a range lock of the transaction
+    /// because the lock's lease ran out.</summary>
+    LeaseLapsed,
+
     /// <summary>A one-phase commit was proposed by a leader of another term than the one that granted the
     /// transaction's locks on the anchor partition.</summary>
     BundleApply
@@ -845,19 +849,21 @@ internal static class DurableTransactionMetrics
     /// <c>detected</c> tag says how the loss surfaced: <c>regrant</c> (a later grant on the partition reported
     /// another term), <c>commit_probe</c> (the partition's confirmed leader is in another term at commit),
     /// <c>range_moved</c> (the lock's key no longer routes to the partition that granted it),
-    /// <c>unconfirmed</c> (no leader would confirm the term, so the lock cannot be proven held), or
-    /// <c>bundle_apply</c> (a one-phase commit was proposed by a leader of another term).
+    /// <c>unconfirmed</c> (no leader would confirm the term, so the lock cannot be proven held),
+    /// <c>bundle_apply</c> (a one-phase commit was proposed by a leader of another term), or
+    /// <c>lease_lapsed</c> (the leader is unchanged, and stopped honoring a range lock whose lease ran out).
     /// </summary>
     internal static readonly Counter<long> LostLockAborts =
         Meter.CreateCounter<long>(
             "kahuna.transactions.lost_lock_aborts",
-            description: "Commits refused because a lock the transaction was granted could not be proven still held after a partition leader change.");
+            description: "Commits refused because a lock the transaction was granted could not be proven still held: the partition leader changed, or the lock's lease ran out.");
 
     private static readonly KeyValuePair<string, object?> LostLockRegrant = new("detected", "regrant");
     private static readonly KeyValuePair<string, object?> LostLockCommitProbe = new("detected", "commit_probe");
     private static readonly KeyValuePair<string, object?> LostLockRangeMoved = new("detected", "range_moved");
     private static readonly KeyValuePair<string, object?> LostLockUnconfirmed = new("detected", "unconfirmed");
     private static readonly KeyValuePair<string, object?> LostLockBundleApply = new("detected", "bundle_apply");
+    private static readonly KeyValuePair<string, object?> LostLockLeaseLapsed = new("detected", "lease_lapsed");
 
     private static long lostLockAborts;
 
@@ -873,6 +879,7 @@ internal static class DurableTransactionMetrics
             LostLockDetection.CommitProbe => LostLockCommitProbe,
             LostLockDetection.RangeMoved => LostLockRangeMoved,
             LostLockDetection.BundleApply => LostLockBundleApply,
+            LostLockDetection.LeaseLapsed => LostLockLeaseLapsed,
             _ => LostLockUnconfirmed
         });
     }

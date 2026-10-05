@@ -128,6 +128,17 @@ So the lock itself is proven, by the Raft term:
   answers the change at once, and a node that cannot confirm answers `MustRetry`. The probe runs in the commit-conflict barrier: for the two-phase
   flow that is after the prepares are durable, when replicated intents have taken over the protection of
   the written keys. A transaction with no writes runs it as its whole commit.
+- **The same probe proves the lease.** The same leader is not always the same exclusion: a range lock is a
+  lease, and when it runs out the leader lets other transactions into the range without telling the
+  holder. The actor that first finds a range lock dead records its holder in a node-wide registry
+  (`LapsedRangeLockRegistry`) in the same turn, before it grants or admits anything the lock would have
+  refused. The `LeaderTerm` probe reads the registry after the leadership confirmation and answers
+  `Unlocked` for a transaction found there, which the coordinator refuses as a lost lock. A renewal that
+  re-creates the lock does not remove the record. The lease of a lock an actor holds is measured on the
+  node's monotonic clock (`KeyValueRangeLock.LeaseEndsAtTick`), not on the hybrid logical clock: a stepped
+  wall clock anywhere in the cluster moves the HLC forward by the step at once, and must not end leases
+  that have time left. The HLC deadline (`Expires`) is the form the lease travels in, recomputed from the
+  time left whenever a lock is copied out of its actor.
 - **The one-phase bundle carries the term.** The bundle validates before it proposes, so a leader change
   between the two would let a leader that never held the locks accept it. With
   `OnePhaseApplyTimeValidation` the bundled commit carries the term of the anchor partition's grants
@@ -316,7 +327,7 @@ Completion of committed durable entry #4917 on partition 2 (PreparedIntent) did 
 | `kahuna.keyvalues.apply_divergence_repaired` | counter | Gated partitions whose projection a whole-partition install replaced |
 | `kahuna.transactions.recordless_intents_stale_detected` | counter | Record-less holds a majority of the replica set had already settled (transaction lifecycle guide, §6.7) |
 | `kahuna.transactions.lock_grant_term_changes` | counter | Transactions whose lock grants on one partition reported two leadership terms |
-| `kahuna.transactions.lost_lock_aborts{detected}` | counter | Commits refused because a lock could not be proven held: `regrant`, `commit_probe`, `range_moved`, `unconfirmed`, `bundle_apply` |
+| `kahuna.transactions.lost_lock_aborts{detected}` | counter | Commits refused because a lock could not be proven held: `regrant`, `commit_probe`, `range_moved`, `unconfirmed`, `bundle_apply`, `lease_lapsed` |
 | `kahuna.durable_tx.one_phase_gated_commit_leader_change_rejections` | counter | One-phase bundled commits rejected at apply because another term than the lock grants' proposed them |
 | `kahuna.range.split.incomplete_source_refusals` | counter | Splits refused because the source leader's state was incomplete |
 | `kahuna.durable_tx.ordered_apply_waits_released_on_leadership_loss` | counter | Durable completions released because the node stopped leading the partition |

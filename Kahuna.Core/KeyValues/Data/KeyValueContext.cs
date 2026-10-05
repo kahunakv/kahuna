@@ -100,6 +100,10 @@ internal sealed class KeyValueContext
     /// contexts.</summary>
     public Transactions.TransactionRecordStore? TransactionRecordStore { get; }
 
+    /// <summary>The node's record of the transactions whose range lock it stopped honoring, shared by every
+    /// key-value actor of the node and read by the commit-time lock proof. A bare test context gets its own.</summary>
+    public LapsedRangeLockRegistry LapsedRangeLocks { get; }
+
     public IPersistenceBackend PersistenceBackend  { get; }
 
     /// <summary>
@@ -207,7 +211,8 @@ internal sealed class KeyValueContext
         SnapshotFloorStore? snapshotFloorStore = null,
         CompletionReceiptStore? completionReceiptStore = null,
         Transactions.PreparedIntentStore? preparedIntentStore = null,
-        Transactions.TransactionRecordStore? transactionRecordStore = null
+        Transactions.TransactionRecordStore? transactionRecordStore = null,
+        LapsedRangeLockRegistry? lapsedRangeLocks = null
     )
     {
         ActorContext = actorContext;
@@ -230,6 +235,7 @@ internal sealed class KeyValueContext
         CompletionReceiptStore = completionReceiptStore ?? new CompletionReceiptStore();
         PreparedIntentStore = preparedIntentStore;
         TransactionRecordStore = transactionRecordStore;
+        LapsedRangeLocks = lapsedRangeLocks ?? new LapsedRangeLockRegistry();
     }
 
     /// <summary>

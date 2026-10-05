@@ -59,7 +59,10 @@ public enum KeyValueConflictChecks
     /// holder. The grant reports the term it was issued under; this check, asked at commit of the confirmed
     /// current leader, proves that leadership has not changed since, and so that every lock the transaction
     /// was granted on the partition is still in force. Answers <see cref="KeyValueResponseType.Aborted"/>
-    /// when the term differs. Asked alone, never combined with another check: the key only routes the probe.
+    /// when the term differs. Under an unchanged term it answers <see cref="KeyValueResponseType.Unlocked"/>
+    /// when the leader stopped honoring a range lock of the transaction because its lease ran out: the same
+    /// leader, but no longer the same exclusion. Asked alone, never combined with another check: the key only
+    /// routes the probe.
     /// </summary>
     LeaderTerm = 1 << 4
 }

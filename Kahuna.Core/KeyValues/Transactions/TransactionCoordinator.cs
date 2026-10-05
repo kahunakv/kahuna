@@ -2657,11 +2657,14 @@ internal sealed class TransactionCoordinator : IDisposable
     /// that term: a term has one leader, and a node that stops leading can only lead again in a later term, so
     /// the same term means the same leader, uninterrupted since the grant, with the lock still in its memory.</para>
     ///
-    /// <para>Three outcomes fail the proof. A different term: the leadership changed. A key that now routes to
+    /// <para>Four outcomes fail the proof. A different term: the leadership changed. A key that now routes to
     /// another partition than the one that granted the lock: the range moved, and the term of its new partition
     /// says nothing about the old grant. No confirmed answer after a few attempts: an election is probably in
-    /// progress, which changes the term anyway. Failing closed costs a retryable abort; failing open would
-    /// commit on an exclusion nobody holds.</para>
+    /// progress, which changes the term anyway. A lapsed lease: the leader is the same, but a range lock is a
+    /// lease in its memory, and the leader answers that it stopped honoring one of this transaction's because
+    /// its time ran out (<see cref="LapsedRangeLockRegistry"/>); a later renewal re-creates the lock and does
+    /// not undo that. Failing closed costs a retryable abort; failing open would commit on an exclusion nobody
+    /// holds.</para>
     /// </summary>
     private async Task<LostLock?> FindLostLock(TransactionContext context, CancellationToken cancellationToken)
     {
@@ -2726,6 +2729,11 @@ internal sealed class TransactionCoordinator : IDisposable
                         return new LostLock(
                             LostLockDetection.CommitProbe,
                             $"partition {grant.PartitionId} is no longer led under term {grant.Term}, in which it granted this transaction a lock; the lock was dropped by the leader change");
+
+                    case KeyValueResponseType.Unlocked:
+                        return new LostLock(
+                            LostLockDetection.LeaseLapsed,
+                            $"the leader of partition {grant.PartitionId} stopped honoring a range lock of this transaction: its lease ran out before the transaction released it");
 
                     default:
                         undecided = true;

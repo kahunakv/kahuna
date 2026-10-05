@@ -54,7 +54,7 @@ internal static class RangeLockChecks
             if (rangeLock.TransactionId == txId)
                 continue;
 
-            if (!IsLive(rangeLock, currentTime, context.SessionOwnedIntentCeilingMs))
+            if (!IsLive(context, rangeLock, currentTime))
                 continue; // expired — will be cleaned up on release or by the collector sweep
 
             if (KeyInRange(key, rangeLock))
@@ -74,6 +74,11 @@ internal static class RangeLockChecks
     /// has been finalized or reaped. Without that arm an abandoned zero-deadline lock blocks every write
     /// into its range for the life of the process, which is the range-lock form of an immortal write intent.
     ///
+    /// <para>A deadline held by an actor is measured on the node's monotonic clock
+    /// (<see cref="KeyValueRangeLock.LeaseEndsAtTick"/>), so a forward leap of the hybrid logical clock does
+    /// not end a lease that has time left. <paramref name="currentTime"/> decides only for a lock that no
+    /// actor holds yet, whose deadline is still in the form it travelled in.</para>
+    ///
     /// <para>The age is measured from the lock's transaction id rather than from a plant stamp, because a
     /// range lock is carried between actors by a split or a merge. The transaction id crosses that transfer
     /// and bounds the same session, while a plant stamp re-taken on import would restart the clock and
@@ -82,12 +87,100 @@ internal static class RangeLockChecks
     internal static bool IsLive(KeyValueRangeLock rangeLock, HLCTimestamp currentTime, int sessionOwnedCeilingMs)
     {
         if (rangeLock.Expires != HLCTimestamp.Zero)
-            return rangeLock.Expires - currentTime > TimeSpan.Zero;
+        {
+            return rangeLock.LeaseEndsAtTick != 0
+                ? rangeLock.LeaseEndsAtTick - Environment.TickCount64 > 0
+                : rangeLock.Expires - currentTime > TimeSpan.Zero;
+        }
 
         if (sessionOwnedCeilingMs <= 0 || rangeLock.TransactionId == HLCTimestamp.Zero)
             return true;
 
         return (currentTime - rangeLock.TransactionId).TotalMilliseconds < sessionOwnedCeilingMs;
+    }
+
+    /// <summary>
+    /// <see cref="IsLive(KeyValueRangeLock, HLCTimestamp, int)"/> for a lock in an actor's table, which also
+    /// records the holder of a dead lock in the node's <see cref="LapsedRangeLockRegistry"/>. Every path that
+    /// decides something on a lock in the table, or refuses to take one into it, uses this entry point: the
+    /// caller is about to act as if the lock were not there, and the record is what keeps its holder from
+    /// committing afterwards.
+    /// </summary>
+    internal static bool IsLive(KeyValueContext context, KeyValueRangeLock rangeLock, HLCTimestamp currentTime)
+    {
+        int ceilingMs = context.SessionOwnedIntentCeilingMs;
+
+        if (IsLive(rangeLock, currentTime, ceilingMs))
+            return true;
+
+        if (!rangeLock.LapseRecorded)
+        {
+            rangeLock.LapseRecorded = true;
+            context.LapsedRangeLocks.Record(rangeLock.TransactionId, ceilingMs);
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Starts the lease of a lock an actor holds, or starts it over on a renewal: <paramref name="expiresMs"/>
+    /// from now on the node's monotonic clock, with the same deadline kept in hybrid-logical-clock form for
+    /// when the lock leaves the actor. Zero makes the lock session-owned, with no deadline in either form.
+    /// </summary>
+    internal static void StartLease(KeyValueRangeLock rangeLock, HLCTimestamp currentTime, int expiresMs)
+    {
+        rangeLock.Expires = KeyValueWriteIntentLease.FromRequest(currentTime, expiresMs);
+        rangeLock.LeaseEndsAtTick = expiresMs == 0 ? 0 : Environment.TickCount64 + expiresMs;
+    }
+
+    /// <summary>
+    /// Takes a lock that arrived with a hybrid-logical-clock deadline into an actor: the time the deadline
+    /// leaves against <paramref name="currentTime"/> becomes its lease on the node's monotonic clock. The
+    /// caller has already refused a lock whose deadline passed. A lock that already has a monotonic deadline
+    /// keeps it: it is an instance this process adopted before and is handing in again, and the deadline it
+    /// was given then is still the right one.
+    /// </summary>
+    internal static void AdoptLease(KeyValueRangeLock rangeLock, HLCTimestamp currentTime)
+    {
+        if (rangeLock.Expires == HLCTimestamp.Zero)
+        {
+            rangeLock.LeaseEndsAtTick = 0;
+            return;
+        }
+
+        if (rangeLock.LeaseEndsAtTick != 0)
+            return;
+
+        long remainingMs = Math.Max((long)(rangeLock.Expires - currentTime).TotalMilliseconds, 1);
+        rangeLock.LeaseEndsAtTick = Environment.TickCount64 + remainingMs;
+    }
+
+    /// <summary>
+    /// A copy of a held lock for a reader outside the actor, with its deadline put back in
+    /// hybrid-logical-clock form: the time left on the lease, added to <paramref name="currentTime"/>. The
+    /// deadline recorded at the grant would not do, because the clock may have leapt since and would place
+    /// it in the past of a lease that has time left.
+    /// </summary>
+    internal static KeyValueRangeLock DetachedCopy(KeyValueRangeLock rangeLock, HLCTimestamp currentTime)
+    {
+        HLCTimestamp expires = rangeLock.Expires;
+
+        if (expires != HLCTimestamp.Zero && rangeLock.LeaseEndsAtTick != 0)
+        {
+            long remainingMs = Math.Max(rangeLock.LeaseEndsAtTick - Environment.TickCount64, 1);
+            expires = currentTime + TimeSpan.FromMilliseconds(remainingMs);
+        }
+
+        return new KeyValueRangeLock
+        {
+            TransactionId  = rangeLock.TransactionId,
+            Expires        = expires,
+            StartKey       = rangeLock.StartKey,
+            StartInclusive = rangeLock.StartInclusive,
+            EndKey         = rangeLock.EndKey,
+            EndInclusive   = rangeLock.EndInclusive,
+            Mode           = rangeLock.Mode,
+        };
     }
 
     /// <summary>
@@ -115,7 +208,7 @@ internal static class RangeLockChecks
             inspected++;
             KeyValueRangeLock rl = locks[i];
 
-            if (IsLive(rl, currentTime, ceilingMs))
+            if (IsLive(context, rl, currentTime))
                 continue;
 
             // A zero deadline can only fail the policy through the ceiling arm, so this identifies an

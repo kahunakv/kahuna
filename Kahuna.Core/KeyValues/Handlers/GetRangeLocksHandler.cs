@@ -30,7 +30,12 @@ internal sealed class GetRangeLocksHandler : BaseHandler
             return KeyValueResponse.ForRangeLocks([]);
         }
 
-        // Return a shallow copy — the caller must not mutate the live list.
-        return KeyValueResponse.ForRangeLocks(new List<KeyValueRangeLock>(locks));
+        // Return copies — the caller must not mutate the live list or its locks. Each copy carries the time
+        // left on its lease as a deadline against the clock read above, which is the form a transfer needs.
+        List<KeyValueRangeLock> snapshot = new(locks.Count);
+        foreach (KeyValueRangeLock held in locks)
+            snapshot.Add(RangeLockChecks.DetachedCopy(held, currentTime));
+
+        return KeyValueResponse.ForRangeLocks(snapshot);
     }
 }

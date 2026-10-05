@@ -165,7 +165,8 @@ internal sealed class KeyValueActorRouters
                 snapshotFloorStore,
                 completionReceiptStore,
                 ephemeralPreparedIntentStore,
-                ephemeralTransactionRecordStore
+                ephemeralTransactionRecordStore,
+                runtime.LapsedRangeLocks
             ));
 
         return new KeyValueActorRing(ephemeralInstances);
@@ -202,7 +203,8 @@ internal sealed class KeyValueActorRouters
                 snapshotFloorStore,
                 completionReceiptStore,
                 preparedIntentStore,
-                transactionRecordStore
+                transactionRecordStore,
+                runtime.LapsedRangeLocks
             ));
 
         return new KeyValueActorRing(persistentInstances);

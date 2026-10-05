@@ -310,6 +310,28 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
         CompletionReceiptStore? completionReceiptStore,
         Transactions.PreparedIntentStore? preparedIntentStore,
         Transactions.TransactionRecordStore? transactionRecordStore
+    ) : this(actorContext, backgroundWriter, writeAggregator, persistenceBackend, raft, backendReadScheduler,
+             keySpaceRegistry, rangeMapStore, configuration, logger, snapshotFloorStore, completionReceiptStore,
+             preparedIntentStore, transactionRecordStore, null)
+    {
+    }
+
+    public KeyValueActor(
+        IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext,
+        IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
+        Writes.PartitionWriteAggregator writeAggregator,
+        IPersistenceBackend persistenceBackend,
+        IRaft raft,
+        IRaftReadScheduler backendReadScheduler,
+        KeySpaceRegistry keySpaceRegistry,
+        RangeMapStore rangeMapStore,
+        KahunaConfiguration configuration,
+        ILogger<IKahuna> logger,
+        SnapshotFloorStore? snapshotFloorStore,
+        CompletionReceiptStore? completionReceiptStore,
+        Transactions.PreparedIntentStore? preparedIntentStore,
+        Transactions.TransactionRecordStore? transactionRecordStore,
+        LapsedRangeLockRegistry? lapsedRangeLocks
     )
     {
         this.actorContext = actorContext;
@@ -333,7 +355,8 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
             snapshotFloorStore,
             completionReceiptStore,
             preparedIntentStore,
-            transactionRecordStore
+            transactionRecordStore,
+            lapsedRangeLocks
         );
 
         KeyValueContext context = kvContext;

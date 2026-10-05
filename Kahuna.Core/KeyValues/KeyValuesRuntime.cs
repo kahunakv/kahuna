@@ -87,6 +87,10 @@ internal sealed class KeyValuesRuntime
 
     internal required Writes.PartitionWriteAggregator WriteAggregator { get; init; }
 
+    /// <summary>The transactions whose range lock this node stopped honoring. Written by the key-value actors,
+    /// read by the commit-time lock proof.</summary>
+    internal LapsedRangeLockRegistry LapsedRangeLocks { get; } = new();
+
     /// <summary>Routes a request to the Raft leader for the key's partition. Assigned in the second wiring
     /// pass because the locator itself takes the manager.</summary>
     internal KeyValueLocator Locator { get; set; } = null!;

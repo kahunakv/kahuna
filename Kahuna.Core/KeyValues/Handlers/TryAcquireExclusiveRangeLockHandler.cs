@@ -107,7 +107,7 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
                     {
                         if (other.TransactionId == message.TransactionId)
                             continue;
-                        if (!RangeLockChecks.IsLive(other, currentTime, context.SessionOwnedIntentCeilingMs))
+                        if (!RangeLockChecks.IsLive(context, other, currentTime))
                             continue;
                         if (RangeLockChecks.RangesOverlap(message.StartKey, message.StartInclusive, message.EndKey, message.EndInclusive,
                                 other.StartKey, other.StartInclusive, other.EndKey, other.EndInclusive))
@@ -124,7 +124,7 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
                 }
                 // X → S downgrade or same-mode re-entry: refresh the expiry from *now* so the
                 // caller can extend the lock beyond its original TTL (heartbeat / lease-renewal).
-                existing.Expires = KeyValueWriteIntentLease.FromRequest(currentTime, message.ExpiresMs);
+                RangeLockChecks.StartLease(existing, currentTime, message.ExpiresMs);
                 return KeyValueStaticResponses.LockedResponse;
             }
 
@@ -137,7 +137,7 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
                 if (existing.TransactionId == message.TransactionId)
                     continue;
 
-                if (!RangeLockChecks.IsLive(existing, currentTime, context.SessionOwnedIntentCeilingMs))
+                if (!RangeLockChecks.IsLive(context, existing, currentTime))
                     continue; // expired, or orphaned past the session-owned ceiling
 
                 if (message.RangeLockMode == RangeLockMode.Shared && existing.Mode == RangeLockMode.Shared)
@@ -185,13 +185,14 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
         KeyValueRangeLock rangeLock = new()
         {
             TransactionId  = message.TransactionId,
-            Expires        = KeyValueWriteIntentLease.FromRequest(currentTime, message.ExpiresMs),
             StartKey       = message.StartKey,
             StartInclusive = message.StartInclusive,
             EndKey         = message.EndKey,
             EndInclusive   = message.EndInclusive,
             Mode           = message.RangeLockMode,
         };
+
+        RangeLockChecks.StartLease(rangeLock, currentTime, message.ExpiresMs);
 
         if (!context.LocksByRange.TryGetValue(keySpace, out List<KeyValueRangeLock>? locks))
         {

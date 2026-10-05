@@ -338,7 +338,9 @@ internal sealed class LocalKeyValueReadOperations
     /// staged base (the post-prepare fence for a read-modify-write key, compared against
     /// <paramref name="baseRevision"/>). Returns Aborted for an intent/range-lock conflict, NotSet for a
     /// staged-base mismatch; DoesNotExist otherwise. The leader-term check is answered alone, by
-    /// <see cref="KeyValueLocator.CheckLeaderTerm"/>, against the term <paramref name="baseRevision"/> carries.
+    /// <see cref="KeyValueLocator.CheckLeaderTerm"/>, against the term <paramref name="baseRevision"/> carries;
+    /// under an unbroken leadership it answers Unlocked when this node stopped honoring a range lock of the
+    /// transaction (<see cref="LapsedRangeLockRegistry"/>).
     /// </summary>
     public async Task<KeyValueResponseType> TryCheckWriteIntentValue(
         HLCTimestamp transactionId,
@@ -355,7 +357,18 @@ internal sealed class LocalKeyValueReadOperations
         // actor holds the answer, so the locator gives it from the Raft term, after it confirmed that this
         // node leads the partition.
         if ((checks & KeyValueConflictChecks.LeaderTerm) != 0)
-            return await locator.CheckLeaderTerm(key, baseRevision, CancellationToken.None);
+        {
+            KeyValueResponseType leadership = await locator.CheckLeaderTerm(key, baseRevision, CancellationToken.None);
+
+            // An unbroken leadership proves that no leader change dropped the transaction's locks. It does not
+            // prove that this leader still honors them: a range lock is a lease, and one whose lease ran out
+            // was already stepped over by whoever asked next. The registry is read after the confirmation, so
+            // an answer of "held" covers every lapse recorded up to the instant this node was confirmed.
+            if (leadership == KeyValueResponseType.DoesNotExist && runtime.LapsedRangeLocks.Contains(transactionId))
+                return KeyValueResponseType.Unlocked;
+
+            return leadership;
+        }
 
         KeyValueRequest request = KeyValueRequestPool.Rent(
             KeyValueRequestType.TryCheckWriteIntent,
