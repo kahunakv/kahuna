@@ -371,8 +371,8 @@ public class TestKeyValueScriptSemantics : BaseCluster
 
     /// <summary>
     /// The lexer patterns always recognised backslash escapes, but the actions passed them through as
-    /// literal two-character text. A control character is also excluded from an unescaped literal, so until
-    /// now there was no way at all to put a line break into a value.
+    /// literal two-character text. A line break can be written either as an escape or as a raw line break
+    /// inside the quotes; both must reach the stored value unchanged.
     /// </summary>
     [Theory, CombinatorialData]
     public async Task TestStringEscapes([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
@@ -416,6 +416,22 @@ public class TestKeyValueScriptSemantics : BaseCluster
 
             Assert.Equal(KeyValueResponseType.Get, read.Type);
             Assert.Equal("line1\nline2", Encoding.UTF8.GetString(read.Value ?? []));
+
+            // A raw line break inside the quotes is kept as it is.
+            await AssertReturns(kahuna1, "RETURN 'a\nb'", "a\nb");
+
+            string rawKey = GetRandomKey();
+
+            KeyValueTransactionResult rawWrite = await kahuna1.TryExecuteTransactionScript(
+                Encoding.UTF8.GetBytes($"BEGIN\n  SET '{rawKey}' 'line1\nline2'\n  COMMIT\nEND"), null, null);
+
+            Assert.Equal(KeyValueResponseType.Set, rawWrite.Type);
+
+            KeyValueTransactionResult rawRead = await kahuna1.TryExecuteTransactionScript(
+                Encoding.UTF8.GetBytes($"GET '{rawKey}'"), null, null);
+
+            Assert.Equal(KeyValueResponseType.Get, rawRead.Type);
+            Assert.Equal("line1\nline2", Encoding.UTF8.GetString(rawRead.Value ?? []));
         }
         finally
         {

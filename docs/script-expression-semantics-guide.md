@@ -138,6 +138,17 @@ These are the recognized escapes:
 
 Both quote forms and the backtick identifier form decode the same way.
 
+A single- or double-quoted literal may also hold raw line breaks, so a value can be typed across lines.
+The line breaks are kept exactly as written, including any indentation on the following lines:
+
+```
+SET x 'first line
+second line'      -- the value is "first line\nsecond line"
+```
+
+A backtick identifier must stay on one line. Other raw control characters, such as a tab, are still
+rejected inside a literal; write them as escapes.
+
 Any other escape is a script error. Whether `\q` was meant as `q` or as `\q` is unknowable, and either
 guess is wrong half the time. A literal that holds no backslash is untouched, and costs nothing.
 

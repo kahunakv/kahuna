@@ -163,6 +163,31 @@ public sealed class TestKeyValueScriptParserSyntax
     }
 
     /// <summary>
+    /// A quoted string literal may hold raw line breaks, and the lines after it still report their own
+    /// line numbers. A backtick identifier stays on one line, and an unclosed literal is still an error.
+    /// </summary>
+    [Fact]
+    public void TestStringLiteralSpansLines()
+    {
+        NodeAst single = parser.Parse("BEGIN\n  SET x 'p1\n '\n  SET p 'xxx'\nEND");
+        Assert.Equal(2, CountNodes(single, NodeType.Set));
+
+        NodeAst? multiLine = FindNode(single, NodeType.StringType);
+        Assert.NotNull(multiLine);
+        Assert.Equal("p1\n ", multiLine.yytext);
+
+        NodeAst? doubleQuoted = FindNode(parser.Parse("RETURN \"a\r\nb\""), NodeType.StringType);
+        Assert.NotNull(doubleQuoted);
+        Assert.Equal("a\r\nb", doubleQuoted.yytext);
+
+        KahunaScriptException afterString = Assert.Throws<KahunaScriptException>(() => parser.Parse("SET x 'a\nb'\nSET y %"));
+        Assert.Contains("at line 3", afterString.Message, StringComparison.Ordinal);
+
+        Assert.Throws<KahunaScriptException>(() => parser.Parse("SET `a\nb` 1"));
+        Assert.Throws<KahunaScriptException>(() => parser.Parse("SET x 'a\nSET y 1"));
+    }
+
+    /// <summary>
     /// A SWITCH keeps every CASE, every value of a multi-value CASE, and the ELSE body, in source order.
     /// </summary>
     [Fact]
