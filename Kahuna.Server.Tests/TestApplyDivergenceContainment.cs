@@ -205,6 +205,19 @@ public sealed class TestApplyDivergenceContainment : BaseCluster
     private static async Task WaitUntilNotLeading(IRaft raft, CancellationToken ct) =>
         await WaitUntilAsync(async () => !await raft.AmILeaderIfHosted(Partition, ct), timeoutMs: 30_000);
 
+    /// <summary>
+    /// Judges the status of a transfer to a replica that containment deposes as soon as it leads. The status is
+    /// the old leader's view of who leads once the handover settles, sampled on a poll. The replica can be
+    /// promoted, proven incomplete and replaced by the peer it relinquishes to inside one poll interval, and the
+    /// old leader then names that successor: <see cref="RaftOperationStatus.LeaderAlreadyElected"/>. Only a
+    /// refusal, where nothing was handed over, fails here. That the replica did lead is proven by what its
+    /// promotion leaves behind (the gate, the stale-hold count), which each caller waits for.
+    /// </summary>
+    private static void AssertHandedOverToAReplicaThatRelinquishes(RaftOperationStatus transfer) =>
+        Assert.True(
+            transfer is RaftOperationStatus.Success or RaftOperationStatus.Pending or RaftOperationStatus.LeaderAlreadyElected,
+            $"transfer to the short replica: {transfer}");
+
     [Fact]
     public async Task ShortLeader_RelinquishesToTheFullerPeer_RefusesToServe_AndIsRepairedByAnInstall()
     {
@@ -236,7 +249,7 @@ public sealed class TestApplyDivergenceContainment : BaseCluster
             // Promote the short replica: the leader-change comparison indicts it as leader.
             double detectedBefore = metrics.Total("kahuna.keyvalues.apply_divergence_detected");
             RaftOperationStatus transfer = await rafts[leader].TransferLeadershipAsync(Partition, EndpointOf(@short), ct);
-            Assert.True(transfer is RaftOperationStatus.Success or RaftOperationStatus.Pending, $"transfer to the short replica: {transfer}");
+            AssertHandedOverToAReplicaThatRelinquishes(transfer);
 
             // (a) It relinquishes within a bounded time, to a peer, and stays gated.
             await WaitUntilAsync(() => managers[@short].KeyValues.DivergenceContainment.IsGated(Partition), timeoutMs: 40_000);
@@ -595,13 +608,17 @@ public sealed class TestApplyDivergenceContainment : BaseCluster
             double staleBefore = metrics.Total("kahuna.transactions.recordless_intents_stale_detected");
 
             RaftOperationStatus transfer = await rafts[leader].TransferLeadershipAsync(Partition, EndpointOf(@short), ct);
-            Assert.True(transfer is RaftOperationStatus.Success or RaftOperationStatus.Pending, $"transfer to the short replica: {transfer}");
-            await WaitUntilAsync(async () => await rafts[@short].AmILeaderIfHosted(Partition, ct), timeoutMs: 30_000);
+            AssertHandedOverToAReplicaThatRelinquishes(transfer);
 
-            // The sweep holds the record-less intents, asks the peers, and is told they settled them.
-            await WaitUntilAsync(() => metrics.Total("kahuna.transactions.recordless_intents_stale_detected") > staleBefore, timeoutMs: 60_000);
+            // The sweep holds the record-less intents, asks the peers, is told they settled them, and gates the
+            // partition. The sweep runs on the partition's leader alone and the fingerprint comparison is masked,
+            // so the gate on this replica is also the proof that it was promoted. Its term is not polled for:
+            // the sweep can gate the partition and hand it on before a poll of who leads samples that term.
+            await WaitUntilAsync(() => managers[@short].KeyValues.DivergenceContainment.IsGated(Partition), timeoutMs: 60_000);
+            Assert.True(
+                metrics.Total("kahuna.transactions.recordless_intents_stale_detected") > staleBefore,
+                "the short replica was gated without its recovery sweep proving a hold stale");
 
-            await WaitUntilAsync(() => managers[@short].KeyValues.DivergenceContainment.IsGated(Partition), timeoutMs: 15_000);
             await WaitUntilNotLeading(rafts[@short], ct);
             Assert.NotEqual(@short, await LeaderIndexOf(Partition, rafts, ct));
             Assert.True(metrics.Total("kahuna.keyvalues.apply_divergence_contained", "gated") >= 1);
