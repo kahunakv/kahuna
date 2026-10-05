@@ -16,18 +16,67 @@ namespace Kahuna.Server.Tests;
 /// <item><see cref="LeaveAndDisposeAsync"/> performs the real graceful leave (drain, <c>RemoveMember</c>
 /// commit, then dispose). Only tests whose subject is a node leaving a live cluster use it.</item>
 /// </list>
+/// Every node is also recorded against the test that assembled it, so <see cref="DisposeLeftBehindAsync"/>
+/// can throw away what that test did not tear down itself. A node nobody disposes keeps its timers, its
+/// elections and its background sweeps running until the process exits, on the cores and the heap the
+/// remaining tests measure.
 /// </summary>
 internal static class TestClusterNodeRegistry
 {
-    private sealed record Runtime(IRaft Raft, IKahuna Kahuna, ActorSystem ActorSystem);
+    private sealed record Runtime(IRaft Raft, IKahuna Kahuna, ActorSystem ActorSystem, string? Owner);
 
     private static readonly Dictionary<IRaft, Runtime> Runtimes = new(ReferenceEqualityComparer.Instance);
     private static readonly object Gate = new();
 
+    /// <summary>The identity of the running test, or null outside one (a node built there has no owner and is
+    /// never disposed on a test's behalf).</summary>
+    public static string? CurrentOwner => TestContext.Current.Test?.UniqueID;
+
     public static void Register(IRaft raft, IKahuna kahuna, ActorSystem actorSystem)
     {
+        string? owner = CurrentOwner;
+
         lock (Gate)
-            Runtimes[raft] = new(raft, kahuna, actorSystem);
+            Runtimes[raft] = new(raft, kahuna, actorSystem, owner);
+    }
+
+    /// <summary>
+    /// Throws away every node <paramref name="owner"/> assembled and has not torn down. Nodes the test
+    /// already disposed left the registry then, so this costs nothing for a test that cleans up.
+    /// </summary>
+    public static async Task DisposeLeftBehindAsync(string owner)
+    {
+        List<Runtime>? leftBehind = null;
+
+        lock (Gate)
+        {
+            foreach (Runtime runtime in Runtimes.Values)
+            {
+                if (runtime.Owner == owner)
+                    (leftBehind ??= []).Add(runtime);
+            }
+
+            if (leftBehind is null)
+                return;
+
+            foreach (Runtime runtime in leftBehind)
+                Runtimes.Remove(runtime.Raft);
+        }
+
+        // Together, as LeaveCluster does: a node disposed alone leaves its peers electing around it.
+        await Task.WhenAll(leftBehind.Select(DisposeLeftBehindNodeAsync)).ConfigureAwait(false);
+    }
+
+    private static async Task DisposeLeftBehindNodeAsync(Runtime runtime)
+    {
+        try
+        {
+            await DisposeAsync(runtime, gracefulLeave: false, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (ObjectDisposedException)
+        {
+            // The test disposed part of the node itself (its Raft instance, its actor system).
+        }
     }
 
     /// <summary>

@@ -14,8 +14,27 @@ using Nixie;
 
 namespace Kahuna.Server.Tests;
 
-public abstract class BaseCluster
+public abstract class BaseCluster : IAsyncLifetime
 {
+    // Captured at construction as well: the node registry reads the same identity when a test assembles a node.
+    private readonly string? owner = TestClusterNodeRegistry.CurrentOwner;
+
+    public ValueTask InitializeAsync() => ValueTask.CompletedTask;
+
+    /// <summary>
+    /// Tears down every node the test assembled and did not dispose itself. A test that ends without
+    /// <see cref="LeaveCluster(IRaft, IRaft, IRaft)"/> (by omission, or by throwing before it) would otherwise
+    /// leave a live cluster behind for the rest of the run.
+    /// </summary>
+    public async ValueTask DisposeAsync()
+    {
+        GC.SuppressFinalize(this);
+
+        string? test = owner ?? TestClusterNodeRegistry.CurrentOwner;
+        if (test is not null)
+            await TestClusterNodeRegistry.DisposeLeftBehindAsync(test);
+    }
+
     /// <summary>
     /// Base for the per-node deterministic election seeds (Kommander 0.10.16 <c>ElectionTimeoutSeed</c>).
     /// Each node adds its NodeId so the three nodes get distinct, reproducible election timers — a

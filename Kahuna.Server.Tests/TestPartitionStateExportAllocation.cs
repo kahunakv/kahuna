@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+using System.Diagnostics.Tracing;
 
 using Kommander.Time;
 
@@ -72,11 +74,13 @@ public sealed class TestPartitionStateExportAllocation
 
         // The number is process-wide: the export's page scan hops threads, so per-thread accounting cannot
         // isolate it, and anything else the process does meanwhile (a straggling teardown of an earlier
-        // test's cluster, the finalizer thread) is charged to the export. That noise is bursty, not sustained,
-        // so the export is measured several times and the smallest attempt is the one judged: a doubling
-        // ladder costs at least 2x on every attempt, so the minimum still catches it, while one attempt hit
-        // by unrelated allocation no longer fails the test. The ambient rate is sampled first and reported
-        // with every attempt so a failure says whether the export or its neighbours allocated.
+        // test's cluster, the finalizer thread) is charged to the export. The export is measured several
+        // times and the smallest attempt is the one judged: a doubling ladder costs at least 2x on every
+        // attempt, so the minimum still catches it, while one attempt hit by unrelated allocation does not
+        // fail the test. The minimum cannot absorb allocation that is sustained across every attempt, so the
+        // ambient rate is sampled first and reported, and a failure also names what the process allocated
+        // (see DescribeAllocators): a cluster an earlier test left running once put hundreds of megabytes per
+        // second here, and the bare totals could not say whose they were.
         long ambientBefore = GC.GetTotalAllocatedBytes(precise: true);
         await Task.Delay(100, ct);
         long ambientPerSecond = (GC.GetTotalAllocatedBytes(precise: true) - ambientBefore) * 10;
@@ -110,6 +114,55 @@ public sealed class TestPartitionStateExportAllocation
         // allocates at most the size itself plus the per-page message objects, and less once the pool is warm.
         TestContext.Current.TestOutputHelper?.WriteLine(report);
 
+        if (allocated >= 1.6 * length)
+            report += "; the process allocated meanwhile: " + await DescribeAllocators(ct);
+
         Assert.True(allocated < 1.6 * length, report);
+    }
+
+    /// <summary>
+    /// What the whole process allocates over half a second, by type, largest first: the runtime's sampled
+    /// allocation events (one per ~100 KB a thread allocates, attributed to the type that crossed the mark).
+    /// Read only on the failure path, to tell an export that allocates too much from a neighbour that does.
+    /// </summary>
+    private static async Task<string> DescribeAllocators(CancellationToken ct)
+    {
+        using AllocationSampler sampler = new();
+        await Task.Delay(500, ct);
+
+        List<KeyValuePair<string, long>> byType = [.. sampler.BytesByType];
+        if (byType.Count == 0)
+            return "nothing sampled";
+
+        byType.Sort(static (a, b) => b.Value.CompareTo(a.Value));
+        return string.Join(", ", byType.Take(6).Select(pair => $"{pair.Key} {pair.Value} B"));
+    }
+
+    private sealed class AllocationSampler : EventListener
+    {
+        private const EventKeywords GarbageCollection = (EventKeywords)0x1;
+
+        public ConcurrentDictionary<string, long> BytesByType { get; } = new(StringComparer.Ordinal);
+
+        protected override void OnEventSourceCreated(EventSource source)
+        {
+            if (source.Name == "Microsoft-Windows-DotNETRuntime")
+                EnableEvents(source, EventLevel.Verbose, GarbageCollection);
+        }
+
+        protected override void OnEventWritten(EventWrittenEventArgs sample)
+        {
+            if (sample.EventName is null || !sample.EventName.StartsWith("GCAllocationTick", StringComparison.Ordinal)
+                || sample.Payload is null || sample.PayloadNames is null)
+                return;
+
+            int type = sample.PayloadNames.IndexOf("TypeName");
+            int amount = sample.PayloadNames.IndexOf("AllocationAmount64");
+            if (type < 0 || amount < 0)
+                return;
+
+            long bytes = Convert.ToInt64(sample.Payload[amount]);
+            BytesByType.AddOrUpdate(sample.Payload[type]?.ToString() ?? "unknown", bytes, (_, total) => total + bytes);
+        }
     }
 }
