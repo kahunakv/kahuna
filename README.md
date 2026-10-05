@@ -34,6 +34,12 @@ Kahuna Script can call custom C# functions registered by the operator or embedde
 
 [More](https://kahunakv.github.io/docs/scripts/user-defined-functions)
 
+### **Distributed Rate Limiting**
+
+Kahuna.Client includes fixed-window, sliding-window, token-bucket and concurrency rate limiters that keep their budgets in Kahuna, so every replica of an application spends one budget. They are standard .NET `RateLimiter` classes, and the Kahuna.Client.AspNetCore package adds them to the ASP.NET Core rate-limiting middleware with `options.AddKahunaFixedWindowLimiter(...)` and similar methods.
+
+[More](docs/distributed-rate-limiting-guide.md)
+
 These capabilities work together. They give you a foundation for reliable and scalable distributed applications.
 
 > _Kahuna_ is a Hawaiian word for an expert in any field.

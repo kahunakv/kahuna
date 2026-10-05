@@ -159,7 +159,44 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
     public Task<(bool, long, int)> TryCompareRevisionAndSetKeyValue(string url, HLCTimestamp transactionId, string key, byte[]? value, long compareRevision, int expiryTime, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default) => throw new NotImplementedException();
     public Task<(bool, long, int)> TryDeleteKeyValue(string url, HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default) => throw new NotImplementedException();
     public Task<(bool, long, int)> TryExtendKeyValue(string url, HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default) => throw new NotImplementedException();
-    public Task<KahunaKeyValueTransactionResult> TryExecuteKeyValueTransactionScript(string url, byte[] script, string? hash, List<KeyValueParameter>? parameters, CancellationToken cancellationToken, TransactionPriority priority = TransactionPriority.Normal) => throw new NotImplementedException();
+    /// <summary>
+    /// Runs the script on the wrapped node with the outcome rules of the gRPC transport: a finished
+    /// script is returned, MustRetry is retried up to five attempts, and every other outcome is thrown
+    /// as a <see cref="KahunaException"/> carrying the response type.
+    /// </summary>
+    public async Task<KahunaKeyValueTransactionResult> TryExecuteKeyValueTransactionScript(string url, byte[] script, string? hash, List<KeyValueParameter>? parameters, CancellationToken cancellationToken, TransactionPriority priority = TransactionPriority.Normal)
+    {
+        int retries = 0;
+        KeyValueTransactionResult result;
+
+        do
+        {
+            if (cancellationToken.IsCancellationRequested)
+                throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
+
+            result = await kahuna.TryExecuteTransactionScript(script, hash, parameters, priority);
+
+            if (result.Type is < KeyValueResponseType.Errored or KeyValueResponseType.DoesNotExist)
+                return new()
+                {
+                    Type = result.Type,
+                    Values = result.Values?.Select(v => new KahunaKeyValueTransactionResultValue
+                    {
+                        Key = v.Key,
+                        Value = v.Value,
+                        Revision = v.Revision,
+                        Expires = v.Expires,
+                        LastModified = v.LastModified
+                    }).ToList()
+                };
+
+            if (++retries >= 5)
+                throw new KahunaException("Retries exhausted.", KeyValueResponseType.Aborted);
+
+        } while (result.Type == KeyValueResponseType.MustRetry);
+
+        throw new KahunaException(string.IsNullOrEmpty(result.Reason) ? "Failed to execute key/value transaction: " + result.Type : result.Reason, result.Type);
+    }
     public async Task<bool> TryAcquireExclusiveKeyValueLock(string url, HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
     {
         (KeyValueResponseType result, _, _, _) = await kahuna.LocateAndTryAcquireExclusiveLock(

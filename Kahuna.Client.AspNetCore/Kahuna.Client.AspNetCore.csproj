@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <OutputType>Library</OutputType>
+        <TargetFramework>net10.0</TargetFramework>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <IsPackable>true</IsPackable>
+        <PackageId>Kahuna.Client.AspNetCore</PackageId>
+        <Version>1.10.11</Version>
+        <Description>ASP.NET Core rate-limiting policies backed by Kahuna, so every replica of an application shares one budget</Description>
+        <Authors>Andres Gutierrez</Authors>
+        <Company>Andres Gutierrez</Company>
+        <InvariantGlobalization>true</InvariantGlobalization>
+        <PackageLicenseExpression>MIT</PackageLicenseExpression>
+        <PackageDescription>ASP.NET Core rate-limiting policies backed by Kahuna, so every replica of an application shares one budget</PackageDescription>
+        <PackageProjectUrl>https://github.com/kahunakv/kahuna</PackageProjectUrl>
+        <RepositoryUrl>https://github.com/kahunakv/kahuna</RepositoryUrl>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
+        <PackageTags>rate limiting;rate limiter;distributed rate limiter;aspnetcore;token bucket;sliding window;kahuna</PackageTags>
+    </PropertyGroup>
+
+    <!-- Kept out of Kahuna.Client so that a console or worker consumer of the client does not need the
+         ASP.NET Core runtime. -->
+    <ItemGroup>
+        <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\Kahuna.Client\Kahuna.Client.csproj" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <None Include="../README.md">
+            <Pack>True</Pack>
+            <PackagePath>\</PackagePath>
+        </None>
+    </ItemGroup>
+
+</Project>
