@@ -64,6 +64,7 @@ internal sealed class SetCommand : BaseCommand
         {
             case KeyValueResponseType.Set:
                 context.RecordModifiedKey((keyName, durability));
+                context.RaiseHighestWriteTime(lastModified);
                 // Stage the value for the durable-intent path, carrying the relative TTL (0 = none). The freeze
                 // resolves it to an absolute expiry of commitTimestamp + expiresMs, so a TTL set is durable-atomic
                 // rather than falling back to the ticket path.
@@ -75,12 +76,11 @@ internal sealed class SetCommand : BaseCommand
                 break;
         }
         
-        // Record the outcome of this statement on the context. Three things read it: the NOT SET guard, which
-        // asks whether the statement that just ran succeeded; the prepare path, which raises the commit
-        // timestamp to the highest LastModified seen; and the batched forms, which hand it back as the
-        // script's result. It is not what the prepared intent is built from — staged values are accumulated
-        // separately per key, which is why the batched set builds this without a value and still commits.
-        // The client-facing result returned below is separate and unaffected.
+        // Record the outcome of this statement on the context. The NOT SET guard reads it to ask whether the
+        // last write took effect, and the batched forms hand it back as the script's result. It is not what
+        // the prepared intent is built from — staged values are accumulated separately per key, which is why
+        // the batched set builds this without a value and still commits — nor the commit-time floor, which is
+        // HighestWriteTime. The client-facing result returned below is separate and unaffected.
         context.ModifiedResult = new()
         {
             Type = type,

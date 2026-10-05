@@ -174,6 +174,8 @@ internal sealed class KeyValueLockHelper : BaseCommand
                 case NodeType.FuncCall:
                 case NodeType.ArgumentList:
                 case NodeType.NotFound:
+                case NodeType.NotDeleted:
+                case NodeType.NotExtended:
                 case NodeType.NotSet:
                 case NodeType.SetNotExists:
                 case NodeType.SetExists:

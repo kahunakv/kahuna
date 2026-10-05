@@ -126,9 +126,26 @@ internal class TransactionContext
     }
 
     /// <summary>
-    /// Last result of a key-value write operation.
+    /// Result of the last key-value write statement. For a batched set-many/delete-many it is the response of
+    /// the batch's last statement, the same result those statements give when run one at a time.
     /// </summary>
     public KeyValueTransactionResult? ModifiedResult { get; set; }
+
+    /// <summary>
+    /// The highest LastModified any confirmed script write of this transaction answered, or zero when none has.
+    /// The manual prepare mints its commit id past it, so the prepare's "modified after the commit id" check cannot
+    /// trip on one of the transaction's own writes. It is kept apart from <see cref="ModifiedResult"/>, which
+    /// describes only the last write statement: an earlier statement, or another key of the same batch, can carry
+    /// the later time.
+    /// </summary>
+    public HLCTimestamp HighestWriteTime { get; private set; }
+
+    /// <summary>Raises <see cref="HighestWriteTime"/> to a confirmed write's LastModified.</summary>
+    public void RaiseHighestWriteTime(HLCTimestamp lastModified)
+    {
+        if (lastModified > HighestWriteTime)
+            HighestWriteTime = lastModified;
+    }
 
     /// <summary>
     /// Whether the transaction should commit or abort.

@@ -187,6 +187,8 @@ internal sealed class ScriptTransactionExecutor
                 case NodeType.FuncCall:
                 case NodeType.ArgumentList:
                 case NodeType.NotFound:
+                case NodeType.NotDeleted:
+                case NodeType.NotExtended:
                 case NodeType.NotSet:
                 case NodeType.Return:
                 case NodeType.Sleep:
@@ -833,6 +835,8 @@ internal sealed class ScriptTransactionExecutor
             case NodeType.ArgumentList:
             case NodeType.NotSet:
             case NodeType.NotFound:
+            case NodeType.NotDeleted:
+            case NodeType.NotExtended:
             case NodeType.SetFlagsList:
             case NodeType.SetEx:
             case NodeType.SetNotExists:
@@ -1310,6 +1314,8 @@ internal sealed class ScriptTransactionExecutor
 
                 case NodeType.NotSet:
                 case NodeType.NotFound:
+                case NodeType.NotDeleted:
+                case NodeType.NotExtended:
                 case NodeType.BeginOptionList:
                 case NodeType.BeginOption:
                 default:

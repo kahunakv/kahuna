@@ -66,4 +66,6 @@ public enum NodeType
     Sleep,
     Throw,
     Negate,
+    NotDeleted,
+    NotExtended,
 }

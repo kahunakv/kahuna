@@ -2,8 +2,9 @@
 
 Kahuna script is the language a transaction script is written in. This guide covers the parts of it whose
 behavior a script author must know exactly: what counts as a condition, how numbers compare, when an
-operand is evaluated, how a range is bounded, and which statements a transaction refuses. It is not a
-full language reference.
+operand is evaluated, how a range is bounded, which statement the `NOT FOUND`, `NOT SET`, `NOT DELETED`
+and `NOT EXTENDED` guards ask about, and which statements a transaction refuses. It is not a full
+language reference.
 
 ## Conditions are boolean, and only boolean
 
@@ -320,6 +321,63 @@ but does not record could be minted again, and two events that share one timesta
 Both functions take no argument. An argument is a script error that names the line.
 
 `current_time()` is unchanged and is not deprecated.
+
+## `NOT FOUND`, `NOT SET`, `NOT DELETED` and `NOT EXTENDED`
+
+These guards ask about an earlier statement, not about a value:
+
+- `NOT FOUND` is true when the last **read** statement did not find what it read. The reads are `GET`,
+  `EXISTS`, `GET BY BUCKET`, `SCAN BY PREFIX` and their ephemeral forms. A `GET` or an `EXISTS` of a
+  present key is found; a `GET BY BUCKET` or a scan is found when it returns at least one key.
+- `NOT SET` is true when the last **write** statement did not take effect. A `SET` whose `NX`, `XX` or
+  `CMP`/`CMPREV` condition failed did not take effect, and neither did a `DELETE` or `EXTEND` of a key that
+  does not exist. A `SET`, `DELETE` or `EXTEND` that changed its key did.
+- `NOT DELETED` is true when the last `DELETE` (or `EDELETE`) deleted nothing because the key did not
+  exist. Only a delete changes its answer.
+- `NOT EXTENDED` is true when the last `EXTEND` (or `EEXTEND`) extended nothing because the key did not
+  exist. Only an extend changes its answer.
+
+`NOT SET` asks about the last write of any kind. `NOT DELETED` and `NOT EXTENDED` ask about the last write
+of their own kind, so a write of another kind in between does not change their answer:
+
+```
+DELETE session
+SET audit 'logout'
+IF NOT DELETED THEN … END     -- true when session did not exist; the SET does not decide it
+IF NOT SET THEN … END         -- false: the last write, the SET, took effect
+```
+
+`NOT DELETED` and `NOT EXTENDED` are each read as one word, so `deleted` and `extended` alone are still
+ordinary names: `LET deleted = 1` and `SET extended 'x'` work. The one exception is a boolean variable
+with one of these names: `NOT deleted` is the guard, so negate the variable with `!deleted` or
+`NOT (deleted)`. (`found` and `set` are keywords on their own, so they cannot be names at all.)
+
+```
+GET config
+LET retries = 3               -- a LET is not a read: NOT FOUND still answers for GET config
+SET audit 'checked'           -- a write is not a read either
+IF NOT FOUND THEN … END       -- true when config is missing
+
+SET leader 'node-A' NX
+GET leader                    -- a read is not a write: NOT SET still answers for the SET
+IF NOT SET THEN THROW 'election failed' END
+```
+
+Only reads change what `NOT FOUND` answers and only writes change what `NOT SET` answers. Any other
+statement — `LET`, an `IF`, an expression, a read for `NOT SET` or a write for `NOT FOUND` — between the
+statement and the guard does not change the answer. A guard with no earlier statement of the kind it asks
+about — a read for `NOT FOUND`, a write for `NOT SET`, a delete for `NOT DELETED`, an extend for
+`NOT EXTENDED` — is a script error that names the line.
+
+A script whose first statements are two or more `SET`s (or two or more `DELETE`s) over distinct keys runs
+them as one batch. The batch answers exactly as the same statements run one at a time: `NOT SET` and
+`NOT DELETED` after it answer for the batch's last statement, and a failed conditional `SET` inside it
+writes nothing while
+the batch's other writes still commit.
+
+A failed condition is not an error. The script continues, and the transaction commits whatever the
+script did write. A conflict or a retryable refusal is different: it stops the script before the guard
+runs, and the transaction reports that outcome.
 
 ## Statements a transaction refuses
 

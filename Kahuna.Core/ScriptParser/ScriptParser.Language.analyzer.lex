@@ -94,6 +94,8 @@ TLessEquals     <=
 TGreaterEquals  >=
 TOr             \|\|
 TAnd            &&
+TNotDeleted     (N|n)(O|o)(T|t)({Space}|{Eol})+(D|d)(E|e)(L|l)(E|e)(T|t)(E|e)(D|d)
+TNotExtended    (N|n)(O|o)(T|t)({Space}|{Eol})+(E|e)(X|x)(T|t)(E|e)(N|n)(D|d)(E|e)(D|d)
 
 %{
 
@@ -226,6 +228,11 @@ TAnd            &&
 {TNot} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TNOT; }
 
 {TNotWord} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TNOT; }
+
+/* NOT DELETED and NOT EXTENDED are each one token, so "deleted" and "extended" stay free as identifiers and key names. */
+{TNotDeleted} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TNOTDELETED; }
+
+{TNotExtended} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TNOTEXTENDED; }
 
 {TLessEquals} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TLESSTHANEQUALS; }
 

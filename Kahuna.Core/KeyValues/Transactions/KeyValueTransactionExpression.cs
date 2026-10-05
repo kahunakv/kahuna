@@ -108,6 +108,12 @@ internal static class KeyValueTransactionExpression
             case NodeType.NotFound:
                 return NotFoundOperator.Eval(context, ast);
             
+            case NodeType.NotDeleted:
+                return NotDeletedOperator.Eval(context, ast);
+            
+            case NodeType.NotExtended:
+                return NotExtendedOperator.Eval(context, ast);
+            
             case NodeType.StmtList:
             case NodeType.Set:
             case NodeType.Get:

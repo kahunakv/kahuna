@@ -30,36 +30,53 @@ internal sealed class SetManyCommand : BaseCommand
         
         List<KahunaSetKeyValueResponseItem> responses = await manager.LocateAndTrySetManyKeyValue(arguments, cancellationToken);
 
-        Dictionary<string, KahunaSetKeyValueRequestItem> argumentsByKey = new(arguments.Count);
+        // Keyed by key and durability: a batch can hold a SET and an ESET of the same key name, and each
+        // response must stage the value of its own statement.
+        Dictionary<(string, KeyValueDurability), KahunaSetKeyValueRequestItem> argumentsByKey = new(arguments.Count);
         foreach (KahunaSetKeyValueRequestItem argument in arguments)
             if (argument.Key is not null)
-                argumentsByKey[argument.Key] = argument;
+                argumentsByKey[(argument.Key, argument.Durability)] = argument;
+
+        // The fan-out answers in completion order, not statement order. The batch stands for its statements run
+        // one at a time, so its result is the response of its last statement, found by key and durability.
+        KahunaSetKeyValueRequestItem lastArgument = arguments[^1];
+        KahunaSetKeyValueResponseItem? last = null;
 
         foreach (KahunaSetKeyValueResponseItem response in responses)
         {
             switch (response.Type)
-            {                                
+            {
                 case KeyValueResponseType.Aborted or KeyValueResponseType.Errored or KeyValueResponseType.MustRetry:
                     context.StopOnStatementFailure("SET", response.Key ?? "", response.Durability, response.Type);
                     break;
             }
-            
-            context.RecordModifiedKey((response.Key ?? "", response.Durability));
+
+            if (response.Durability == lastArgument.Durability && string.Equals(response.Key, lastArgument.Key, StringComparison.Ordinal))
+                last = response;
+
+            // Only a confirmed write joins the working set, as with the single set. A conditional set whose
+            // condition failed (NotSet) wrote nothing: recording it would leave a modified key with no staged
+            // value, which the commit refuses.
+            if (response.Type != KeyValueResponseType.Set || response.Key is null)
+                continue;
+
+            context.RecordModifiedKey((response.Key, response.Durability));
+            context.RaiseHighestWriteTime(response.LastModified);
 
             // Stage the value for the durable-intent path, carrying the item's relative TTL (0 = none), mirroring
             // the single set. The freeze resolves it to an absolute expiry of commitTimestamp + expiresMs.
-            if (response.Type == KeyValueResponseType.Set && response.Key is not null
-                && argumentsByKey.TryGetValue(response.Key, out KahunaSetKeyValueRequestItem? argument))
+            if (argumentsByKey.TryGetValue((response.Key, response.Durability), out KahunaSetKeyValueRequestItem? argument))
                 context.StageMutation(response.Key, argument.Value, KeyValueState.Set, response.Revision, argument.ExpiresMs, (argument.Flags & KeyValueFlags.SetNoRevision) != 0, response.LastModified);
         }
-        
-        // The last response is the one that survives: the prepare path raises the commit timestamp from
-        // the recorded result, and this command hands it back as the statement's result. Building a
-        // result per response inside the loop made garbage of every response but the last.
-        if (responses.Count > 0)
-        {
-            KahunaSetKeyValueResponseItem last = responses[^1];
 
+        // A short-circuited answer (an invalid key, no leader) may not name the last statement's key; it then
+        // stands for the whole batch.
+        if (last is null && responses.Count > 0)
+            last = responses[^1];
+
+        // Building a result per response inside the loop made garbage of every response but the last.
+        if (last is not null)
+        {
             context.ModifiedResult = new()
             {
                 Type = last.Type,

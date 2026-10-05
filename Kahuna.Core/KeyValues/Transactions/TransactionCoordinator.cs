@@ -2975,24 +2975,15 @@ internal sealed class TransactionCoordinator : IDisposable
 
     /// <summary>
     /// The commit id the manual (ephemeral) prepare carries: a fresh HLC event that is also past the highest
-    /// LastModified the transaction's last write observed, so the prepare's "was this key modified after the
-    /// commit id" check cannot trip on the transaction's own staged write.
+    /// LastModified any of the transaction's confirmed writes observed, so the prepare's "was this key modified
+    /// after the commit id" check cannot trip on the transaction's own staged write.
     /// </summary>
     private HLCTimestamp MintManualCommitId(TransactionContext context)
     {
         HLCTimestamp highestModifiedTime = context.TransactionId;
 
-        if (context.ModifiedResult?.Type is KeyValueResponseType.Set or KeyValueResponseType.Extended or KeyValueResponseType.Deleted)
-        {
-            if (context.ModifiedResult.Values is not null)
-            {
-                foreach (KeyValueTransactionResultValue result in context.ModifiedResult.Values)
-                {
-                    if (result.LastModified != HLCTimestamp.Zero && result.LastModified > highestModifiedTime)
-                        highestModifiedTime = result.LastModified;
-                }
-            }
-        }
+        if (context.HighestWriteTime > highestModifiedTime)
+            highestModifiedTime = context.HighestWriteTime;
 
         return raft.HybridLogicalClock.ReceiveEvent(raft.GetLocalNodeId(), highestModifiedTime);
     }

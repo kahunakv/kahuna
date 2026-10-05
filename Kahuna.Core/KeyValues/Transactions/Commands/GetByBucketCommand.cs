@@ -49,6 +49,9 @@ internal sealed class GetByBucketCommand : BaseCommand
         if (response.Type is KeyValueResponseType.Aborted or KeyValueResponseType.Errored or KeyValueResponseType.MustRetry)
             context.StopOnStatementFailure("GET BY BUCKET", keyName, durability, response.Type);
 
+        // The same answer this statement returns: an empty bucket is not found.
+        context.LastReadType = response.Items.Count == 0 ? KeyValueResponseType.DoesNotExist : KeyValueResponseType.Get;
+
         if (response.Items.Count == 0)
         {
             if (ast.rightAst is not null)

@@ -52,6 +52,7 @@ internal sealed class DeleteCommand : BaseCommand
         {
             case KeyValueResponseType.Deleted:
                 context.RecordModifiedKey((keyName, durability));
+                context.RaiseHighestWriteTime(lastModified);
                 context.StageMutation(keyName, null, KeyValueState.Deleted, revision, 0, noRevision: false, lastModified); // deletes have no TTL and retain history
                 break;
             
@@ -73,6 +74,8 @@ internal sealed class DeleteCommand : BaseCommand
                 LastModified = lastModified
             }
         ];
+
+        context.LastDeleteType = type;
 
         context.ModifiedResult = new()
         {

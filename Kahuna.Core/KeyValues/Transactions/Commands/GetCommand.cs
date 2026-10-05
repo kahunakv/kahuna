@@ -58,6 +58,8 @@ internal sealed class GetCommand : BaseCommand
         if (type is KeyValueResponseType.Aborted or KeyValueResponseType.Errored or KeyValueResponseType.MustRetry)
             context.StopOnStatementFailure("GET", keyName, durability, type);
 
+        context.LastReadType = type;
+
         if (type != KeyValueResponseType.Get || readOnlyContext is null)
         {
             if (type == KeyValueResponseType.DoesNotExist && readTimestamp.IsNull())

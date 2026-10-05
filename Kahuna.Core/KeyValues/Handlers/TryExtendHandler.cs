@@ -146,7 +146,8 @@ internal sealed class TryExtendHandler : BaseHandler
                 context.AdjustEstimatedEntryBytes(entry, KeyValueStoreAccounting.MvccEntryAddedBytes(mvccDictJustCreated, mvccEntry.Value));
             }
             
-            if (mvccEntry.State == KeyValueState.Deleted)
+            // An Undefined placeholder (a lock on a key never written) holds no value: nothing to extend.
+            if (mvccEntry.State is KeyValueState.Deleted or KeyValueState.Undefined)
                 return new(KeyValueResponseType.DoesNotExist, mvccEntry.Revision);
             
             if (mvccEntry.Expires != HLCTimestamp.Zero && mvccEntry.Expires - currentTime < TimeSpan.Zero)
@@ -173,7 +174,7 @@ internal sealed class TryExtendHandler : BaseHandler
             return new(KeyValueResponseType.Extended, mvccEntry.Revision, mvccEntry.LastModified);
         }
         
-        if (entry.State == KeyValueState.Deleted || (entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero))
+        if (entry.State is KeyValueState.Deleted or KeyValueState.Undefined || (entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero))
             return new(KeyValueResponseType.DoesNotExist, entry.Revision);
 
         KeyValueProposal proposal = new(

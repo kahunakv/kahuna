@@ -53,6 +53,9 @@ internal sealed class ScanByPrefixCommand : BaseCommand
             context.Status = KeyValueExecutionStatus.Stop;
         }
 
+        // The same answer this statement returns: an empty scan is not found.
+        context.LastReadType = response.Items.Count == 0 ? KeyValueResponseType.DoesNotExist : KeyValueResponseType.Get;
+
         if (response.Items.Count == 0)
         {
             if (ast.rightAst is not null)

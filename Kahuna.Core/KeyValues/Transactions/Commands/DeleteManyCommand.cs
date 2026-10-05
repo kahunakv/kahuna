@@ -28,6 +28,11 @@ internal sealed class DeleteManyCommand : BaseCommand
 
         List<KahunaDeleteKeyValueResponseItem> responses = await manager.LocateAndTryDeleteManyKeyValue(arguments, cancellationToken);
 
+        // The fan-out answers in completion order, not statement order. The batch stands for its statements run
+        // one at a time, so its result is the response of its last statement, found by key and durability.
+        KahunaDeleteKeyValueRequestItem lastArgument = arguments[^1];
+        KahunaDeleteKeyValueResponseItem? last = null;
+
         foreach (KahunaDeleteKeyValueResponseItem response in responses)
         {
             switch (response.Type)
@@ -37,20 +42,26 @@ internal sealed class DeleteManyCommand : BaseCommand
                     break;
             }
 
+            if (response.Durability == lastArgument.Durability && string.Equals(response.Key, lastArgument.Key, StringComparison.Ordinal))
+                last = response;
+
             if (response.Type == KeyValueResponseType.Deleted)
             {
                 context.RecordModifiedKey((response.Key ?? "", response.Durability));
+                context.RaiseHighestWriteTime(response.LastModified);
                 context.StageMutation(response.Key ?? "", null, KeyValueState.Deleted, response.Revision, 0, noRevision: false, response.LastModified); // deletes have no TTL and retain history
             }
-
         }
 
-        // The last response is the one that survives: the prepare path raises the commit timestamp from
-        // the recorded result, and this command hands it back as the statement's result. Building a
-        // result per response inside the loop made garbage of every response but the last.
-        if (responses.Count > 0)
+        // A short-circuited answer (an invalid key, no leader) may not name the last statement's key; it then
+        // stands for the whole batch.
+        if (last is null && responses.Count > 0)
+            last = responses[^1];
+
+        // Building a result per response inside the loop made garbage of every response but the last.
+        if (last is not null)
         {
-            KahunaDeleteKeyValueResponseItem last = responses[^1];
+            context.LastDeleteType = last.Type;
 
             context.ModifiedResult = new()
             {

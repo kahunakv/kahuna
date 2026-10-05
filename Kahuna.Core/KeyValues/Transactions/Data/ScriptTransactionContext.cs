@@ -39,6 +39,25 @@ internal sealed class ScriptTransactionContext : TransactionContext
     }
 
     /// <summary>
+    /// What the last read statement (GET, EXISTS, GET BY BUCKET, SCAN BY PREFIX and their ephemeral forms)
+    /// answered, or null when no read has run. NOT FOUND tests this rather than <see cref="TransactionContext.Result"/>:
+    /// every statement overwrites the result, so a LET or a write between the read and the guard would decide it.
+    /// </summary>
+    internal KeyValueResponseType? LastReadType { get; set; }
+
+    /// <summary>
+    /// What the last DELETE or EDELETE statement answered (for a batched delete, its last statement), or null when
+    /// none has run. NOT DELETED tests it, so a write of another kind between the delete and the guard does not decide it.
+    /// </summary>
+    internal KeyValueResponseType? LastDeleteType { get; set; }
+
+    /// <summary>
+    /// What the last EXTEND or EEXTEND statement answered, or null when none has run. NOT EXTENDED tests it, so a write
+    /// of another kind between the extend and the guard does not decide it.
+    /// </summary>
+    internal KeyValueResponseType? LastExtendType { get; set; }
+
+    /// <summary>
     /// Script parameters (placeholders) passed into the script at execution time.
     /// </summary>
     public List<KeyValueParameter>? Parameters { get; init; }

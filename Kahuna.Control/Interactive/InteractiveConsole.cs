@@ -89,6 +89,8 @@ public static class InteractiveConsole
                 "sleep",
                 "throw",
                 "found",
+                "deleted",
+                "extended",
                 // locks
                 "lock",
                 "extend-lock",

@@ -58,7 +58,9 @@ internal sealed class TryDeleteHandler : BaseHandler
         if (terminal is not null)
             return (terminal, null, null, currentTime);
 
-        if (entry!.State == KeyValueState.Deleted)
+        // Undefined is a placeholder with no value (a lock taken on a key that was never written), so it is as
+        // absent as a tombstone, the same as every read and the set path treat it.
+        if (entry!.State is KeyValueState.Deleted or KeyValueState.Undefined)
             return (new(KeyValueResponseType.DoesNotExist, entry.Revision), null, null, currentTime);
 
         // Operation type is always TryDelete here. Use the literal rather than message.Type so the proposal the
@@ -233,7 +235,10 @@ internal sealed class TryDeleteHandler : BaseHandler
         if (entry.Revision > mvccEntry.Revision) // early conflict detection
             return KeyValueStaticResponses.AbortedResponse;
 
-        if (entry.State == KeyValueState.Deleted)
+        // Absence is judged on the transaction's own view: a key this transaction set is present to its delete
+        // even when the committed entry is only a lock placeholder (Undefined), and a key it already deleted is
+        // absent. An Undefined placeholder holds no value, so it is as absent as a tombstone.
+        if (mvccEntry.State is KeyValueState.Deleted or KeyValueState.Undefined)
             return new(KeyValueResponseType.DoesNotExist, mvccEntry.Revision);
 
         // The staged tombstone takes a new revision, exactly as a staged set does. Keeping the live

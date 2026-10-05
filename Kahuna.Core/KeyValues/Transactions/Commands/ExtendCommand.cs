@@ -53,6 +53,7 @@ internal sealed class ExtendCommand : BaseCommand
         {
             case KeyValueResponseType.Extended:
                 context.RecordModifiedKey((keyName, durability));
+                context.RaiseHighestWriteTime(lastModified);
 
                 // Stage the extend for the durable-intent path so a transaction containing an extend stays on the
                 // durable path instead of falling back to the ticket path. An extend changes only the expiry, so
@@ -86,6 +87,8 @@ internal sealed class ExtendCommand : BaseCommand
                 LastModified = lastModified
             }
         ];
+
+        context.LastExtendType = type;
 
         context.ModifiedResult = new()
         {
