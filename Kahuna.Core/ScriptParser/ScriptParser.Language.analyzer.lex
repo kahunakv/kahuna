@@ -17,6 +17,8 @@ TEnd            (E|e)(N|n)(D|d)
 TFor            (F|f)(O|o)(R|r)
 TDo             (D|d)(O|o)
 TIn             (I|i)(N|n)
+TSwitch         (S|s)(W|w)(I|i)(T|t)(C|c)(H|h)
+TCase           (C|c)(A|a)(S|s)(E|e)
 TNx             (N|n)(X|x)
 TXx             (X|x)(X|x)
 TEx             (E|e)(X|x)
@@ -170,6 +172,10 @@ TNotExtended    (N|n)(O|o)(T|t)({Space}|{Eol})+(E|e)(X|x)(T|t)(E|e)(N|n)(D|d)(E|
 {TDo} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TDO; }
 
 {TIn} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TIN; }
+
+{TSwitch} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TSWITCH; }
+
+{TCase} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TCASE; }
 
 {TBegin} { SetTokenLocation(yyline, yycol, yyleng); yylval.l = yyline; return (int)Token.TBEGIN; }
 

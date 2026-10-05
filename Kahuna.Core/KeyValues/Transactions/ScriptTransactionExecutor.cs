@@ -168,6 +168,7 @@ internal sealed class ScriptTransactionExecutor
                 case NodeType.Identifier:
                 case NodeType.If:
                 case NodeType.For:
+                case NodeType.Switch:
                 case NodeType.Equals:
                 case NodeType.NotEquals:
                 case NodeType.LessThan:
@@ -771,7 +772,7 @@ internal sealed class ScriptTransactionExecutor
     }
 
     /// <summary>
-    /// Whether every node of the script is one a single actor turn can run: expressions, LET, IF, RETURN, THROW,
+    /// Whether every node of the script is one a single actor turn can run: expressions, LET, IF, SWITCH, RETURN, THROW,
     /// and the point operations over the ephemeral key space. A turn holds its actor for as long as it runs, so
     /// anything that waits (SLEEP), loops (FOR), reaches other partitions (bucket reads, scans), touches the
     /// persistent key space, or controls a transaction by hand (BEGIN, COMMIT, ROLLBACK) keeps the script on
@@ -808,6 +809,10 @@ internal sealed class ScriptTransactionExecutor
             case NodeType.StmtList:
             case NodeType.Let:
             case NodeType.If:
+            case NodeType.Switch:
+            case NodeType.SwitchCaseList:
+            case NodeType.SwitchCase:
+            case NodeType.SwitchValueList:
             case NodeType.Return:
             case NodeType.Throw:
             case NodeType.Eset:
@@ -1167,6 +1172,10 @@ internal sealed class ScriptTransactionExecutor
                     await ExecuteFor(context, ast, cancellationToken);
                     break;
 
+                case NodeType.Switch:
+                    await ExecuteSwitch(context, ast, cancellationToken);
+                    break;
+
                 case NodeType.Let:
                 {
                     LetCommand.Execute(context, ast);
@@ -1444,6 +1453,68 @@ internal sealed class ScriptTransactionExecutor
             if (ast.extendedOne is not null)
                 await ExecuteTransactionInternal(context, ast.extendedOne, cancellationToken);
         }
+    }
+
+    /// <summary>
+    /// Runs the body of the first CASE whose value equals the subject, or the ELSE body when no CASE matches.
+    /// The subject is evaluated once, before any CASE value. The CASE values are then evaluated in source
+    /// order and compared by the rules of '==', and evaluation stops at the first match, so a CASE value after
+    /// the match is never evaluated. Exactly one body runs: control never falls through to the next CASE.
+    /// </summary>
+    private async Task ExecuteSwitch(ScriptTransactionContext context, NodeAst ast, CancellationToken cancellationToken)
+    {
+        if (ast.leftAst is null)
+            throw new KahunaScriptException("Invalid SWITCH expression", ast.yyline);
+
+        if (ast.rightAst is null)
+            throw new KahunaScriptException("Invalid SWITCH cases", ast.yyline);
+
+        KeyValueExpressionResult subject = KeyValueTransactionExpression.Eval(context, ast.leftAst);
+
+        NodeAst? body = FindMatchingCase(context, ast.rightAst, subject) ?? ast.extendedOne;
+
+        if (body is not null)
+            await ExecuteTransactionInternal(context, body, cancellationToken);
+    }
+
+    /// <summary>
+    /// The body of the first CASE in <paramref name="cases"/> that matches <paramref name="subject"/>, or null
+    /// when none does. The CASE list is a left-leaning spine, so the left side holds the earlier cases and is
+    /// searched first. The recursion is one frame per CASE, which the parser's depth limit bounds.
+    /// </summary>
+    private static NodeAst? FindMatchingCase(ScriptTransactionContext context, NodeAst cases, KeyValueExpressionResult subject)
+    {
+        if (cases.nodeType == NodeType.SwitchCaseList)
+        {
+            if (cases.leftAst is null || cases.rightAst is null)
+                throw new KahunaScriptException("Invalid SWITCH cases", cases.yyline);
+
+            return FindMatchingCase(context, cases.leftAst, subject) ?? FindMatchingCase(context, cases.rightAst, subject);
+        }
+
+        if (cases.nodeType != NodeType.SwitchCase || cases.leftAst is null || cases.rightAst is null)
+            throw new KahunaScriptException("Invalid SWITCH case", cases.yyline);
+
+        return AnyValueMatches(context, cases.leftAst, subject) ? cases.rightAst : null;
+    }
+
+    /// <summary>
+    /// Whether any value of one CASE equals <paramref name="subject"/>. The values form a left-leaning spine in
+    /// source order, so the left side is evaluated first and evaluation stops at the first match.
+    /// </summary>
+    private static bool AnyValueMatches(ScriptTransactionContext context, NodeAst values, KeyValueExpressionResult subject)
+    {
+        if (values.nodeType == NodeType.SwitchValueList)
+        {
+            if (values.leftAst is null || values.rightAst is null)
+                throw new KahunaScriptException("Invalid CASE values", values.yyline);
+
+            return AnyValueMatches(context, values.leftAst, subject) || AnyValueMatches(context, values.rightAst, subject);
+        }
+
+        KeyValueExpressionResult value = KeyValueTransactionExpression.Eval(context, values);
+
+        return EqualsOperator.AreEqual(subject, value, values, "==");
     }
 
     /// <summary>

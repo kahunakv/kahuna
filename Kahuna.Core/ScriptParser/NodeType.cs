@@ -68,4 +68,8 @@ public enum NodeType
     Negate,
     NotDeleted,
     NotExtended,
+    Switch,
+    SwitchCaseList,
+    SwitchCase,
+    SwitchValueList,
 }

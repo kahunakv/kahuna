@@ -121,6 +121,7 @@ internal static class KeyValueTransactionExpression
             case NodeType.Eget:
             case NodeType.If:
             case NodeType.For:
+            case NodeType.Switch:
             case NodeType.SetNotExists:
             case NodeType.SetExists:
             case NodeType.SetCmp:

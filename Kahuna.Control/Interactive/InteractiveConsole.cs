@@ -82,6 +82,8 @@ public static class InteractiveConsole
                 "for",
                 "in",
                 "do",
+                "switch",
+                "case",
                 "begin",
                 "rollback",
                 "commit",

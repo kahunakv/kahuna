@@ -2,9 +2,9 @@
 
 Kahuna script is the language a transaction script is written in. This guide covers the parts of it whose
 behavior a script author must know exactly: what counts as a condition, how numbers compare, when an
-operand is evaluated, how a range is bounded, which statement the `NOT FOUND`, `NOT SET`, `NOT DELETED`
-and `NOT EXTENDED` guards ask about, and which statements a transaction refuses. It is not a full
-language reference.
+operand is evaluated, how `SWITCH` picks a branch, how a range is bounded, which statement the
+`NOT FOUND`, `NOT SET`, `NOT DELETED` and `NOT EXTENDED` guards ask about, and which statements a
+transaction refuses. It is not a full language reference.
 
 ## Conditions are boolean, and only boolean
 
@@ -378,6 +378,39 @@ the batch's other writes still commit.
 A failed condition is not an error. The script continues, and the transaction commits whatever the
 script did write. A conflict or a retryable refusal is different: it stops the script before the guard
 runs, and the transaction reports that outcome.
+
+## `SWITCH` runs one branch, chosen by equality
+
+`SWITCH` compares one value against a list of `CASE` values and runs the body of the first `CASE` that
+matches. A `CASE` can list several values, separated by commas. The optional `ELSE` body runs when no
+`CASE` matches; without it, a `SWITCH` with no match does nothing.
+
+```
+SWITCH status
+  CASE 'open' THEN
+    ESET @k 'accepting'
+  CASE 'closed', 'expired' THEN
+    THROW 'not accepting'
+  ELSE
+    RETURN null
+END
+```
+
+- The subject is evaluated once, before any `CASE` value.
+- `CASE` values are evaluated in source order, and evaluation stops at the first match. A value after the
+  match is never evaluated, so `CASE 1, 1 / 0` matches a subject of `1` without a division error.
+- A `CASE` matches exactly when `subject == value` would be true, by the rules in
+  [Numeric equality is exact](#numeric-equality-is-exact). A numeric string matches the number it spells,
+  `null` matches only `null`, and a pair that `==` cannot compare (`1` against `'abc'`) is the same script
+  error `==` reports.
+- Exactly one body runs. Control never falls through to the next `CASE`, and there is no `BREAK`.
+- The subject and the values are expressions, not only literals: `CASE limit * 2 THEN` is valid.
+- Every `CASE` needs at least one statement. A `SWITCH` needs at least one `CASE`, and `ELSE` comes last.
+
+A pessimistic transaction takes its locks before the script runs, so it cannot know which `CASE` will
+match. The keys named in every `CASE` body and in the `ELSE` body are locked, the same way both branches
+of an `IF` are. `SWITCH` and `CASE` are reserved words, so neither can be a variable name or an unquoted
+key name.
 
 ## Statements a transaction refuses
 

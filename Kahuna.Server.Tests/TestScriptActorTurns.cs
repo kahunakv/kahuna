@@ -205,6 +205,56 @@ public sealed class TestScriptActorTurns : BaseCluster
     }
 
     /// <summary>
+    /// SWITCH is bounded like IF, so a script that branches with it over one ephemeral key still runs in a turn,
+    /// and the turn reaches the same answers and leaves the same value as the general path.
+    /// </summary>
+    [Fact]
+    public async Task Switch_RunsInATurn_WithTheSameOutcome()
+    {
+        const string script = """
+        LET current = EGET @k
+        SWITCH current
+          CASE null THEN
+            ESET @k 'a'
+            RETURN 'created'
+          CASE 'a' THEN
+            ESET @k 'b'
+            RETURN 'advanced'
+          ELSE
+            RETURN 'done'
+        END
+        """;
+
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        await using EmbeddedKahunaNode withTurns = await StartNode(loggerFactory, turns: true, ct);
+        await using EmbeddedKahunaNode without = await StartNode(loggerFactory, turns: false, ct);
+
+        string key = "turns/switch/" + Guid.NewGuid().ToString("N")[..8];
+        long turnsBefore = DurableTransactionMetrics.ScriptActorTurnsCount;
+
+        List<string> answers = [];
+
+        for (int i = 0; i < 4; i++)
+        {
+            KeyValueTransactionResult a = await RunRetrying(withTurns.Kahuna, script, KeyParameter(key));
+            KeyValueTransactionResult b = await RunRetrying(without.Kahuna, script, KeyParameter(key));
+
+            Assert.True(a.Type == KeyValueResponseType.Get, $"{a.Type}: {a.Reason}");
+            Assert.True(Observed(a) == Observed(b), $"run {i} differs: turns {Observed(a)} vs general {Observed(b)}");
+
+            answers.Add(Encoding.UTF8.GetString(a.Value ?? []));
+        }
+
+        Assert.Equal(["created", "advanced", "done", "done"], answers);
+        Assert.Equal(await Read(withTurns.Kahuna, key, ct), await Read(without.Kahuna, key, ct));
+        Assert.Equal("b", (await Read(withTurns.Kahuna, key, ct)).Value);
+
+        // The counter is process-wide and other classes run beside this one, so it bounds from below.
+        Assert.True(DurableTransactionMetrics.ScriptActorTurnsCount - turnsBefore >= 4);
+    }
+
+    /// <summary>
     /// Callers racing one counter admit exactly the budget. A turn serializes each of them on the actor; the
     /// general path serializes them with the key's lock. Either way the count is exact.
     /// </summary>

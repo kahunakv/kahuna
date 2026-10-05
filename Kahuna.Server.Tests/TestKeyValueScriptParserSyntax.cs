@@ -161,4 +161,62 @@ public sealed class TestKeyValueScriptParserSyntax
         Assert.NotNull(literal);
         Assert.Equal("0x1A", literal.yytext);
     }
+
+    /// <summary>
+    /// A SWITCH keeps every CASE, every value of a multi-value CASE, and the ELSE body, in source order.
+    /// </summary>
+    [Fact]
+    public void TestSwitchParses()
+    {
+        NodeAst ast = parser.Parse("""
+            SWITCH x
+              CASE 1 THEN RETURN 'one'
+              CASE 2, 3, 4 THEN RETURN 'few'
+              ELSE RETURN 'many'
+            END
+            """);
+
+        NodeAst? switchNode = FindNode(ast, NodeType.Switch);
+        Assert.NotNull(switchNode);
+        Assert.Equal(NodeType.Identifier, switchNode.leftAst!.nodeType);
+        Assert.NotNull(switchNode.extendedOne);
+
+        Assert.Equal(2, CountNodes(ast, NodeType.SwitchCase));
+        Assert.Equal(1, CountNodes(ast, NodeType.SwitchCaseList));
+        Assert.Equal(2, CountNodes(ast, NodeType.SwitchValueList));
+        Assert.Equal(3, CountNodes(ast, NodeType.Return));
+
+        // The CASE list is a left-leaning spine, so the first CASE is the left child and the second the right.
+        NodeAst cases = switchNode.rightAst!;
+        Assert.Equal(NodeType.SwitchCase, cases.leftAst!.nodeType);
+        Assert.Equal("1", cases.leftAst.leftAst!.yytext);
+        Assert.Equal(NodeType.SwitchValueList, cases.rightAst!.leftAst!.nodeType);
+
+        // No ELSE, lower case, a single CASE, an expression as the subject and as a value.
+        NodeAst bare = parser.Parse("switch count(items) + 1 case n * 2 then let r = 1 end");
+        NodeAst? bareSwitch = FindNode(bare, NodeType.Switch);
+        Assert.NotNull(bareSwitch);
+        Assert.Null(bareSwitch.extendedOne);
+        Assert.Equal(NodeType.Add, bareSwitch.leftAst!.nodeType);
+        Assert.Equal(NodeType.SwitchCase, bareSwitch.rightAst!.nodeType);
+        Assert.Equal(NodeType.Mult, bareSwitch.rightAst.leftAst!.nodeType);
+    }
+
+    /// <summary>
+    /// A SWITCH needs at least one CASE, every CASE needs THEN and a body, and CASE has no meaning on its own.
+    /// </summary>
+    [Theory]
+    [InlineData("SWITCH x END")]
+    [InlineData("SWITCH x ELSE RETURN 1 END")]
+    [InlineData("SWITCH x CASE 1 RETURN 1 END")]
+    [InlineData("SWITCH x CASE 1 THEN END")]
+    [InlineData("SWITCH x CASE THEN RETURN 1 END")]
+    [InlineData("SWITCH x CASE 1, THEN RETURN 1 END")]
+    [InlineData("SWITCH x CASE 1 THEN RETURN 1")]
+    [InlineData("SWITCH x CASE 1 THEN RETURN 1 ELSE RETURN 2 CASE 3 THEN RETURN 3 END")]
+    [InlineData("CASE 1 THEN RETURN 1 END")]
+    public void TestMalformedSwitchIsRejected(string script)
+    {
+        Assert.Throws<KahunaScriptException>(() => parser.Parse(script));
+    }
 }

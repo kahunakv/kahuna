@@ -67,6 +67,29 @@ internal sealed class KeyValueLockHelper : BaseCommand
                     if (ast.extendedOne is not null) 
                         GetLocksToAcquire(context, ast.extendedOne, ephemeralLocks, persistentLocks, ephemeralPrefixLocksToAcquire, persistentPrefixLocksToAcquire);
                     break;
+
+                // Any CASE body or the ELSE body can run, so every one contributes its keys, as both IF branches do.
+                case NodeType.Switch:
+                    if (ast.rightAst is not null) 
+                        GetLocksToAcquire(context, ast.rightAst, ephemeralLocks, persistentLocks, ephemeralPrefixLocksToAcquire, persistentPrefixLocksToAcquire);
+
+                    if (ast.extendedOne is not null) 
+                        GetLocksToAcquire(context, ast.extendedOne, ephemeralLocks, persistentLocks, ephemeralPrefixLocksToAcquire, persistentPrefixLocksToAcquire);
+                    break;
+
+                case NodeType.SwitchCaseList:
+                    if (ast.leftAst is not null) 
+                        GetLocksToAcquire(context, ast.leftAst, ephemeralLocks, persistentLocks, ephemeralPrefixLocksToAcquire, persistentPrefixLocksToAcquire);
+
+                    if (ast.rightAst is not null) 
+                        GetLocksToAcquire(context, ast.rightAst, ephemeralLocks, persistentLocks, ephemeralPrefixLocksToAcquire, persistentPrefixLocksToAcquire);
+                    break;
+
+                // The CASE values are expressions and name no key, so only the body is walked.
+                case NodeType.SwitchCase:
+                    if (ast.rightAst is not null) 
+                        GetLocksToAcquire(context, ast.rightAst, ephemeralLocks, persistentLocks, ephemeralPrefixLocksToAcquire, persistentPrefixLocksToAcquire);
+                    break;
                 
                 case NodeType.Set:
                     if (ast.leftAst is null)

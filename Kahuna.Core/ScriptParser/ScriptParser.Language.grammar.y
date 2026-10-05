@@ -28,7 +28,7 @@
 %token TBEGIN TROLLBACK TCOMMIT TLET TSET TGET TESET TEGET TDELETE TEDELETE TEXTEND TEEXTEND TEXISTS TEEXISTS
 %token TIF TELSE TTHEN TEND TNX TXX TEX TCMP TCMPREV TNOREV TTHROW TFOUND TFOR TDO TIN
 %token TRETURN TSLEEP TDIGIT TFLOAT TSTRING TIDENTIFIER TESCIDENTIFIER TPLACEHOLDER TTRUE TFALSE TNULL TAT TSCAN TESCAN TPREFIX TBUCKET TBY TAS TOF
-%token TNOTDELETED TNOTEXTENDED
+%token TNOTDELETED TNOTEXTENDED TSWITCH TCASE
 
 %%
 
@@ -53,6 +53,7 @@ stmt    : set_stmt { $$.n = $1.n; $$.l = $1.l; }
         | let_stmt { $$.n = $1.n; $$.l = $1.l; }
         | for_stmt { $$.n = $1.n; $$.l = $1.l; }
         | if_stmt { $$.n = $1.n; $$.l = $1.l; } 
+        | switch_stmt { $$.n = $1.n; $$.l = $1.l; }
         | begin_stmt { $$.n = $1.n; $$.l = $1.l; }
         | commit_stmt { $$.n = $1.n; $$.l = $1.l; }
         | rollback_stmt { $$.n = $1.n; $$.l = $1.l; }
@@ -176,6 +177,21 @@ if_stmt : TIF expression TTHEN stmt_list TEND { $$.n = new(NodeType.If, $2.n, $4
         | TIF expression TTHEN stmt_list TELSE stmt_list TEND { $$.n = new(NodeType.If, $2.n, $4.n, $6.n, null, null, null, null, $1.l); }
         ;
         
+switch_stmt : TSWITCH expression switch_cases TEND { $$.n = new(NodeType.Switch, $2.n, $3.n, null, null, null, null, null, $1.l); }
+            | TSWITCH expression switch_cases TELSE stmt_list TEND { $$.n = new(NodeType.Switch, $2.n, $3.n, $5.n, null, null, null, null, $1.l); }
+            ;
+
+switch_cases : switch_cases switch_case { $$.n = new(NodeType.SwitchCaseList, $1.n, $2.n, null, null, null, null, null, $1.l); }
+             | switch_case { $$.n = $1.n; $$.l = $1.l; }
+             ;
+
+switch_case : TCASE switch_values TTHEN stmt_list { $$.n = new(NodeType.SwitchCase, $2.n, $4.n, null, null, null, null, null, $1.l); }
+            ;
+
+switch_values : switch_values TCOMMA expression { $$.n = new(NodeType.SwitchValueList, $1.n, $3.n, null, null, null, null, null, $1.l); }
+              | expression { $$.n = $1.n; $$.l = $1.l; }
+              ;
+
 for_stmt : TFOR identifier TIN expression TDO stmt_list TEND { $$.n = new(NodeType.For, $2.n, $4.n, $6.n, null, null, null, null, $1.l); }
          ; 
         

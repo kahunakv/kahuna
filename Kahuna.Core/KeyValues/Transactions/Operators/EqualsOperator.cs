@@ -30,31 +30,41 @@ internal static class EqualsOperator
         KeyValueExpressionResult left = KeyValueTransactionExpression.Eval(context, ast.leftAst);
         KeyValueExpressionResult right = KeyValueTransactionExpression.Eval(context, ast.rightAst);
 
+        return KeyValueExpressionResult.FromBool(AreEqual(left, right, ast, operatorType));
+    }
+
+    /// <summary>
+    /// Compares two values that are already evaluated, by the rules of '=='. SWITCH uses this to compare its
+    /// subject, evaluated once, against each CASE value, so a CASE matches exactly when '==' would be true and
+    /// fails with the same error when '==' would fail.
+    /// </summary>
+    public static bool AreEqual(KeyValueExpressionResult left, KeyValueExpressionResult right, NodeAst ast, string operatorType)
+    {
         switch (left.Type)
         {
             case KeyValueExpressionType.NullType when right.Type == KeyValueExpressionType.NullType:
-                return KeyValueExpressionResult.FromBool(true);
+                return true;
             
             case KeyValueExpressionType.NullType when right.Type != KeyValueExpressionType.NullType:
-                return KeyValueExpressionResult.FromBool(false);
+                return false;
             
             case KeyValueExpressionType.BoolType when right.Type == KeyValueExpressionType.BoolType:
-                return KeyValueExpressionResult.FromBool(left.BoolValue == right.BoolValue);
+                return left.BoolValue == right.BoolValue;
             
             case KeyValueExpressionType.StringType when right.Type == KeyValueExpressionType.StringType:
-                return KeyValueExpressionResult.FromBool(string.Compare(left.StrValue, right.StrValue, StringComparison.Ordinal) == 0);
+                return string.Compare(left.StrValue, right.StrValue, StringComparison.Ordinal) == 0;
             
             case KeyValueExpressionType.LongType when right.Type == KeyValueExpressionType.LongType:
-                return KeyValueExpressionResult.FromBool(left.LongValue == right.LongValue);
+                return left.LongValue == right.LongValue;
             
             case KeyValueExpressionType.DoubleType when right.Type == KeyValueExpressionType.DoubleType:
-                return KeyValueExpressionResult.FromBool(left.DoubleValue == right.DoubleValue);
+                return left.DoubleValue == right.DoubleValue;
             
             case KeyValueExpressionType.LongType when right.Type == KeyValueExpressionType.DoubleType:
-                return KeyValueExpressionResult.FromBool(left.LongValue == right.DoubleValue);
+                return left.LongValue == right.DoubleValue;
             
             case KeyValueExpressionType.DoubleType when right.Type == KeyValueExpressionType.LongType:
-                return KeyValueExpressionResult.FromBool(left.DoubleValue == right.LongValue);
+                return left.DoubleValue == right.LongValue;
             
             case KeyValueExpressionType.BytesType when right.Type == KeyValueExpressionType.StringType:
             {
@@ -65,7 +75,7 @@ internal static class EqualsOperator
                 try
                 {
                     Encoding.UTF8.GetBytes(str.AsSpan(), buf);
-                    return KeyValueExpressionResult.FromBool(((ReadOnlySpan<byte>)left.BytesValue).SequenceEqual(buf));
+                    return ((ReadOnlySpan<byte>)left.BytesValue).SequenceEqual(buf);
                 }
                 finally
                 {
@@ -82,7 +92,7 @@ internal static class EqualsOperator
                 try
                 {
                     Encoding.UTF8.GetBytes(str.AsSpan(), buf);
-                    return KeyValueExpressionResult.FromBool(((ReadOnlySpan<byte>)right.BytesValue).SequenceEqual(buf));
+                    return ((ReadOnlySpan<byte>)right.BytesValue).SequenceEqual(buf);
                 }
                 finally
                 {
@@ -91,7 +101,7 @@ internal static class EqualsOperator
             }
             
             case KeyValueExpressionType.BytesType when right.Type == KeyValueExpressionType.BytesType:
-                return KeyValueExpressionResult.FromBool(((ReadOnlySpan<byte>)left.BytesValue).SequenceEqual(right.BytesValue));
+                return ((ReadOnlySpan<byte>)left.BytesValue).SequenceEqual(right.BytesValue);
             
             case KeyValueExpressionType.StringType when right.Type == KeyValueExpressionType.DoubleType:
             {
@@ -100,10 +110,10 @@ internal static class EqualsOperator
                     if (!double.TryParse(left.StrValue, NumberStyles.Float, CultureInfo.InvariantCulture, out double leftDouble))                    
                         throw new KahunaScriptException("Invalid operands: " + left.Type + " == " + right.Type, ast.yyline);
                 
-                    return KeyValueExpressionResult.FromBool(leftDouble == right.DoubleValue);
+                    return leftDouble == right.DoubleValue;
                 }
 
-                return KeyValueExpressionResult.FromBool(leftLong == right.DoubleValue);
+                return leftLong == right.DoubleValue;
             }
 
             case KeyValueExpressionType.StringType when right.Type == KeyValueExpressionType.LongType:
@@ -113,10 +123,10 @@ internal static class EqualsOperator
                     if (!double.TryParse(left.StrValue, NumberStyles.Float, CultureInfo.InvariantCulture, out double leftDouble))                    
                         throw new KahunaScriptException("Invalid operands: " + left.Type + " == " + right.Type, ast.yyline);
                 
-                    return KeyValueExpressionResult.FromBool(leftDouble == right.LongValue);
+                    return leftDouble == right.LongValue;
                 }
 
-                return KeyValueExpressionResult.FromBool(leftLong == right.LongValue);
+                return leftLong == right.LongValue;
             }
 
             case KeyValueExpressionType.LongType when right.Type == KeyValueExpressionType.StringType:
@@ -126,10 +136,10 @@ internal static class EqualsOperator
                     if (!double.TryParse(right.StrValue, NumberStyles.Float, CultureInfo.InvariantCulture, out double rightDouble))                    
                         throw new KahunaScriptException("Invalid operands: " + left.Type + " == " + right.Type, ast.yyline);
                     
-                    return KeyValueExpressionResult.FromBool(left.LongValue == rightDouble);
+                    return left.LongValue == rightDouble;
                 }
 
-                return KeyValueExpressionResult.FromBool(left.LongValue == rightLong);
+                return left.LongValue == rightLong;
             }
             
             case KeyValueExpressionType.DoubleType when right.Type == KeyValueExpressionType.StringType:
@@ -139,16 +149,16 @@ internal static class EqualsOperator
                     if (!double.TryParse(right.StrValue, NumberStyles.Float, CultureInfo.InvariantCulture, out double rightDouble))                    
                         throw new KahunaScriptException($"Invalid operands: {left.Type} {operatorType} {right.Type}", ast.yyline);
                     
-                    return KeyValueExpressionResult.FromBool(left.DoubleValue == rightDouble);
+                    return left.DoubleValue == rightDouble;
                 }
 
-                return KeyValueExpressionResult.FromBool(left.DoubleValue == rightLong);
+                return left.DoubleValue == rightLong;
             }
 
             default:
                 
                 if (right.Type == KeyValueExpressionType.NullType && left.Type != KeyValueExpressionType.NullType)
-                    return KeyValueExpressionResult.FromBool(false);
+                    return false;
                 
                 throw new KahunaScriptException($"Invalid operands: {left.Type} {operatorType} {right.Type}", ast.yyline);
         }
