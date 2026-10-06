@@ -58,6 +58,12 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     private const int KeyStackThreshold = 256;
 
     /// <summary>
+    /// Keys per MultiGet when the flush path reads current heads. Each found value stays pinned in
+    /// the block cache until its MultiGet returns, so this bounds the pinned memory per call.
+    /// </summary>
+    private const int HeadReadBatchSize = 128;
+
+    /// <summary>
     /// Represents the default write options for write operations in the persistence backend.
     /// Configured with synchronization enabled to ensure durability by flushing changes to disk
     /// before returning control to the calling code.
@@ -77,9 +83,21 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// large, mostly-cold slices of the keyspace once, so they must not fill the block cache — under direct
     /// reads it is the sole in-RAM read cache, and letting a sweep populate it would evict blocks the
     /// point-read hot path depends on. User-facing scans deliberately keep the default (cache-filling)
-    /// behavior; changing those needs workload measurement.
+    /// behavior; changing those needs workload measurement. Async I/O applies for the same reason as in
+    /// <see cref="ScanReadOptions"/>.
     /// </summary>
-    private static readonly ReadOptions MaintenanceScanReadOptions = new ReadOptions().SetFillCache(false);
+    private static readonly ReadOptions MaintenanceScanReadOptions = new ReadOptions().SetFillCache(false).SetAsyncIO(true);
+
+    /// <summary>
+    /// Read options for user-facing and export scans that walk many rows in key order. With direct reads
+    /// the OS does no readahead for SST files, so the prefetch RocksDB does itself is the only readahead a
+    /// scan gets; async I/O lets that prefetch overlap with the scan instead of blocking on every block
+    /// miss, and lets a seek read the first block of each level in parallel. Where the native library has
+    /// io_uring (the Linux glibc build) the reads go through it; elsewhere RocksDB falls back to
+    /// synchronous reads, so the option is safe on every platform. Short single-key revision walks keep
+    /// the default options: they read one or two blocks and never reach the readahead threshold.
+    /// </summary>
+    private static readonly ReadOptions ScanReadOptions = new ReadOptions().SetAsyncIO(true);
 
 /// <summary>
     /// Process-wide fallback block cache for the table reader, used when no shared bundle is injected.
@@ -989,7 +1007,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             }
         }
 
-        // One native point read per distinct key resolves the durable heads for the batch.
+        // Batched native reads of each distinct key's current row resolve the durable heads.
         // All flush-path stores are serialized on the writer queue and the install/restore callers
         // run quiesced, so the read-compare-write below is not racing another store for these keys.
         Dictionary<string, StoredKeyValueOrdering> durableHeads;
@@ -1478,11 +1496,12 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
 
     /// <summary>
     /// Reads the ordering fields of the current row for every key in <paramref name="keys"/>.
-    /// Keys with no current row are absent from the result. Each lookup is a native point get
-    /// whose deserializer decodes revision and commit HLC in place over the native value memory:
-    /// no row key, payload, or scaffolding array is allocated. A MultiGet batch is deliberately
-    /// not used here — its managed wrapper marshals every value into a fresh array, which is the
-    /// exact copy these compares never need.
+    /// Keys with no current row are absent from the result. The lookups go to RocksDB as batched
+    /// MultiGets, which group the filter and index checks of each table file and, where the native
+    /// library has io_uring, read a file's data blocks in parallel. The visitor decodes revision and
+    /// commit HLC in place over the pinned native value: no value, row key or payload array is
+    /// allocated. Each MultiGet pins every value it finds until it returns, so the keys go in chunks
+    /// of <see cref="HeadReadBatchSize"/> to bound the block-cache memory one flush holds pinned.
     /// </summary>
     private Dictionary<string, StoredKeyValueOrdering> ReadCurrentHeads(IReadOnlyCollection<string> keys)
     {
@@ -1491,46 +1510,73 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         if (keys.Count == 0)
             return heads;
 
-        byte[]? rented = null;
-        Span<byte> rowKeyBuffer = stackalloc byte[KeyStackThreshold];
+        string[] batchKeys = ArrayPool<string>.Shared.Rent(Math.Min(keys.Count, HeadReadBatchSize));
+        byte[] packed = ArrayPool<byte>.Shared.Rent(HeadReadBatchSize * 64);
+        Span<int> rowKeyLengths = stackalloc int[HeadReadBatchSize];
+        CurrentHeadVisitor visitor = new(batchKeys, heads);
+        int count = 0;
+        int used = 0;
 
         try
         {
             foreach (string key in keys)
             {
-                int keyLen = Encoding.UTF8.GetByteCount(key);
-                int rowKeyLen = keyLen + CurrentMarkerUtf8.Length;
+                int rowKeyLen = Encoding.UTF8.GetByteCount(key) + CurrentMarkerUtf8.Length;
 
-                Span<byte> rowKey = rowKeyBuffer;
-                if (rowKeyLen > rowKey.Length)
+                if (used + rowKeyLen > packed.Length)
                 {
-                    if (rented is null || rented.Length < rowKeyLen)
-                    {
-                        if (rented is not null)
-                            ArrayPool<byte>.Shared.Return(rented);
-                        rented = ArrayPool<byte>.Shared.Rent(rowKeyLen);
-                    }
-
-                    rowKey = rented;
+                    byte[] larger = ArrayPool<byte>.Shared.Rent(Math.Max(packed.Length * 2, used + rowKeyLen));
+                    packed.AsSpan(0, used).CopyTo(larger);
+                    ArrayPool<byte>.Shared.Return(packed);
+                    packed = larger;
                 }
 
-                Encoding.UTF8.GetBytes(key, rowKey);
-                CurrentMarkerUtf8.CopyTo(rowKey[keyLen..]);
+                int keyLen = Encoding.UTF8.GetBytes(key, packed.AsSpan(used));
+                CurrentMarkerUtf8.CopyTo(packed.AsSpan(used + keyLen));
 
-                StoredKeyValueOrderingLookup lookup = db.Get(
-                    rowKey[..rowKeyLen], StoredKeyValueOrderingDeserializer.Instance, cf: columnFamilyKeys);
+                batchKeys[count] = key;
+                rowKeyLengths[count] = rowKeyLen;
+                used += rowKeyLen;
+                count++;
 
-                if (lookup.Found)
-                    heads[key] = lookup.Ordering;
+                if (count == HeadReadBatchSize)
+                {
+                    db.MultiGet(packed.AsSpan(0, used), rowKeyLengths, ref visitor, cf: columnFamilyKeys);
+                    count = 0;
+                    used = 0;
+                }
             }
+
+            if (count > 0)
+                db.MultiGet(packed.AsSpan(0, used), rowKeyLengths[..count], ref visitor, cf: columnFamilyKeys);
         }
         finally
         {
-            if (rented is not null)
-                ArrayPool<byte>.Shared.Return(rented);
+            // Clear the key slots so the pool does not keep this batch's strings alive.
+            ArrayPool<string>.Shared.Return(batchKeys, clearArray: true);
+            ArrayPool<byte>.Shared.Return(packed);
         }
 
         return heads;
+    }
+
+    /// <summary>
+    /// Maps each current row a MultiGet finds back to its key (by batch position) and records the
+    /// ordering fields, decoded in place over the native value memory.
+    /// </summary>
+    private readonly struct CurrentHeadVisitor : IMultiGetValueVisitor
+    {
+        private readonly string[] batchKeys;
+        private readonly Dictionary<string, StoredKeyValueOrdering> heads;
+
+        public CurrentHeadVisitor(string[] batchKeys, Dictionary<string, StoredKeyValueOrdering> heads)
+        {
+            this.batchKeys = batchKeys;
+            this.heads = heads;
+        }
+
+        public void OnValue(int index, ReadOnlySpan<byte> value) =>
+            heads[batchKeys[index]] = DecodeKeyValueOrdering(value);
     }
 
 
@@ -2241,7 +2287,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             prefixBytes = prefixBytes[..prefixLen];
             Encoding.UTF8.GetBytes(prefixKeyName, prefixBytes);
 
-            using Iterator? iterator = db.NewIterator(cf: columnFamilyKeys);
+            using Iterator? iterator = db.NewIterator(readOptions: ScanReadOptions, cf: columnFamilyKeys);
             iterator.Seek(prefixBytes);
 
             // One parse shell serves every row of the scan; fields are copied out per row.
@@ -2335,7 +2381,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             prefixBytes = prefixBytes[..prefixLen];
             Encoding.UTF8.GetBytes(prefixKeyName, prefixBytes);
 
-            using Iterator? iterator = db.NewIterator(cf: columnFamilyKeys);
+            using Iterator? iterator = db.NewIterator(readOptions: ScanReadOptions, cf: columnFamilyKeys);
             iterator.Seek(prefixBytes);
 
             // Rows of one logical key are usually adjacent, so cache the last decoded logical key
@@ -2592,7 +2638,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             seekBytes = seekBytes[..seekLen];
             Encoding.UTF8.GetBytes(seekStr, seekBytes);
 
-            using Iterator iterator = db.NewIterator(cf: columnFamilyKeys);
+            using Iterator iterator = db.NewIterator(readOptions: ScanReadOptions, cf: columnFamilyKeys);
             iterator.Seek(seekBytes);
 
             // One parse shell serves every row of the scan; fields are copied out per row.
@@ -2673,7 +2719,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     {
         List<(string, ReadOnlyKeyValueEntry)> items = [];
 
-        using Iterator iterator = db.NewIterator(cf: columnFamilyKeys);
+        using Iterator iterator = db.NewIterator(readOptions: ScanReadOptions, cf: columnFamilyKeys);
 
         if (cursor is null)
             iterator.SeekToFirst();
@@ -2747,7 +2793,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     {
         List<(string, LockEntry)> items = [];
 
-        using Iterator iterator = db.NewIterator(cf: columnFamilyLocks);
+        using Iterator iterator = db.NewIterator(readOptions: ScanReadOptions, cf: columnFamilyLocks);
 
         if (cursor is null)
             iterator.SeekToFirst();
@@ -2978,9 +3024,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
 
     /// <summary>
     /// Decodes the ordering fields of a row directly from the RocksDB-owned native value memory.
-    /// The payload bytes are skipped in place and never copied into managed memory — unlike a
-    /// MultiGet, whose managed wrapper marshals every value into a fresh array before the caller
-    /// can look at it.
+    /// The payload bytes are skipped in place and never copied into managed memory.
     /// </summary>
     private sealed class StoredKeyValueOrderingDeserializer : ISpanDeserializer<StoredKeyValueOrderingLookup>
     {
@@ -3756,7 +3800,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 foreach (byte[] futureRev in st.FutureRevisionKeys) { batch.Delete(futureRev, cf: kv); batchOps++; }
             }
 
-            using (Iterator it = copy.NewIterator(cf: kv))
+            using (Iterator it = copy.NewIterator(readOptions: MaintenanceScanReadOptions, cf: kv))
             {
                 it.SeekToFirst();
                 while (it.Valid())
@@ -3822,7 +3866,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             FlushGroup();
 
             // Exclude locks from the as-of image — volatile lease state re-established at runtime.
-            using (Iterator lockIt = copy.NewIterator(cf: locksCf))
+            using (Iterator lockIt = copy.NewIterator(readOptions: MaintenanceScanReadOptions, cf: locksCf))
             {
                 lockIt.SeekToFirst();
                 while (lockIt.Valid())

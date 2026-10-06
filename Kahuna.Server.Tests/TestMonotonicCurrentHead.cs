@@ -119,6 +119,46 @@ public class TestMonotonicCurrentHead
     [InlineData("memory")]
     [InlineData("sqlite")]
     [InlineData("rocksdb")]
+    public void OlderDuplicatesInABatchOfManyKeysNeverRegressTheirCurrentRows(string kind)
+    {
+        IPersistenceBackend backend = CreateBackend(kind);
+        try
+        {
+            // More keys than one batched head read takes, with multi-byte and long keys mixed in, so the
+            // durable heads are resolved over several reads and a packed key buffer that has to grow.
+            const int count = 300;
+            string[] keys = new string[count];
+            for (int i = 0; i < count; i++)
+                keys[i] = $"mono/many/é{i:D4}" + (i % 5 == 0 ? new string('x', 400) : "");
+
+            List<PersistenceRequestItem> newer = new(count / 2);
+            for (int i = 0; i < count; i += 2)
+                newer.Add(Item(keys[i], revision: 311, lastModifiedPhysical: 2_000));
+            Assert.True(backend.StoreKeyValues(newer));
+
+            // Every key gets an older record: it must advance only the keys with no newer head.
+            List<PersistenceRequestItem> older = new(count);
+            for (int i = 0; i < count; i++)
+                older.Add(Item(keys[i], revision: 310, lastModifiedPhysical: 1_000));
+            Assert.True(backend.StoreKeyValues(older));
+
+            for (int i = 0; i < count; i++)
+            {
+                KeyValueEntry? current = backend.GetKeyValue(keys[i]);
+                Assert.NotNull(current);
+                Assert.Equal(i % 2 == 0 ? 311 : 310, current!.Revision);
+            }
+        }
+        finally
+        {
+            (backend as IDisposable)?.Dispose();
+        }
+    }
+
+    [Theory]
+    [InlineData("memory")]
+    [InlineData("sqlite")]
+    [InlineData("rocksdb")]
     public void SameRevisionRecordsAdvanceByCommitHlcOnly(string kind)
     {
         IPersistenceBackend backend = CreateBackend(kind);
