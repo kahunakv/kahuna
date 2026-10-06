@@ -439,6 +439,112 @@ public class TestKahunaRateLimiters : BaseCluster
     }
 
     /// <summary>
+    /// A renewal and a release return no decision, so their outcome must not be parsed as one. A held
+    /// lease is renewed many times and then released, and none of those calls may throw on the way.
+    /// </summary>
+    [Fact]
+    public async Task TestConcurrencyRenewalAndReleaseThrowNothing()
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
+            await AssembleThreNodeCluster("memory", 4, raftLogger, kahunaLogger);
+
+        int unexpectedAnswers = 0;
+
+        void OnFirstChance(object? sender, System.Runtime.ExceptionServices.FirstChanceExceptionEventArgs e)
+        {
+            if (e.Exception is KahunaException ex && ex.Message.StartsWith("Rate limiter script returned an unexpected answer", StringComparison.Ordinal))
+                Interlocked.Increment(ref unexpectedAnswers);
+        }
+
+        AppDomain.CurrentDomain.FirstChanceException += OnFirstChance;
+
+        try
+        {
+            KahunaClient[] clients = Replicas(kahuna1, kahuna2, kahuna3);
+            KahunaConcurrencyLimiterOptions options = new()
+            {
+                Key = NewKey(),
+                PermitLimit = 1,
+                LeaseDuration = TimeSpan.FromMilliseconds(300)
+            };
+
+            KahunaConcurrencyLimiter holder = new(clients[0], options);
+            await using KahunaConcurrencyLimiter other = new(clients[1], options);
+
+            RateLimitLease held = await holder.AcquireAsync(1, Token);
+            Assert.True(held.IsAcquired);
+
+            // Four lease durations, so about twelve renewals. The permit is still held only because
+            // they took effect.
+            await Task.Delay(1200, Token);
+            Assert.False((await other.AcquireAsync(1, Token)).IsAcquired);
+
+            held.Dispose();
+
+            // An asynchronous disposal waits for the release that is still in flight.
+            await holder.DisposeAsync();
+
+            Assert.True((await other.AcquireAsync(1, Token)).IsAcquired);
+            Assert.Equal(0, Volatile.Read(ref unexpectedAnswers));
+        }
+        finally
+        {
+            AppDomain.CurrentDomain.FirstChanceException -= OnFirstChance;
+
+            await LeaveCluster(node1, node2, node3);
+        }
+    }
+
+    /// <summary>
+    /// A held lease whose key is gone from the cluster, as after an expiry, is dropped by its next
+    /// renewal: the renewal does not write the key again, and the limiter stops counting the lease as
+    /// held, so it can become idle.
+    /// </summary>
+    [Fact]
+    public async Task TestConcurrencyLeaseThatLapsedIsDroppedByTheRenewal()
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
+            await AssembleThreNodeCluster("memory", 4, raftLogger, kahunaLogger);
+
+        try
+        {
+            KahunaClient[] clients = Replicas(kahuna1, kahuna2, kahuna3);
+            string key = NewKey();
+
+            await using KahunaConcurrencyLimiter limiter = new(clients[0], new()
+            {
+                Key = key,
+                PermitLimit = 1,
+                LeaseDuration = TimeSpan.FromMilliseconds(600)
+            });
+
+            RateLimitLease held = await limiter.AcquireAsync(1, Token);
+            Assert.True(held.IsAcquired);
+            Assert.Null(limiter.IdleDuration);
+
+            List<KahunaKeyValue> leases = await clients[1].GetByBucket(key, KeyValueDurability.Ephemeral, cancellationToken: Token);
+            KahunaKeyValue lease = Assert.Single(leases);
+
+            // Another party removes the lease key, as its expiry would.
+            await clients[1].ExecuteKeyValueTransactionScript("EDELETE @lease_key", parameters: [new() { Key = "@lease_key", Value = lease.Key }], cancellationToken: Token);
+
+            await WaitUntil(() => limiter.IdleDuration is not null);
+
+            // Two more renewal intervals: no renewal writes the key again.
+            await Task.Delay(400, Token);
+            Assert.Empty(await clients[1].GetByBucket(key, KeyValueDurability.Ephemeral, cancellationToken: Token));
+
+            // Disposing the dropped lease has nothing left to give back.
+            held.Dispose();
+            Assert.True((await limiter.AcquireAsync(1, Token)).IsAcquired);
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
+    }
+
+    /// <summary>
     /// A request refused by a concurrency limiter waits in the local queue, and is granted as soon as
     /// this process gives a permit back. With the newest served first, a full queue evicts the oldest
     /// waiter with a refusal to make room.

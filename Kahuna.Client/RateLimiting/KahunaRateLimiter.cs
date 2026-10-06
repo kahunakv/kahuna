@@ -231,11 +231,29 @@ public abstract class KahunaRateLimiter : RateLimiter
     }
 
     /// <summary>
-    /// Runs one decision script, and runs it again while the cluster answers that the transaction
-    /// aborted or must be retried. Neither outcome changed the state, so a retry cannot spend
-    /// permits twice. Two callers that race for one counter are what makes a transaction abort.
+    /// Runs one decision script and reads its <c>"1:&lt;n&gt;"</c> or <c>"0:&lt;n&gt;"</c> answer.
     /// </summary>
-    private protected async Task<(bool Granted, long Value)> RunScriptAsync(
+    private protected async Task<(bool Granted, long Value)> DecideAsync(
+        KahunaRateLimiterScript script,
+        List<KeyValueParameter> parameters,
+        CancellationToken cancellationToken
+    )
+    {
+        KahunaKeyValueTransactionResult result = await RunScriptAsync(script, parameters, cancellationToken).ConfigureAwait(false);
+
+        return ParseAnswer(result);
+    }
+
+    /// <summary>
+    /// Runs one script, and runs it again while the cluster answers that the transaction aborted or
+    /// must be retried. Neither outcome changed the state, so a retry cannot spend permits twice. Two
+    /// callers that race for one counter are what makes a transaction abort.
+    ///
+    /// <para>The result is returned as the cluster gave it. A script that returns no decision, such as
+    /// a lease renewal or a release, reads the outcome of its last statement from
+    /// <see cref="KahunaKeyValueTransactionResult.Type"/>.</para>
+    /// </summary>
+    private protected async Task<KahunaKeyValueTransactionResult> RunScriptAsync(
         KahunaRateLimiterScript script,
         List<KeyValueParameter> parameters,
         CancellationToken cancellationToken
@@ -243,11 +261,9 @@ public abstract class KahunaRateLimiter : RateLimiter
     {
         for (int attempt = 0; ; attempt++)
         {
-            KahunaKeyValueTransactionResult result;
-
             try
             {
-                result = await client.ExecuteKeyValueTransactionScript(script.Bytes, script.Hash, parameters, cancellationToken).ConfigureAwait(false);
+                return await client.ExecuteKeyValueTransactionScript(script.Bytes, script.Hash, parameters, cancellationToken).ConfigureAwait(false);
             }
             catch (KahunaException ex) when (
                 ex.ErrorDomain == KahunaErrorDomain.KeyValue
@@ -256,10 +272,7 @@ public abstract class KahunaRateLimiter : RateLimiter
                 && !cancellationToken.IsCancellationRequested)
             {
                 await Task.Delay(RetryDelay(attempt), cancellationToken).ConfigureAwait(false);
-                continue;
             }
-
-            return ParseAnswer(result);
         }
     }
 
@@ -271,7 +284,7 @@ public abstract class KahunaRateLimiter : RateLimiter
         TimeSpan.FromMilliseconds(Random.Shared.Next(1, 2 << Math.Min(attempt, 5)));
 
     /// <summary>
-    /// Reads <c>"1:&lt;n&gt;"</c> or <c>"0:&lt;n&gt;"</c>, the only answers the scripts give.
+    /// Reads <c>"1:&lt;n&gt;"</c> or <c>"0:&lt;n&gt;"</c>, the only answers the decision scripts give.
     /// </summary>
     private static (bool Granted, long Value) ParseAnswer(KahunaKeyValueTransactionResult result)
     {

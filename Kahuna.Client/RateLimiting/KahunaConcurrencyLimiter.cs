@@ -84,7 +84,7 @@ public sealed class KahunaConcurrencyLimiter : KahunaRateLimiter
             new() { Key = "@lease_ms", Value = leaseText }
         ];
 
-        (bool granted, long value) = await RunScriptAsync(acquireScript, parameters, cancellationToken).ConfigureAwait(false);
+        (bool granted, long value) = await DecideAsync(acquireScript, parameters, cancellationToken).ConfigureAwait(false);
 
         if (!granted)
             return Refusal(value);
@@ -144,6 +144,8 @@ public sealed class KahunaConcurrencyLimiter : KahunaRateLimiter
         {
             List<KeyValueParameter> parameters = [new() { Key = "@lease_key", Value = leaseKey }];
 
+            // The outcome needs no check: the key is gone whether this call deleted it or it
+            // expired first.
             await RunScriptAsync(releaseScript, parameters, CancellationToken.None).ConfigureAwait(false);
         }
         catch (Exception)
@@ -160,7 +162,7 @@ public sealed class KahunaConcurrencyLimiter : KahunaRateLimiter
     /// <summary>
     /// Renews every held lease once per renewal interval, and stops when no lease is held. A lease
     /// that expired before its renewal is not written again, because its permits may already
-    /// belong to another process.
+    /// belong to another process. This process stops renewing it and stops counting it as held.
     /// </summary>
     private async Task RenewLeasesAsync()
     {
@@ -181,15 +183,25 @@ public sealed class KahunaConcurrencyLimiter : KahunaRateLimiter
                         new() { Key = "@lease_ms", Value = leaseText }
                     ];
 
+                    KahunaKeyValueTransactionResult result;
+
                     try
                     {
-                        await RunScriptAsync(renewScript, parameters, disposeToken).ConfigureAwait(false);
+                        result = await RunScriptAsync(renewScript, parameters, disposeToken).ConfigureAwait(false);
                     }
                     catch (Exception) when (!disposeToken.IsCancellationRequested)
                     {
                         // The next round tries again. The lease only lapses if every renewal fails
                         // for a whole lease period.
+                        continue;
                     }
+
+                    // The renewal writes only over a live lease key, so NotSet means the lease
+                    // expired on the cluster. Its key is gone, so a later release has nothing to
+                    // delete. A waiter of this process can compete for the permits now, as any
+                    // other process already can.
+                    if (result.Type == KeyValueResponseType.NotSet && heldLeases.TryRemove(lease))
+                        WakeQueue();
                 }
 
                 lock (renewalLock)

@@ -41,7 +41,7 @@ public sealed class KahunaFixedWindowRateLimiter : KahunaRateLimiter
             new() { Key = "@permits", Value = PermitsText(permitCount) }
         ];
 
-        (bool granted, long value) = await RunScriptAsync(script, parameters, cancellationToken).ConfigureAwait(false);
+        (bool granted, long value) = await DecideAsync(script, parameters, cancellationToken).ConfigureAwait(false);
 
         if (!granted)
             return Refusal(value);
