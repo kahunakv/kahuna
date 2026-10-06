@@ -7,7 +7,7 @@
         <Nullable>enable</Nullable>
         <IsPackable>true</IsPackable>
         <PackageId>Kahuna.Client.AspNetCore</PackageId>
-        <Version>1.11.1</Version>
+        <Version>1.11.2</Version>
         <Description>ASP.NET Core rate-limiting policies backed by Kahuna, so every replica of an application shares one budget</Description>
         <Authors>Andres Gutierrez</Authors>
         <Company>Andres Gutierrez</Company>
