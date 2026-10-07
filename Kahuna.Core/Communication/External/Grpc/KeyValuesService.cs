@@ -908,7 +908,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <summary>
     /// Probes a group of keys this node leads for concurrent write intents. The sender already grouped the keys
     /// by owning node, so — as with the batched many-key reads — this serves them locally rather than routing
-    /// each one again.
+    /// each one again, after confirming this node's leadership of the keys' partitions. The leadership terms
+    /// the held staged intents were confirmed under travel back on the response, as lock grants' terms do.
     /// </summary>
     private async Task<GrpcTryCheckManyWriteIntentsResponse> TryCheckManyWriteIntentsCore(GrpcTryCheckManyWriteIntentsRequest request, ServerCallContext context)
     {
@@ -917,10 +918,13 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         foreach (GrpcTryCheckManyWriteIntentsRequestItem item in request.Items)
             keys.Add(new(item.Key, (KeyValueDurability)item.Durability, (KeyValueConflictChecks)item.Checks, item.BaseRevision));
 
+        using LockGrantScope.Scope grantScope = LockGrantScope.Begin(out LockGrantCapture grants);
+
         List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses =
-            await keyValues.TryCheckManyWriteIntentValues(
+            await keyValues.TryCheckManyWriteIntentValuesConfirmed(
                 new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
-                keys);
+                keys,
+                context.CancellationToken);
 
         GrpcTryCheckManyWriteIntentsResponse response = new() { ServedFrom = "" };
 
@@ -931,6 +935,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 Key = key,
                 Durability = (GrpcKeyValueDurability)durability
             });
+
+        AddLockGrantTerms(response.GrantTerms, grants);
 
         return response;
     }
@@ -2723,7 +2729,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         DurableOnePhaseWireReply? reply = await keyValues.DurableOnePhaseLocal(
             request.PartitionId, request.RecordInitDelta.ToByteArray(), request.AnchorPrepareDelta.ToByteArray(),
             request.DecisionDelta.ToByteArray(), transactionId, request.Epoch, opId,
-            string.IsNullOrEmpty(request.FenceKey) ? null : request.FenceKey, request.FenceGeneration, context.CancellationToken);
+            string.IsNullOrEmpty(request.FenceKey) ? null : request.FenceKey, request.FenceGeneration, request.ExpectedTerm, context.CancellationToken);
 
         return new GrpcDurableOnePhaseResponse
         {

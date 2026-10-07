@@ -895,6 +895,12 @@ public sealed class KahunaConfiguration
     /// interleaving the post-prepare staged-base fence exists to abort. Shortening it increases exposure
     /// to that fence's aborts under slow clients; lengthening it delays writers behind genuinely
     /// abandoned transactions until the reaper clears them. Was a hardcoded 15 s before it was a setting.
+    ///
+    /// <para>The lease ends at the commit probe: an intent the probe finds holding a staged write is claimed for
+    /// the commit and no longer lapses by this deadline, because a one-phase bundle can apply long after the
+    /// probe and that intent is what makes a snapshot read wait for the staged write until it does. From then on
+    /// the commit or the rollback clears the intent, and <see cref="SessionOwnedIntentCeilingMs"/> bounds one
+    /// whose coordinator died in between.</para>
     /// </summary>
     public int StagedWriteIntentLeaseMs { get; set; } = 15_000;
 

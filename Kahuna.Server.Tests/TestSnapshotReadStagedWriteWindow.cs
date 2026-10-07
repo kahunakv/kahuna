@@ -146,6 +146,55 @@ public sealed class TestSnapshotReadStagedWriteWindow
         return commitType;
     }
 
+    /// <summary>
+    /// Runs <paramref name="commit"/> on the one-phase path with a snapshot read of <paramref name="key"/> started
+    /// after the commit probe passed and before the bundle is proposed — <paramref name="delayBeforeReadMs"/>
+    /// into that window, which models a slow bundle round — then reads the same snapshot again and asserts both
+    /// reads agree. The hook only runs on the one-phase path, so a transaction that took the two-phase flow fails
+    /// the test instead of passing it for the wrong reason.
+    /// </summary>
+    private static async Task<KeyValueResponseType> CommitWithReadBetweenProbeAndPropose(
+        EmbeddedKahunaNode node, string key, int delayBeforeReadMs, Func<Task<KeyValueResponseType>> commit, CancellationToken ct)
+    {
+        KahunaManager manager = (KahunaManager)node.Kahuna;
+        DurableTransactionFinalizer finalizer = manager.TransactionCoordinator.DurableFinalizerForTests;
+
+        Task<(KeyValueResponseType Type, string? Value)>? firstRead = null;
+        HLCTimestamp readTimestamp = HLCTimestamp.Zero;
+
+        finalizer.TestAfterReadSetValidationHook = async hookCt =>
+        {
+            finalizer.TestAfterReadSetValidationHook = null;
+
+            await Task.Delay(delayBeforeReadMs, hookCt);
+
+            readTimestamp = node.Raft.HybridLogicalClock.TrySendOrLocalEvent(node.Raft.GetLocalNodeId());
+            firstRead = ReadAt(node.Kahuna, key, readTimestamp, ct);
+
+            await Task.WhenAny(firstRead, Task.Delay(500, hookCt));
+        };
+
+        KeyValueResponseType commitType;
+        try
+        {
+            commitType = await commit();
+        }
+        finally
+        {
+            finalizer.TestAfterReadSetValidationHook = null;
+        }
+
+        Assert.NotNull(firstRead);
+
+        (KeyValueResponseType Type, string? Value) first = await firstRead;
+        (KeyValueResponseType Type, string? Value) second = await ReadAt(node.Kahuna, key, readTimestamp, ct);
+
+        Assert.True(first == second,
+            $"two reads at {readTimestamp} disagree: first {first.Type}/{first.Value}, then {second.Type}/{second.Value} (commit answered {commitType})");
+
+        return commitType;
+    }
+
     private static async Task<TransactionHandle> Start(IKahuna kahuna, string coordinatorKey, CancellationToken ct)
     {
         (KeyValueResponseType startType, TransactionHandle handle) = await kahuna.LocateAndStartTransaction(
@@ -236,5 +285,43 @@ public sealed class TestSnapshotReadStagedWriteWindow
 
         // Nothing lapsed, so the transaction itself must still commit.
         Assert.Equal(KeyValueResponseType.Committed, committed);
+    }
+
+    /// <summary>
+    /// One key, so the transaction takes the one-phase bundle, which validates before it proposes and decides in
+    /// the same durable batch as its prepare. The staged intent's lease runs out after the commit probe passed and
+    /// before the bundle is proposed, as it would during a slow bundle round. The probe claimed the intent for the
+    /// commit, so a read in that window must still wait for the staged write instead of answering the old value
+    /// at a snapshot the bundle then commits inside; and nothing was lost, so the transaction must commit.
+    /// </summary>
+    [Fact]
+    public async Task OnePhaseStagedSet_LeaseRunsOutWhileTheBundleIsInFlight_ReadInWindow_IsRepeatable()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        await using EmbeddedKahunaNode node = await StartNode(loggerFactory, stagedWriteIntentLeaseMs: 200, ct);
+
+        string key = $"srw-{Guid.NewGuid():N}-1p/k";
+        await Seed(node.Kahuna, key, "V1", ct);
+
+        TransactionHandle tx = await Start(node.Kahuna, key + "/tx", ct);
+
+        (KeyValueResponseType writeType, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+            tx.TransactionId, key, "V2"u8.ToArray(), null, -1, KeyValueFlags.None, 0,
+            KeyValueDurability.Persistent, ct,
+            coordinatorKey: tx.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
+        Assert.Equal(KeyValueResponseType.Set, writeType);
+
+        // Twice the lease: the intent would have lapsed by the time the read runs, had the probe not held it.
+        KeyValueResponseType committed = await CommitWithReadBetweenProbeAndPropose(node, key, delayBeforeReadMs: 400, async () =>
+        {
+            (KeyValueResponseType commitType, _) = await node.Kahuna.LocateAndCommitTransaction(tx, ct);
+            return commitType;
+        }, ct);
+
+        Assert.Equal(KeyValueResponseType.Committed, committed);
+
+        (KeyValueResponseType Type, string? Value) now = await ReadAt(node.Kahuna, key, HLCTimestamp.Zero, ct);
+        Assert.Equal((KeyValueResponseType.Get, "V2"), now);
     }
 }

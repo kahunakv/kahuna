@@ -1280,7 +1280,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     public async Task<DurableOnePhaseWireReply?> DurableOnePhase(
         string node, int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
         HLCTimestamp transactionId, long epoch, HLCTimestamp opId,
-        string? fenceKey, long fenceGeneration, CancellationToken cancellationToken)
+        string? fenceKey, long fenceGeneration, long expectedTerm, CancellationToken cancellationToken)
     {
         if (!TypedDurableOperations)
             return null;
@@ -1289,7 +1289,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         {
             using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
 
-            return await kahunaNode.DurableOnePhaseLocal(partitionId, recordInitDelta, anchorPrepareDelta, decisionDelta, transactionId, epoch, opId, fenceKey, fenceGeneration, cancellationToken);
+            return await kahunaNode.DurableOnePhaseLocal(partitionId, recordInitDelta, anchorPrepareDelta, decisionDelta, transactionId, epoch, opId, fenceKey, fenceGeneration, expectedTerm, cancellationToken);
         }
 
         throw Unreachable(node);

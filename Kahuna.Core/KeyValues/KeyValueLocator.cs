@@ -1251,9 +1251,129 @@ internal sealed class KeyValueLocator
         List<Task> tasks = new(probePlan.Count);
 
         foreach ((string leader, List<KeyValueConflictProbe> xkeys) in probePlan)
-            tasks.Add(TryCheckManyWriteIntentsOnNode(transactionId, leader, localNode, leaderByPartition, xkeys, lockSync, responses, cancellationToken));
+            tasks.Add(TryCheckManyWriteIntentsOnNode(transactionId, leader, localNode, xkeys, lockSync, responses, cancellationToken));
 
         await Task.WhenAll(tasks);
+
+        return responses;
+    }
+
+    /// <summary>
+    /// Serves a batched conflict probe for keys grouped to this node, after confirming this node's leadership
+    /// (read-index) of every partition the keys route to; the keys of a partition that does not confirm answer
+    /// <see cref="KeyValueResponseType.MustRetry"/>. This is the local leg of
+    /// <see cref="LocateAndTryCheckManyWriteIntents"/> and the entry for a probe that arrived over the wire
+    /// already grouped: the confirmation has to run on the node that answers, because a follower that has not
+    /// yet heard of a newer term would otherwise vouch for staged state of a leadership that ended.
+    ///
+    /// <para>A key whose own staged intent the probe found held (<see cref="KeyValueConflictChecks.OwnStagedIntent"/>)
+    /// reports the leadership term it was confirmed under into the open <see cref="LockGrantScope"/>, as a lock
+    /// grant does. The term is read <b>before</b> the confirmation, for the reason given on
+    /// <see cref="LockGrantTermBeforeConfirmation"/>: a proposal later fenced to that term can only be appended
+    /// by this very leadership, uninterrupted since the probe, with the intent still in its memory.</para>
+    /// </summary>
+    internal async Task<List<(KeyValueResponseType type, string key, KeyValueDurability durability)>> TryCheckManyWriteIntentsConfirmedLocally(
+        HLCTimestamp transactionId,
+        List<KeyValueConflictProbe> keys,
+        CancellationToken cancellationToken
+    )
+    {
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses = new(keys.Count);
+
+        if (keys.Count == 0)
+            return responses;
+
+        if (!raft.Joined)
+            return BuildManyWriteIntentRejection(keys, KeyValueResponseType.MustRetry);
+
+        bool captureTerms = LockGrantScope.Current is not null;
+
+        // The term of every partition involved, read before any confirmation; null once the partition failed to
+        // confirm. One entry per partition, so a probe over many keys of one partition confirms it once.
+        Dictionary<int, long?> termByPartition = [];
+        List<int> partitions = [];
+        int[] partitionOf = new int[keys.Count];
+
+        for (int i = 0; i < keys.Count; i++)
+        {
+            if (string.IsNullOrEmpty(keys[i].Key))
+            {
+                partitionOf[i] = -1;
+                continue;
+            }
+
+            int partitionId = RouteKey(keys[i].Key);
+            partitionOf[i] = partitionId;
+
+            // A leader-term probe confirms the leadership of the node that answers it by itself
+            // (CheckLeaderTerm), and answers a term the partition is already past as proof on any node; a
+            // confirmation here would turn that proof into a retry on a follower. It never reports a term.
+            if ((keys[i].Checks & KeyValueConflictChecks.LeaderTerm) != 0)
+                continue;
+
+            if (termByPartition.TryAdd(partitionId, captureTerms ? raft.GetPartitionTerm(partitionId) : 0))
+                partitions.Add(partitionId);
+        }
+
+        foreach (int partitionId in partitions)
+        {
+            if (!await ConfirmLeadershipForRead(partitionId, cancellationToken))
+                termByPartition[partitionId] = null;
+        }
+
+        List<KeyValueConflictProbe>? confirmedProbes = null;
+        int[]? confirmedPartitions = null;
+
+        for (int i = 0; i < keys.Count; i++)
+        {
+            KeyValueConflictProbe item = keys[i];
+
+            if (partitionOf[i] < 0)
+            {
+                responses.Add((KeyValueResponseType.InvalidInput, item.Key, item.Durability));
+                continue;
+            }
+
+            if ((item.Checks & KeyValueConflictChecks.LeaderTerm) == 0 && termByPartition[partitionOf[i]] is null)
+            {
+                responses.Add((KeyValueResponseType.MustRetry, item.Key, item.Durability));
+                continue;
+            }
+
+            confirmedProbes ??= new(keys.Count);
+            confirmedPartitions ??= new int[keys.Count];
+            confirmedPartitions[confirmedProbes.Count] = partitionOf[i];
+            confirmedProbes.Add(item);
+        }
+
+        if (confirmedProbes is null)
+            return responses;
+
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability)> answers =
+            await manager.TryCheckManyWriteIntentValues(transactionId, confirmedProbes);
+
+        // The answers come back one per probe, in probe order. A held own staged intent is the answer that
+        // passed every check the probe asked for; any refusal (lost intent, foreign range lock, a gated key)
+        // reports no term, because nothing was proven about the key.
+        for (int i = 0; i < answers.Count; i++)
+        {
+            (KeyValueResponseType type, string key, KeyValueDurability durability) answer = answers[i];
+            responses.Add(answer);
+
+            if (!captureTerms || i >= confirmedProbes.Count)
+                continue;
+
+            KeyValueConflictProbe probe = confirmedProbes[i];
+
+            if ((probe.Checks & KeyValueConflictChecks.OwnStagedIntent) == 0
+                || answer.type != KeyValueResponseType.DoesNotExist
+                || !string.Equals(answer.key, probe.Key, StringComparison.Ordinal))
+                continue;
+
+            int partitionId = confirmedPartitions![i];
+            if (termByPartition.TryGetValue(partitionId, out long? confirmedTerm) && confirmedTerm is { } term && term > 0)
+                LockGrantScope.Record(partitionId, term, probe.Key);
+        }
 
         return responses;
     }
@@ -1313,7 +1433,6 @@ internal sealed class KeyValueLocator
         HLCTimestamp transactionId,
         string leader,
         string localNode,
-        Dictionary<int, string> leaderByPartition,
         List<KeyValueConflictProbe> xkeys,
         Lock lockSync,
         List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses,
@@ -1325,9 +1444,7 @@ internal sealed class KeyValueLocator
         List<(KeyValueResponseType type, string key, KeyValueDurability durability)> nodeResponses;
 
         if (leader == localNode)
-            nodeResponses = await ConfirmLeadershipForGroupRead(leader, leaderByPartition, cancellationToken)
-                ? await manager.TryCheckManyWriteIntentValues(transactionId, xkeys)
-                : BuildManyWriteIntentRejection(xkeys, KeyValueResponseType.MustRetry);
+            nodeResponses = await TryCheckManyWriteIntentsConfirmedLocally(transactionId, xkeys, cancellationToken);
         else
             nodeResponses = await interNodeCommunication.TryCheckManyWriteIntents(leader, transactionId, xkeys, cancellationToken);
 

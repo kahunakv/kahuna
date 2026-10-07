@@ -69,6 +69,18 @@ internal sealed class KeyValueWriteIntent
     /// lands outside every snapshot already served on the key; the commit-time probe refuses it.
     /// </summary>
     public bool Lapsed { get; set; }
+
+    /// <summary>
+    /// True once the owning transaction's commit probe found this intent holding a staged write and claimed it
+    /// for the commit. From here on the intent ignores its lease deadline: it stays live until the commit or the
+    /// rollback clears it, or until the session liveness ceiling proves that no session can still own it. The
+    /// commit timestamp is frozen before the probe, and a one-phase bundle decides in the same durable batch as
+    /// its prepare, so nothing after the probe can refuse the commit if the intent lapses while the bundle is in
+    /// flight; a snapshot read that then stepped over the lapsed intent would answer the old value at a snapshot
+    /// the commit lands inside. Holding the intent makes that read wait instead. Set in the key's actor turn by
+    /// the probe; never cleared.
+    /// </summary>
+    public bool HeldForCommit { get; set; }
 }
 
 /// <summary>
@@ -148,10 +160,10 @@ internal static class KeyValueWriteIntentLease
 
         intent.Lapsed = true;
 
-        // A zero deadline can only fail the policy through the ceiling arm, so this branch identifies an
-        // orphaned session-owned intent without re-deriving the reason. An ordinary lease expiry is routine
-        // and stays unreported.
-        if (intent.Expires == HLCTimestamp.Zero && !intent.CeilingExpiryReported)
+        // A zero deadline, or an intent held for its commit, can only fail the policy through the ceiling arm,
+        // so this branch identifies an orphaned session-bound intent without re-deriving the reason. An
+        // ordinary lease expiry is routine and stays unreported.
+        if ((intent.Expires == HLCTimestamp.Zero || intent.HeldForCommit) && !intent.CeilingExpiryReported)
         {
             intent.CeilingExpiryReported = true;
             DurableTransactionMetrics.SessionOwnedIntentCeilingExpiries.Add(1, IntentKind);
@@ -164,7 +176,9 @@ internal static class KeyValueWriteIntentLease
     /// <summary>
     /// The liveness policy itself, in three arms:
     /// <list type="bullet">
-    /// <item>A positive deadline is live until the deadline passes.</item>
+    /// <item>A positive deadline is live until the deadline passes — unless the intent is
+    /// <see cref="KeyValueWriteIntent.HeldForCommit"/>: the owner's commit probe claimed it, so from then on it
+    /// is bound to the session like a zero-deadline intent and the two arms below decide it.</item>
     /// <item>A zero deadline on a prepared intent (<c>CommitTimestamp != Zero</c>) is live. Its fate belongs
     /// to the decision machinery — the finalizer, the recovery sweep and the settle paths resolve it against
     /// the canonical record — and expiring one that later commits would discard the only route to an
@@ -176,7 +190,7 @@ internal static class KeyValueWriteIntentLease
     /// </summary>
     internal static bool IsLive(KeyValueWriteIntent intent, HLCTimestamp currentTime, int sessionOwnedCeilingMs)
     {
-        if (intent.Expires != HLCTimestamp.Zero)
+        if (intent.Expires != HLCTimestamp.Zero && !intent.HeldForCommit)
             return intent.Expires - currentTime > TimeSpan.Zero;
 
         if (intent.CommitTimestamp != HLCTimestamp.Zero)

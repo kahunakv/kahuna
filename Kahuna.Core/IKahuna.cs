@@ -139,7 +139,7 @@ public interface IKahuna
     public Task<DurableOnePhaseWireReply?> DurableOnePhaseLocal(
         int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
         HLCTimestamp transactionId, long epoch, HLCTimestamp opId,
-        string? fenceKey, long fenceGeneration, CancellationToken cancellationToken);
+        string? fenceKey, long fenceGeneration, long expectedTerm, CancellationToken cancellationToken);
 
     /// <summary>Serves a canonical transaction-record lookup routed here because this node is the record's anchor
     /// partition leader. Returns the serialized record, or null when no record exists locally.</summary>
@@ -178,6 +178,12 @@ public interface IKahuna
     /// <summary>Probes many locally owned keys for the conflict classes each one asks for, one result per
     /// requested key.</summary>
     public Task<List<(KeyValueResponseType type, string key, KeyValueDurability durability)>> TryCheckManyWriteIntentValues(HLCTimestamp transactionId, List<KeyValueConflictProbe> keys);
+
+    /// <summary>Probes many keys grouped to this node for the conflict classes each one asks for, after confirming
+    /// this node's leadership of every partition they route to; the keys of a partition that does not confirm
+    /// answer MustRetry. A held own staged intent reports the term its leadership was confirmed under into the
+    /// open lock-grant capture.</summary>
+    public Task<List<(KeyValueResponseType type, string key, KeyValueDurability durability)>> TryCheckManyWriteIntentValuesConfirmed(HLCTimestamp transactionId, List<KeyValueConflictProbe> keys, CancellationToken cancellationToken);
 
     public Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)> LocateAndTryAcquireExclusiveLock(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default);
 

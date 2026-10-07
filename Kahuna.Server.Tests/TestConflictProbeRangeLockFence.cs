@@ -1,5 +1,6 @@
 using Kahuna.Server.Communication;
 using Google.Protobuf;
+using Grpc.Core;
 using Kommander;
 using Kommander.Time;
 using Microsoft.Extensions.Logging;
@@ -243,7 +244,7 @@ public sealed class TestConflictProbeRangeLockFence : BaseCluster
 
         CapturingProbeKahuna fake = new();
         await new KeyValuesService(fake, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance)
-            .TryCheckManyWriteIntentsInternal(parsed, null!);
+            .TryCheckManyWriteIntentsInternal(parsed, new StubServerCallContext());
 
         Assert.NotNull(fake.Probes);
         Assert.Equal(2, fake.Probes!.Count);
@@ -270,13 +271,14 @@ public sealed class TestConflictProbeRangeLockFence : BaseCluster
 
         CapturingProbeKahuna fake = new();
         await new KeyValuesService(fake, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance)
-            .TryCheckManyWriteIntentsInternal(parsed, null!);
+            .TryCheckManyWriteIntentsInternal(parsed, new StubServerCallContext());
 
         Assert.NotNull(fake.Probes);
         Assert.Equal(KeyValueConflictChecks.None, Assert.Single(fake.Probes!).Checks);
     }
 
-    /// <summary>Records the probe list the gRPC handler decoded and answers every key cleanly.</summary>
+    /// <summary>Records the probe list the gRPC handler decoded and answers every key cleanly. The handler serves a
+    /// wire probe through the leadership-confirming entry, which here captures exactly as the plain one does.</summary>
     private sealed class CapturingProbeKahuna : FakeKahunaBase
     {
         public List<KeyValueConflictProbe>? Probes { get; private set; }
@@ -289,5 +291,26 @@ public sealed class TestConflictProbeRangeLockFence : BaseCluster
             return Task.FromResult(keys.ConvertAll(probe =>
                 (KeyValueResponseType.DoesNotExist, probe.Key, probe.Durability)));
         }
+
+        public override Task<List<(KeyValueResponseType type, string key, KeyValueDurability durability)>> TryCheckManyWriteIntentValuesConfirmed(
+            HLCTimestamp transactionId, List<KeyValueConflictProbe> keys, CancellationToken cancellationToken) =>
+            TryCheckManyWriteIntentValues(transactionId, keys);
+    }
+
+    /// <summary>Minimal context: the handler reads only the cancellation token.</summary>
+    private sealed class StubServerCallContext : ServerCallContext
+    {
+        protected override CancellationToken CancellationTokenCore => CancellationToken.None;
+        protected override string MethodCore => "test";
+        protected override string HostCore => "test";
+        protected override string PeerCore => "test";
+        protected override DateTime DeadlineCore => DateTime.MaxValue;
+        protected override Metadata RequestHeadersCore => new();
+        protected override Metadata ResponseTrailersCore => new();
+        protected override Status StatusCore { get; set; }
+        protected override WriteOptions? WriteOptionsCore { get; set; }
+        protected override AuthContext AuthContextCore => throw new NotSupportedException();
+        protected override ContextPropagationToken CreatePropagationTokenCore(ContextPropagationOptions? options) => throw new NotSupportedException();
+        protected override Task WriteResponseHeadersAsyncCore(Metadata responseHeaders) => throw new NotSupportedException();
     }
 }

@@ -72,8 +72,10 @@ public enum KeyValueConflictChecks
     /// the only thing that makes a snapshot read wait for the staged write. If it lapsed, was replaced, or was
     /// dropped by a leader change, a read may already have answered the old value at a snapshot the commit would
     /// land inside. Asked of the transaction's written keys at commit. Answers
-    /// <see cref="KeyValueResponseType.Unlocked"/> when the intent was lost, and renews its lease otherwise, so it
-    /// cannot lapse before a prepare that follows this probe lands.
+    /// <see cref="KeyValueResponseType.Unlocked"/> when the intent was lost, and claims it for the commit
+    /// otherwise, so it cannot lapse before the prepare or the one-phase bundle that follows this probe applies.
+    /// The node that answers "held" also reports the leadership term it confirmed the intent under, so the
+    /// one-phase bundle can be fenced to that term.
     /// </summary>
     OwnStagedIntent = 1 << 5
 }

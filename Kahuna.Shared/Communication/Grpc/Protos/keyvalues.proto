@@ -474,6 +474,9 @@ message GrpcTryCheckManyWriteIntentsRequestItem {
 message GrpcTryCheckManyWriteIntentsResponse {
   optional string ServedFrom = 1;
   repeated GrpcTryCheckManyWriteIntentsResponseItem Items = 2;
+  // The leadership terms under which the serving node confirmed the caller's own staged intents held
+  // (check 32), one per partition, so the caller's one-phase bundle can be fenced to that leadership.
+  repeated GrpcLockGrantTerm GrantTerms = 3;
 }
 
 message GrpcTryCheckManyWriteIntentsResponseItem {
@@ -1593,6 +1596,10 @@ message GrpcDurableOnePhaseRequest {
   int32 OpIdNode = 11;
   int64 OpIdPhysical = 12;
   uint32 OpIdCounter = 13;
+  // The Raft term the anchor partition must still be led under when the bundle is appended: the term the
+  // transaction's staged intents (and locks) on the partition were confirmed under at the commit probe. The
+  // receiver refuses the bundle before anything is appended when its term differs. 0 = no fence.
+  int64 ExpectedTerm = 14;
 }
 
 // The bundle signals (BatchCommitted / PrepareAcknowledged / PrepareRejection, as in GrpcDurableBundleResponse)

@@ -1238,6 +1238,29 @@ internal static class DurableTransactionMetrics
             "kahuna.durable_tx.one_phase_gated_commit_leader_change_rejections",
             description: "One-phase bundled commits rejected at apply because a leader of another term than the one that granted the transaction's locks proposed them.");
 
+    /// <summary>
+    /// One-phase bundles refused by the anchor leader before anything was appended, because the partition's
+    /// term differed from the one the transaction's staged intents (and locks) were confirmed under at the
+    /// commit probe: the partition changed leader between the probe and the propose, so the intents the probe
+    /// confirmed lived in a leader that no longer leads, and a snapshot read served since may have stepped over
+    /// the staged write. Nothing durable happens; the retry's probe finds the intent gone and refuses the commit.
+    /// </summary>
+    internal static readonly Counter<long> OnePhaseBundleTermFenceRefusals =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.one_phase_bundle_term_fence_refusals",
+            description: "One-phase bundles refused before append because the anchor partition's term differed from the one the commit probe confirmed the transaction's staged intents under.");
+
+    private static long onePhaseBundleTermFenceRefusals;
+
+    /// <summary>Process-wide count behind <see cref="OnePhaseBundleTermFenceRefusals"/>, readable for tests.</summary>
+    internal static long OnePhaseBundleTermFenceRefusalsCount => Interlocked.Read(ref onePhaseBundleTermFenceRefusals);
+
+    internal static void OnePhaseBundleTermFenceRefused()
+    {
+        Interlocked.Increment(ref onePhaseBundleTermFenceRefusals);
+        OnePhaseBundleTermFenceRefusals.Add(1);
+    }
+
     private static long onePhaseGatedCommitStaleBaseRejections;
 
     private static long onePhaseGatedCommitStaleReadRejections;

@@ -115,7 +115,7 @@ public sealed class TestAbandonedScriptFinalizeFence
         (byte[] holderInit, byte[] holderPrepare, byte[] holderDecision, _) = RawOnePhase(holder, [heldKey], now, holderOp, deadline);
 
         DurableOnePhaseWireReply? committed = await node.Kahuna.DurableOnePhaseLocal(
-            partition, holderInit, holderPrepare, holderDecision, holder, 1, holderOp, null, 0, ct);
+            partition, holderInit, holderPrepare, holderDecision, holder, 1, holderOp, null, 0, 0, ct);
         Assert.NotNull(committed);
         Assert.True(committed!.Value.PrepareAcknowledged);
         Assert.Equal((int)TransactionDecision.Commit, committed.Value.Decision);
@@ -128,7 +128,7 @@ public sealed class TestAbandonedScriptFinalizeFence
         (byte[] init, byte[] prepare, byte[] decision, List<PreparedIntent> intents) = RawOnePhase(abandoned, [heldKey, freshKey], now, abandonedOp, deadline);
 
         DurableOnePhaseWireReply? refused = await node.Kahuna.DurableOnePhaseLocal(
-            partition, init, prepare, decision, abandoned, 1, abandonedOp, null, 0, ct);
+            partition, init, prepare, decision, abandoned, 1, abandonedOp, null, 0, 0, ct);
         Assert.NotNull(refused);
         Assert.True(refused!.Value.BatchCommitted);
         Assert.False(refused.Value.PrepareAcknowledged);

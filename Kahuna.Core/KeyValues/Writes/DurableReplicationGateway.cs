@@ -609,14 +609,14 @@ internal sealed class DurableReplicationGateway
     internal async Task<DurableOnePhaseReply?> ReplicateDurableOnePhaseBundleThroughSchedulerFenced(
         int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
         HLCTimestamp transactionId, long epoch, HLCTimestamp opId,
-        string fenceKey, long fenceGeneration, CancellationToken cancellationToken)
+        string fenceKey, long fenceGeneration, long expectedTerm, CancellationToken cancellationToken)
     {
         string? leader = await ResolveDurableLeader(partitionId, cancellationToken).ConfigureAwait(false);
         if (leader is not null)
         {
             DurableOnePhaseReply? typed = await ForwardDurableOnePhaseAsync(
                 leader, partitionId, recordInitDelta, anchorPrepareDelta, decisionDelta,
-                transactionId, epoch, opId, fenceKey, fenceGeneration, cancellationToken).ConfigureAwait(false);
+                transactionId, epoch, opId, fenceKey, fenceGeneration, expectedTerm, cancellationToken).ConfigureAwait(false);
 
             // Mirror a refused prepare's verdict into the local intent store, as the typed bundle forward does,
             // so the origin's classification reads it exactly as a local refusal. Nothing is projected into the
@@ -630,22 +630,23 @@ internal sealed class DurableReplicationGateway
 
         return await ReplicateDurableOnePhaseLocal(
             partitionId, recordInitDelta, anchorPrepareDelta, decisionDelta,
-            transactionId, epoch, opId, fenceKey, fenceGeneration, cancellationToken).ConfigureAwait(false);
+            transactionId, epoch, opId, fenceKey, fenceGeneration, expectedTerm, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Forwards a one-phase bundle to the anchor partition's leader as the typed one-phase operation.
-    /// Null means the receiver does not implement it (an older node).</summary>
+    /// Null means the receiver does not implement it (an older node). An older receiver also ignores the term
+    /// fence, so the probe-to-propose leader change stays uncovered until every node carries it.</summary>
     private async Task<DurableOnePhaseReply?> ForwardDurableOnePhaseAsync(
         string node, int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
         HLCTimestamp transactionId, long epoch, HLCTimestamp opId,
-        string? fenceKey, long fenceGeneration, CancellationToken cancellationToken)
+        string? fenceKey, long fenceGeneration, long expectedTerm, CancellationToken cancellationToken)
     {
         DurableOnePhaseReply? reply;
         try
         {
             DurableOnePhaseWireReply? wire = await interNodeCommunication.DurableOnePhase(
                 node, partitionId, recordInitDelta, anchorPrepareDelta, decisionDelta,
-                transactionId, epoch, opId, fenceKey, fenceGeneration, cancellationToken).ConfigureAwait(false);
+                transactionId, epoch, opId, fenceKey, fenceGeneration, expectedTerm, cancellationToken).ConfigureAwait(false);
             reply = wire is { } answeredWire ? DurableOnePhaseReply.FromWire(answeredWire) : null;
         }
         catch
@@ -676,7 +677,7 @@ internal sealed class DurableReplicationGateway
     internal async Task<DurableOnePhaseWireReply?> DurableOnePhaseLocal(
         int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
         HLCTimestamp transactionId, long epoch, HLCTimestamp opId,
-        string? fenceKey, long fenceGeneration, CancellationToken cancellationToken)
+        string? fenceKey, long fenceGeneration, long expectedTerm, CancellationToken cancellationToken)
     {
         if (!await raft.AmILeaderIfHosted(partitionId, cancellationToken).ConfigureAwait(false))
         {
@@ -696,7 +697,7 @@ internal sealed class DurableReplicationGateway
                 DurableTransactionMetrics.DurableOperationRedirected();
                 DurableOnePhaseReply? redirected = await ForwardDurableOnePhaseAsync(
                     actualLeader, partitionId, recordInitDelta, anchorPrepareDelta, decisionDelta,
-                    transactionId, epoch, opId, fenceKey, fenceGeneration, cancellationToken).ConfigureAwait(false);
+                    transactionId, epoch, opId, fenceKey, fenceGeneration, expectedTerm, cancellationToken).ConfigureAwait(false);
                 return redirected?.ToWire();
             }
 
@@ -706,7 +707,7 @@ internal sealed class DurableReplicationGateway
 
         DurableOnePhaseReply reply = await ReplicateDurableOnePhaseLocal(
             partitionId, recordInitDelta, anchorPrepareDelta, decisionDelta,
-            transactionId, epoch, opId, fenceKey, fenceGeneration, cancellationToken).ConfigureAwait(false);
+            transactionId, epoch, opId, fenceKey, fenceGeneration, expectedTerm, cancellationToken).ConfigureAwait(false);
         return reply.ToWire();
     }
 
@@ -717,12 +718,33 @@ internal sealed class DurableReplicationGateway
     private async Task<DurableOnePhaseReply> ReplicateDurableOnePhaseLocal(
         int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
         HLCTimestamp transactionId, long epoch, HLCTimestamp opId,
-        string? fenceKey, long fenceGeneration, CancellationToken cancellationToken)
+        string? fenceKey, long fenceGeneration, long exclusionTerm, CancellationToken cancellationToken)
     {
-        TaskCompletionSource<bool> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        // Term fence, see ReplicateDurableLocal. The bundle is fenced to the term the coordinator's commit probe
+        // confirmed the transaction's staged intents (and locks) under, when it reports one, rather than to this
+        // node's current term: the bundle validates before it proposes and decides in the same durable batch as
+        // its prepare, so once appended nothing can refuse it, and the in-memory intents the probe confirmed are
+        // what keep a snapshot read waiting for the staged write until the batch applies. Those intents live in
+        // the memory of the leader of that term only. A different term here means the partition changed leader
+        // between the probe and this propose: this leader never held them, and a read it served meanwhile may
+        // have answered without the staged write at a snapshot the frozen commit timestamp lands inside. The
+        // bundle is refused before anything is appended — nothing durable, a clean retry whose own probe then
+        // finds the staged intent gone and refuses the commit. The Raft executor compares the stamp again at the
+        // append, so a leadership that ends between this read and the append refuses it too.
+        long currentTerm = raft.GetPartitionTerm(partitionId);
 
-        // Term fence, see ReplicateDurableLocal.
-        long expectedTerm = raft.GetPartitionTerm(partitionId);
+        if (exclusionTerm != 0 && exclusionTerm != currentTerm)
+        {
+            DurableTransactionMetrics.OnePhaseBundleTermFenceRefused();
+            logger.LogWarning(
+                "Refusing the one-phase bundle of transaction {TransactionId} on partition {PartitionId}: its staged intents were confirmed in term {ExclusionTerm}, and the partition is led in term {CurrentTerm}",
+                transactionId, partitionId, exclusionTerm, currentTerm);
+            return NotCommittedOnePhaseReply;
+        }
+
+        long expectedTerm = exclusionTerm != 0 ? exclusionTerm : currentTerm;
+
+        TaskCompletionSource<bool> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         Writes.DurableProposalSubmission submission = new(
             partitionId,

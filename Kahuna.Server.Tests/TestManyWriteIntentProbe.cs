@@ -106,6 +106,69 @@ public sealed class TestManyWriteIntentProbe : BaseCluster
     }
 
     /// <summary>
+    /// A probe that asks a written key about the caller's own staged intent reports, when the intent is held, the
+    /// leadership term the key's leader confirmed it under — into the lock-grant capture, as a lock grant does —
+    /// so the one-phase bundle can be fenced to that leadership. A key the caller never staged a write on answers
+    /// that the intent is lost and reports no term: nothing was proven about it.
+    /// </summary>
+    [Fact]
+    public async Task Probe_HeldOwnStagedIntent_ReportsTheLeadershipTerm()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using EmbeddedKahunaNode node = await StartNode(loggerFactory, ct);
+
+        string staged = $"probe-term-{Guid.NewGuid():N}/staged";
+        string untouched = $"probe-term-{Guid.NewGuid():N}/untouched";
+
+        (KeyValueResponseType startType, TransactionHandle tx) = await node.Kahuna.LocateAndStartTransaction(
+            new KeyValueTransactionOptions
+            {
+                CoordinatorKey = staged,
+                Locking = KeyValueTransactionLocking.Optimistic,
+                AsyncRelease = true,
+                Timeout = 60_000
+            }, ct);
+        Assert.Equal(KeyValueResponseType.Set, startType);
+
+        (KeyValueResponseType writeType, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+            tx.TransactionId, staged, "V"u8.ToArray(), null, -1, KeyValueFlags.None, 0,
+            KeyValueDurability.Persistent, ct,
+            coordinatorKey: tx.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
+        Assert.Equal(KeyValueResponseType.Set, writeType);
+
+        List<KeyValueConflictProbe> keys =
+        [
+            new(staged, KeyValueDurability.Persistent, KeyValueConflictChecks.ForeignRangeLock | KeyValueConflictChecks.OwnStagedIntent),
+            new(untouched, KeyValueDurability.Persistent, KeyValueConflictChecks.ForeignRangeLock | KeyValueConflictChecks.OwnStagedIntent)
+        ];
+
+        List<LockGrantTerm>? grants;
+        Dictionary<string, KeyValueResponseType> byKey;
+
+        using (LockGrantScope.Begin(out LockGrantCapture capture))
+        {
+            byKey = await ProbeByKey(node.Kahuna, tx.TransactionId, keys, ct);
+            grants = capture.Take();
+        }
+
+        Assert.Equal(KeyValueResponseType.DoesNotExist, byKey[staged]);
+        Assert.Equal(KeyValueResponseType.Unlocked, byKey[untouched]);
+
+        int partition = ((KahunaManager)node.Kahuna).LocateRange(staged).PartitionId;
+        LockGrantTerm grant = Assert.Single(grants!);
+        Assert.Equal(partition, grant.PartitionId);
+        Assert.Equal(staged, grant.RoutingKey);
+        Assert.Equal(node.Raft.GetPartitionTerm(partition), grant.Term);
+        Assert.True(grant.Term > 0);
+
+        // A probe with no capture open records nothing and still answers.
+        Assert.Null(LockGrantScope.Current);
+        Assert.Equal(KeyValueResponseType.DoesNotExist, (await ProbeByKey(node.Kahuna, tx.TransactionId, keys, ct))[staged]);
+
+        await node.Kahuna.LocateAndRollbackTransaction(tx, ct);
+    }
+
+    /// <summary>
     /// A malformed key is reported against itself and does not cancel the probe for the rest of the set. The
     /// opposite behaviour — bailing out on the whole request — would silently drop the write-skew guard for
     /// every other read dependency in the transaction.

@@ -809,7 +809,8 @@ public sealed class TestOnePhaseApplyTimeGateCluster : BaseCluster
 
         BatchTap holder = cluster.Taps.Single(static t => t.StalledBatches > 0);
 
-        // Let the stalled transaction's in-memory write intent lapse, as a paused coordinator's would.
+        // Twice the configured lease: the stalled transaction's in-memory write intent was claimed for the commit
+        // by the probe that preceded the stalled proposal, so it outlives the lease and keeps excluding writers.
         await Task.Delay(400, ct);
         return holder;
     }
@@ -827,10 +828,12 @@ public sealed class TestOnePhaseApplyTimeGateCluster : BaseCluster
     }
 
     /// <summary>
-    /// The lost-update shape of a stalled bundle: the competitor commits and fully settles the same base while
-    /// the read-modify-write's bundle is in flight, and the bundle applies afterwards. The apply-time base
-    /// check rejects it on every replica — the record stays Undecided, memoed — and the retry is told the truth:
-    /// a conflict abort, the competitor's write surviving.
+    /// The lost-update shape of a stalled bundle: the same base commits and fully settles while the
+    /// read-modify-write's bundle is in flight, and the bundle applies afterwards. A competitor cannot do that
+    /// through the write path any more — the victim's staged intent is claimed for its commit and excludes it
+    /// for as long as the bundle is in flight — so the base is moved on every replica's ledger directly, the
+    /// shape a path that never meets the intent would leave. The apply-time base check rejects the bundle on
+    /// every replica — the record stays Undecided, memoed — and the retry is told the truth: a conflict abort.
     /// </summary>
     [Fact]
     public async Task StalledBundle_CompetitorCommittedTheBase_IsRejectedOnEveryReplica_AndAbortsTruthfully()
@@ -853,13 +856,27 @@ public sealed class TestOnePhaseApplyTimeGateCluster : BaseCluster
 
                 BatchTap holder = await StallCommit(cluster, coordinator, victim, ct);
 
-                // The competitor commits the same base and settles everywhere.
-                KeyValueTransactionResult competitor = await RetryOnMustRetry(
-                    coordinator, Encoding.UTF8.GetBytes($"BEGIN SET `{key}` '101' COMMIT END"), null, null);
-                Assert.Equal(KeyValueResponseType.Set, competitor.Type);
+                // A competitor that meets the victim's staged intent is excluded while the bundle is in flight,
+                // even though the intent's lease has run out.
+                (KeyValueResponseType excluded, _, _) = await coordinator.LocateAndTrySetKeyValue(
+                    HLCTimestamp.Zero, key, "101"u8.ToArray(), null, -1, KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct);
+                Assert.Equal(KeyValueResponseType.MustRetry, excluded);
+
+                // The same base, committed and settled on every replica's ledger behind the intent's back.
+                HLCTimestamp competitorTx = new(0, victim.TransactionId.L + 1, 0);
+                PreparedIntent competitor = new(
+                    competitorTx, 1, key, ManifestHash: 7, RecordAnchorKey: key, CommitTimestamp: new HLCTimestamp(0, competitorTx.L + 1, 0),
+                    State: KeyValueState.Set, Value: "101"u8.ToArray(), Bucket: null, Revision: baseRevision + 1, Expires: HLCTimestamp.Zero,
+                    NoRevision: false, BaseRevision: baseRevision, BaseState: KeyValueState.Set,
+                    RecoveryDeadline: HLCTimestamp.Zero, Resolution: PreparedIntentResolution.Pending);
                 foreach (KahunaManager manager in cluster.Managers)
+                {
+                    manager.DurablePreparedIntentStore.Apply(new PrepareIntentCommand(competitor), partition);
+                    manager.DurablePreparedIntentStore.Apply(new ResolveIntentCommand(competitorTx, 1, key, Commit: true), partition);
+                    manager.DurablePreparedIntentStore.Apply(new RemoveIntentCommand(competitorTx, 1, key), partition);
                     await WaitUntilAsync(() =>
                         manager.DurablePreparedIntentStore.TryGetLedgerHead(partition, key, out long head, out _, out _) && head > baseRevision);
+                }
 
                 long staleBaseBefore = DurableTransactionMetrics.OnePhaseGatedCommitStaleBaseRejectionsCount;
 
@@ -876,6 +893,8 @@ public sealed class TestOnePhaseApplyTimeGateCluster : BaseCluster
                 Assert.Equal(KeyValueResponseType.Aborted, terminal);
 
                 await AssertRecordOnEveryReplica(cluster, victim, TransactionDecision.Abort, rejectedBundles: 1);
+
+                // The competitor's write survives; the victim's never surfaces.
                 Assert.Equal("101", await ReadValue(cluster.Managers[0], key, ct));
             });
         }
@@ -1102,12 +1121,13 @@ public sealed class TestOnePhaseApplyTimeGateCluster : BaseCluster
     }
 
     /// <summary>
-    /// The shipped bundled-prepare gate, unchanged under the option: a second read-modify-write let in by the
-    /// first one's lapsed lease, whose bundle applies behind the first's healed bundle, has its prepare rejected
-    /// against the first's live intent and its commit withheld with it; it is never told Committed.
+    /// A second read-modify-write behind a stalled bundle: the first transaction's staged intent is claimed for
+    /// its commit and outlives its lease, so the second writer reads the base but cannot stage over the key
+    /// while the first bundle is in flight. Once the heal commits the first, the second is released, and its
+    /// commit finds its read moved; it is never told Committed.
     /// </summary>
     [Fact]
-    public async Task SecondWriter_BehindAStalledBundle_IsNeverToldCommitted()
+    public async Task SecondWriter_BehindAStalledBundle_IsExcludedWhileItIsInFlight_AndNeverToldCommitted()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         Cluster cluster = await Assemble(applyTimeValidation: true);
@@ -1128,16 +1148,28 @@ public sealed class TestOnePhaseApplyTimeGateCluster : BaseCluster
                 BatchTap holder = await StallCommit(cluster, coordinator, first, ct);
 
                 (TransactionHandle second, _) = await StartAndRead(coordinator, coordinatorKey, key, ct);
-                await Write(coordinator, second, key, "second", ct);
 
-                // The heal delivers the first bundle immediately ahead of the second's own.
+                (KeyValueResponseType excluded, _, _) = await coordinator.LocateAndTrySetKeyValue(
+                    second.TransactionId, key, "second"u8.ToArray(), null, -1, KeyValueFlags.None, 0,
+                    KeyValueDurability.Persistent, ct,
+                    coordinatorKey: second.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
+                Assert.Equal(KeyValueResponseType.MustRetry, excluded);
+
+                // The heal delivers the first bundle immediately ahead of the first's own retried proposal.
                 holder.InjectStalledBeforeNext = true;
-                (KeyValueResponseType commitSecond, _) = await coordinator.LocateAndCommitTransaction(second, ct);
-                Assert.NotEqual(KeyValueResponseType.Committed, commitSecond);
-
-                await AssertRecordOnEveryReplica(cluster, first, TransactionDecision.Commit, rejectedBundles: 0);
-                Assert.Equal(KeyValueResponseType.Aborted, await CommitToTerminal(coordinator, second, ct));
                 Assert.Equal(KeyValueResponseType.Committed, await CommitToTerminal(coordinator, first, ct));
+                await AssertRecordOnEveryReplica(cluster, first, TransactionDecision.Commit, rejectedBundles: 0);
+
+                // Released, the second writer stages over the new head at most; its read moved, so it never commits.
+                (KeyValueResponseType late, _, _) = await RetryOnMustRetryAsync(
+                    () => coordinator.LocateAndTrySetKeyValue(
+                        second.TransactionId, key, "second"u8.ToArray(), null, -1, KeyValueFlags.None, 0,
+                        KeyValueDurability.Persistent, ct,
+                        coordinatorKey: second.CoordinatorKey, operationId: TransactionOperationId.NewRandom()),
+                    r => r.Item1);
+                KeyValueResponseType terminalSecond = late == KeyValueResponseType.Set ? await CommitToTerminal(coordinator, second, ct) : late;
+                Assert.NotEqual(KeyValueResponseType.Committed, terminalSecond);
+
                 Assert.Equal("first", await ReadValue(cluster.Managers[0], key, ct));
             });
         }

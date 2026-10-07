@@ -120,11 +120,14 @@ public interface IInterNodeCommunication
     /// <summary>Forwards a one-phase commit bundle ([record init, prepare, commit decision] of one transaction)
     /// to the anchor partition's leader, which submits it as ONE atomic scheduler submission and answers with the
     /// bundle signals plus the canonical outcome read after the ordered apply. Answers null when the receiver
-    /// does not implement the operation (an older node), so the caller can fall back to the two-phase flow.</summary>
+    /// does not implement the operation (an older node), so the caller can fall back to the two-phase flow.
+    /// <paramref name="expectedTerm"/> is the Raft term the anchor partition must still be led under when the
+    /// bundle is appended (the term the commit probe confirmed the transaction's staged intents under); the
+    /// receiver refuses the bundle before anything is appended when its term differs. 0 disables the fence.</summary>
     public Task<DurableOnePhaseWireReply?> DurableOnePhase(
         string node, int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
         HLCTimestamp transactionId, long epoch, HLCTimestamp opId,
-        string? fenceKey, long fenceGeneration, CancellationToken cancellationToken);
+        string? fenceKey, long fenceGeneration, long expectedTerm, CancellationToken cancellationToken);
 
     /// <summary>Routes a linearizable canonical transaction-record lookup to the partition leader that owns the
     /// record's anchor key, returning the serialized record (null when absent). Used by the consult sites so a

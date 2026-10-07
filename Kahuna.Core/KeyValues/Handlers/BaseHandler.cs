@@ -593,13 +593,13 @@ internal abstract class BaseHandler
 
     /// <summary>
     /// Whether <paramref name="intent"/> is a yielding intent that a foreground writer may take over: its owner
-    /// yields, it has not been pinned by its owner's finalize, it has not been prepared in memory
-    /// (<see cref="KeyValueWriteIntent.CommitTimestamp"/> is Zero), and no durable prepared intent backs it on
-    /// this key. A prepared or durable intent is never stolen.
+    /// yields, it has not been pinned or claimed for its commit by its owner's finalize, it has not been prepared
+    /// in memory (<see cref="KeyValueWriteIntent.CommitTimestamp"/> is Zero), and no durable prepared intent
+    /// backs it on this key. A prepared or durable intent is never stolen.
     /// </summary>
     protected bool IsStealableYieldingIntent(string key, KeyValueWriteIntent intent)
     {
-        if (!intent.Yielding || intent.Pinned || intent.CommitTimestamp != HLCTimestamp.Zero)
+        if (!intent.Yielding || intent.Pinned || intent.HeldForCommit || intent.CommitTimestamp != HLCTimestamp.Zero)
             return false;
 
         Transactions.Data.PreparedIntent? durable = context.PreparedIntentStore?.Get(key);

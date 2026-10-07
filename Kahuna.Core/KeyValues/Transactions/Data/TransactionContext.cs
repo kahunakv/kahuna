@@ -366,6 +366,7 @@ internal class TransactionContext
     private string? stagedChainBreak;
     private Dictionary<int, LockGrantTerm>? lockGrantTerms;
     private string? lockGrantTermChange;
+    private Dictionary<int, long>? stagedIntentTerms;
     private int pendingOperationCount;
     private int retainedOperationCount;
 
@@ -462,6 +463,39 @@ internal class TransactionContext
             foreach (LockGrantTerm grant in grants)
                 FoldLockGrantTermLocked(grant);
         }
+    }
+
+    /// <summary>
+    /// Records the leadership terms under which the commit probe confirmed this transaction's staged write
+    /// intents held, one per partition. A later probe (a retried commit) overwrites: a staged intent that
+    /// survived a leader change cannot exist (the new leader has no staged state and answers that the intent is
+    /// lost), so the latest term is the one the next proposal must be fenced to. Kept apart from the lock
+    /// grants, whose first-term-wins rule and change detection belong to locks that are renewed and upgraded
+    /// across leaderships.
+    /// </summary>
+    internal void RecordStagedIntentTerms(IReadOnlyList<LockGrantTerm>? grants)
+    {
+        if (grants is null || grants.Count == 0)
+            return;
+
+        lock (registryLock)
+        {
+            stagedIntentTerms ??= [];
+
+            foreach (LockGrantTerm grant in grants)
+            {
+                if (grant.Term > 0)
+                    stagedIntentTerms[grant.PartitionId] = grant.Term;
+            }
+        }
+    }
+
+    /// <summary>The term the commit probe last confirmed this transaction's staged intents on
+    /// <paramref name="partitionId"/> under, or 0 when no probe reported one for it.</summary>
+    internal long StagedIntentTermOf(int partitionId)
+    {
+        lock (registryLock)
+            return stagedIntentTerms is not null && stagedIntentTerms.TryGetValue(partitionId, out long term) ? term : 0;
     }
 
     /// <summary>

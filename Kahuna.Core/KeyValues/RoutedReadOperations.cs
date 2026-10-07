@@ -243,6 +243,19 @@ internal sealed class RoutedReadOperations
     }
 
     /// <summary>
+    /// Serves a probe already grouped to this node, confirming the leadership of every partition its keys route
+    /// to first; see <see cref="KeyValueLocator.TryCheckManyWriteIntentsConfirmedLocally"/>.
+    /// </summary>
+    public Task<List<(KeyValueResponseType type, string key, KeyValueDurability durability)>> TryCheckManyWriteIntentValuesConfirmed(
+        HLCTimestamp transactionId,
+        List<KeyValueConflictProbe> keys,
+        CancellationToken cancellationToken
+    )
+    {
+        return locator.TryCheckManyWriteIntentsConfirmedLocally(transactionId, keys, cancellationToken);
+    }
+
+    /// <summary>
     /// Staged-base variant of <see cref="LocateAndTryCheckManyWriteIntents"/> — see
     /// <see cref="KeyValueLocator.LocateAndTryCheckManyWriteIntentsUnconfirmed"/> for the leadership
     /// contract that makes the unconfirmed local probe safe for the commit-time write-side

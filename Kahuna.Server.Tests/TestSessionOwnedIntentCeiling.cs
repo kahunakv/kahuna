@@ -97,6 +97,28 @@ public sealed class TestSessionOwnedIntentCeiling : RaftTrackingTest
     }
 
     /// <summary>
+    /// An intent the commit probe claimed for its commit ignores the lease it was planted with. A one-phase
+    /// bundle can apply long after the probe, and until it does this intent is what makes a snapshot read wait
+    /// for the staged write; a lease that ran out in between would let the read answer without it. The intent is
+    /// bound to the session instead, and dies at the ceiling exactly as a session-owned one does.
+    /// </summary>
+    [Fact]
+    public void IntentHeldForCommit_OutlivesItsLeaseDeadline_UntilTheCeiling()
+    {
+        KeyValueWriteIntent intent = new()
+        {
+            TransactionId = At(0),
+            AcquiredAt = At(0),
+            Expires = At(500),
+            HeldForCommit = true
+        };
+
+        Assert.True(KeyValueWriteIntentLease.IsLive(intent, At(501), CeilingMs));
+        Assert.True(KeyValueWriteIntentLease.IsLive(intent, At(CeilingMs - 1), CeilingMs));
+        Assert.False(KeyValueWriteIntentLease.IsLive(intent, At(CeilingMs), CeilingMs));
+    }
+
+    /// <summary>
     /// The age is measured from the plant stamp, not from the transaction id. A long-running session that
     /// takes a lock late in its life gets the full ceiling from the moment it took it, rather than a
     /// window already partly spent.

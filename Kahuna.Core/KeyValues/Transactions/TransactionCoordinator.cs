@@ -1902,7 +1902,7 @@ internal sealed class TransactionCoordinator : IDisposable
                 readSetExclusion: eligibility.ReadSetExclusion,
                 applyTimeValidation: eligibility.ApplyTimeValidation,
                 bundledReadDependencies: eligibility.OnPartitionReadDependencies,
-                bundledLockGrantTerm: eligibility.AnchorLockGrantTerm).ConfigureAwait(false);
+                bundledExclusionTerm: () => AnchorExclusionTerm(context, input.AnchorPartitionId)).ConfigureAwait(false);
         }
         catch (Exception)
         {
@@ -2124,14 +2124,38 @@ internal sealed class TransactionCoordinator : IDisposable
     /// <param name="OnPartitionReadDependencies">The read-only point dependencies routed to the anchor
     /// partition, carried into the bundled commit for that apply-time check; null when none, when the check
     /// is off, or when the read set is excluded (the 2PC flow validates the whole read set from the context).</param>
-    /// <param name="AnchorLockGrantTerm">The leadership term the transaction's locks on the anchor partition
-    /// were granted under, carried into the bundled commit so its apply can refuse a bundle proposed by a
-    /// leader of another term; 0 when the transaction holds no lock there or the check is off.</param>
     private readonly record struct OnePhaseEligibility(
         OnePhaseGateOutcome? ReadSetExclusion,
         bool ApplyTimeValidation,
-        IReadOnlyList<BundledReadDependency>? OnPartitionReadDependencies,
-        long AnchorLockGrantTerm = 0);
+        IReadOnlyList<BundledReadDependency>? OnPartitionReadDependencies);
+
+    /// <summary>
+    /// The leadership term the transaction's in-memory exclusions on the anchor partition were confirmed under:
+    /// the term the commit probe confirmed its staged write intents held there, else the term its locks there
+    /// were granted under; 0 when neither reported one. The one-phase bundle is fenced to this term — refused
+    /// before anything is appended when the anchor partition is led under another one, and, with apply-time
+    /// validation, refused again at apply — because the staged intents and locks live in that leader's memory
+    /// only, and until the bundle applies they are what keeps a snapshot read waiting for the staged write.
+    /// Evaluated after the commit probe ran: the probe is what reports the staged intents' term, so the
+    /// finalizer reads it once the validation passed, not when the eligibility is computed.
+    /// </summary>
+    private static long AnchorExclusionTerm(TransactionContext context, int anchorPartitionId)
+    {
+        long stagedIntentTerm = context.StagedIntentTermOf(anchorPartitionId);
+        if (stagedIntentTerm != 0)
+            return stagedIntentTerm;
+
+        if (context.SnapshotLockGrantTerms() is { } lockGrants)
+        {
+            foreach (LockGrantTerm grant in lockGrants)
+            {
+                if (grant.PartitionId == anchorPartitionId)
+                    return grant.Term;
+            }
+        }
+
+        return 0;
+    }
 
     /// <summary>
     /// Decides which of the transaction's validated dependencies keep the one-phase bundle closed and which
@@ -2178,9 +2202,11 @@ internal sealed class TransactionCoordinator : IDisposable
         // A lock is held in the granting leader's memory only. The bundle is validated before it is proposed,
         // so a leader change between that validation and the propose would let a new leader, which never saw
         // the locks, accept the bundle. With apply-time validation the bundled commit carries the term the
-        // anchor partition's locks were granted under and every replica refuses it unless a leader of that
-        // very term proposed it. Without it nothing at apply can tell, so a multi-process group sends the
-        // transaction through the two-phase flow, whose validation runs after its prepares are durable.
+        // anchor partition's exclusions were confirmed under (see AnchorExclusionTerm) and every replica refuses
+        // it unless a leader of that very term proposed it. Without it nothing at apply can tell, so a
+        // multi-process group sends a lock-holding transaction through the two-phase flow, whose validation runs
+        // after its prepares are durable. The staged write intents every durable transaction holds are covered
+        // in both modes by the anchor leader's pre-append fence on that same term.
         List<LockGrantTerm>? lockGrants = context.SnapshotLockGrantTerms();
 
         if (!configuration.OnePhaseApplyTimeValidation)
@@ -2200,18 +2226,8 @@ internal sealed class TransactionCoordinator : IDisposable
             return new OnePhaseEligibility(exclusion, ApplyTimeValidation: false, OnPartitionReadDependencies: null);
         }
 
-        long anchorLockGrantTerm = 0;
-        if (lockGrants is not null)
-        {
-            foreach (LockGrantTerm grant in lockGrants)
-            {
-                if (grant.PartitionId == input.AnchorPartitionId)
-                    anchorLockGrantTerm = grant.Term;
-            }
-        }
-
         if (!RequiresReadSetValidation(context))
-            return new OnePhaseEligibility(ReadSetExclusion: null, ApplyTimeValidation: true, OnPartitionReadDependencies: null, anchorLockGrantTerm);
+            return new OnePhaseEligibility(ReadSetExclusion: null, ApplyTimeValidation: true, OnPartitionReadDependencies: null);
 
         if (closesBundle && (context.PrefixLocksAcquired is { Count: > 0 } || context.RangeLocksAcquired is { Count: > 0 }))
             return new OnePhaseEligibility(OnePhaseGateOutcome.PredicateRead, ApplyTimeValidation: true, OnPartitionReadDependencies: null);
@@ -2248,7 +2264,7 @@ internal sealed class TransactionCoordinator : IDisposable
             }
         }
 
-        return new OnePhaseEligibility(ReadSetExclusion: null, ApplyTimeValidation: true, OnPartitionReadDependencies: onPartitionReads, anchorLockGrantTerm);
+        return new OnePhaseEligibility(ReadSetExclusion: null, ApplyTimeValidation: true, OnPartitionReadDependencies: onPartitionReads);
     }
 
     /// <summary>
@@ -2817,8 +2833,10 @@ internal sealed class TransactionCoordinator : IDisposable
         // the only thing that makes a snapshot read wait for that write. An intent that lapsed, was taken, or was
         // dropped by a leader change may have let a read answer the old value at a snapshot this commit would land
         // inside, so the commit is refused. On the two-phase flows this probe runs after the prepares are durable,
-        // and from there on the prepared intents make reads wait; the one-phase bundle validates before it
-        // proposes, and the probe renews the intent's lease to cover that gap.
+        // and from there on the prepared intents make reads wait. The one-phase bundle validates before it
+        // proposes and cannot be refused once appended, so the probe closes the gap to its apply in two ways: a
+        // held intent is claimed for the commit and no longer lapses by its lease, and the leader that confirmed
+        // it reports the term it leads under, to which the bundle is fenced at the anchor leader.
         //
         // Write keys deliberately do not ask about foreign write intents: a foreign
         // in-memory intent on a key this transaction writes is the durable prepare's conflict to resolve —
@@ -2843,9 +2861,16 @@ internal sealed class TransactionCoordinator : IDisposable
             return true;
 
         // One probe per node owning part of the set, rather than one per key: a working set spread over remote
-        // partitions otherwise costs a network round trip per key.
-        List<(KeyValueResponseType type, string key, KeyValueDurability durability)> results =
-            await manager.LocateAndTryCheckManyWriteIntents(context.TransactionId, probeKeys, cancellationToken);
+        // partitions otherwise costs a network round trip per key. The capture collects, per partition, the
+        // leadership term under which a leader confirmed this transaction's staged intents held; the one-phase
+        // bundle is fenced to it (see AnchorExclusionTerm).
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability)> results;
+
+        using (LockGrantScope.Begin(out LockGrantCapture stagedIntentTerms))
+        {
+            results = await manager.LocateAndTryCheckManyWriteIntents(context.TransactionId, probeKeys, cancellationToken);
+            context.RecordStagedIntentTerms(stagedIntentTerms.Take());
+        }
 
         Dictionary<(string, KeyValueDurability), KeyValueResponseType> byKey = new(results.Count);
 

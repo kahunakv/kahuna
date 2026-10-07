@@ -273,9 +273,9 @@ public sealed class TestLostExclusionOutcome : BaseCluster
     }
 
     /// <summary>
-    /// The one-phase bundle validates before it proposes; the leader changes in between, and every replica refuses
-    /// the bundle at apply from the term of the log entry. That refusal reaches the script as the same
-    /// <c>MustRetry</c>, and the re-run commits.
+    /// The one-phase bundle validates before it proposes; the leader changes in between, and the new leader
+    /// refuses the bundle before anything is appended, because it is fenced to the term the validation ran
+    /// under. That refusal reaches the script as the same <c>MustRetry</c>, and the re-run commits.
     /// </summary>
     [Fact]
     public async Task ScriptWhoseBundleWasProposedAfterTheLeaderChanged_AnswersMustRetry_AndARerunCommits()
@@ -323,7 +323,7 @@ public sealed class TestLostExclusionOutcome : BaseCluster
                 };
             }
 
-            long lostLockAborts = DurableTransactionMetrics.LostLockAbortsCount;
+            long fenceRefusals = DurableTransactionMetrics.OnePhaseBundleTermFenceRefusalsCount;
 
             KeyValueTransactionResult refused;
             try
@@ -338,8 +338,8 @@ public sealed class TestLostExclusionOutcome : BaseCluster
 
             Assert.Equal(1, hookRuns);
             Assert.Equal(KeyValueResponseType.MustRetry, refused.Type);
-            Assert.True(DurableTransactionMetrics.LostLockAbortsCount > lostLockAborts,
-                "the bundle must be refused because a leader of another term proposed it, and counted as such");
+            Assert.True(DurableTransactionMetrics.OnePhaseBundleTermFenceRefusalsCount > fenceRefusals,
+                "the bundle must be refused before the append because the partition is led in another term than the one its validation ran under, and counted as such");
 
             await AssertReadsEverywhere(managers, dataKey, null, 0, ct);
 

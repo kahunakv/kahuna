@@ -118,15 +118,15 @@ public sealed class TestOnePhaseBundledCommitGate
     }
 
     /// <summary>
-    /// The incompatible-order shape, prevented end to end: the second read-modify-write transaction — let in by
-    /// the first one's expired in-memory intent lease while the first's decision proposal is still in flight —
-    /// must never be told Committed once the healed log applies the stalled bundle ahead of its own: its bundled
-    /// prepare is rejected there, so its bundled decision must be rejected with it. The commit answers MustRetry,
-    /// the retry's 2PC fallback aborts truthfully on the conflict, and the surviving value is the first
-    /// transaction's — one winner, no fork.
+    /// The incompatible-order shape, prevented end to end: a second read-modify-write transaction arrives while
+    /// the first one's decision proposal is still in flight and its in-memory intent lease has run out. The
+    /// commit probe claimed that intent for the commit, so it did not lapse: the second writer reads the base
+    /// but cannot stage over the key. Once the healed log applies the stalled bundle ahead of the first's retried
+    /// proposal, the first commits and the second is released; its read moved, so it is never told Committed,
+    /// and the surviving value is the first transaction's — one winner, no fork.
     /// </summary>
     [Fact]
-    public async Task SecondWriter_BehindAStalledBundle_IsNeverToldCommittedForADiscardedWrite()
+    public async Task SecondWriter_BehindAStalledBundle_IsExcludedWhileItIsInFlight_AndNeverToldCommitted()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         const string key = "gate/lostupdate/k1";
@@ -143,6 +143,8 @@ public sealed class TestOnePhaseBundledCommitGate
             InitialPartitions = 4,
             // Synchronous settlement keeps resolution inline, so post-outcome store state is deterministic.
             DurableDeferredSettlement = false,
+            // A short lease, so the test can outlive it with a small delay instead of the 15 s production default.
+            StagedWriteIntentLeaseMs = 200,
             WriteBatchExecutorDecorator = inner => stalling = new StallingExecutor(inner)
         }, loggerFactory);
         await node.StartAsync(ct);
@@ -183,10 +185,10 @@ public sealed class TestOnePhaseBundledCommitGate
         Assert.True(executor.StalledBatches > 0, "the durable decision proposal must have been stalled");
         executor.Armed = false;
 
-        // The in-memory write intent that excludes conflicting writers is a 15-second lease. The stalled
-        // proposal outlives it — the coordinator holds the working set, but holding it does not extend the
-        // lease, exactly as a killed coordinator could not. Once it lapses the second writer walks in.
-        await Task.Delay(TimeSpan.FromSeconds(15.5), ct);
+        // The in-memory write intent that excludes conflicting writers is a lease, and the stalled proposal
+        // outlives it. The commit probe that preceded the proposal claimed the intent for the commit, so the
+        // lease no longer applies: the intent excludes writers until the first transaction decides.
+        await Task.Delay(500, ct);
 
         // ── Second transaction: the same read-modify-write against the still-unchanged base ──
         (KeyValueResponseType startedB, TransactionHandle second) = await kahuna.LocateAndStartTransaction(
@@ -206,28 +208,47 @@ public sealed class TestOnePhaseBundledCommitGate
         Assert.True(baseEntry!.Value.AsSpan().SequenceEqual("base"u8),
             "the second writer must observe the pre-stall base, not the stalled transaction's write");
 
+        // The first writer's held intent excludes the second's write for as long as the first's decision is in flight.
         (KeyValueResponseType setB, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
             second.TransactionId, key, "second-writer"u8.ToArray(), null, -1, KeyValueFlags.Set, 0,
             KeyValueDurability.Persistent, ct, 0, second.CoordinatorKey, TransactionOperationId.NewRandom());
-        Assert.Equal(KeyValueResponseType.Set, setB);
+        Assert.Equal(KeyValueResponseType.MustRetry, setB);
 
-        // The heal: the stalled bundle is delivered immediately ahead of the second transaction's own bundle in
-        // log order. The first transaction durably commits; the second's prepare is rejected against its live
-        // intent — and its bundled decision must be rejected with it.
+        // The heal: the stalled bundle is delivered immediately ahead of the first transaction's retried proposal
+        // in log order, and the first transaction durably commits.
         executor.InjectStalledBeforeNext = true;
 
-        (KeyValueResponseType commitB, _) = await kahuna.LocateAndCommitTransaction(second, ct);
-        Assert.NotEqual(KeyValueResponseType.Committed, commitB);
-
-        // Drive the retryable outcome to its truthful terminal: the 2PC fallback meets the winner's settled
-        // state and aborts on the read-set conflict. It must never surface Committed — the write was discarded.
-        KeyValueResponseType terminalB = commitB;
-        for (int attempt = 0; attempt < 50 && terminalB == KeyValueResponseType.MustRetry; attempt++)
+        (KeyValueResponseType terminalA, _) = await kahuna.LocateAndCommitTransaction(first, ct);
+        for (int attempt = 0; attempt < 50 && terminalA == KeyValueResponseType.MustRetry; attempt++)
         {
             await Task.Delay(200, ct);
-            (terminalB, _) = await kahuna.LocateAndCommitTransaction(second, ct);
+            (terminalA, _) = await kahuna.LocateAndCommitTransaction(first, ct);
         }
-        Assert.Equal(KeyValueResponseType.Aborted, terminalB);
+        Assert.Equal(KeyValueResponseType.Committed, terminalA);
+
+        // Released, the second writer stages over the new head at most. Its read moved, so its commit must never
+        // surface Committed — the write would discard the first transaction's.
+        KeyValueResponseType lateB = KeyValueResponseType.MustRetry;
+        for (int attempt = 0; attempt < 50 && lateB == KeyValueResponseType.MustRetry; attempt++)
+        {
+            (lateB, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+                second.TransactionId, key, "second-writer"u8.ToArray(), null, -1, KeyValueFlags.Set, 0,
+                KeyValueDurability.Persistent, ct, 0, second.CoordinatorKey, TransactionOperationId.NewRandom());
+            if (lateB == KeyValueResponseType.MustRetry)
+                await Task.Delay(100, ct);
+        }
+
+        KeyValueResponseType terminalB = lateB;
+        if (lateB == KeyValueResponseType.Set)
+        {
+            (terminalB, _) = await kahuna.LocateAndCommitTransaction(second, ct);
+            for (int attempt = 0; attempt < 50 && terminalB == KeyValueResponseType.MustRetry; attempt++)
+            {
+                await Task.Delay(200, ct);
+                (terminalB, _) = await kahuna.LocateAndCommitTransaction(second, ct);
+            }
+        }
+        Assert.NotEqual(KeyValueResponseType.Committed, terminalB);
 
         // The canonical records agree: the stalled transaction won; the second was never durably committed.
         TransactionRecord? firstRecord = kahuna.DurableTransactionRecordStore.Get(first.TransactionId, 1);

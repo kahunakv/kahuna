@@ -151,11 +151,14 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     /// leader after the ordered apply; the origin must never infer a commit from the batch signals alone,
     /// because the commit transition is judged at apply, in log order. Returns <see langword="null"/> only when
     /// the remote leader does not implement the typed operation (an older node), in which case the caller falls
-    /// back to standard 2PC. Null delegate disables the fast path entirely.</summary>
+    /// back to standard 2PC. Null delegate disables the fast path entirely. <paramref name="expectedTerm"/> is the
+    /// Raft term the anchor partition must still be led under when the bundle is appended — the term the commit
+    /// probe confirmed the transaction's staged intents (and locks) under; the anchor leader refuses the bundle
+    /// before anything is appended when its term differs, and 0 disables that fence.</summary>
     public delegate Task<Writes.DurableOnePhaseReply?> ReplicateOnePhaseBundleDelegate(
         int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
         HLCTimestamp transactionId, long epoch, HLCTimestamp opId,
-        string fenceKey, long fenceGeneration, CancellationToken cancellationToken);
+        string fenceKey, long fenceGeneration, long expectedTerm, CancellationToken cancellationToken);
 
     /// <summary>Checks every frozen intent's validated base (<see cref="PreparedIntent.BaseRevision"/> /
     /// <see cref="PreparedIntent.BaseState"/>) against the key's current committed state — the write-side
@@ -370,9 +373,12 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     /// check (<see cref="Configuration.KahunaConfiguration.OnePhaseApplyTimeValidation"/>).</param>
     /// <param name="bundledReadDependencies">The read-only point dependencies routed to the anchor partition, with
     /// the committed state the transaction observed, carried into the bundled commit for its apply-time check.</param>
-    /// <param name="bundledLockGrantTerm">The Raft term the transaction's locks on the anchor partition were
-    /// granted under, carried into the bundled commit so its apply refuses a bundle proposed in another term;
-    /// 0 when the transaction holds no lock there. Carried only with <paramref name="applyTimeValidation"/>.</param>
+    /// <param name="bundledExclusionTerm">Reports the Raft term the transaction's in-memory exclusions on the
+    /// anchor partition — the staged intents its commit probe confirmed held, else the locks it was granted
+    /// there — were confirmed under; 0 when none reported one. Read after <paramref name="validateReadSet"/>
+    /// ran, because that validation's probe is what reports the staged intents' term. The one-phase bundle is
+    /// fenced to it at the anchor leader (refused before anything is appended under another term) and, with
+    /// <paramref name="applyTimeValidation"/>, carries it into the bundled commit so the apply refuses it too.</param>
     public async Task<DurableFinalizeOutcome> FinalizeAsync(
         DurableFinalizeInput input,
         Func<CancellationToken, Task<TransactionAbortClass>> validateReadSet,
@@ -381,7 +387,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         OnePhaseGateOutcome? readSetExclusion = null,
         bool applyTimeValidation = false,
         IReadOnlyList<BundledReadDependency>? bundledReadDependencies = null,
-        long bundledLockGrantTerm = 0)
+        Func<long>? bundledExclusionTerm = null)
     {
         long startTicks = Stopwatch.GetTimestamp();
 
@@ -511,7 +517,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         if (gate == OnePhaseGateOutcome.Entered)
         {
             (DurableFinalizeOutcome? onePhase, OnePhaseFallbackReason fallback) = await TryOnePhaseFinalizeAsync(
-                input, initDelta, prepareDeltas[0], validateReadSet, opId, applyTimeValidation, bundledReadDependencies, bundledLockGrantTerm, cancellationToken).ConfigureAwait(false);
+                input, initDelta, prepareDeltas[0], validateReadSet, opId, applyTimeValidation, bundledReadDependencies, bundledExclusionTerm, cancellationToken).ConfigureAwait(false);
 
             if (onePhase is { } fastOutcome)
             {
@@ -889,7 +895,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         HLCTimestamp opId,
         bool applyTimeValidation,
         IReadOnlyList<BundledReadDependency>? bundledReadDependencies,
-        long bundledLockGrantTerm,
+        Func<long>? bundledExclusionTerm,
         CancellationToken cancellationToken)
     {
         // Every admitted attempt records its pre-submission wall time exactly once: at a pre-propose exit
@@ -987,17 +993,25 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         for (int i = 0; i < partition.Intents.Count; i++)
             bundledPrepareKeys[i] = partition.Intents[i].Key;
 
+        // The leadership the validation above confirmed the transaction's staged intents (and locks) under.
+        // Those intents are in-memory state of that leader alone, and until the bundle applies they are what
+        // keeps a snapshot read waiting for the staged write; the bundle is therefore fenced to that term at the
+        // anchor leader, so a leader change between the validation and the append refuses it before anything is
+        // durable instead of committing behind reads another leader already served. Read here, after the
+        // validation, because the validation's probe is what reports the term.
+        long exclusionTerm = bundledExclusionTerm?.Invoke() ?? 0;
+
         byte[] decisionDelta = TransactionRecordStore.SerializeDelta([
             new CommitTransactionCommand(
                 input.TransactionId, input.Epoch, input.ManifestHash, opId, attemptHlc, bundledPrepareKeys,
                 ApplyTimeValidation: applyTimeValidation,
                 BundledReadDependencies: applyTimeValidation && bundledReadDependencies is { Count: > 0 } ? bundledReadDependencies : null,
-                LockGrantTerm: applyTimeValidation ? bundledLockGrantTerm : 0)]);
+                LockGrantTerm: applyTimeValidation ? exclusionTerm : 0)]);
 
         Writes.DurableOnePhaseReply? proposed = await replicateOnePhaseBundle!(
             partition.PartitionId, initDelta, anchorPrepareDelta, decisionDelta,
             input.TransactionId, input.Epoch, opId,
-            input.RecordAnchorKey, input.AnchorGeneration, cancellationToken).ConfigureAwait(false);
+            input.RecordAnchorKey, input.AnchorGeneration, exclusionTerm, cancellationToken).ConfigureAwait(false);
 
         // Record the attempt's decomposition from the reply: the bundle's durable round is the leader's own
         // enqueue-to-acknowledgement measurement, and everything else since the attempt began — including both

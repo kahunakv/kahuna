@@ -151,8 +151,12 @@ internal sealed class TryCheckWriteIntentHandler : BaseHandler
     /// <item>the intent lapsed at any point, even if its owner renewed it afterwards
     /// (<see cref="KeyValueWriteIntent.Lapsed"/>), or is not live now.</item>
     /// </list>
-    /// A held intent's lease is renewed, so it cannot lapse between this probe and a prepare that follows it (the
-    /// one-phase bundle validates before it proposes). A session-owned intent (no deadline) is left as is.
+    /// A held intent is claimed for the commit (<see cref="KeyValueWriteIntent.HeldForCommit"/>): its lease
+    /// deadline no longer applies, so it cannot lapse between this probe and the apply that follows it. The
+    /// one-phase bundle validates before it proposes and decides in the same durable batch as its prepare, so a
+    /// lapse during a slow bundle round could not be refused afterwards; a renewed lease would only move the
+    /// window, a hold closes it. The commit or the rollback clears the intent, and the session liveness ceiling
+    /// bounds one whose coordinator died in between.
     /// </summary>
     private bool OwnStagedIntentHeld(KeyValueRequest message, HLCTimestamp currentTime)
     {
@@ -167,12 +171,7 @@ internal sealed class TryCheckWriteIntentHandler : BaseHandler
             || !KeyValueWriteIntentLease.IsLive(context, message.Key, stagedUnder, currentTime))
             return false;
 
-        if (stagedUnder.Expires != HLCTimestamp.Zero)
-        {
-            HLCTimestamp renewed = currentTime + context.Configuration.StagedWriteIntentLeaseMs;
-            if (renewed > stagedUnder.Expires)
-                stagedUnder.Expires = renewed;
-        }
+        stagedUnder.HeldForCommit = true;
 
         return true;
     }

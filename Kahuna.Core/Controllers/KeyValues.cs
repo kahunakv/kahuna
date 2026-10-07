@@ -500,6 +500,15 @@ public sealed partial class KahunaManager
         return keyValues.TryCheckManyWriteIntentValues(transactionId, keys);
     }
 
+    public Task<List<(KeyValueResponseType type, string key, KeyValueDurability durability)>> TryCheckManyWriteIntentValuesConfirmed(
+        HLCTimestamp transactionId,
+        List<KeyValueConflictProbe> keys,
+        CancellationToken cancellationToken
+    )
+    {
+        return keyValues.TryCheckManyWriteIntentValuesConfirmed(transactionId, keys, cancellationToken);
+    }
+
     public Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)> TryAcquireExclusiveLock(
         HLCTimestamp transactionId,
         string key,

@@ -452,12 +452,13 @@ public sealed class TestLeaderChangeLostRangeLock : BaseCluster
 
     /// <summary>
     /// The one-phase bundle validates the transaction before it proposes, and decides in the same batch as its
-    /// prepare. When the partition changes leader between that validation and the propose, the bundle is
-    /// proposed by a leader that never held the transaction's locks. Every replica must refuse it at apply,
-    /// from the term of the log entry alone.
+    /// prepare. When the partition changes leader between that validation and the propose, the bundle reaches a
+    /// leader that never held the transaction's locks or staged intents. The bundle is fenced to the term the
+    /// validation ran under, so that leader refuses it before anything is appended; the apply-time term gate
+    /// stays behind it for a bundle an older node appended without the fence.
     /// </summary>
     [Fact]
-    public async Task OnePhaseBundleProposedAfterTheLeaderChanged_IsRefusedAtApply()
+    public async Task OnePhaseBundleProposedAfterTheLeaderChanged_IsRefusedBeforeItIsAppended()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
@@ -505,7 +506,7 @@ public sealed class TestLeaderChangeLostRangeLock : BaseCluster
                 };
             }
 
-            long lostLockAborts = DurableTransactionMetrics.LostLockAbortsCount;
+            long fenceRefusals = DurableTransactionMetrics.OnePhaseBundleTermFenceRefusalsCount;
 
             KeyValueResponseType commitType;
             try
@@ -520,8 +521,8 @@ public sealed class TestLeaderChangeLostRangeLock : BaseCluster
 
             Assert.Equal(1, hookRuns);
             Assert.NotEqual(KeyValueResponseType.Committed, commitType);
-            Assert.True(DurableTransactionMetrics.LostLockAbortsCount > lostLockAborts,
-                "the bundle must be refused because a leader of another term proposed it, and counted as such");
+            Assert.True(DurableTransactionMetrics.OnePhaseBundleTermFenceRefusalsCount > fenceRefusals,
+                "the bundle must be refused before the append because the partition is led in another term than the one its validation ran under, and counted as such");
 
             await SettleEverywhere(managers, [dataKey], ct);
 

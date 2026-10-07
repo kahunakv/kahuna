@@ -861,6 +861,10 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
 
         GrpcTryCheckManyWriteIntentsResponse remoteResponse = response.TryCheckManyWriteIntents!;
 
+        // The terms the remote leader confirmed the caller's staged intents under, replayed into the caller's
+        // capture exactly as a remote lock grant's are.
+        RecordLockGrantTerms(remoteResponse.GrantTerms);
+
         List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses = new(remoteResponse.Items.Count);
 
         foreach (GrpcTryCheckManyWriteIntentsResponseItem item in remoteResponse.Items)
@@ -2357,7 +2361,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
     public async Task<DurableOnePhaseWireReply?> DurableOnePhase(
         string node, int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
         HLCTimestamp transactionId, long epoch, HLCTimestamp opId,
-        string? fenceKey, long fenceGeneration, CancellationToken cancellationToken)
+        string? fenceKey, long fenceGeneration, long expectedTerm, CancellationToken cancellationToken)
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);
 
@@ -2369,6 +2373,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             DecisionDelta = UnsafeByteOperations.UnsafeWrap(decisionDelta),
             FenceKey = fenceKey ?? string.Empty,
             FenceGeneration = fenceGeneration,
+            ExpectedTerm = expectedTerm,
             TransactionIdNode = transactionId.N,
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,

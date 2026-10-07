@@ -265,7 +265,7 @@ public sealed class TestDurableTransportAttribution : BaseCluster
             (byte[] init, byte[] prepare, byte[] decision) = RawOnePhase(txId, key + "/1p", now, opId, now, deadline, 0);
 
             DurableOnePhaseWireReply? committed = await leader.DurableOnePhaseLocal(
-                partition, init, prepare, decision, txId, 1, opId, null, 0, ct);
+                partition, init, prepare, decision, txId, 1, opId, null, 0, 0, ct);
             Assert.NotNull(committed);
             Assert.True(committed!.Value.BatchCommitted);
             Assert.True(committed.Value.PrepareAcknowledged);
@@ -274,7 +274,7 @@ public sealed class TestDurableTransportAttribution : BaseCluster
 
             // ── Duplicate delivery: idempotent, the same canonical answer ──
             DurableOnePhaseWireReply? duplicate = await leader.DurableOnePhaseLocal(
-                partition, init, prepare, decision, txId, 1, opId, null, 0, ct);
+                partition, init, prepare, decision, txId, 1, opId, null, 0, 0, ct);
             Assert.NotNull(duplicate);
             Assert.True(duplicate!.Value.DecisionKnown);
             Assert.Equal((int)TransactionDecision.Commit, duplicate.Value.Decision);
@@ -290,7 +290,7 @@ public sealed class TestDurableTransportAttribution : BaseCluster
             (byte[] loserInit, byte[] loserPrepare, byte[] loserDecision) = RawOnePhase(loser, heldKey, now, loserOp, now, deadline, 0);
 
             DurableOnePhaseWireReply? refused = await leader.DurableOnePhaseLocal(
-                partition, loserInit, loserPrepare, loserDecision, loser, 1, loserOp, null, 0, ct);
+                partition, loserInit, loserPrepare, loserDecision, loser, 1, loserOp, null, 0, 0, ct);
             Assert.NotNull(refused);
             Assert.True(refused!.Value.BatchCommitted);
             Assert.False(refused.Value.PrepareAcknowledged);
@@ -307,7 +307,7 @@ public sealed class TestDurableTransportAttribution : BaseCluster
             (byte[] lateInit, byte[] latePrepare, byte[] lateDecision) = RawOnePhase(late, key + "/1p-late", now, lateOp, pastDeadline, shortDeadline, 0);
 
             DurableOnePhaseWireReply? withheld = await leader.DurableOnePhaseLocal(
-                partition, lateInit, latePrepare, lateDecision, late, 1, lateOp, null, 0, ct);
+                partition, lateInit, latePrepare, lateDecision, late, 1, lateOp, null, 0, 0, ct);
             Assert.NotNull(withheld);
             Assert.True(withheld!.Value.BatchCommitted);
             Assert.True(withheld.Value.PrepareAcknowledged);
