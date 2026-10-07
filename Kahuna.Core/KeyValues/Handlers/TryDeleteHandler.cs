@@ -63,6 +63,9 @@ internal sealed class TryDeleteHandler : BaseHandler
         if (entry!.State is KeyValueState.Deleted or KeyValueState.Undefined)
             return (new(KeyValueResponseType.DoesNotExist, entry.Revision), null, null, currentTime);
 
+        // The load can raise the head to a committed intent stamped on a faster clock: stamp after it.
+        currentTime = StampAfter(currentTime, entry.LastModified);
+
         // Operation type is always TryDelete here. Use the literal rather than message.Type so the proposal the
         // aggregator carries records a TryDelete, which is what CompleteProposal and the replicated log record
         // expect.
@@ -240,6 +243,9 @@ internal sealed class TryDeleteHandler : BaseHandler
         // absent. An Undefined placeholder holds no value, so it is as absent as a tombstone.
         if (mvccEntry.State is KeyValueState.Deleted or KeyValueState.Undefined)
             return new(KeyValueResponseType.DoesNotExist, mvccEntry.Revision);
+
+        // The staged stamp becomes the commit's lower bound, so it must be later than the revision it replaces.
+        currentTime = StampAfter(currentTime, StagedBaseLastModified(entry, mvccEntry));
 
         // The staged tombstone takes a new revision, exactly as a staged set does. Keeping the live
         // revision number would commit the tombstone over the last live value's persisted revision

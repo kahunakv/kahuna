@@ -56,11 +56,11 @@ internal static class DurableSnapshotSource
         if (context.PreparedIntentStore?.Get(key) is not { } foreign || foreign.TransactionId == readerTransactionId)
             return SnapshotDecision.UseBase;
 
-        // A resident head strictly newer than the intent has moved past it: snapshotting the intent would pin an
-        // older revision than the head and abort the reader on its first read. Strictly newer only, as for snapshot
-        // reads (ResidentHeadSupersedesIntent): an extend reuses the base revision, so at an equal revision the
-        // intent is the authoritative copy, and pinning it pins the head's own revision.
-        if (resident is not null && resident.Revision > foreign.Revision)
+        // A resident head that already replaced the intent has moved past it: snapshotting the intent would pin an
+        // older version than the head (an older revision, or the pre-extend expiry at the same revision) and abort
+        // the reader on its first read, or serve it the expiry the extend replaced.
+        if (resident is not null
+            && PreparedIntentVisibility.IsReplacedByHead(foreign, resident.Revision, resident.LastModified, HLCTimestamp.Zero))
             return SnapshotDecision.UseBase;
 
         switch (DurableReadVisibility.Resolve(context, foreign, HLCTimestamp.Zero, hint))
@@ -105,25 +105,33 @@ internal static class DurableSnapshotSource
            && mvcc.ContainsKey(readerTransactionId);
 
     /// <summary>
-    /// True when a committed head of <paramref name="intent"/>'s key strictly newer than the intent is known, so the
-    /// scan-merge must not serve the intent: the resident entry, or a row the scan evaluated and left out of its page
-    /// (<paramref name="excludedHeads"/>, a newer delete or expired value that is not resident). Strictly newer only:
-    /// an extend reuses the base revision, so at an equal revision the intent is the authoritative copy.
+    /// True when a committed head of <paramref name="intent"/>'s key that already replaced the intent is known, so
+    /// the scan-merge must not serve the intent: the resident entry, or a row the scan evaluated and left out of its
+    /// page (<paramref name="excludedHeads"/>, a newer delete or an expired value that is not resident). See
+    /// <see cref="PreparedIntentVisibility.IsReplacedByHead"/> for the equal-revision (extend) rule.
+    /// <paramref name="readTimestamp"/> is the scan's snapshot, or <see cref="HLCTimestamp.Zero"/> for a latest scan.
     /// </summary>
-    public static bool HeadSupersedesIntent(KeyValueContext context, PreparedIntent intent, Dictionary<string, long>? excludedHeads)
-        => (context.Store.TryGetValue(intent.Key, out KeyValueEntry? entry) && entry.Revision > intent.Revision)
-           || (excludedHeads is not null && excludedHeads.TryGetValue(intent.Key, out long revision) && revision > intent.Revision);
+    public static bool HeadSupersedesIntent(
+        KeyValueContext context, PreparedIntent intent, Dictionary<string, ExcludedHead>? excludedHeads, HLCTimestamp readTimestamp)
+        => (context.Store.TryGetValue(intent.Key, out KeyValueEntry? entry)
+            && PreparedIntentVisibility.IsReplacedByHead(intent, entry.Revision, entry.LastModified, readTimestamp))
+           || (excludedHeads is not null && excludedHeads.TryGetValue(intent.Key, out ExcludedHead head)
+               && PreparedIntentVisibility.IsReplacedByHead(intent, head.Revision, head.LastModified, readTimestamp));
 
     /// <summary>
-    /// Records the head revision of a row a latest-read scan evaluated but left out of its page (a delete or an
-    /// expired value), for <see cref="HeadSupersedesIntent"/>. Only needed while some prepared intent lingers, and
-    /// only for a latest read: a snapshot page's rows are as-of revisions, not heads.
+    /// Records the head of a row a latest-read scan evaluated but left out of its page (a delete or an expired
+    /// value), for <see cref="HeadSupersedesIntent"/>. Only needed while some prepared intent lingers, and only for a
+    /// latest read: a snapshot page's rows are as-of revisions, not heads.
     /// </summary>
-    public static void RecordExcludedHead(KeyValueContext context, ref Dictionary<string, long>? excludedHeads, string key, long revision)
+    public static void RecordExcludedHead(
+        KeyValueContext context, ref Dictionary<string, ExcludedHead>? excludedHeads, string key, long revision, HLCTimestamp lastModified)
     {
         if (context.PreparedIntentStore is not { Count: > 0 })
             return;
 
-        (excludedHeads ??= new(StringComparer.Ordinal))[key] = revision;
+        (excludedHeads ??= new(StringComparer.Ordinal))[key] = new(revision, lastModified);
     }
 }
+
+/// <summary>The revision and stamp of a head a latest-read scan left out of its page.</summary>
+internal readonly record struct ExcludedHead(long Revision, HLCTimestamp LastModified);

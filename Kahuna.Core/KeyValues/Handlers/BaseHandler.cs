@@ -699,6 +699,31 @@ internal abstract class BaseHandler
     }
 
     /// <summary>
+    /// Returns the stamp for a write that replaces a head stamped <paramref name="baseLastModified"/>: the
+    /// handler's <paramref name="currentTime"/> when it is already later, otherwise a clock event received from
+    /// the base stamp, which is strictly later and keeps every later event on this node after it.
+    /// <para>The head's stamp is not always minted on this node's clock. A committed durable intent carries the
+    /// coordinator's commit timestamp, and a head loaded from disk or applied from the log can carry another
+    /// leader's stamp. When that clock runs ahead, a write that keeps its pre-load stamp would give the key a
+    /// newer revision with an older LastModified. Snapshot reads, the revision archive, and same-revision
+    /// ordering of extends and deletes all assume LastModified grows with every write to a key.</para>
+    /// </summary>
+    protected HLCTimestamp StampAfter(HLCTimestamp currentTime, HLCTimestamp baseLastModified)
+    {
+        if (currentTime > baseLastModified)
+            return currentTime;
+
+        return context.Raft.HybridLogicalClock.ReceiveEvent(context.Raft.GetLocalNodeId(), baseLastModified);
+    }
+
+    /// <summary>
+    /// The latest stamp a staged transactional write replaces: the transaction's own staged copy, or the
+    /// committed head when a same-revision write (an extend) moved the head after the copy was taken.
+    /// </summary>
+    protected static HLCTimestamp StagedBaseLastModified(KeyValueEntry entry, KeyValueMvccEntry mvccEntry) =>
+        entry.LastModified > mvccEntry.LastModified ? entry.LastModified : mvccEntry.LastModified;
+
+    /// <summary>
     /// Advances a resident committed head while preserving the superseded revision under the
     /// snapshot-floor retention policy. Both leader settlement and follower cache coherence call
     /// this routine so no replicated head update can bypass archival or accounting. The caller owns
@@ -834,17 +859,17 @@ internal abstract class BaseHandler
     }
 
     /// <summary>
-    /// Whether a read must skip the durable prepared-intent overlay and take the ordinary read path: the resident
-    /// head already carries a revision newer than the intent, so a later committed write superseded it (a
-    /// non-transactional write proceeds over a committed-but-unsettled intent, and the intent lingers until its
-    /// settlement) and the head plus its archive answer for the latest read and for every snapshot. Serving the
-    /// lingering intent instead would answer with an older value than the committed head — a client could write a key
-    /// and read the previous value back — and a later read, after the intent settles and leaves the store, would
-    /// answer differently. Strictly newer only: an extend reuses the base revision number, so an equal revision is
-    /// not proof of materialization.
+    /// Whether a read must skip the durable prepared-intent overlay and take the ordinary read path: a later
+    /// committed write already replaced the intent in the resident head (a non-transactional write proceeds over a
+    /// committed-but-unsettled intent, and the intent lingers until its settlement), and the head plus its archive
+    /// answer for the read. Serving the lingering intent instead would answer with an older version than the committed
+    /// head — a client could write or extend a key and read the previous value or expiry back — and a later read,
+    /// after the intent settles and leaves the store, would answer differently. See
+    /// <see cref="PreparedIntentVisibility.IsReplacedByHead"/> for the equal-revision (extend) rule.
+    /// <paramref name="readTimestamp"/> is the read's snapshot, or <see cref="HLCTimestamp.Zero"/> for a latest read.
     /// </summary>
-    protected static bool ResidentHeadSupersedesIntent(KeyValueEntry? entry, PreparedIntent intent) =>
-        entry is not null && entry.Revision > intent.Revision;
+    protected static bool ResidentHeadSupersedesIntent(KeyValueEntry? entry, PreparedIntent intent, HLCTimestamp readTimestamp) =>
+        entry is not null && PreparedIntentVisibility.IsReplacedByHead(intent, entry.Revision, entry.LastModified, readTimestamp);
 
     /// <summary>
     /// Loads a persistent key's committed head from the backend on the actor and makes it resident, for the read

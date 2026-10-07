@@ -78,7 +78,7 @@ internal sealed class TryExistsHandler : BaseHandler
                 }
             }
 
-            if (!ResidentHeadSupersedesIntent(entry, candidateIntent))
+            if (!ResidentHeadSupersedesIntent(entry, candidateIntent, readTs))
             {
                 foreignIntent = candidateIntent;
                 foreignAction = action;

@@ -155,7 +155,10 @@ internal sealed class TryExtendHandler : BaseHandler
             
             if (entry.Revision > mvccEntry.Revision) // early conflict detection
                 return KeyValueStaticResponses.AbortedResponse;
-            
+
+            // The staged stamp becomes the commit's lower bound, so it must be later than the stamp it replaces.
+            currentTime = StampAfter(currentTime, StagedBaseLastModified(entry, mvccEntry));
+
             mvccEntry.Expires = currentTime + message.ExpiresMs;
             mvccEntry.LastUsed = currentTime;
             mvccEntry.LastModified = currentTime;
@@ -176,6 +179,11 @@ internal sealed class TryExtendHandler : BaseHandler
         
         if (entry.State is KeyValueState.Deleted or KeyValueState.Undefined || (entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero))
             return new(KeyValueResponseType.DoesNotExist, entry.Revision);
+
+        // An extend keeps the revision, so only LastModified orders it after the head it replaces (followers
+        // reject a same-revision notification that is not strictly newer). The load can raise the head to a
+        // committed intent stamped on a faster clock: stamp after it.
+        currentTime = StampAfter(currentTime, entry.LastModified);
 
         KeyValueProposal proposal = new(
             message.Type,

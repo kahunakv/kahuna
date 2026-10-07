@@ -137,7 +137,8 @@ internal sealed class TryGetByRangeHandler : BaseHandler
                     items, ranged, snapshotTs, currentTime, limit, kvHasMore, kvCeilingKey,
                     i => DurableReadVisibility.ScanDecision(context, message.ForeignScanDecisions, i),
                     k => DurableSnapshotSource.ReaderHasOwnVersion(context, k, message.TransactionId),
-                    i => DurableSnapshotSource.HeadSupersedesIntent(context, i, excludedHeads: null));
+                    i => DurableSnapshotSource.HeadSupersedesIntent(
+                        context, i, excludedHeads: null, message.ReadTimestamp.IsNull() ? HLCTimestamp.Zero : message.ReadTimestamp));
                 if (merge.MustRetry)
                     return new(KeyValueResponseType.MustRetry,
                         new KeyValueGetByRangeResult(KeyValueResponseType.MustRetry, [], null, false));

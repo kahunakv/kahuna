@@ -65,6 +65,31 @@ internal static class PreparedIntentVisibility
         return ReadVisibilityAction.Retry;
     }
 
+    /// <summary>
+    /// Whether a committed head of the intent's key (<paramref name="headRevision"/>, stamped
+    /// <paramref name="headLastModified"/>) already replaces the committed intent for a read at
+    /// <paramref name="readTimestamp"/> (<see cref="HLCTimestamp.Zero"/> for a latest read), so the read must answer
+    /// from the head and its archive instead of the lingering intent.
+    /// <para>A head at a newer revision always replaces it. An extend keeps the revision, so at an equal revision
+    /// the head replaces the intent only when it is stamped after the intent's commit timestamp: every write stamps
+    /// after the head it replaces, so that head is a later write over the materialized intent. A head with the
+    /// intent's own stamp (or an older one) is the materialized intent itself or a row behind it, and the intent stays
+    /// authoritative. A snapshot read below the later head keeps the intent too: the intent is the version visible at
+    /// that snapshot.</para>
+    /// </summary>
+    public static bool IsReplacedByHead(PreparedIntent intent, long headRevision, HLCTimestamp headLastModified, HLCTimestamp readTimestamp)
+    {
+        if (headRevision > intent.Revision)
+            return true;
+
+        if (headRevision != intent.Revision
+            || intent.CommitTimestamp == HLCTimestamp.Zero
+            || headLastModified <= intent.CommitTimestamp)
+            return false;
+
+        return readTimestamp == HLCTimestamp.Zero || headLastModified <= readTimestamp;
+    }
+
     /// <summary>The ordinary-read expiry predicate applied to a committed prepared intent's value: expired iff it
     /// carries an expiry that is strictly before "now" (<c>Expires != Zero &amp;&amp; (Expires - currentTime) &lt; 0</c>,
     /// matching every materialized-read exit). A committed-but-expired intent must not be served as live — the read

@@ -60,6 +60,9 @@ internal sealed class TrySetHandler : BaseHandler
         if (terminal is not null)
             return (terminal, null, null, currentTime);
 
+        // The load can raise the head to a committed intent stamped on a faster clock: stamp after it.
+        currentTime = StampAfter(currentTime, entry.LastModified);
+
         HLCTimestamp newExpires = message.ExpiresMs > 0 ? (currentTime + message.ExpiresMs) : HLCTimestamp.Zero;
 
         // Check if the value must not be changed according to flags
@@ -279,8 +282,6 @@ internal sealed class TrySetHandler : BaseHandler
         if (terminal is not null)
             return terminal;
 
-        HLCTimestamp newExpires = message.ExpiresMs > 0 ? (currentTime + message.ExpiresMs) : HLCTimestamp.Zero;
-
         // Temporarily store the value in the MVCC entry
         exists = true;
         entry.MvccEntries ??= new();
@@ -304,6 +305,12 @@ internal sealed class TrySetHandler : BaseHandler
 
         if (entry.Revision > mvccEntry.Revision) // early conflict detection
             return KeyValueStaticResponses.AbortedResponse;
+
+        // The staged stamp becomes the commit's lower bound (the coordinator mints the commit timestamp above
+        // it), so it must be later than the revision the transaction replaces, whatever clock stamped that.
+        currentTime = StampAfter(currentTime, StagedBaseLastModified(entry, mvccEntry));
+
+        HLCTimestamp newExpires = message.ExpiresMs > 0 ? (currentTime + message.ExpiresMs) : HLCTimestamp.Zero;
 
         if (mvccEntry.State is KeyValueState.Deleted or KeyValueState.Undefined)
         {

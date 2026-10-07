@@ -49,9 +49,9 @@ internal sealed class RangeScanContinuation : ReadContinuation
     private readonly HLCTimestamp currentTime;
     private readonly bool isSnapshotRead;
 
-    // Head revisions of rows this scan evaluated and left out of its page, kept across disk pages for the intent
-    // merge. Allocated only while prepared intents linger (see DurableSnapshotSource.RecordExcludedHead).
-    private Dictionary<string, long>? excludedHeads;
+    // Heads of rows this scan evaluated and left out of its page, kept across disk pages for the intent merge.
+    // Allocated only while prepared intents linger (see DurableSnapshotSource.RecordExcludedHead).
+    private Dictionary<string, ExcludedHead>? excludedHeads;
 
     /// <summary>Canonical decisions routed off-mailbox for the still-pending foreign intents this scan's window
     /// meets (keyed by intent identity). Null on the first attempt; populated when the manager re-issues the scan
@@ -314,7 +314,7 @@ internal sealed class RangeScanContinuation : ReadContinuation
                 // on the key; remember it for the intent merge, which otherwise sees no row and would inject the
                 // intent's older value.
                 if (!isSnapshotRead && entry is not null)
-                    DurableSnapshotSource.RecordExcludedHead(context, ref excludedHeads, keyToProcess, entry.Revision);
+                    DurableSnapshotSource.RecordExcludedHead(context, ref excludedHeads, keyToProcess, entry.Revision, entry.LastModified);
                 continue;
             }
 
@@ -417,7 +417,7 @@ internal sealed class RangeScanContinuation : ReadContinuation
                     accumulated, ranged, snapshotTs, currentTime, limit, kvHasMore, kvCeilingKey,
                     i => DurableReadVisibility.ScanDecision(context, routedDecisions, i),
                     k => DurableSnapshotSource.ReaderHasOwnVersion(context, k, transactionId),
-                    i => DurableSnapshotSource.HeadSupersedesIntent(context, i, excludedHeads));
+                    i => DurableSnapshotSource.HeadSupersedesIntent(context, i, excludedHeads, isSnapshotRead ? snapshotTs : HLCTimestamp.Zero));
                 if (merge.MustRetry)
                 {
                     Resolve(new(KeyValueResponseType.MustRetry,

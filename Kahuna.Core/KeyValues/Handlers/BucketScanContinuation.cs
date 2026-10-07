@@ -105,7 +105,7 @@ internal sealed class BucketScanContinuation : ReadContinuation
 
         // Heads of rows left out of the page that are not resident (foreign key-space rows are never cached here),
         // for the intent overlay: such a head can still supersede an older committed intent on the key.
-        Dictionary<string, long>? excludedHeads = null;
+        Dictionary<string, ExcludedHead>? excludedHeads = null;
 
         if (ScanDiskResult is not null)
         {
@@ -145,7 +145,7 @@ internal sealed class BucketScanContinuation : ReadContinuation
                     result = EvaluateForeignRow(key, diskEntry);
 
                     if ((result is null || result.Type == KeyValueResponseType.DoesNotExist) && readTimestamp.IsNull())
-                        DurableSnapshotSource.RecordExcludedHead(context, ref excludedHeads, key, diskEntry.Revision);
+                        DurableSnapshotSource.RecordExcludedHead(context, ref excludedHeads, key, diskEntry.Revision, diskEntry.LastModified);
                 }
 
                 if (result is null || result.Type == KeyValueResponseType.DoesNotExist)
@@ -193,7 +193,7 @@ internal sealed class BucketScanContinuation : ReadContinuation
         HLCTimestamp readTimestamp,
         HLCTimestamp transactionId,
         IReadOnlyDictionary<(HLCTimestamp TransactionId, long Epoch), TransactionDecision>? routedDecisions = null,
-        Dictionary<string, long>? excludedHeads = null)
+        Dictionary<string, ExcludedHead>? excludedHeads = null)
     {
         if (context.PreparedIntentStore is not { } intentStore)
             return (items, false);
@@ -209,7 +209,7 @@ internal sealed class BucketScanContinuation : ReadContinuation
             limit: KeyValueScanLimits.MaxPrefixScanResults, kvHasMore: false, kvCeilingKey: null,
             i => DurableReadVisibility.ScanDecision(context, routedDecisions, i),
             k => DurableSnapshotSource.ReaderHasOwnVersion(context, k, transactionId),
-            i => DurableSnapshotSource.HeadSupersedesIntent(context, i, excludedHeads));
+            i => DurableSnapshotSource.HeadSupersedesIntent(context, i, excludedHeads, readTimestamp.IsNull() ? HLCTimestamp.Zero : readTimestamp));
 
         return (merge.Items, merge.MustRetry);
     }
