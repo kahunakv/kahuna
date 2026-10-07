@@ -412,8 +412,10 @@ retry loop. A rising rejection rate means the deadline is too tight for current 
 
 ### Abort classification
 
-`Aborted` includes conflict aborts, lost staging and canonical terminal aborts such as `PresumedAbort`.
-The reason distinguishes `Transaction conflict`, `Lost staging: …`, and `Transaction aborted: …`.
+`Aborted` includes conflict aborts, lost locks and stagings (class `LostExclusion`), and canonical
+terminal aborts such as `PresumedAbort`. The reason distinguishes `Transaction conflict`, `Lost lock: …`,
+`Lost staging: …`, and `Transaction aborted: …`. A script answers a `LostExclusion` abort as `MustRetry`
+instead, because a re-run of the script is a new transaction.
 Start a new transaction after an abort. `MustRetry` means the finalize has not established a terminal
 outcome; it can already have durable initialization and prepares, so retry finalize with the same
 identity rather than assuming nothing happened.

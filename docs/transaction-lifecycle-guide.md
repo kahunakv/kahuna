@@ -417,6 +417,14 @@ instead: every lock grant reports the Raft term it was issued under, and the com
 `Lost lock: …`) unless every partition the transaction holds a lock on is still led under that term. The
 same guide describes the proof and its counters.
 
+Both refusals are a *lost exclusion*, not a conflict: no other transaction need have touched the keys, and
+nothing the transaction staged was committed. The durable record classes the abort as `LostExclusion`.
+What the caller gets depends on the entry point. An interactive session gets a terminal `Aborted`, because
+its reads were made under the lost lock and the leadership term will not return: start a new transaction.
+A script gets `MustRetry`: it is self-contained, so a new run takes new locks under the new leader and
+reads again, which is exactly what the client layer already does for `MustRetry`. Leader churn alone
+therefore never surfaces to a script's caller as an abort.
+
 **Cross-node.** The decision record lives on the anchor partition, which may be led by another node. When
 the decision is not resolvable locally, the read routes a lookup to the anchor leader
 (`LookupDurableRecordRouted` via `TryRouteForeignDecision`) and re-issues with the terminal decision, rather
@@ -515,8 +523,8 @@ Every path maps onto three outcomes, and the distinction is load-bearing:
 | Outcome | Meaning | Caller action |
 |---|---|---|
 | `Committed` / `Set` / `Get` … | Succeeded | Proceed |
-| **`Aborted`** | A conflict, lost staging, or a terminal durable abort (including `PresumedAbort`) | Start a new transaction; this transaction cannot commit |
-| **`MustRetry`** | This attempt did not establish a terminal outcome | Interactive finalize: retry with the same identity; a failed script statement: re-run the script |
+| **`Aborted`** | A conflict, a lost lock or staging on an interactive session, or a terminal durable abort (including `PresumedAbort`) | Start a new transaction; this transaction cannot commit |
+| **`MustRetry`** | This attempt did not establish a terminal outcome; or a script whose lock or staging was dropped by a leader change (its run was durably aborted, and a re-run is a new transaction) | Interactive finalize: retry with the same identity; a script: re-run the script |
 | `Errored` / `InvalidInput` | Malformed input or an internal error | Fix the request |
 
 Admission and unresolved infrastructure failures are retryable rather than fabricated conflicts.

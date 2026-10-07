@@ -351,8 +351,12 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     /// </summary>
     internal Func<CancellationToken, Task>? TestBeforeDeferredResolutionHook;
 
-    /// <param name="validateReadSet">Runs the optimistic read-set conflict check after every prepare is durable;
-    /// true means no conflict. Only invoked when every prepare committed.</param>
+    /// <param name="validateReadSet">Runs the commit-time checks after every prepare is durable: the lock proof,
+    /// the conflict probe and the optimistic read-set validation. <see cref="TransactionAbortClass.None"/> means
+    /// the transaction may commit; any other class is the abort the check calls for, recorded on the decision —
+    /// <see cref="TransactionAbortClass.Conflict"/> for an observed conflict,
+    /// <see cref="TransactionAbortClass.LostExclusion"/> for a lock or staging dropped by a leader change. Only
+    /// invoked when every prepare committed.</param>
     /// <param name="opId">This attempt's unique operation id, also used as the transition's attempt HLC (for the
     /// deadline check and the recorded winner). Must be less than or equal to the frozen decision deadline for a
     /// commit to be authorized.</param>
@@ -371,7 +375,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     /// 0 when the transaction holds no lock there. Carried only with <paramref name="applyTimeValidation"/>.</param>
     public async Task<DurableFinalizeOutcome> FinalizeAsync(
         DurableFinalizeInput input,
-        Func<CancellationToken, Task<bool>> validateReadSet,
+        Func<CancellationToken, Task<TransactionAbortClass>> validateReadSet,
         HLCTimestamp opId,
         CancellationToken cancellationToken,
         OnePhaseGateOutcome? readSetExclusion = null,
@@ -766,21 +770,24 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         // same truthful conflict a failed validation is — ordered ahead of the decision, where the detached
         // stale-base veto carrying the same verdict used to race the commit and lose.
         long validateStart = Stopwatch.GetTimestamp();
-        bool validated = false;
+        TransactionAbortClass validation = TransactionAbortClass.None;
         if (allPrepared)
         {
-            Task<bool> readSetValidation = validateReadSet(cancellationToken);
+            Task<TransactionAbortClass> readSetValidation = validateReadSet(cancellationToken);
             Task<bool>? replicaFenceConfirmation = confirmReplicaFence?.Invoke(input, cancellationToken);
 
-            validated = await readSetValidation.ConfigureAwait(false);
-            if (replicaFenceConfirmation is not null)
-                validated &= await replicaFenceConfirmation.ConfigureAwait(false);
+            validation = await readSetValidation.ConfigureAwait(false);
+            if (replicaFenceConfirmation is not null && !await replicaFenceConfirmation.ConfigureAwait(false) && validation == TransactionAbortClass.None)
+                validation = TransactionAbortClass.Conflict;
 
             DurableTransactionMetrics.FinalizeValidateMs.Record(Stopwatch.GetElapsedTime(validateStart).TotalMilliseconds);
         }
 
-        // ── Decision barrier: a commit only when every prepare is durable and validation passed; otherwise a
-        // conflict abort (validation failed) or a retryable abort (a prepare did not commit). ──
+        bool validated = validation == TransactionAbortClass.None;
+
+        // ── Decision barrier: a commit only when every prepare is durable and validation passed; otherwise the
+        // abort the validation named (a conflict, or an exclusion lost to a leader change) or a retryable abort
+        // (a prepare did not commit). ──
         // Test-only: runs a competing action after the commit-time probe passed and before the decision.
         if (allPrepared && validated && afterReadSetValidationHook is not null)
             await afterReadSetValidationHook(cancellationToken).ConfigureAwait(false);
@@ -799,8 +806,11 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         else
         {
             // A stale base is a genuine conflict (the write was validated against a base that moved), whatever
-            // round it surfaced in; any other unacknowledged participant is a retryable failure.
-            TransactionAbortClass abortClass = !allPrepared && !staleBase ? TransactionAbortClass.RetryableFailure : TransactionAbortClass.Conflict;
+            // round it surfaced in; any other unacknowledged participant is a retryable failure. With every
+            // prepare durable, the abort is the one the validation named.
+            TransactionAbortClass abortClass = !allPrepared
+                ? staleBase ? TransactionAbortClass.Conflict : TransactionAbortClass.RetryableFailure
+                : validation;
             outcome = await DecideAsync(input, commit: false, abortClass, opId, cancellationToken).ConfigureAwait(false);
         }
         DurableTransactionMetrics.FinalizeDecisionMs.Record(Stopwatch.GetElapsedTime(decisionStart).TotalMilliseconds);
@@ -875,7 +885,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         DurableFinalizeInput input,
         byte[] initDelta,
         byte[] anchorPrepareDelta,
-        Func<CancellationToken, Task<bool>> validateReadSet,
+        Func<CancellationToken, Task<TransactionAbortClass>> validateReadSet,
         HLCTimestamp opId,
         bool applyTimeValidation,
         IReadOnlyList<BundledReadDependency>? bundledReadDependencies,
@@ -920,7 +930,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         // validation falls back to the standard flow, which re-validates and drives the durable conflict
         // abort with its usual semantics.
         long validateStart = Stopwatch.GetTimestamp();
-        bool validated = await validateReadSet(cancellationToken).ConfigureAwait(false);
+        bool validated = await validateReadSet(cancellationToken).ConfigureAwait(false) == TransactionAbortClass.None;
         DurableTransactionMetrics.FinalizeValidateMs.Record(Stopwatch.GetElapsedTime(validateStart).TotalMilliseconds);
         if (!validated)
         {
@@ -1052,9 +1062,10 @@ internal sealed class DurableTransactionFinalizer : IDisposable
                     // The anchor partition changed leader between the validation and the propose, so the locks
                     // the validation relied on were gone when the bundle was proposed. Final like a stale base:
                     // terms only advance, so no retry of this transaction can be proposed in the term of its
-                    // grants again.
+                    // grants again. Recorded as a lost exclusion, not a conflict: no other transaction need have
+                    // touched the keys.
                     DurableTransactionMetrics.LostLockAborted(LostLockDetection.BundleApply);
-                    return (await DecideAsync(input, commit: false, TransactionAbortClass.Conflict, opId, cancellationToken).ConfigureAwait(false), OnePhaseFallbackReason.None);
+                    return (await DecideAsync(input, commit: false, TransactionAbortClass.LostExclusion, opId, cancellationToken).ConfigureAwait(false), OnePhaseFallbackReason.None);
 
                 case BundledCommitVerdict.PrepareMissing:
                 {

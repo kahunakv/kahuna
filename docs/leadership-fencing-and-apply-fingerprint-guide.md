@@ -90,7 +90,9 @@ transaction had never touched the key. The coordinator catches it instead. Every
 revision into the coordinator, and a restaging of the same key must continue that chain (one above
 after a set or delete, equal after an extend); a point read of a staged key must answer the staged
 revision. A restaging or a read that does not match marks the transaction, and its commit is refused
-with `Aborted` and the reason `Lost staging: …`. The counters are `kahuna.kv.staged_chain_breaks`
+with the reason `Lost staging: …` — `Aborted` for an interactive session, `MustRetry` for a script, which
+is self-contained and re-runs as a new transaction (see the lock proof below for the same split). The
+durable record classes the abort as `LostExclusion`. The counters are `kahuna.kv.staged_chain_breaks`
 (detections) and `kahuna.kv.staged_chain_break_aborts` (commits refused). A blind write with no
 earlier staging of the key needs no fence: it is last-writer-wins by design, and a write under a
 point lock carries the lock's committed base, which the prepare compares with the head.
@@ -146,9 +148,13 @@ So the lock itself is proven, by the Raft term:
   that term. Without apply-time validation a multi-process group sends a transaction that holds a lock
   through the two-phase flow (gate outcome `held_lock`).
 
-A failed proof refuses the commit with `Aborted` and the reason `Lost lock: …`. Nothing the transaction
-staged was committed, so the client restarts it. The proof also fails closed when the lock's key now
-routes to another partition (the range moved) and when no leader confirms the term after a few attempts.
+A failed proof refuses the commit with the reason `Lost lock: …`. Nothing the transaction staged was
+committed, and no conflict was observed: the durable record classes the abort as `LostExclusion`, not
+`Conflict`. An interactive session gets `Aborted` and starts a new transaction, because its reads under
+the lost lock cannot be repeated. A script gets `MustRetry`: it is self-contained, so the client layer
+re-runs it as a new transaction, which takes its locks from the current leader. The proof also fails
+closed when the lock's key now routes to another partition (the range moved) and when no leader confirms
+the term after a few attempts; a proof that failed closed without a real loss costs a script one re-run.
 
 ```
 Refusing to commit transaction HLC(1:…): partition 2 is no longer led under term 3, in which it granted this transaction a lock; the lock was dropped by the leader change

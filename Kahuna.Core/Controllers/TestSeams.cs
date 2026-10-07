@@ -62,6 +62,9 @@ public sealed partial class KahunaManager
     /// <summary>The interactive-transaction coordinator, for tests that install finalizer interleaving hooks.</summary>
     internal Server.KeyValues.Transactions.TransactionCoordinator TransactionCoordinator => keyValues.Coordinator;
 
+    /// <summary>The script executor, for tests that install its interleaving hook.</summary>
+    internal Server.KeyValues.Transactions.ScriptTransactionExecutor ScriptExecutor => keyValues.ScriptExecutor;
+
     /// <summary>Durable transaction-record store (canonical decisions). Diagnostic/test access.</summary>
     internal Server.KeyValues.Transactions.TransactionRecordStore DurableTransactionRecordStore => keyValues.DurableTransactionRecordStore;
 

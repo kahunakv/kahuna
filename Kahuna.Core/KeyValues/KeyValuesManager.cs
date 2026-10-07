@@ -290,6 +290,9 @@ internal sealed partial class KeyValuesManager : IDisposable
     /// <summary>Test-only access to the transaction coordinator for driving renewal and reap directly.</summary>
     internal TransactionCoordinator Coordinator => txCoordinator;
 
+    /// <summary>Test-only access to the script executor, for installing its interleaving hook.</summary>
+    internal ScriptTransactionExecutor ScriptExecutor => scriptExecutor;
+
     /// <summary>Test-only access to the operation registrar, for refusing a completion on demand.</summary>
     internal OperationRegistrar Registrar => operationRegistrar;
 

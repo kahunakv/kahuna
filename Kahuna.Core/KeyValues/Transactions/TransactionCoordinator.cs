@@ -1403,7 +1403,7 @@ internal sealed class TransactionCoordinator : IDisposable
         {
             DurableTransactionMetrics.StagedChainBreakAborts.Add(1);
             logger.LogWarning("Refusing to commit transaction {TransactionId}: {Break}", context.TransactionId, stagedChainBreak);
-            context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Lost staging: " + stagedChainBreak };
+            context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Lost staging: " + stagedChainBreak, ExclusionLost = true };
             return;
         }
 
@@ -1886,8 +1886,16 @@ internal sealed class TransactionCoordinator : IDisposable
                 validateReadSet: async ct =>
                 {
                     DurableTransactionMetrics.FinalizeReadSetKeys.Record(context.ReadKeys?.Count ?? 0);
-                    return await CheckCommitConflicts(context, ct).ConfigureAwait(false)
-                        && await ValidateReadSet(context, ct).ConfigureAwait(false);
+
+                    if (await CheckCommitConflicts(context, ct).ConfigureAwait(false)
+                        && await ValidateReadSet(context, ct).ConfigureAwait(false))
+                        return TransactionAbortClass.None;
+
+                    // The refusal that failed the check named its cause on the result: a lost lock is recorded
+                    // as such, so the decision does not call a leader change a conflict.
+                    return context.Result is { Type: KeyValueResponseType.Aborted, ExclusionLost: true }
+                        ? TransactionAbortClass.LostExclusion
+                        : TransactionAbortClass.Conflict;
                 },
                 opId,
                 cancellationToken,
@@ -1949,6 +1957,17 @@ internal sealed class TransactionCoordinator : IDisposable
                 context.Result is { Type: not (KeyValueResponseType.Aborted or KeyValueResponseType.Errored or KeyValueResponseType.MustRetry) }
                     ? context.Result
                     : new KeyValueTransactionResult { Type = KeyValueResponseType.Set, Reason = null },
+            // A lost exclusion keeps the refusal's own reason (which partition changed leader, or which key lost
+            // its staging) when this attempt's validation wrote it; a class read back from a record another
+            // attempt decided has no such text and reports the class.
+            DurableFinalizeResult.Aborted when outcome.AbortClass == TransactionAbortClass.LostExclusion => new KeyValueTransactionResult
+            {
+                Type = KeyValueResponseType.Aborted,
+                Reason = context.Result is { Type: KeyValueResponseType.Aborted, ExclusionLost: true, Reason: { } lostReason }
+                    ? lostReason
+                    : "Transaction aborted: a leader change dropped a lock or a staging the transaction relied on",
+                ExclusionLost = true
+            },
             DurableFinalizeResult.Aborted => new KeyValueTransactionResult
             {
                 Type = KeyValueResponseType.Aborted,
@@ -2631,7 +2650,10 @@ internal sealed class TransactionCoordinator : IDisposable
 
     /// <summary>
     /// Refuses the commit of a transaction that lost a lock: nothing it staged was committed, so the client
-    /// restarts it. Counted once per transaction, however many finalize stages reach the same verdict.
+    /// restarts it. Counted once per transaction, however many finalize stages reach the same verdict. The
+    /// result is marked as a lost exclusion rather than a conflict: an interactive session answers it as a
+    /// terminal Aborted (its reads under the lost lock cannot be repeated), and a self-contained script answers
+    /// it as MustRetry, since a new run takes new locks under the new leader and reads again.
     /// </summary>
     private void RefuseLostLock(TransactionContext context, LostLock lost)
     {
@@ -2642,7 +2664,7 @@ internal sealed class TransactionCoordinator : IDisposable
             logger.LogWarning("Refusing to commit transaction {TransactionId}: {Reason}", context.TransactionId, lost.Reason);
         }
 
-        context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Lost lock: " + lost.Reason };
+        context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Lost lock: " + lost.Reason, ExclusionLost = true };
     }
 
     /// <summary>
@@ -2887,10 +2909,14 @@ internal sealed class TransactionCoordinator : IDisposable
             {
                 DurableTransactionMetrics.LostStagedIntentAborts.Add(1);
 
+                // The transaction's own exclusion over the key is gone (its lease lapsed, or a leader change
+                // dropped it), not a conflict another transaction caused: marked as a lost exclusion, so a
+                // script re-runs instead of reporting an abort.
                 context.Result = new()
                 {
                     Type = KeyValueResponseType.Aborted,
-                    Reason = $"Write intent of the staged write on key {key} was lost before commit"
+                    Reason = $"Write intent of the staged write on key {key} was lost before commit",
+                    ExclusionLost = true
                 };
 
                 logger.LogWarning(

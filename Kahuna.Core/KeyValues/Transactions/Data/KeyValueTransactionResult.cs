@@ -13,6 +13,16 @@ public sealed class KeyValueTransactionResult
     
     public string? Reason { get; set; }
 
+    /// <summary>
+    /// True when an <see cref="KeyValueResponseType.Aborted"/> result refused the commit because a lock or a
+    /// staging the transaction relied on was dropped by a partition leader change, not because of a conflict
+    /// with another transaction (<see cref="TransactionAbortClass.LostExclusion"/>). An interactive session
+    /// still has to start over: its reads were made under the lost exclusion and the leadership term will not
+    /// return. A self-contained script is run again as a new transaction, so the executor answers it as
+    /// <see cref="KeyValueResponseType.MustRetry"/>.
+    /// </summary>
+    internal bool ExclusionLost { get; init; }
+
     public long Revision
     {
         get

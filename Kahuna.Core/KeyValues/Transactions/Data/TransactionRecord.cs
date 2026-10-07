@@ -24,6 +24,10 @@ internal enum TransactionDecision
 /// maps to <c>Aborted</c> at the API boundary. Reporting a non-conflict abort as <c>MustRetry</c> would promise a
 /// retry that can never succeed, because each retry re-reads the same aborted record. The caller's recourse for
 /// any class is the same: start a new transaction.</para>
+///
+/// <para>The one exception is a self-contained script, which carries its whole transaction and can be run again
+/// as a new one: the script executor answers a <see cref="LostExclusion"/> abort with <c>MustRetry</c>, because
+/// the refusal names no conflict, only a leader change that dropped the exclusion the transaction ran under.</para>
 /// </summary>
 internal enum TransactionAbortClass
 {
@@ -31,7 +35,14 @@ internal enum TransactionAbortClass
     Conflict = 1,
     RetryableFailure = 2,
     ExplicitRollback = 3,
-    PresumedAbort = 4
+    PresumedAbort = 4,
+
+    /// <summary>
+    /// A lock or a staging the transaction relied on was dropped by a partition leader change, so what it read
+    /// or computed was no longer protected at commit. No other transaction need have touched its keys: the
+    /// refusal is the proof's failing closed, not an observed conflict.
+    /// </summary>
+    LostExclusion = 5
 }
 
 /// <summary>One manifest entry: a logical modified key and its durability. The key is the routing authority.</summary>

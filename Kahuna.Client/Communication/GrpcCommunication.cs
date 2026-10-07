@@ -1449,38 +1449,55 @@ public class GrpcCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
 
         int retries = 0;
         GrpcTryExecuteTransactionScriptResponse? response;
-        
+
         GrpcBatcher batcher = GetSharedBatcher(url);
-        
-        do
+
+        // A script's MustRetry is a transient the server already classified — a leader change that dropped the
+        // locks the script ran under, a foreign intent still settling, a fenced route — and a re-run is a new
+        // transaction. None of those clear within an immediate re-issue, so the attempts are spaced like a
+        // transaction-session call's (see MustRetryBackoff). Allocated only once a MustRetry is observed.
+        MustRetryBackoff? mustRetryBackoff = null;
+
+        try
         {
-            if (cancellationToken.IsCancellationRequested)
-                throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
-            
-            GrpcBatcherResponse batchResponse;
-                
-            batchResponse = await batcher.Enqueue(request, cancellationToken).ConfigureAwait(false);
-            
-            response = batchResponse.TryExecuteTransactionScript;
+            do
+            {
+                if (cancellationToken.IsCancellationRequested)
+                    throw new KahunaException("Operation cancelled", KeyValueResponseType.Aborted);
 
-            if (response is null)
-                throw new KahunaException("Response is null", KeyValueResponseType.Errored);
+                GrpcBatcherResponse batchResponse;
 
-            if (response.Type is < GrpcKeyValueResponseType.TypeErrored or GrpcKeyValueResponseType.TypeDoesNotExist)
-                return new()
-                {
-                    Type = (KeyValueResponseType)response.Type,
-                    Values = GetTransactionValues(response.Values),
-                    TimeElapsedMs = response.TimeElapsedMs
-                };
-            
-            if (response.Type == GrpcKeyValueResponseType.TypeMustRetry)
+                batchResponse = await batcher.Enqueue(request, cancellationToken).ConfigureAwait(false);
+
+                response = batchResponse.TryExecuteTransactionScript;
+
+                if (response is null)
+                    throw new KahunaException("Response is null", KeyValueResponseType.Errored);
+
+                if (response.Type is < GrpcKeyValueResponseType.TypeErrored or GrpcKeyValueResponseType.TypeDoesNotExist)
+                    return new()
+                    {
+                        Type = (KeyValueResponseType)response.Type,
+                        Values = GetTransactionValues(response.Values),
+                        TimeElapsedMs = response.TimeElapsedMs
+                    };
+
+                if (response.Type != GrpcKeyValueResponseType.TypeMustRetry)
+                    break;
+
                 logger?.LogDebug("Server asked to retry transaction");
-            
-            if (++retries >= 5)
-                throw new KahunaException("Retries exhausted.", KeyValueResponseType.Aborted);
 
-        } while (response.Type == GrpcKeyValueResponseType.TypeMustRetry);
+                if (++retries >= 5)
+                    throw new KahunaException("Retries exhausted.", KeyValueResponseType.Aborted);
+
+                mustRetryBackoff ??= new MustRetryBackoff();
+                await mustRetryBackoff.WaitAsync(cancellationToken).ConfigureAwait(false);
+            } while (true);
+        }
+        finally
+        {
+            mustRetryBackoff?.Dispose();
+        }
         
         if (!string.IsNullOrEmpty(response.Reason))
             throw new KahunaException(response.Reason, (KeyValueResponseType)response.Type);

@@ -156,7 +156,8 @@ public sealed class TestDurableTransactionFinalizer
         Assert.Null(intents.Get("acct/1"));
     }
 
-    private static Func<CancellationToken, Task<bool>> Validate(bool ok) => _ => Task.FromResult(ok);
+    private static Func<CancellationToken, Task<TransactionAbortClass>> Validate(bool ok) =>
+        _ => Task.FromResult(ok ? TransactionAbortClass.None : TransactionAbortClass.Conflict);
 
     [Fact]
     public async Task Commit_InvokesCommitApplyPerIntent_AbortInvokesRollbackPerIntent()
@@ -1235,10 +1236,10 @@ public sealed class TestDurableTransactionFinalizer
                 return Task.FromResult<DurableOnePhaseReply?>(null);
             });
 
-        async Task<bool> SlowFailingValidate(CancellationToken ct)
+        async Task<TransactionAbortClass> SlowFailingValidate(CancellationToken ct)
         {
             await Task.Delay(validationDelayMs, ct);
-            return false;
+            return TransactionAbortClass.Conflict;
         }
 
         using MetricCapture capture = new("route",
@@ -1537,7 +1538,7 @@ public sealed class TestDurableTransactionFinalizer
             validateReadSet: _ =>
             {
                 intentVisibleDuringValidation = intents.Get("acct/1") is { } live && live.TransactionId == txId;
-                return Task.FromResult(true);
+                return Task.FromResult(TransactionAbortClass.None);
             },
             opId: Ts(2000),
             CancellationToken.None,

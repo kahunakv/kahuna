@@ -46,6 +46,14 @@ internal sealed class ScriptTransactionExecutor
     /// </summary>
     private readonly ScriptFunctionTable functionTable;
 
+    /// <summary>
+    /// Test-only interleaving hook, awaited after a script acquired every lock its statements need and before
+    /// its first statement runs. Lets a test change a partition's leader inside the grant→commit window of a
+    /// script — the interval in which a lock the script was granted can be dropped — which no external caller
+    /// can time deterministically. Null (zero-cost) in production.
+    /// </summary>
+    internal Func<CancellationToken, Task>? TestAfterLocksAcquiredHook;
+
     public ScriptTransactionExecutor(
         KeyValuesManager manager,
         KahunaConfiguration configuration,
@@ -646,6 +654,11 @@ internal sealed class ScriptTransactionExecutor
                         );
 
                     context.RecordLockGrantTerms(lockGrants.Take());
+
+                    // Test-only: runs a competing action once the script holds its locks and before any
+                    // statement runs. See TestAfterLocksAcquiredHook.
+                    if (TestAfterLocksAcquiredHook is { } afterLocksAcquiredHook)
+                        await afterLocksAcquiredHook(cts.Token);
                 }
             }
 
@@ -666,8 +679,19 @@ internal sealed class ScriptTransactionExecutor
 
                 // The coordinator names why it aborted (a conflict, a moved base, a refused prepare). That reason
                 // is part of the outcome the client acts on, so it is carried through rather than flattened.
-                if (context.Result?.Type == KeyValueResponseType.Aborted)
-                    return new() { Type = KeyValueResponseType.Aborted, Reason = context.Result.Reason ?? "Transaction aborted" };
+                //
+                // A refusal because a leader change dropped a lock or a staging the script ran under is not a
+                // conflict: no other transaction need have touched its keys, and nothing it staged was committed
+                // (the refusal decided a durable abort, or ran before anything durable). The script is
+                // self-contained, so a new run takes new locks under the new leader and reads again — exactly the
+                // retryable outcome, and what the client layer already does for MustRetry. An interactive session
+                // keeps Aborted for the same refusal: its reads under the lost exclusion cannot be repeated.
+                if (context.Result is { Type: KeyValueResponseType.Aborted } aborted)
+                    return new()
+                    {
+                        Type = aborted.ExclusionLost ? KeyValueResponseType.MustRetry : KeyValueResponseType.Aborted,
+                        Reason = aborted.Reason ?? "Transaction aborted"
+                    };
 
                 return context.Result ?? new() { Type = KeyValueResponseType.Errored };
             }
