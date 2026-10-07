@@ -168,7 +168,7 @@ The next two sections are just these two shapes in detail.
 
 ## 5. Full backups
 
-A full backup has two parts written together:
+A full backup has two parts written together, and a third one when durable transactions are in flight:
 
 1. **A base image** — a consistent, crash-safe snapshot of the storage engine. RocksDB produces this
    almost instantly (it hard-links its files); SQLite copies the database; the in-memory engine
@@ -177,6 +177,10 @@ A full backup has two parts written together:
 2. **A manifest** — a small JSON record describing the backup: its identity, the per-partition range
    of log positions it covers, checksums, and (for coordinated backups, see §8) the cluster
    timestamp.
+3. **An intent frontier** (`intent_frontier.pb`, only when there is something to record) — the durable
+   prepared intents that are live at the end of each partition's range, with their values, and the
+   intents that settled just before it. The checksums in the manifest cover it like every other
+   artifact.
 
 > **Concept — checkpoint.** A "checkpoint" is a point-in-time snapshot of the storage engine that can
 > be opened independently of the live database. It is the base image a restore starts from.
@@ -221,6 +225,20 @@ image is a snapshot of the disk. So the order matters:
 > is missing committed writes. The barrier is keyed on **HLC**, not log index, on purpose: the
 > leader's commit-completion path carries only the change's HLC, not a WAL index, so an HLC barrier
 > keeps this a self-contained Kahuna guarantee with no change to the consensus layer.
+
+> **Decision — the full backup records the prepared intents its chain needs.** A durable transaction's
+> committed value lives in its prepared intent: a by-reference materialization record, or a
+> materializing settlement, carries no value of its own (see §7). Restore replays only the
+> incrementals, which start after the full's range. So a transaction prepared *inside* the range and
+> settled *after* it would have its value in no replayed segment, and every restore of every chain built
+> on that full would abort. The intent frontier closes that gap. The backup copies the node's live
+> intents *before* it reads the range ends, and folds each partition's log up to its range end from the
+> position that copy reflects. Then it checks every log entry after the range end against the frontier,
+> exactly as a restore will replay it. If an entry names an intent the frontier cannot supply (an intent
+> prepared before the log's compaction floor and settled between a coordinated cut and the copy), the
+> backup **fails closed** with the retryable outcome `CutUnverified` and publishes nothing. A backup
+> written before the frontier existed restores as before; a reader that predates the frontier refuses a
+> full that carries one instead of misreading it.
 
 > **Decision — a flush that cannot durably persist must fault, not report success.** The background
 > writer's drain now reports whether it actually persisted everything. If it can't (a backend I/O
@@ -306,12 +324,17 @@ Two properties make this safe to run, and safe to *re-run*:
 Restore classifies key/value records by their encoded kind. Value-carrying materializations include
 the committed row; by-reference materializations reconstruct it from the corresponding prepared intent.
 With `DurableMaterializeOnResolve`, a committed settlement itself installs those rows, without separate
-key/value materialization records. Restore tracks prepares through the WAL segments, expands these
-resolves before their intent removals, and cuts rows on the transaction's commit HLC. The backup applied
+key/value materialization records. Restore seeds the prepared intents from the full's intent frontier (§5), tracks prepares through the WAL
+segments, expands these resolves before their intent removals, and cuts rows on the transaction's commit
+HLC. The backup applied
 barrier also includes that HLC, rather than treating a settlement as timestamp-free bookkeeping.
 
-A recent duplicate materializing settlement is tolerated. A materializing resolve without its prepare
-or recognized duplicate history fails restore closed; it is not silently skipped. Reader compatibility
+Two producers can materialize or settle the same commit (the deferred settlement and the recovery sweep
+or a blocked transaction's helper), so a second copy can arrive after the settlement removed the intent.
+A recent duplicate materializing settlement, and a by-reference record that arrives after its intent
+settled, are tolerated: the first copy installed the row, as a live replica also concludes. A
+materialization without its prepare or recognized duplicate history fails restore closed; it is not
+silently skipped. Reader compatibility
 must precede enabling new encodings. See the
 [durable settlement guide](durable-settlement-guide.md) for configuration and rolling upgrades.
 
@@ -558,7 +581,9 @@ A **coordinated** backup (`/v1/backups/coordinated`) is the cluster-wide product
 on the node that leads the meta partition (the *backup coordinator*). A request to any other node is
 rejected with outcome `NotBackupCoordinator` (HTTP 503 / gRPC `Unavailable`) — retry against the
 current leader. A coordinated backup can also fail with `CutUnverified` (HTTP 503 / gRPC `Unavailable`)
-when transactions kept overtaking its cut (see §8); nothing is published, so retry it. Because leadership can move, **the coordinator changes over time**, so a coordinated
+when transactions kept overtaking its cut (see §8); nothing is published, so retry it. A full backup
+can fail with the same outcome when it cannot record a prepared intent its chain's restore would need
+(see §5); a retry reads new range ends. Because leadership can move, **the coordinator changes over time**, so a coordinated
 backup is written to whichever node was coordinator at the time.
 
 > **The catalog is whatever is at `BackupDir`.** `ListBackups`, chain resolution, and parent lookup

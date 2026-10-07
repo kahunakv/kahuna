@@ -68,7 +68,8 @@ internal sealed class BackupService : IDisposable
         Func<int, HLCTimestamp>? appliedHlcProbe = null,
         BackupRetentionPolicy retentionPolicy = default,
         long copyThrottleBytesPerSec = 0,
-        Func<PreparedIntentCommitObservation>? beginCommitObservation = null)
+        Func<PreparedIntentCommitObservation>? beginCommitObservation = null,
+        BackupDriver.WalkLiveIntentsDelegate? walkLiveIntents = null)
     {
         // Refuse an unsafe backup root before writing anything: a symlinked or group/world-writable
         // directory would let another user on the host read tenant data or tamper with artifacts and
@@ -86,7 +87,7 @@ internal sealed class BackupService : IDisposable
         _acquireRetentionHold = acquireRetentionHold;
         _logger = logger;
         _driver = new BackupDriver(raft, persistenceBackend, flushBeforeCheckpoint,
-            acquireSnapshotHold, releaseSnapshotHold, renewSnapshotHold, snapshotHoldLeaseMs, appliedHlcProbe);
+            acquireSnapshotHold, releaseSnapshotHold, renewSnapshotHold, snapshotHoldLeaseMs, appliedHlcProbe, walkLiveIntents);
         _catalog = new BackupCatalog(manifestTarget);
         _artifacts = artifactStore;
         _queryMinInFlight = queryMinInFlight;

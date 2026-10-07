@@ -121,7 +121,10 @@ internal sealed class BackupFacade : IDisposable
             copyThrottleBytesPerSec: configuration.BackupRestoreThrottleBytesPerSec,
             // The coordinated backup verifies its cut after the capture against the durable intents this node
             // held from before the cut was chosen until then.
-            beginCommitObservation: keyValues.BeginCommitObservation);
+            beginCommitObservation: keyValues.BeginCommitObservation,
+            // A full backup records the durable intents live at its range ends, which the restore of every chain
+            // built on it needs to expand a commit settled after the range.
+            walkLiveIntents: keyValues.DurablePreparedIntentStore.WalkLiveIntents);
 
         // Periodic backup GC: sweeps crash-orphaned/leftover artifacts (always) and enforces
         // retention (when configured), including a startup sweep on its first tick. Disabled when
@@ -327,7 +330,7 @@ internal sealed class BackupFacade : IDisposable
                 "The cluster topology changed during the backup; nothing was published. Retry once stable."),
         BackupDriverException d when d.CutUnverified =>
             new(KahunaBackupOutcome.CutUnverified,
-                "A transaction at or below the backup cut was still in flight during the capture; nothing was published. Retry."),
+                "A transaction in flight during the capture could not be proven whole in the backup or in its chain's restore; nothing was published. Retry."),
         BackupDriverException d when d.RetryableLeadershipLoss =>
             new(KahunaBackupOutcome.RetryableLeadershipLoss,
                 "Meta-partition leadership was lost during the backup; nothing was published. Retry against the leader."),

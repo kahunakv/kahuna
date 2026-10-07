@@ -266,8 +266,8 @@ internal static class BackupArtifactVerifier
     /// <summary>
     /// Validates the manifest as a document, independent of the filesystem: type/parent/base-cut
     /// consistency, no duplicate partition ranges, valid index and HLC bounds per range, and the
-    /// exact set of artifact names the type requires (a Full's keys are all under <c>checkpoint/</c>
-    /// and include the checkpoint sidecar; an Incremental's keys are exactly one
+    /// exact set of artifact names the type requires (a Full's keys are all under <c>checkpoint/</c>,
+    /// except its optional intent frontier, and include the checkpoint sidecar; an Incremental's keys are exactly one
     /// <c>partition_{id}.wal</c> per range, no more, no fewer).
     /// </summary>
     private static void ValidateManifestSchema(BackupManifest m)
@@ -310,6 +310,10 @@ internal static class BackupArtifactVerifier
             bool hasSidecar = false;
             foreach (string key in m.Checksums.Keys)
             {
+                // Beside the checkpoint, a Full may carry the intent frontier its chain's restore seeds from.
+                if (key == IntentFrontier.ArtifactName)
+                    continue;
+
                 if (!key.StartsWith(CheckpointPrefix, StringComparison.Ordinal))
                     throw new BackupArtifactException(
                         $"Backup {m.BackupId:N}: Full artifact '{key}' is not under '{CheckpointPrefix}'.");

@@ -1980,6 +1980,21 @@ internal sealed class PreparedIntentStore
     /// <summary>Every intent currently held on this partition — the input to the recovery sweep.</summary>
     public IReadOnlyCollection<PreparedIntent> Snapshot() => intents.Values.ToArray();
 
+    /// <summary>
+    /// Every intent this node holds, together with each of <paramref name="partitionIds"/>'s applied log position
+    /// read BEFORE the walk: every intent an entry at or below that position prepared, and that no later entry
+    /// removed, is in the walk (a position is published only after its entry's commands are in the map). The map
+    /// copy is atomic across keys.
+    /// </summary>
+    internal LiveIntentWalk WalkLiveIntents(IReadOnlyList<int> partitionIds)
+    {
+        Dictionary<int, long> appliedThrough = new(partitionIds.Count);
+        foreach (int partitionId in partitionIds)
+            appliedThrough[partitionId] = AppliedLogIndexOf(partitionId);
+
+        return new LiveIntentWalk(intents.Values.ToArray(), appliedThrough);
+    }
+
     /// <summary>Pending (undecided) intents whose recovery deadline is at or before <paramref name="now"/> —
     /// candidates for a recovery decision lookup. Deadline comparison is by HLC, never a local clock.</summary>
     public IReadOnlyList<PreparedIntent> DueForRecovery(HLCTimestamp now)
@@ -3681,6 +3696,44 @@ internal sealed class PreparedIntentStore
             logger.LogInformation(
                 "Snapshot install for partition {PartitionId} replaced {Purged} locally held intent(s) with the {Installed} the snapshot carries (reflected through log index {ReflectedThroughIndex})",
                 partitionId, purged, section.Intents.Count, section.ReflectedThroughIndex);
+    }
+
+    /// <summary>
+    /// Encodes the intents a backup's restore must know at the start of its replay: the live intents with their
+    /// values, and the identities already settled (no settled-at position is recorded for them).
+    /// </summary>
+    internal static byte[] SerializeBackupFrontier(
+        IEnumerable<PreparedIntent> live, IEnumerable<(HLCTimestamp TransactionId, long Epoch, string Key)> settled)
+    {
+        PreparedIntentSnapshotMessage message = new();
+        foreach (PreparedIntent intent in live)
+            message.Intents.Add(PrepareProtoOf(intent));
+
+        foreach ((HLCTimestamp transactionId, long epoch, string key) in settled)
+        {
+            SettledTransactionLedgerEntryMessage entry = new();
+            FillSettledEntry(entry, new SettledIdentityEntry(transactionId, epoch, key, HLCTimestamp.Zero));
+            message.SettledTransactions.Add(entry);
+        }
+
+        return ReplicationSerializer.Serialize(message);
+    }
+
+    /// <summary>Decodes a frontier written by <see cref="SerializeBackupFrontier"/>, read to the end of
+    /// <paramref name="payload"/>.</summary>
+    internal static (List<PreparedIntent> Live, List<(HLCTimestamp TransactionId, long Epoch, string Key)> Settled) DeserializeBackupFrontier(Stream payload)
+    {
+        PreparedIntentSnapshotMessage message = PreparedIntentSnapshotMessage.Parser.ParseFrom(payload);
+
+        List<PreparedIntent> live = new(message.Intents.Count);
+        foreach (PreparedIntentCommandMessage entry in message.Intents)
+            live.Add(IntentOf(entry));
+
+        List<(HLCTimestamp TransactionId, long Epoch, string Key)> settled = new(message.SettledTransactions.Count);
+        foreach (SettledIdentityEntry entry in SettledEntriesOf(message))
+            settled.Add((entry.TransactionId, entry.Epoch, entry.Key));
+
+        return (live, settled);
     }
 
     public static byte[] SerializeIntents(IEnumerable<PreparedIntent> intents)

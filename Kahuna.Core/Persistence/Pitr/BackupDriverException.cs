@@ -62,7 +62,9 @@ internal sealed class BackupDriverException : Exception
     /// True when a coordinated backup could not prove, after its capture, that its image holds every transaction
     /// with a commit timestamp at or below the cut as a whole: a durable transaction at or below the cut was in
     /// flight during the capture, or a partition could not confirm that this node applied everything the cluster
-    /// had committed. Nothing is published; a retry chooses a new cut.
+    /// had committed. Also true when a full backup could not capture the prepared intents its chain's restore needs:
+    /// an intent live at a range end settled before the node's intents were walked, and its prepare is outside the
+    /// WAL the backup reads. Nothing is published; a retry chooses a new cut and new range ends.
     /// </summary>
     public bool CutUnverified { get; init; }
 

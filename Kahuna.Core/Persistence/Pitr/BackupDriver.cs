@@ -1,4 +1,5 @@
 
+using System.Security.Cryptography;
 using System.Text.Json;
 using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
@@ -43,6 +44,7 @@ internal sealed class BackupDriver
     /// </summary>
     private readonly Func<Task>? _flushBeforeCheckpoint;
     private readonly Func<int, HLCTimestamp>? _appliedHlcProbe;
+    private readonly WalkLiveIntentsDelegate? _walkLiveIntents;
 
     internal const int DefaultApplyBarrierTimeoutMs = 30_000;
 
@@ -52,6 +54,13 @@ internal sealed class BackupDriver
     /// are the partitions the image holds. Returns false when the image may be torn; nothing is then published.
     /// </summary>
     internal delegate Task<bool> VerifyCutDelegate(HLCTimestamp cut, IReadOnlyList<int> coveredPartitions, CancellationToken ct);
+
+    /// <summary>
+    /// Copies the node's live prepared intents, with each of <paramref name="partitionIds"/>'s applied position read
+    /// before the copy (see <see cref="PreparedIntentStore.WalkLiveIntents"/>). A full backup records from it the
+    /// intents its chain's restore needs at the start of the replay (see <see cref="IntentFrontier"/>).
+    /// </summary>
+    internal delegate LiveIntentWalk WalkLiveIntentsDelegate(IReadOnlyList<int> partitionIds);
 
     /// <summary>
     /// Acquires an MVCC snapshot-history hold pinning revision history at the given cut, returning a
@@ -83,9 +92,11 @@ internal sealed class BackupDriver
         ReleaseSnapshotHoldDelegate? releaseSnapshotHold = null,
         RenewSnapshotHoldDelegate? renewSnapshotHold = null,
         int snapshotHoldLeaseMs = DefaultSnapshotHoldLeaseMs,
-        Func<int, HLCTimestamp>? appliedHlcProbe = null)
+        Func<int, HLCTimestamp>? appliedHlcProbe = null,
+        WalkLiveIntentsDelegate? walkLiveIntents = null)
     {
         _raft = raft;
+        _walkLiveIntents = walkLiveIntents;
         _persistenceBackend = persistenceBackend;
         _flushBeforeCheckpoint = flushBeforeCheckpoint;
         _appliedHlcProbe = appliedHlcProbe;
@@ -119,7 +130,8 @@ internal sealed class BackupDriver
             _acquireSnapshotHold, _releaseSnapshotHold, _renewSnapshotHold, _snapshotHoldLeaseMs, _appliedHlcProbe,
             identity: identity, topologyGenerationProbe: ComposeTopologyGeneration,
             hostsPartition: _raft.HostsPartition,
-            verifyCoordinator: verifyCoordinator, signManifest: signManifest, verifyCut: verifyCut, ct: ct);
+            verifyCoordinator: verifyCoordinator, signManifest: signManifest, verifyCut: verifyCut,
+            walkLiveIntents: _walkLiveIntents, ct: ct);
 
     /// <summary>
     /// Reads committed WAL entries since the parent backup's <c>ToIndex</c>, serialises them
@@ -215,6 +227,7 @@ internal sealed class BackupDriver
         Func<CancellationToken, Task<bool>>? verifyCoordinator = null,
         Action<BackupManifest>? signManifest = null,
         VerifyCutDelegate? verifyCut = null,
+        WalkLiveIntentsDelegate? walkLiveIntents = null,
         CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
@@ -251,6 +264,11 @@ internal sealed class BackupDriver
                 throw new BackupDriverException(
                     "The persistence backend cannot produce an exact as-of checkpoint; a full backup " +
                     "with a proven base cut cannot be taken.") { ExactCheckpointUnavailable = true };
+
+            // Walk the live intents BEFORE the range ends are read: an intent still live at a range end read later
+            // was then live during the walk, unless it was prepared after the walk's applied position — and the
+            // frontier's WAL fold starts there. See IntentFrontier.
+            LiveIntentWalk? intentWalk = walkLiveIntents?.Invoke(partitions.Select(p => p.PartitionId).ToArray());
 
             List<PartitionBackupRange> ranges = [];
             List<int> clusterPartitions = [];
@@ -406,6 +424,16 @@ internal sealed class BackupDriver
                 // Publish the artifacts. This must precede the manifest so manifest presence remains the
                 // existence predicate for a complete backup.
                 await staging.CommitAsync(workCt).ConfigureAwait(false);
+            }
+
+            // The intents live at the range ends, which the incrementals' replay starts after. Captured after the
+            // checkpoint so the check of the WAL past the range ends reaches at least as far as the capture.
+            IntentFrontier frontier = IntentFrontier.Capture(wal, ranges, intentWalk, workCt);
+            if (!frontier.IsEmpty)
+            {
+                (string digest, long length) = await WriteIntentFrontierAsync(artifacts, backupId, frontier, workCt).ConfigureAwait(false);
+                checksums[IntentFrontier.ArtifactName] = digest;
+                sizes[IntentFrontier.ArtifactName] = length;
             }
 
             BackupManifest manifest = BackupManifest.CreateFull(ranges);
@@ -864,6 +892,23 @@ internal sealed class BackupDriver
     }
 
     // ── helpers ────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>Writes the frontier artifact and returns its digest and length for the manifest. The frontier is
+    /// bounded by the intents in flight and the settled lookback, so it is encoded whole.</summary>
+    private static async Task<(string Digest, long Length)> WriteIntentFrontierAsync(
+        IBackupArtifactStore artifacts, Guid backupId, IntentFrontier frontier, CancellationToken ct)
+    {
+        byte[] bytes = frontier.Serialize();
+
+        await using (IBackupArtifactWriter writer =
+                     await artifacts.OpenWriteAsync(backupId, IntentFrontier.ArtifactName, ct).ConfigureAwait(false))
+        {
+            await writer.Stream.WriteAsync(bytes, ct).ConfigureAwait(false);
+            await writer.CompleteAsync(ct).ConfigureAwait(false);
+        }
+
+        return (Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant(), bytes.Length);
+    }
 
     /// <summary>
     /// Builds the per-partition high-water mark across a resolved ancestor chain: for each partition,

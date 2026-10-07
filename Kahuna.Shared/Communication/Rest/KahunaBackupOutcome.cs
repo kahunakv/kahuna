@@ -82,8 +82,9 @@ public enum KahunaBackupOutcome
     /// <summary>
     /// A coordinated backup could not prove that its image holds every transaction at or below its cut as a
     /// whole: a transaction at or below the cut was still in flight during the capture on every attempt, or a
-    /// partition could not confirm that the coordinator applied everything the cluster had committed. Nothing
-    /// was published; retry.
+    /// partition could not confirm that the coordinator applied everything the cluster had committed. A full
+    /// backup also reports it when it could not record a prepared intent that the restore of a chain built on it
+    /// would need. Nothing was published; retry.
     /// </summary>
     CutUnverified = 17,
 }

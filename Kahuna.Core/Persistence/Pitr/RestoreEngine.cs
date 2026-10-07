@@ -109,20 +109,30 @@ internal static class RestoreEngine
 
         // The prepared intents the replayed segments have installed but not yet settled, keyed by the identity
         // a by-reference materialization record names. A record of that shape carries no value, so this map is
-        // the only place the restore can read the committed mutation from. It is fed from the same segments, in
-        // the same per-partition log order a live replica applies, and it shrinks again on every settle — so it
-        // holds only the intents that are genuinely in flight at the point the replay has reached.
+        // the only place the restore can read the committed mutation from. It starts from the full's intent
+        // frontier and is fed from the same segments, in the same per-partition log order a live replica applies,
+        // and it shrinks again on every settle — so it holds only the intents in flight at the point the replay
+        // has reached (plus, from the frontier, intents prepared just after the full's range, which their own
+        // replayed prepares install again).
         Dictionary<PreparedIntentIdentity, PreparedIntent> liveIntents = [];
 
         // Identities the replay settled recently, so a second producer's duplicate settle (a deferred settlement
         // racing the recovery sweep) is recognized as already installed instead of as a settle with no prepare.
         SettledIntentWindow settledIntents = new();
 
+        Func<PreparedIntentIdentity, bool> isSettled = settledIntents.Contains;
+
         // The rows the current prepared-intent delta installs through its materializing resolves.
         List<(PersistenceRequestItem Item, HLCTimestamp CommitHlc)> installs = [];
 
         try
         {
+            // The replay starts after the full's range, but a transaction prepared inside it can settle in the first
+            // incremental: seed the intents live at the range end, and the identities settled just before it, from
+            // the frontier the full captured.
+            if (chain.Count > 1)
+                await SeedFromIntentFrontierAsync(chain[0], artifacts, stagingRoot, liveIntents, settledIntents, ct).ConfigureAwait(false);
+
             // Skip the first (Full) entry — its state is already in the backend via the checkpoint.
             // Replay incrementals in chronological order.
             foreach (BackupManifest manifest in chain.Skip(1))
@@ -200,7 +210,7 @@ internal static class RestoreEngine
                             continue;
                         }
 
-                        (PersistenceRequestItem item, HLCTimestamp commitHlc)? decoded = ToRequestItem(entry, liveIntents, manifest.BackupId);
+                        (PersistenceRequestItem item, HLCTimestamp commitHlc)? decoded = ToRequestItem(entry, liveIntents, manifest.BackupId, isSettled);
 
                         // Cut on the transaction COMMIT HLC carried in the payload, not the Raft WAL entry
                         // Time. Every participant of a multi-partition transaction shares one commit HLC, but
@@ -255,6 +265,47 @@ internal static class RestoreEngine
     }
 
     // ── helpers ────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Loads the full backup's intent frontier, when it has one, into the replay's intent state. The artifact is
+    /// staged and digest-verified like a segment before it is read. A full written before the frontier existed
+    /// (or with nothing in flight) has none, and the replay then starts with no intents, as it always did.
+    /// </summary>
+    private static async Task SeedFromIntentFrontierAsync(
+        BackupManifest full,
+        IBackupArtifactStore artifacts,
+        string stagingRoot,
+        Dictionary<PreparedIntentIdentity, PreparedIntent> liveIntents,
+        SettledIntentWindow settledIntents,
+        CancellationToken ct)
+    {
+        if (!full.Checksums.ContainsKey(IntentFrontier.ArtifactName))
+            return;
+
+        string staged = await StageAndVerifySegmentAsync(
+            artifacts, full, IntentFrontier.ArtifactName, stagingRoot, ct).ConfigureAwait(false);
+
+        IntentFrontier frontier;
+        try
+        {
+            await using FileStream stream = new(staged, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, useAsync: true);
+            frontier = IntentFrontier.Deserialize(stream);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            throw new BackupArtifactException(
+                $"Backup {full.BackupId:N}: intent frontier '{IntentFrontier.ArtifactName}' is unreadable.", ex);
+        }
+        finally
+        {
+            TryDeleteFile(staged);
+        }
+
+        foreach (PreparedIntent intent in frontier.Live)
+            liveIntents[IntentFrontier.IdentityOf(intent)] = intent;
+
+        settledIntents.AddBaseline(frontier.Settled);
+    }
 
     /// <summary>
     /// Persists a batch and fails closed if the backend could not store it. Every backend returns
@@ -391,10 +442,13 @@ internal static class RestoreEngine
     /// single timestamp the coordinator stamps identically on every participant of a
     /// (possibly multi-partition) transaction, so it — not the per-partition WAL entry Time —
     /// is the correct axis for an as-of cut. Returns <c>null</c> for entries that are not
-    /// key-value mutations (e.g. range-map or lock entries).
+    /// key-value mutations (e.g. range-map or lock entries), and for a by-reference record whose intent
+    /// <paramref name="isSettled"/> reports already settled: a second copy of a materialization whose first
+    /// copy installed the row before the settle.
     /// </summary>
     internal static (PersistenceRequestItem item, HLCTimestamp commitHlc)? ToRequestItem(
-        WalSegmentEntry entry, Dictionary<PreparedIntentIdentity, PreparedIntent> liveIntents, Guid backupId)
+        WalSegmentEntry entry, Dictionary<PreparedIntentIdentity, PreparedIntent> liveIntents, Guid backupId,
+        Func<PreparedIntentIdentity, bool>? isSettled = null)
     {
         if (entry.LogType != ReplicationTypes.KeyValues)
             return null;
@@ -412,18 +466,23 @@ internal static class RestoreEngine
             case KeyValueRecordKind.ByReferenceMutation:
             {
                 // A by-reference record carries no value; the committed mutation lives in the prepared intent it
-                // names, which the same segment stream installed earlier in log order.
-                PreparedIntentIdentity identity = new(
-                    new HLCTimestamp(msg.TransactionIdNode, msg.TransactionIdPhysical, msg.TransactionIdCounter),
-                    msg.Epoch,
-                    msg.Key);
+                // names, which the same segment stream installed earlier in log order, or the full's frontier did.
+                PreparedIntentIdentity identity = ByReferenceIdentityOf(msg);
 
                 if (!liveIntents.TryGetValue(identity, out PreparedIntent? intent))
+                {
+                    // Two producers materialize the same commit (the deferred settlement and a helper or the
+                    // recovery sweep), and one copy can land after the settle that removed the intent. The first
+                    // copy installed the row, exactly as a live replica treats the late copy as redundant.
+                    if (isSettled is not null && isSettled(identity))
+                        return null;
+
                     throw new BackupDriverException(
                         $"Backup {backupId:N}: log entry {entry.Id} materializes prepared intent " +
                         $"{identity.TransactionId}/{identity.Epoch} for key '{identity.Key}' by reference, but no " +
                         "prepare for it appears in the replayed segments; the restore would silently drop a " +
                         "committed value and is aborted.");
+                }
 
                 state = intent.State;
                 value = intent.Value;
@@ -458,6 +517,25 @@ internal static class RestoreEngine
 
         return (item, commitHlc);
     }
+
+    /// <summary>The prepared intent a by-reference materialization record names, when
+    /// <paramref name="message"/> is one.</summary>
+    internal static bool TryGetByReferenceIdentity(KeyValueMessage message, out PreparedIntentIdentity identity)
+    {
+        if (KeyValueMessageDecoder.Classify(KeyValueMessageDecoder.RecordType(message)) != KeyValueRecordKind.ByReferenceMutation)
+        {
+            identity = default;
+            return false;
+        }
+
+        identity = ByReferenceIdentityOf(message);
+        return true;
+    }
+
+    private static PreparedIntentIdentity ByReferenceIdentityOf(KeyValueMessage message) => new(
+        new HLCTimestamp(message.TransactionIdNode, message.TransactionIdPhysical, message.TransactionIdCounter),
+        message.Epoch,
+        message.Key);
 
     /// <summary>
     /// Folds one replayed prepared-intent delta into the restore's live-intent map: a prepare installs the
@@ -539,7 +617,8 @@ internal static class RestoreEngine
     /// A bounded memory of the identities the replay settled most recently. A duplicate settle follows its first
     /// copy closely in the log (two producers racing the same resolution), so a window of recent identities
     /// recognizes it without the memory growing with every transaction in the chain. A duplicate older than the
-    /// window fails the restore closed rather than guessing.
+    /// window fails the restore closed rather than guessing. The identities the full's frontier settled before the
+    /// replay starts are kept apart from the window, so the replay's own settles never evict them.
     /// </summary>
     private sealed class SettledIntentWindow
     {
@@ -549,7 +628,15 @@ internal static class RestoreEngine
 
         private readonly Queue<PreparedIntentIdentity> order = new();
 
-        public bool Contains(PreparedIntentIdentity identity) => members.Contains(identity);
+        private readonly HashSet<PreparedIntentIdentity> baseline = [];
+
+        public bool Contains(PreparedIntentIdentity identity) => members.Contains(identity) || baseline.Contains(identity);
+
+        public void AddBaseline(IReadOnlyList<PreparedIntentIdentity> identities)
+        {
+            foreach (PreparedIntentIdentity identity in identities)
+                baseline.Add(identity);
+        }
 
         public void Add(PreparedIntentIdentity identity)
         {
