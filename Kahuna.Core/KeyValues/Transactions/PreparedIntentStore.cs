@@ -224,6 +224,12 @@ internal sealed class PreparedIntentStore
     // on the same key would otherwise both observe the pre-state and clobber each other.
     private readonly object applyGate = new();
 
+    // The open commit observations (see BeginCommitObservation). Copy-on-write under commitObservationGate, so the
+    // install path reads it with no lock.
+    private volatile PreparedIntentCommitObservation[] commitObservations = [];
+
+    private readonly object commitObservationGate = new();
+
     // Resolves an intent's key to its current data partition, so a per-partition snapshot/transfer only covers
     // the intents this partition owns. Null in the pure/in-memory configuration used by unit tests.
     private Func<string, int>? resolvePartition;
@@ -860,6 +866,7 @@ internal sealed class PreparedIntentStore
                 else
                 {
                     intents[key] = result.Intent;
+                    ObserveInstalled(result.Intent);
                     Interlocked.Add(ref totalBytes, IntentBytes(result.Intent) - (existing is null ? 0 : IntentBytes(existing)));
                 }
 
@@ -2009,6 +2016,73 @@ internal sealed class PreparedIntentStore
         }
 
         return due;
+    }
+
+    /// <summary>
+    /// The lowest commit timestamp among the live intents that can still commit (pending, or resolved to commit
+    /// and not yet removed), or <see cref="HLCTimestamp.Zero"/> when there is none. A point-in-time read: an intent
+    /// whose prepare applies after the scan is not seen — <see cref="BeginCommitObservation"/> covers that.
+    /// </summary>
+    public HLCTimestamp MinUnsettledCommitTimestamp()
+    {
+        HLCTimestamp min = HLCTimestamp.Zero;
+
+        foreach (KeyValuePair<string, PreparedIntent> kv in intents)
+        {
+            PreparedIntent intent = kv.Value;
+            if (intent.Resolution == PreparedIntentResolution.Aborted || intent.CommitTimestamp == HLCTimestamp.Zero)
+                continue;
+
+            if (min == HLCTimestamp.Zero || intent.CommitTimestamp.CompareTo(min) < 0)
+                min = intent.CommitTimestamp;
+        }
+
+        return min;
+    }
+
+    /// <summary>
+    /// Opens an observation of the lowest commit timestamp among the intents live now and every intent installed
+    /// on this node until the observation is disposed (see <see cref="PreparedIntentCommitObservation"/>).
+    ///
+    /// <para>The observation is registered before the live set is scanned. An install writes the map before it
+    /// reads the registry, so an install the registry read misses happened before the registration, and the scan
+    /// that follows the registration sees it.</para>
+    /// </summary>
+    public PreparedIntentCommitObservation BeginCommitObservation()
+    {
+        PreparedIntentCommitObservation observation = new(EndCommitObservation);
+
+        lock (commitObservationGate)
+            commitObservations = [.. commitObservations, observation];
+
+        foreach (KeyValuePair<string, PreparedIntent> kv in intents)
+            observation.Observe(kv.Value);
+
+        return observation;
+    }
+
+    private void EndCommitObservation(PreparedIntentCommitObservation observation)
+    {
+        lock (commitObservationGate)
+        {
+            PreparedIntentCommitObservation[] current = commitObservations;
+            int index = Array.IndexOf(current, observation);
+            if (index < 0)
+                return;
+
+            PreparedIntentCommitObservation[] next = new PreparedIntentCommitObservation[current.Length - 1];
+            Array.Copy(current, 0, next, 0, index);
+            Array.Copy(current, index + 1, next, index, current.Length - index - 1);
+            commitObservations = next;
+        }
+    }
+
+    // Called after every write of an intent into the map. Costs one volatile read when no observation is open.
+    private void ObserveInstalled(PreparedIntent intent)
+    {
+        PreparedIntentCommitObservation[] open = commitObservations;
+        for (int i = 0; i < open.Length; i++)
+            open[i].Observe(intent);
     }
 
     public int Count => intents.Count;
@@ -3188,6 +3262,7 @@ internal sealed class PreparedIntentStore
         if (!intents.TryGetValue(incoming.Key, out PreparedIntent? existing))
         {
             intents[incoming.Key] = incoming;
+            ObserveInstalled(incoming);
             Interlocked.Add(ref totalBytes, IntentBytes(incoming));
             StampDirty(incoming.Key);
             return;
@@ -3203,6 +3278,7 @@ internal sealed class PreparedIntentStore
         if (existing.IsPending && incoming.IsResolved)
         {
             intents[incoming.Key] = incoming;
+            ObserveInstalled(incoming);
             Interlocked.Add(ref totalBytes, IntentBytes(incoming) - IntentBytes(existing));
             StampDirty(incoming.Key);
         }

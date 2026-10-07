@@ -341,38 +341,44 @@ every partition "cap your coverage at `T`." Each partition independently include
 
 ### Choosing a safe `T`
 
-There is a subtlety worth understanding. A transaction that spans two partitions commits on each
-partition with that partition's *own* local timestamp, so the two halves can land at slightly
-different HLCs. If `T` were chosen to fall *between* them, the cut would include one half and exclude
-the other — a torn transaction.
+Every participant of a durable transaction carries the **same** commit timestamp, minted once by the
+transaction's coordinator. Backup capture and restore both cut on that shared timestamp, not on each
+partition's local log time, so a transaction that is already settled is included or excluded as a
+whole. The danger is a transaction that is still **in flight** while the backup runs:
 
 ```
-   cross-shard transaction:   shard A commits at t=240   shard B commits at t=260
-                                          │                       │
-   unsafe T = 250  ───────────────────────┼─────── T ─────────────┼──  A in, B out  → TORN
-   safe   T = 230  ──── T ─────────────────┼───────────────────────┼──  both out     → OK
-   safe   T = 270  ────────────────────────┼───────────────────────┼─── T ──  both in → OK
+   transaction X, commit timestamp C = 240, participants on shard A and shard B
+
+   decided ──► A's row installed ──► [ checkpoint taken ] ──► B's row installed
+                                             │
+                    image at T = 250:  A in, B out  → TORN
 ```
 
-To avoid the torn case, the coordinator picks `T` **strictly below the earliest in-flight (preparing)
-transaction in the cluster**. Any transaction that is mid-commit will land entirely above `T` and be
-excluded as a whole; everything already settled below `T` is included. When the cluster is idle (no
-transactions in flight), `T` is simply the latest committed point — which includes everything and so
-can't tear anything.
+A durable transaction's pending writes live as **prepared intents** on each participant partition.
+Its commit timestamp is minted on its coordinator *before* any prepare is proposed, so a prepare with
+a low commit timestamp can reach a partition after the backup has picked `T`. The coordinator
+therefore does two things:
 
-> **What this guarantees, and what it doesn't.** Choosing `T` below all in-flight work prevents
-> cutting a transaction *that is actively committing*. It does not, by itself, protect against a
-> transaction that committed earlier whose two halves happened to land on opposite sides of `T`. In
-> practice the coordinator chooses `T` to avoid the active-commit case; an unconditional guarantee
-> would require stamping every participant of a transaction with one shared commit timestamp, which
-> is a larger change. For most operational backups — taken at a quiet point or with the coordinator
-> picking a safe `T` — the cut is consistent.
+1. **It picks `T` below everything it can see in flight.** `T` sits strictly below the lowest commit
+   timestamp among the live prepared intents (and the prepared actor write intents) on the
+   coordinator. When nothing is in flight, `T` is the latest committed point.
+2. **It verifies `T` after the capture.** Before it picks `T`, the coordinator starts to watch every
+   prepared intent that is live or that arrives. After the checkpoint, it confirms for every captured
+   partition that it applied everything the cluster had committed. If it saw a transaction at or
+   below `T`, it discards the image and tries again with a new `T`. After three attempts it fails with
+   the retryable outcome `CutUnverified` (HTTP 503 / gRPC `Unavailable`), and nothing is published.
 
-> **Decision — accept a "choose a safe T" rule rather than re-architect commits now.** The fully
-> general fix (one shared commit timestamp across all participants of a transaction) is a deep change
-> to how transactions commit. The pragmatic choice is to keep per-shard commit timestamps and instead
-> have the coordinator *pick `T` to dodge the dangerous zone*. It covers the common case cheaply, and
-> the limitation is documented honestly rather than hidden behind an over-promise.
+> **Why the check is sound.** If any write of transaction X is in the image, X was decided before the
+> checkpoint, so every prepare of X had committed. The confirmation makes each of those prepares
+> applied on the coordinator, so the coordinator saw X's commit timestamp — unless that participant
+> had already settled before the watch started, in which case its row is in the image too. A
+> transaction decided after the checkpoint has no write in the image, so it is excluded as a whole.
+
+> **Limits.** The check covers durable transactions. A persistent transaction that falls back to the
+> ticket path (for example one that only extends a key) keeps its pending state on its partition
+> leader's actors, and the coordinator sees only its own actors. A plain full backup
+> (`/v1/backups/full`) and an incremental do not pick or verify a cut; use a coordinated backup when
+> you need one consistent cut across partitions.
 
 ---
 
@@ -551,7 +557,8 @@ Leaving it empty disables that guard (a null id is treated as "unknown" and skip
 A **coordinated** backup (`/v1/backups/coordinated`) is the cluster-wide product: it is accepted only
 on the node that leads the meta partition (the *backup coordinator*). A request to any other node is
 rejected with outcome `NotBackupCoordinator` (HTTP 503 / gRPC `Unavailable`) — retry against the
-current leader. Because leadership can move, **the coordinator changes over time**, so a coordinated
+current leader. A coordinated backup can also fail with `CutUnverified` (HTTP 503 / gRPC `Unavailable`)
+when transactions kept overtaking its cut (see §8); nothing is published, so retry it. Because leadership can move, **the coordinator changes over time**, so a coordinated
 backup is written to whichever node was coordinator at the time.
 
 > **The catalog is whatever is at `BackupDir`.** `ListBackups`, chain resolution, and parent lookup

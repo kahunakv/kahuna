@@ -374,6 +374,9 @@ internal sealed partial class KeyValuesManager
     internal Task<HLCTimestamp> GetSafeTimestampAsync() =>
         nodeMaintenance.GetSafeTimestampAsync();
 
+    internal Transactions.PreparedIntentCommitObservation BeginCommitObservation() =>
+        nodeMaintenance.BeginCommitObservation();
+
     internal Task<bool> PurgeUnhostedPartitionDataAsync(int partitionId, Func<bool> stillUnhosted, CancellationToken cancellationToken) =>
         nodeMaintenance.PurgeUnhostedPartitionDataAsync(partitionId, stillUnhosted, cancellationToken);
 

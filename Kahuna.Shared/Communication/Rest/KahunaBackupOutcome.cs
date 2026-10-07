@@ -78,4 +78,12 @@ public enum KahunaBackupOutcome
     /// partitions. Restore a chain with full coverage instead.
     /// </summary>
     RestrictedCoverage = 16,
+
+    /// <summary>
+    /// A coordinated backup could not prove that its image holds every transaction at or below its cut as a
+    /// whole: a transaction at or below the cut was still in flight during the capture on every attempt, or a
+    /// partition could not confirm that the coordinator applied everything the cluster had committed. Nothing
+    /// was published; retry.
+    /// </summary>
+    CutUnverified = 17,
 }

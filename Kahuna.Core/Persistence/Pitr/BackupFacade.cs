@@ -118,7 +118,10 @@ internal sealed class BackupFacade : IDisposable
                 MaxAge: configuration.BackupRetentionMaxAge > TimeSpan.Zero ? configuration.BackupRetentionMaxAge : null,
                 MaxTotalBytes: configuration.BackupRetentionMaxBytes > 0 ? configuration.BackupRetentionMaxBytes : null),
             // Restore checkpoint-copy throughput budget (bytes/sec; 0 = unlimited).
-            copyThrottleBytesPerSec: configuration.BackupRestoreThrottleBytesPerSec);
+            copyThrottleBytesPerSec: configuration.BackupRestoreThrottleBytesPerSec,
+            // The coordinated backup verifies its cut after the capture against the durable intents this node
+            // held from before the cut was chosen until then.
+            beginCommitObservation: keyValues.BeginCommitObservation);
 
         // Periodic backup GC: sweeps crash-orphaned/leftover artifacts (always) and enforces
         // retention (when configured), including a startup sweep on its first tick. Disabled when
@@ -322,6 +325,9 @@ internal sealed class BackupFacade : IDisposable
         BackupDriverException d when d.TopologyChanged =>
             new(KahunaBackupOutcome.TopologyChanged,
                 "The cluster topology changed during the backup; nothing was published. Retry once stable."),
+        BackupDriverException d when d.CutUnverified =>
+            new(KahunaBackupOutcome.CutUnverified,
+                "A transaction at or below the backup cut was still in flight during the capture; nothing was published. Retry."),
         BackupDriverException d when d.RetryableLeadershipLoss =>
             new(KahunaBackupOutcome.RetryableLeadershipLoss,
                 "Meta-partition leadership was lost during the backup; nothing was published. Retry against the leader."),

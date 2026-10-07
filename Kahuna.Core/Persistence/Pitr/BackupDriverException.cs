@@ -58,5 +58,13 @@ internal sealed class BackupDriverException : Exception
     /// </summary>
     public bool RestrictedCoverage { get; init; }
 
+    /// <summary>
+    /// True when a coordinated backup could not prove, after its capture, that its image holds every transaction
+    /// with a commit timestamp at or below the cut as a whole: a durable transaction at or below the cut was in
+    /// flight during the capture, or a partition could not confirm that this node applied everything the cluster
+    /// had committed. Nothing is published; a retry chooses a new cut.
+    /// </summary>
+    public bool CutUnverified { get; init; }
+
     public BackupDriverException(string message) : base(message) { }
 }

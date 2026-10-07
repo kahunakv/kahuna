@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Diagnostics;
 using Kahuna.Server.KeyValues.Ranges;
+using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Shared.Communication.Rest;
 using Kommander;
@@ -31,6 +32,7 @@ internal sealed class BackupService : IDisposable
     private readonly Func<int, long, IDisposable>? _acquireRetentionHold;
     private readonly ILogger? _logger;
     private readonly Func<Task<HLCTimestamp>> _queryMinInFlight;
+    private readonly Func<PreparedIntentCommitObservation>? _beginCommitObservation;
     private readonly BackupRetentionPolicy _retentionPolicy;
 
     // Restore checkpoint-copy throughput budget in bytes/second; 0 = unlimited. Caps the bulk copy so a
@@ -65,7 +67,8 @@ internal sealed class BackupService : IDisposable
         int snapshotHoldLeaseMs = BackupDriver.DefaultSnapshotHoldLeaseMs,
         Func<int, HLCTimestamp>? appliedHlcProbe = null,
         BackupRetentionPolicy retentionPolicy = default,
-        long copyThrottleBytesPerSec = 0)
+        long copyThrottleBytesPerSec = 0,
+        Func<PreparedIntentCommitObservation>? beginCommitObservation = null)
     {
         // Refuse an unsafe backup root before writing anything: a symlinked or group/world-writable
         // directory would let another user on the host read tenant data or tamper with artifacts and
@@ -87,6 +90,7 @@ internal sealed class BackupService : IDisposable
         _catalog = new BackupCatalog(manifestTarget);
         _artifacts = artifactStore;
         _queryMinInFlight = queryMinInFlight;
+        _beginCommitObservation = beginCommitObservation;
         _retentionPolicy = retentionPolicy;
         _copyThrottleBytesPerSec = copyThrottleBytesPerSec;
     }
@@ -228,18 +232,79 @@ internal sealed class BackupService : IDisposable
                 await _raft.AmILeaderIfHosted(metaPartition, fenceCt).ConfigureAwait(false)
                 && _raft.WalAdapter.GetCurrentTerm(metaPartition) == coordinatorTerm;
 
-            HLCTimestamp snapshotT = await SnapshotCoordinator.ComputeSafeSnapshotTimeAsync(
-                _queryMinInFlight, _raft.WalAdapter, _raft.GetPartitionMap(), ct);
-            BackupManifest manifest = await _driver.TakeFullBackupAsync(
-                _artifacts, _catalog, snapshotT, BuildOwnerIdentity(), StillCoordinator,
-                signManifest: ManifestSigner, ct: ct);
-            RecordBackupSuccess(manifest, start);
-            KahunaBackupInfo dto = ToDto(manifest);
-            await TryRunGcLockedAsync(ct).ConfigureAwait(false);
-            return dto;
+            // The cut is chosen from what this node sees in flight, and a durable prepare that applies here after
+            // the choice is invisible to it. So each attempt also verifies its cut after the capture, against an
+            // observation of the durable intents opened before the choice. An attempt whose cut a transaction
+            // overtook publishes nothing, and the next attempt chooses again with that transaction in view.
+            for (int attempt = 1; ; attempt++)
+            {
+                using PreparedIntentCommitObservation? observation = _beginCommitObservation?.Invoke();
+
+                HLCTimestamp snapshotT = await SnapshotCoordinator.ComputeSafeSnapshotTimeAsync(
+                    _queryMinInFlight, _raft.WalAdapter, _raft.GetPartitionMap(), ct);
+
+                BackupDriver.VerifyCutDelegate? verifyCut = observation is null
+                    ? null
+                    : (cut, covered, verifyCt) => VerifyCoordinatedCutAsync(observation, cut, covered, verifyCt);
+
+                try
+                {
+                    BackupManifest manifest = await _driver.TakeFullBackupAsync(
+                        _artifacts, _catalog, snapshotT, BuildOwnerIdentity(), StillCoordinator,
+                        signManifest: ManifestSigner, verifyCut: verifyCut, ct: ct);
+                    RecordBackupSuccess(manifest, start);
+                    KahunaBackupInfo dto = ToDto(manifest);
+                    await TryRunGcLockedAsync(ct).ConfigureAwait(false);
+                    return dto;
+                }
+                catch (BackupDriverException ex) when (ex.CutUnverified && attempt < MaxCoordinatedCutAttempts)
+                {
+                    _logger?.LogWarning(
+                        "Coordinated backup attempt {Attempt} discarded its image at cut {Cut}: {Reason} Retrying with a new cut.",
+                        attempt, snapshotT, ex.Message);
+                }
+            }
         }
         catch { BackupIoMetrics.BackupFailures.Add(1); throw; }
         finally { _gcGate.Release(); }
+    }
+
+    /// <summary>How many cuts a coordinated backup tries before it reports the cut as unverified.</summary>
+    internal const int MaxCoordinatedCutAttempts = 3;
+
+    /// <summary>
+    /// Proves, after the capture, that the image holds every durable transaction with a commit timestamp at or
+    /// below <paramref name="cut"/> as a whole, or holds none of it.
+    ///
+    /// <para>A transaction with a write in the image was decided before the capture, so every one of its
+    /// prepares had committed before this call. Confirming local application of each covered partition makes
+    /// each of those prepares applied on this node. Each of its intents was then live when the observation
+    /// opened, or was installed while it was open — and the observation saw its commit timestamp — or it settled
+    /// before the observation opened, which put its row in the store before the flush and so in the image. So
+    /// when the observation saw nothing at or below the cut, no transaction at or below the cut has only part of
+    /// its writes in the image. A transaction decided after the capture has no write in it at all.</para>
+    /// </summary>
+    private async Task<bool> VerifyCoordinatedCutAsync(
+        PreparedIntentCommitObservation observation, HLCTimestamp cut, IReadOnlyList<int> coveredPartitions, CancellationToken ct)
+    {
+        Task<bool>[] confirmations = new Task<bool>[coveredPartitions.Count];
+        for (int i = 0; i < coveredPartitions.Count; i++)
+            confirmations[i] = _raft.ConfirmLocalApplicationAsync(coveredPartitions[i], ct).AsTask();
+
+        bool[] confirmed = await Task.WhenAll(confirmations).ConfigureAwait(false);
+        for (int i = 0; i < confirmed.Length; i++)
+        {
+            if (!confirmed[i])
+                throw new BackupDriverException(
+                    $"Partition {coveredPartitions[i]} could not confirm that this node applied everything the cluster " +
+                    $"committed, so the backup cut {cut} cannot be verified; the backup was not published.")
+                {
+                    CutUnverified = true
+                };
+        }
+
+        HLCTimestamp min = observation.MinCommitTimestamp;
+        return min == HLCTimestamp.Zero || min.CompareTo(cut) > 0;
     }
 
     private static void RecordBackupSuccess(BackupManifest manifest, long startTimestamp)

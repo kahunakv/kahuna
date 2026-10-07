@@ -9,11 +9,10 @@ namespace Kahuna.Server.KeyValues.Handlers;
 /// Returns the minimum prepared <c>CommitTimestamp</c> across all live write intents in this
 /// shard, or <c>HLCTimestamp.Zero</c> when the shard has no in-flight prepared transactions.
 ///
-/// <para>Used by the coordinated-snapshot coordinator.  Any T strictly below the returned
-/// minimum avoids cutting a <em>currently prepared</em> transaction on this shard.  This does
-/// not protect against already-committed cross-shard transactions whose per-shard WAL
-/// <c>Time</c> values straddle T — those have no live <c>WriteIntent</c> and are invisible to
-/// this scan.  See <see cref="SnapshotCoordinator"/> for the full limitation.</para>
+/// <para>Used by the coordinated-snapshot coordinator.  Only the manual (ephemeral) prepare stamps
+/// the actor intent's commit timestamp; a durable transaction's pending mutation lives in the
+/// prepared-intent store, which the node-level query reads alongside this scan.  See
+/// <see cref="SnapshotCoordinator"/>.</para>
 /// </summary>
 internal sealed class GetSafeTimestampHandler : BaseHandler
 {

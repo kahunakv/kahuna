@@ -9,9 +9,12 @@ namespace Kahuna.Server.Persistence.Pitr;
 /// Computes the cluster-wide snapshot timestamp T for coordinated backups.
 ///
 /// <para><b>What this protects against:</b> T is placed strictly below the minimum in-flight
-/// (prepared but not yet committed) <c>CommitTimestamp</c> across all actor shards, so a
-/// transaction that is actively mid-commit when the coordinator runs commits with a shared HLC at
-/// or above that minimum — strictly above T — and is therefore excluded as a whole.</para>
+/// <c>CommitTimestamp</c> this node can see — prepared actor write intents and the durable prepared
+/// intents that can still commit — so a transaction visibly mid-commit when the coordinator runs commits
+/// with a shared HLC strictly above T and is excluded as a whole. A durable prepare can apply on this node
+/// after T is chosen (its commit timestamp is minted on its coordinator first), so the choice alone is not
+/// a proof: <see cref="BackupService"/> verifies T after the capture and chooses again when a transaction
+/// at or below it was in flight.</para>
 ///
 /// <para><b>Already-committed cross-shard transactions are not torn.</b> Each participant of a
 /// transaction carries the same shared coordinator commit HLC in its committed value's payload
@@ -32,9 +35,9 @@ internal static class SnapshotCoordinator
     /// Computes the cluster-wide T.
     ///
     /// <list type="bullet">
-    ///   <item>Calls <paramref name="queryClusterMinInFlight"/> to obtain the minimum prepared
-    ///   <c>CommitTimestamp</c> M across all actor shards.  The delegate returns
-    ///   <see cref="HLCTimestamp.Zero"/> when the cluster is quiesced (no in-flight 2PC).</item>
+    ///   <item>Calls <paramref name="queryClusterMinInFlight"/> to obtain the minimum in-flight
+    ///   <c>CommitTimestamp</c> M this node sees.  The delegate returns
+    ///   <see cref="HLCTimestamp.Zero"/> when nothing is visibly in flight.</item>
     ///   <item>If M is non-zero, returns <c>Predecessor(M)</c> — the HLC tick immediately
     ///   before M.  A transaction still in flight commits with a shared HLC <c>≥ M</c> — strictly
     ///   above T — so the commit-HLC cut applied at capture/restore excludes it as a whole.
@@ -48,8 +51,8 @@ internal static class SnapshotCoordinator
     /// has no committed entries on any partition (e.g. a brand-new empty cluster).
     /// </summary>
     /// <param name="queryClusterMinInFlight">
-    /// Async delegate that fans out <c>GetSafeTimestamp</c> to all actor shards and returns
-    /// the cluster-wide minimum in-flight <c>CommitTimestamp</c> (or Zero).
+    /// Async delegate that returns the minimum in-flight <c>CommitTimestamp</c> this node sees across its
+    /// actor shards and its durable prepared intents (or Zero).
     /// </param>
     /// <param name="wal">WAL adapter used for the quiesced fallback scan.</param>
     /// <param name="partitions">Partition list — same set passed to <see cref="BackupDriver"/>.</param>

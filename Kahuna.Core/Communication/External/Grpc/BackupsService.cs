@@ -163,6 +163,7 @@ public sealed class BackupsService : Backups.BackupsBase
         KahunaBackupOutcome.RetryableLeadershipLoss => StatusCode.Unavailable,
         KahunaBackupOutcome.NotBackupCoordinator => StatusCode.Unavailable,
         KahunaBackupOutcome.InsecureRoot => StatusCode.Unavailable,
+        KahunaBackupOutcome.CutUnverified => StatusCode.Unavailable,
         KahunaBackupOutcome.Cancelled => StatusCode.Cancelled,
         KahunaBackupOutcome.IoError => StatusCode.Internal,
         KahunaBackupOutcome.ParentMissing => StatusCode.NotFound,

@@ -47,6 +47,13 @@ internal sealed class BackupDriver
     internal const int DefaultApplyBarrierTimeoutMs = 30_000;
 
     /// <summary>
+    /// Checks, after the checkpoint is captured, that no transaction with a commit timestamp at or below
+    /// <paramref name="cut"/> was decided with only part of its writes in the image. <paramref name="coveredPartitions"/>
+    /// are the partitions the image holds. Returns false when the image may be torn; nothing is then published.
+    /// </summary>
+    internal delegate Task<bool> VerifyCutDelegate(HLCTimestamp cut, IReadOnlyList<int> coveredPartitions, CancellationToken ct);
+
+    /// <summary>
     /// Acquires an MVCC snapshot-history hold pinning revision history at the given cut, returning a
     /// hold id, or <c>null</c> when protection cannot be guaranteed (the effective snapshot floor
     /// already passed the cut, or the hold could not be acquired) — in which case the full backup
@@ -106,13 +113,13 @@ internal sealed class BackupDriver
     public Task<BackupManifest> TakeFullBackupAsync(IBackupArtifactStore artifacts, BackupCatalog catalog,
         HLCTimestamp? snapshotT = null, BackupOwnerIdentity identity = default,
         Func<CancellationToken, Task<bool>>? verifyCoordinator = null, Action<BackupManifest>? signManifest = null,
-        CancellationToken ct = default) =>
+        VerifyCutDelegate? verifyCut = null, CancellationToken ct = default) =>
         RunFullAsync(_raft.WalAdapter, _raft.GetPartitionMap(), _persistenceBackend,
             artifacts, catalog, _flushBeforeCheckpoint, snapshotT,
             _acquireSnapshotHold, _releaseSnapshotHold, _renewSnapshotHold, _snapshotHoldLeaseMs, _appliedHlcProbe,
             identity: identity, topologyGenerationProbe: ComposeTopologyGeneration,
             hostsPartition: _raft.HostsPartition,
-            verifyCoordinator: verifyCoordinator, signManifest: signManifest, ct: ct);
+            verifyCoordinator: verifyCoordinator, signManifest: signManifest, verifyCut: verifyCut, ct: ct);
 
     /// <summary>
     /// Reads committed WAL entries since the parent backup's <c>ToIndex</c>, serialises them
@@ -207,6 +214,7 @@ internal sealed class BackupDriver
         Func<int, bool>? hostsPartition = null,
         Func<CancellationToken, Task<bool>>? verifyCoordinator = null,
         Action<BackupManifest>? signManifest = null,
+        VerifyCutDelegate? verifyCut = null,
         CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
@@ -372,6 +380,17 @@ internal sealed class BackupDriver
                          await artifacts.BeginCheckpointAsync(backupId, workCt).ConfigureAwait(false))
             {
                 persistenceBackend.CreateCheckpointAsOf(staging.LocalPath, maxAppliedIndex, cut, workCt);
+
+                // The checkpoint is the capture. Only now can the caller prove that no transaction with a commit
+                // timestamp at or below the cut was decided with part of its writes outside the image — a
+                // transaction decided later has no write in it. Checked before anything is hashed or published.
+                if (verifyCut is not null && !await verifyCut(cut, coveredPartitions, workCt).ConfigureAwait(false))
+                    throw new BackupDriverException(
+                        $"A transaction with a commit timestamp at or below the backup cut {cut} was still in flight " +
+                        "during the capture, so the image may hold only part of it; the backup was not published.")
+                    {
+                        CutUnverified = true
+                    };
 
                 // Hash every file the checkpoint produced (data files AND the sidecar), not just the
                 // sidecar, so a truncated or altered checkpoint is caught before replay. Hashing happens

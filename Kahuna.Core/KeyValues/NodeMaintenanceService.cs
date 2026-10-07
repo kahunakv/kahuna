@@ -58,9 +58,14 @@ internal sealed class NodeMaintenanceService
     }
 
     /// <summary>
-    /// Fans out a <c>GetSafeTimestamp</c> query to every key-value actor shard and returns
-    /// the minimum prepared <c>CommitTimestamp</c> across all live write intents in the cluster.
-    /// Returns <see cref="HLCTimestamp.Zero"/> when no shard has an in-flight prepared transaction.
+    /// Returns the lowest commit timestamp this node knows a transaction is still in flight at: the prepared
+    /// <c>CommitTimestamp</c> of every live actor write intent (fanned out to every key-value actor shard), and
+    /// the commit timestamp of every durable prepared intent that can still commit. A durable transaction never
+    /// sets the actor intent's commit timestamp — its pending mutation lives in the prepared-intent store, which
+    /// every replica of the partition holds. Returns <see cref="HLCTimestamp.Zero"/> when neither source has one.
+    ///
+    /// <para>A point-in-time answer: a prepare that applies after it is not seen. A caller that needs a cut
+    /// nothing in flight can pass must verify it after its capture (see <c>BackupService</c>).</para>
     /// </summary>
     internal async Task<HLCTimestamp> GetSafeTimestampAsync()
     {
@@ -75,7 +80,7 @@ internal sealed class NodeMaintenanceService
 
         KeyValueResponse?[] results = await Task.WhenAll(tasks);
 
-        HLCTimestamp min = HLCTimestamp.Zero;
+        HLCTimestamp min = runtime.PreparedIntentStore.MinUnsettledCommitTimestamp();
         foreach (KeyValueResponse? r in results)
         {
             if (r is null || r.Ticket == HLCTimestamp.Zero)
@@ -86,6 +91,11 @@ internal sealed class NodeMaintenanceService
 
         return min;
     }
+
+    /// <summary>Opens a commit observation over this node's durable prepared intents (see
+    /// <see cref="Transactions.PreparedIntentCommitObservation"/>).</summary>
+    internal Transactions.PreparedIntentCommitObservation BeginCommitObservation() =>
+        runtime.PreparedIntentStore.BeginCommitObservation();
 
     /// <summary>
     /// Removes everything this node retains for a partition the committed map no longer hosts
