@@ -46,4 +46,12 @@ internal sealed class KeyValueMvccEntry
     /// When true this write must not archive a historical revision entry.
     /// </summary>
     public bool NoRevision { get; set; }
+
+    /// <summary>
+    /// The write intent that held the key when this transaction staged its first write here, or null while the
+    /// transaction has only read the key. A snapshot read waits for the staged write only while that same intent
+    /// is live, so the commit-time probe proves the transaction never lost the key by finding this exact intent
+    /// still in place and never lapsed (see <see cref="KeyValueWriteIntent.Lapsed"/>).
+    /// </summary>
+    public KeyValueWriteIntent? StagedUnder { get; set; }
 }

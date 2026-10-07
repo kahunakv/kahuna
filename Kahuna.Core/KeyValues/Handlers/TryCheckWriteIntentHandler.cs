@@ -62,6 +62,10 @@ internal sealed class TryCheckWriteIntentHandler : BaseHandler
             && RangeLockChecks.KeyCoveredByForeignRangeLock(context, message.Key, GetBucket(message.Key), message.TransactionId, currentTime))
             return KeyValueStaticResponses.AbortedResponse;
 
+        if ((message.ConflictChecks & KeyValueConflictChecks.OwnStagedIntent) != 0
+            && !OwnStagedIntentHeld(message, currentTime))
+            return KeyValueStaticResponses.UnlockedResponse;
+
         if ((message.ConflictChecks & (KeyValueConflictChecks.WriteIntent | KeyValueConflictChecks.StagedBase)) == 0)
             return KeyValueStaticResponses.DoesNotExistContextResponse;
 
@@ -132,6 +136,45 @@ internal sealed class TryCheckWriteIntentHandler : BaseHandler
             return KeyValueStaticResponses.AbortedResponse;
 
         return KeyValueStaticResponses.DoesNotExistContextResponse;
+    }
+
+    /// <summary>
+    /// Whether the write intent this transaction staged its write on the key under still holds the key and never
+    /// lapsed. A snapshot read waits for a staged write only while that intent is live; the transaction's commit
+    /// timestamp is frozen before any prepare lands, so if the intent was lost in between, a read may already have
+    /// answered the old value at a snapshot the commit would land inside. Lost means any of:
+    /// <list type="bullet">
+    /// <item>no MVCC entry of this transaction, or one that records no staged write: a leader change dropped the
+    /// staged state, or the key was evicted with it;</item>
+    /// <item>the resident intent is not the one the write was staged under: the original lapsed and was cleared,
+    /// or another transaction holds the key now;</item>
+    /// <item>the intent lapsed at any point, even if its owner renewed it afterwards
+    /// (<see cref="KeyValueWriteIntent.Lapsed"/>), or is not live now.</item>
+    /// </list>
+    /// A held intent's lease is renewed, so it cannot lapse between this probe and a prepare that follows it (the
+    /// one-phase bundle validates before it proposes). A session-owned intent (no deadline) is left as is.
+    /// </summary>
+    private bool OwnStagedIntentHeld(KeyValueRequest message, HLCTimestamp currentTime)
+    {
+        if (!context.Store.TryGetValue(message.Key, out KeyValueEntry? entry)
+            || entry.MvccEntries is null
+            || !entry.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? mvccEntry)
+            || mvccEntry.StagedUnder is not { } stagedUnder)
+            return false;
+
+        if (!ReferenceEquals(entry.WriteIntent, stagedUnder)
+            || stagedUnder.Lapsed
+            || !KeyValueWriteIntentLease.IsLive(context, message.Key, stagedUnder, currentTime))
+            return false;
+
+        if (stagedUnder.Expires != HLCTimestamp.Zero)
+        {
+            HLCTimestamp renewed = currentTime + context.Configuration.StagedWriteIntentLeaseMs;
+            if (renewed > stagedUnder.Expires)
+                stagedUnder.Expires = renewed;
+        }
+
+        return true;
     }
 
     /// <summary>

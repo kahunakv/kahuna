@@ -356,6 +356,10 @@ internal sealed class TrySetHandler : BaseHandler
             Yielding = message.ConflictPolicy == TransactionConflictPolicy.Yield
         };
 
+        // The intent is also what makes a snapshot read wait for this staged write; the commit-time probe
+        // proves it held the key from here on (see KeyValueMvccEntry.StagedUnder).
+        mvccEntry.StagedUnder ??= entry.WriteIntent;
+
         return new(KeyValueResponseType.Set, mvccEntry.Revision, currentTime);
     }
 }

@@ -230,6 +230,18 @@ internal static class DurableTransactionMetrics
     }
 
     /// <summary>
+    /// Transactions refused at commit because the write intent one of their staged writes was staged under was
+    /// lost before the commit became visible: its lease lapsed, another transaction took the key, or a leader
+    /// change dropped it. A snapshot read in that window did not wait for the staged write, so committing could
+    /// land the write inside a snapshot that already answered without it. A sustained rate means transactions
+    /// that outlive the staged-intent lease, or frequent leader changes.
+    /// </summary>
+    internal static readonly Counter<long> LostStagedIntentAborts =
+        Meter.CreateCounter<long>(
+            "kahuna.transactions.lost_staged_intent_aborts",
+            description: "Transactions refused at commit because the write intent a staged write relied on was lost.");
+
+    /// <summary>
     /// Transactions aborted at the commit barrier because a foreign range lock covered a key they had written —
     /// a range lock acquired after the write was staged, which the write-time fence cannot see. Each occurrence
     /// is a prevented phantom write. A sustained rate means real contention between writers and range-locking

@@ -1,6 +1,10 @@
 using System.Text;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kommander.Data;
+using Kahuna.Server.Replication.Protos;
+using Kahuna.Server.Replication;
+using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Shared.KeyValue;
 using Kommander.Time;
 using Microsoft.Extensions.Logging;
@@ -122,7 +126,7 @@ public sealed class TestEarlyWriteConflictAbort
     /// Leaves a committed transaction's value for <paramref name="key"/> in the settlement window: its prepared
     /// intent is still pending while its canonical record already says commit.
     /// </summary>
-    private static async Task ImportCommittedUnsettledIntent(
+    private static async Task<PreparedIntent> ImportCommittedUnsettledIntent(
         KahunaManager kahuna, string key, long revision, string value, CancellationToken ct)
     {
         string anchor = key + "/committer";
@@ -142,6 +146,32 @@ public sealed class TestEarlyWriteConflictAbort
             Participants: [new TransactionParticipantRef(key, KeyValueDurability.Persistent)], ManifestPresent: true,
             Decision: TransactionDecision.Commit, AbortClass: TransactionAbortClass.None, WinningOpId: txId,
             CreatedAt: txId, DecidedAt: txId)]);
+
+        return kahuna.DurablePreparedIntentStore.Get(key)!;
+    }
+
+    /// <summary>
+    /// Leaves a committed transaction's value for <paramref name="key"/> reflected in the resident head while its
+    /// prepared intent is still unsettled — the state right after a commit on the key. The intent takes the next
+    /// revision, and its committed value is applied the way a replicated commit applies it, so the head carries
+    /// exactly the intent's revision and commit timestamp, as a real materialization does. Returns that revision.
+    /// </summary>
+    private static async Task<long> ImportMaterializedUnsettledIntent(
+        KahunaManager kahuna, string key, long revision, string value, CancellationToken ct)
+    {
+        PreparedIntent intent = await ImportCommittedUnsettledIntent(kahuna, key, revision, value, ct);
+
+        byte[] record = PreparedIntentMaterializer.ToKeyValueRecord(
+            intent with { Resolution = PreparedIntentResolution.Committed }, new KeyValueMessage());
+
+        bool applied = await kahuna.OnReplicationReceived(
+            kahuna.LocateRange(key).PartitionId,
+            new RaftLog { LogType = ReplicationTypes.KeyValues, LogData = record });
+
+        Assert.True(applied, "the committed value must apply");
+        Assert.Equal(revision, (await LatestCommitted(kahuna, key, ct)).Revision);
+
+        return revision;
     }
 
     /// <summary>
@@ -187,8 +217,8 @@ public sealed class TestEarlyWriteConflictAbort
         KahunaManager kahuna = (KahunaManager)node.Kahuna;
         string key = NewKey();
 
-        long head = await AutoCommitSet(kahuna, key, "seed", ct);
-        await ImportCommittedUnsettledIntent(kahuna, key, head, "seed", ct);
+        long seeded = await AutoCommitSet(kahuna, key, "seed", ct);
+        long head = await ImportMaterializedUnsettledIntent(kahuna, key, seeded + 1, "committed", ct);
 
         TransactionHandle loser = await StartOptimistic(kahuna, key, ct);
         (KeyValueResponseType firstRead, ReadOnlyKeyValueEntry? first) = await TxGet(kahuna, loser, key, ct);
@@ -317,8 +347,8 @@ public sealed class TestEarlyWriteConflictAbort
         KahunaManager kahuna = (KahunaManager)node.Kahuna;
         string key = NewKey();
 
-        long head = await AutoCommitSet(kahuna, key, "seed", ct);
-        await ImportCommittedUnsettledIntent(kahuna, key, head, "seed", ct);
+        long seeded = await AutoCommitSet(kahuna, key, "seed", ct);
+        await ImportMaterializedUnsettledIntent(kahuna, key, seeded + 1, "committed", ct);
 
         TransactionHandle loser = await StartOptimistic(kahuna, key, ct);
         Assert.Equal(KeyValueResponseType.Exists, (await TxExists(kahuna, loser, key, ct)).Item1);

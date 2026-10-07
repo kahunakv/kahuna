@@ -64,5 +64,16 @@ public enum KeyValueConflictChecks
     /// leader, but no longer the same exclusion. Asked alone, never combined with another check: the key only
     /// routes the probe.
     /// </summary>
-    LeaderTerm = 1 << 4
+    LeaderTerm = 1 << 4,
+
+    /// <summary>
+    /// The caller's own staged write on the key is still covered by the write intent it was staged under. The
+    /// commit timestamp is frozen before any prepare lands, and until the prepare does, that in-memory intent is
+    /// the only thing that makes a snapshot read wait for the staged write. If it lapsed, was replaced, or was
+    /// dropped by a leader change, a read may already have answered the old value at a snapshot the commit would
+    /// land inside. Asked of the transaction's written keys at commit. Answers
+    /// <see cref="KeyValueResponseType.Unlocked"/> when the intent was lost, and renews its lease otherwise, so it
+    /// cannot lapse before a prepare that follows this probe lands.
+    /// </summary>
+    OwnStagedIntent = 1 << 5
 }

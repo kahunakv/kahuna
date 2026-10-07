@@ -61,6 +61,14 @@ internal sealed class KeyValueWriteIntent
     /// the durable prepare that follows it. Meaningless on a non-yielding intent.
     /// </summary>
     public bool Pinned { get; set; }
+
+    /// <summary>
+    /// True once any path found this intent no longer live (its lease or liveness ceiling ran out). Sticky: a
+    /// later refresh of the lease by the owner does not clear it. While the intent was not live, a snapshot read
+    /// that met it did not wait for the owner's staged write, so the owner can no longer prove that its commit
+    /// lands outside every snapshot already served on the key; the commit-time probe refuses it.
+    /// </summary>
+    public bool Lapsed { get; set; }
 }
 
 /// <summary>
@@ -137,6 +145,8 @@ internal static class KeyValueWriteIntentLease
 
         if (IsLive(intent, currentTime, ceilingMs))
             return true;
+
+        intent.Lapsed = true;
 
         // A zero deadline can only fail the policy through the ceiling arm, so this branch identifies an
         // orphaned session-owned intent without re-deriving the reason. An ordinary lease expiry is routine

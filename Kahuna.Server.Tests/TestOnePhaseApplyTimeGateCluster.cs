@@ -947,7 +947,11 @@ public sealed class TestOnePhaseApplyTimeGateCluster : BaseCluster
     public async Task StalledBundle_ReadDependencyUnderAForeignLiveIntent_IsRejected_ThenCommitsOnceItClears()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
-        Cluster cluster = await Assemble(applyTimeValidation: true);
+
+        // The competitor is injected straight into the intent stores, so this test needs no short lease. The
+        // victim's own staged intent must stay live across the stall: a lapsed intent let snapshot reads step over
+        // the staged write, and the retry is then refused instead of committing.
+        Cluster cluster = await Assemble(applyTimeValidation: true, config => config.StagedWriteIntentLeaseMs = 30_000);
 
         try
         {

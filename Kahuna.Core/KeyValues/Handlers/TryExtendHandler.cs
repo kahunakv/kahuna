@@ -163,16 +163,19 @@ internal sealed class TryExtendHandler : BaseHandler
             mvccEntry.LastUsed = currentTime;
             mvccEntry.LastModified = currentTime;
 
-            // A yielding transaction plants a write intent for the staged extend so the finalize pin has an
-            // intent to claim and a foreground writer can take the key over. A normal transaction is unchanged.
-            if (message.ConflictPolicy == TransactionConflictPolicy.Yield)
-                entry.WriteIntent ??= new()
-                {
-                    TransactionId = message.TransactionId,
-                    Expires = currentTime + context.Configuration.StagedWriteIntentLeaseMs,
-                    AcquiredAt = currentTime,
-                    Yielding = true
-                };
+            // The staged extend plants a write intent exactly as a staged set does, so a snapshot read waits for
+            // the new expiry instead of answering the old one at a snapshot the extend then commits inside. A
+            // yielding transaction's intent is also what its finalize pin claims and a foreground writer takes
+            // over.
+            entry.WriteIntent ??= new()
+            {
+                TransactionId = message.TransactionId,
+                Expires = currentTime + context.Configuration.StagedWriteIntentLeaseMs,
+                AcquiredAt = currentTime,
+                Yielding = message.ConflictPolicy == TransactionConflictPolicy.Yield
+            };
+
+            mvccEntry.StagedUnder ??= entry.WriteIntent;
             
             return new(KeyValueResponseType.Extended, mvccEntry.Revision, mvccEntry.LastModified);
         }

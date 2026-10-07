@@ -2790,7 +2790,15 @@ internal sealed class TransactionCoordinator : IDisposable
             }
         }
 
-        // Write keys ask only about foreign range locks. Deliberately not about write intents: a foreign
+        // Write keys ask about foreign range locks and about their own staged write intent. The commit timestamp
+        // is frozen before any prepare lands, and until it does, the in-memory intent a write was staged under is
+        // the only thing that makes a snapshot read wait for that write. An intent that lapsed, was taken, or was
+        // dropped by a leader change may have let a read answer the old value at a snapshot this commit would land
+        // inside, so the commit is refused. On the two-phase flows this probe runs after the prepares are durable,
+        // and from there on the prepared intents make reads wait; the one-phase bundle validates before it
+        // proposes, and the probe renews the intent's lease to cover that gap.
+        //
+        // Write keys deliberately do not ask about foreign write intents: a foreign
         // in-memory intent on a key this transaction writes is the durable prepare's conflict to resolve —
         // it retries and helps the blocker settle — and flagging it here would turn that retryable contention
         // into a hard abort. Deliberately not about staged bases either: a moved base on a read-then-written
@@ -2805,7 +2813,7 @@ internal sealed class TransactionCoordinator : IDisposable
                 if (string.IsNullOrEmpty(key))
                     continue;
 
-                probeKeys.Add(new(key, durability, KeyValueConflictChecks.ForeignRangeLock));
+                probeKeys.Add(new(key, durability, KeyValueConflictChecks.ForeignRangeLock | KeyValueConflictChecks.OwnStagedIntent));
             }
         }
 
@@ -2871,6 +2879,23 @@ internal sealed class TransactionCoordinator : IDisposable
                 logger.LogWarning(
                     "Staged base for {Key} moved between validation and prepare of transaction {TransactionId}; aborting to prevent a lost update",
                     key, context.TransactionId);
+
+                return false;
+            }
+
+            if (type == KeyValueResponseType.Unlocked && !isReadKey)
+            {
+                DurableTransactionMetrics.LostStagedIntentAborts.Add(1);
+
+                context.Result = new()
+                {
+                    Type = KeyValueResponseType.Aborted,
+                    Reason = $"Write intent of the staged write on key {key} was lost before commit"
+                };
+
+                logger.LogWarning(
+                    "Refusing to commit transaction {TransactionId}: the write intent its staged write on {Key} relied on lapsed or was dropped",
+                    context.TransactionId, key);
 
                 return false;
             }

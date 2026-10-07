@@ -254,17 +254,19 @@ internal sealed class TryDeleteHandler : BaseHandler
         mvccEntry.State = KeyValueState.Deleted;
         mvccEntry.LastModified = currentTime;
 
-        // A yielding transaction plants a write intent for the staged tombstone so the finalize pin has an
-        // intent to claim and a foreground writer can take the key over. A normal transaction is unchanged: the
-        // tombstone's write-skew fence is the coordinator's commit-time probe, exactly as before.
-        if (message.ConflictPolicy == TransactionConflictPolicy.Yield)
-            entry.WriteIntent ??= new()
-            {
-                TransactionId = message.TransactionId,
-                Expires = currentTime + context.Configuration.StagedWriteIntentLeaseMs,
-                AcquiredAt = currentTime,
-                Yielding = true
-            };
+        // The staged tombstone plants a write intent exactly as a staged set does. The intent is what makes a
+        // snapshot read wait for the tombstone: the commit timestamp is frozen before any prepare lands, so a read
+        // that met no intent here could answer the live value at a snapshot the delete then commits inside. A
+        // yielding transaction's intent is also what its finalize pin claims and a foreground writer takes over.
+        entry.WriteIntent ??= new()
+        {
+            TransactionId = message.TransactionId,
+            Expires = currentTime + context.Configuration.StagedWriteIntentLeaseMs,
+            AcquiredAt = currentTime,
+            Yielding = message.ConflictPolicy == TransactionConflictPolicy.Yield
+        };
+
+        mvccEntry.StagedUnder ??= entry.WriteIntent;
 
         return new(KeyValueResponseType.Deleted, mvccEntry.Revision, mvccEntry.LastModified);
     }

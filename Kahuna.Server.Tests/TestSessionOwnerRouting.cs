@@ -118,6 +118,27 @@ public sealed class TestSessionOwnerRouting : BaseCluster
         return (handle, partition, owner);
     }
 
+    /// <summary>
+    /// A fresh data key that routes to a partition other than <paramref name="partition"/>, so moving that
+    /// partition's leadership moves the session's coordinator only, not the leader that holds the staged write. A
+    /// staged write lives in its leader's memory, and a commit after its partition changed leader is refused (see
+    /// <see cref="OwnerCommit_AfterTheWrittenKeysPartitionChangedLeader_IsRefused"/>). Keys route by their parent
+    /// bucket, so the candidates vary the bucket.
+    /// </summary>
+    private static string DataKeyOffPartition(KahunaManager manager, string prefix, int partition)
+    {
+        string runId = Guid.NewGuid().ToString("N")[..8];
+
+        for (int i = 0; i < 256; i++)
+        {
+            string candidate = $"{prefix}-{runId}-{i}/k";
+            if (manager.LocateRange(candidate).PartitionId != partition)
+                return candidate;
+        }
+
+        throw new InvalidOperationException("no data key routes away from the coordinator partition");
+    }
+
     private static async Task AssertValueVisible(KahunaManager reader, string key, string expected, CancellationToken ct)
     {
         await WaitUntilAsync(async () =>
@@ -147,8 +168,9 @@ public sealed class TestSessionOwnerRouting : BaseCluster
             string key = "owner-route/" + Guid.NewGuid().ToString("N")[..8];
             (TransactionHandle handle, int partition, int owner) = await BeginOnItsCoordinator(rafts, managers, key, ct);
             int successor = (owner + 1) % Nodes;
+            string dataKey = DataKeyOffPartition(managers[owner], "owner-route-data", partition);
 
-            await Write(managers[owner], handle, key, "moved-then-committed", ct);
+            await Write(managers[owner], handle, dataKey, "moved-then-committed", ct);
 
             await MoveLeadership(rafts, partition, owner, successor, ct);
 
@@ -158,7 +180,7 @@ public sealed class TestSessionOwnerRouting : BaseCluster
             Assert.Equal(KeyValueResponseType.Committed, commitType);
 
             foreach (KahunaManager reader in managers)
-                await AssertValueVisible(reader, key, "moved-then-committed", ct);
+                await AssertValueVisible(reader, dataKey, "moved-then-committed", ct);
         }
         finally
         {
@@ -183,8 +205,9 @@ public sealed class TestSessionOwnerRouting : BaseCluster
             string key = "owner-fwd/" + Guid.NewGuid().ToString("N")[..8];
             (TransactionHandle handle, int partition, int owner) = await BeginOnItsCoordinator(rafts, managers, key, ct);
             int successor = (owner + 1) % Nodes;
+            string dataKey = DataKeyOffPartition(managers[owner], "owner-fwd-data", partition);
 
-            await Write(managers[owner], handle, key, "forwarded-to-owner", ct);
+            await Write(managers[owner], handle, dataKey, "forwarded-to-owner", ct);
 
             await MoveLeadership(rafts, partition, owner, successor, ct);
 
@@ -194,7 +217,48 @@ public sealed class TestSessionOwnerRouting : BaseCluster
             Assert.Equal(KeyValueResponseType.Committed, commitType);
 
             foreach (KahunaManager reader in managers)
-                await AssertValueVisible(reader, key, "forwarded-to-owner", ct);
+                await AssertValueVisible(reader, dataKey, "forwarded-to-owner", ct);
+        }
+        finally
+        {
+            await LeaveCluster(rafts[0], rafts[1], rafts[2]);
+        }
+    }
+
+    /// <summary>
+    /// A staged write lives in the memory of the leader that staged it. When the written key's partition changes
+    /// leader before the commit, the new leader holds nothing that would make a snapshot read wait for the write,
+    /// so the commit is refused (a retryable abort) rather than landing inside a snapshot that may already have
+    /// answered without it.
+    /// </summary>
+    [Fact]
+    public async Task OwnerCommit_AfterTheWrittenKeysPartitionChangedLeader_IsRefused()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft[] rafts, IKahuna[] kahunas) = await AssembleCluster(Nodes, "memory", Partitions, raftLogger, kahunaLogger);
+        KahunaManager[] managers = [.. kahunas.Cast<KahunaManager>()];
+
+        try
+        {
+            string key = "owner-moved-data/" + Guid.NewGuid().ToString("N")[..8];
+            (TransactionHandle handle, _, int owner) = await BeginOnItsCoordinator(rafts, managers, key, ct);
+
+            string dataKey = "owner-moved-data-" + Guid.NewGuid().ToString("N")[..8] + "/k";
+            await Write(managers[owner], handle, dataKey, "never-visible", ct);
+
+            int dataPartition = managers[owner].LocateRange(dataKey).PartitionId;
+            int dataLeader = await LeaderIndexOf(dataPartition, rafts, ct);
+            await MoveLeadership(rafts, dataPartition, dataLeader, (dataLeader + 1) % Nodes, ct);
+
+            (KeyValueResponseType commitType, _) = await RetryOnMustRetryAsync(
+                () => managers[owner].LocateAndCommitTransaction(handle, ct), r => r.Item1);
+
+            Assert.Equal(KeyValueResponseType.Aborted, commitType);
+
+            (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await managers[owner].LocateAndTryGetValue(
+                HLCTimestamp.Zero, dataKey, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+            Assert.True(type == KeyValueResponseType.DoesNotExist || entry?.Value is null);
         }
         finally
         {
