@@ -358,8 +358,11 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     /// the conflict probe and the optimistic read-set validation. <see cref="TransactionAbortClass.None"/> means
     /// the transaction may commit; any other class is the abort the check calls for, recorded on the decision —
     /// <see cref="TransactionAbortClass.Conflict"/> for an observed conflict,
-    /// <see cref="TransactionAbortClass.LostExclusion"/> for a lock or staging dropped by a leader change. Only
-    /// invoked when every prepare committed.</param>
+    /// <see cref="TransactionAbortClass.LostExclusion"/> for a lock or staging dropped by a leader change.
+    /// <see cref="TransactionAbortClass.RetryableFailure"/> means the checks proved nothing (a probed leader could
+    /// not confirm its leadership): no conflict was found and nothing is decided, the attempt answers
+    /// <see cref="DurableFinalizeResult.MustRetry"/> and leaves its prepares for a retry under the same identity.
+    /// Only invoked when every prepare committed.</param>
     /// <param name="opId">This attempt's unique operation id, also used as the transition's attempt HLC (for the
     /// deadline check and the recorded winner). Must be less than or equal to the frozen decision deadline for a
     /// commit to be authorized.</param>
@@ -809,6 +812,13 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         }
         else if (allPrepared && validated)
             outcome = await DecideAsync(input, commit: true, TransactionAbortClass.None, opId, cancellationToken).ConfigureAwait(false);
+        else if (allPrepared && validation == TransactionAbortClass.RetryableFailure)
+        {
+            // The commit-time checks proved nothing: no conflict was found and no exclusion was lost, so there is
+            // no abort to record. The prepares stay installed for a retry under the same identity, and a caller
+            // that abandons the attempt fences it (see TransactionCoordinator.FenceAbandonedFinalize).
+            outcome = Retry();
+        }
         else
         {
             // A stale base is a genuine conflict (the write was validated against a base that moved), whatever
@@ -936,11 +946,18 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         // validation falls back to the standard flow, which re-validates and drives the durable conflict
         // abort with its usual semantics.
         long validateStart = Stopwatch.GetTimestamp();
-        bool validated = await validateReadSet(cancellationToken).ConfigureAwait(false) == TransactionAbortClass.None;
+        TransactionAbortClass validation = await validateReadSet(cancellationToken).ConfigureAwait(false);
         DurableTransactionMetrics.FinalizeValidateMs.Record(Stopwatch.GetElapsedTime(validateStart).TotalMilliseconds);
-        if (!validated)
+        if (validation != TransactionAbortClass.None)
         {
             DurableTransactionMetrics.OnePhasePreBundle(Stopwatch.GetElapsedTime(attemptStart).TotalMilliseconds, forwarded: false);
+
+            // Checks that proved nothing are not a failed validation: nothing durable exists yet, so the attempt
+            // ends as a clean retry. A fallback to the standard flow would make the prepares durable and then
+            // meet the same unanswered probe.
+            if (validation == TransactionAbortClass.RetryableFailure)
+                return (Retry(), OnePhaseFallbackReason.None);
+
             return (null, OnePhaseFallbackReason.ValidationFailed);
         }
 
@@ -1000,6 +1017,17 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         // durable instead of committing behind reads another leader already served. Read here, after the
         // validation, because the validation's probe is what reports the term.
         long exclusionTerm = bundledExclusionTerm?.Invoke() ?? 0;
+
+        // The term is also the proof that the probe confirmed the anchor's staged intents held under a leader
+        // it could name: a written anchor key whose probe passed always reports one. None, with a reporter
+        // wired, means the hold was not proven — an older probe server that reports no term — and the bundle
+        // must not propose unfenced. The standard flow probes after its prepares are durable, where a lost
+        // staging is caught and the prepared intents keep snapshot reads waiting.
+        if (bundledExclusionTerm is not null && exclusionTerm == 0)
+        {
+            DurableTransactionMetrics.OnePhasePreBundle(Stopwatch.GetElapsedTime(attemptStart).TotalMilliseconds, forwarded: false);
+            return (null, OnePhaseFallbackReason.ExclusionTermUnknown);
+        }
 
         byte[] decisionDelta = TransactionRecordStore.SerializeDelta([
             new CommitTransactionCommand(

@@ -73,6 +73,34 @@ internal sealed class PartitionDivergenceContainment
     internal IReadOnlyList<int> GatedPartitions => [.. gated.Keys];
 
     /// <summary>
+    /// Test-only: gates the partition on this node the way a detection does, but without the relinquish, the
+    /// withheld candidacy and the re-seed requests, so a test can hold the gate up on a node that keeps leading.
+    /// That is the window a real detection opens too — the gate stands at once and the relinquish runs detached —
+    /// and the one in which a request routed here is answered MustRetry. Disposing the result clears the gate.
+    /// </summary>
+    internal IDisposable GateForTests(int partitionId)
+    {
+        GatedPartition state = new(string.Empty, "gated by a test", DateTime.UtcNow, new CancellationTokenSource());
+
+        if (!gated.TryAdd(partitionId, state))
+        {
+            state.Lifetime.Dispose();
+            throw new InvalidOperationException($"partition {partitionId} is already gated on this node");
+        }
+
+        return new TestGate(this, partitionId, state);
+    }
+
+    private sealed class TestGate(PartitionDivergenceContainment owner, int partitionId, GatedPartition state) : IDisposable
+    {
+        public void Dispose()
+        {
+            if (owner.gated.TryRemove(new KeyValuePair<int, GatedPartition>(partitionId, state)))
+                state.Lifetime.Dispose();
+        }
+    }
+
+    /// <summary>
     /// Gates the partition on this node and, when this node leads it, relinquishes leadership to
     /// <paramref name="fullerPeer"/>. Idempotent: a partition already gated only re-runs the relinquish,
     /// which is what a re-elected gated node needs.

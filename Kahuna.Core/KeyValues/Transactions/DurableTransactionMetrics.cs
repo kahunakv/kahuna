@@ -113,7 +113,13 @@ internal enum OnePhaseFallbackReason
     None,
     ForeignIntent,
     ValidationFailed,
-    RemoteLeader
+    RemoteLeader,
+
+    /// <summary>
+    /// The commit probe reported no leadership term for the anchor partition, so the bundle had nothing to be
+    /// fenced to and the transaction took the standard flow instead.
+    /// </summary>
+    ExclusionTermUnknown
 }
 
 /// <summary>Which resolution path materialized or settled an intent; the tag of
@@ -1068,6 +1074,7 @@ internal static class DurableTransactionMetrics
     private static readonly KeyValuePair<string, object?> FallbackForeignIntent = new("reason", "foreign_intent");
     private static readonly KeyValuePair<string, object?> FallbackValidationFailed = new("reason", "validation_failed");
     private static readonly KeyValuePair<string, object?> FallbackRemoteLeader = new("reason", "remote_leader");
+    private static readonly KeyValuePair<string, object?> FallbackExclusionTermUnknown = new("reason", "exclusion_term_unknown");
     private static readonly KeyValuePair<string, object?> FallbackOther = new("reason", "other");
 
     internal static void OnePhaseGateDecided(OnePhaseGateOutcome outcome) =>
@@ -1091,6 +1098,7 @@ internal static class DurableTransactionMetrics
             OnePhaseFallbackReason.ForeignIntent => FallbackForeignIntent,
             OnePhaseFallbackReason.ValidationFailed => FallbackValidationFailed,
             OnePhaseFallbackReason.RemoteLeader => FallbackRemoteLeader,
+            OnePhaseFallbackReason.ExclusionTermUnknown => FallbackExclusionTermUnknown,
             _ => FallbackOther
         });
 
@@ -1259,6 +1267,28 @@ internal static class DurableTransactionMetrics
     {
         Interlocked.Increment(ref onePhaseBundleTermFenceRefusals);
         OnePhaseBundleTermFenceRefusals.Add(1);
+    }
+
+    /// <summary>
+    /// Commits refused with MustRetry because the commit probe proved nothing about a probed key: the key's
+    /// leader could not confirm its leadership (a failed read-index, or a partition gated as incomplete), no
+    /// leader was known for the partition, or the answer was one this node does not know. No conflict was found
+    /// and nothing was decided; the retry's probe asks again.
+    /// </summary>
+    internal static readonly Counter<long> CommitProbesUnproven =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.commit_probes_unproven",
+            description: "Commits refused with MustRetry because the commit probe could not prove a probed key clean or conflicting.");
+
+    private static long commitProbesUnproven;
+
+    /// <summary>Process-wide count behind <see cref="CommitProbesUnproven"/>, readable for tests.</summary>
+    internal static long CommitProbesUnprovenCount => Interlocked.Read(ref commitProbesUnproven);
+
+    internal static void CommitProbeUnproven()
+    {
+        Interlocked.Increment(ref commitProbesUnproven);
+        CommitProbesUnproven.Add(1);
     }
 
     private static long onePhaseGatedCommitStaleBaseRejections;

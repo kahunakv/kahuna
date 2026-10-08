@@ -1892,10 +1892,14 @@ internal sealed class TransactionCoordinator : IDisposable
                         return TransactionAbortClass.None;
 
                     // The refusal that failed the check named its cause on the result: a lost lock is recorded
-                    // as such, so the decision does not call a leader change a conflict.
-                    return context.Result is { Type: KeyValueResponseType.Aborted, ExclusionLost: true }
-                        ? TransactionAbortClass.LostExclusion
-                        : TransactionAbortClass.Conflict;
+                    // as such, so the decision does not call a leader change a conflict; and a probe that proved
+                    // nothing is no abort at all — the finalizer decides nothing and the attempt is retried.
+                    return context.Result switch
+                    {
+                        { Type: KeyValueResponseType.MustRetry } => TransactionAbortClass.RetryableFailure,
+                        { Type: KeyValueResponseType.Aborted, ExclusionLost: true } => TransactionAbortClass.LostExclusion,
+                        _ => TransactionAbortClass.Conflict
+                    };
                 },
                 opId,
                 cancellationToken,
@@ -2379,9 +2383,11 @@ internal sealed class TransactionCoordinator : IDisposable
             if (failure is null)
                 continue;
 
+            // A re-read that proved nothing (the key's leader asked for a retry) is no conflict: nothing was
+            // decided, so the commit is refused as MustRetry and the retry validates again.
             context.Result = new()
             {
-                Type = KeyValueResponseType.Aborted,
+                Type = failure.Value.Retryable ? KeyValueResponseType.MustRetry : KeyValueResponseType.Aborted,
                 Reason = failure.Value.AbortReason
             };
 
@@ -2410,7 +2416,8 @@ internal sealed class TransactionCoordinator : IDisposable
                     readKey.Key,
                     readKey.Durability,
                     response
-                )
+                ),
+                Retryable: response is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication
             );
 
         bool existsNow = response == KeyValueResponseType.Exists && current is not null;
@@ -2430,7 +2437,11 @@ internal sealed class TransactionCoordinator : IDisposable
         return null;
     }
 
-    private readonly record struct ReadValidationFailure(string AbortReason, Action Log);
+    /// <summary>
+    /// A read dependency that did not validate. <paramref name="Retryable"/> marks a re-read that proved nothing
+    /// (the leader asked for a retry, or the value was still in flight) as opposed to an observed change.
+    /// </summary>
+    private readonly record struct ReadValidationFailure(string AbortReason, Action Log, bool Retryable = false);
 
     /// <summary>
     /// The write-side compare-and-set, run by the finalizer before anything durable is proposed: checks each
@@ -2620,7 +2631,8 @@ internal sealed class TransactionCoordinator : IDisposable
     /// <summary>
     /// The commit barrier's two questions, asked side by side: whether every lock the transaction was granted
     /// is still in force (<see cref="FindLostLock"/>), and whether a conflict that must not exist at commit does
-    /// (<see cref="ProbeCommitConflicts"/>). False sets the Aborted result.
+    /// (<see cref="ProbeCommitConflicts"/>). False sets the Aborted result, or the MustRetry result when the
+    /// probe proved nothing.
     /// </summary>
     private async Task<bool> CheckCommitConflicts(TransactionContext context, CancellationToken cancellationToken)
     {
@@ -2807,6 +2819,12 @@ internal sealed class TransactionCoordinator : IDisposable
     ///
     /// The two sets are disjoint — a read key that was also written is validated as a write — so a flagged
     /// answer is attributed by which set the key came from.
+    ///
+    /// The probe passes a key only on the clean answer (<see cref="KeyValueResponseType.DoesNotExist"/>). Every
+    /// other answer fails it: a found conflict or a lost own intent refuses the commit as <c>Aborted</c>, and an
+    /// answer that proved nothing — <see cref="KeyValueResponseType.MustRetry"/> from a leader that could not
+    /// confirm its leadership or from a gated partition, or an answer this node does not know — refuses it as
+    /// <c>MustRetry</c>, since nothing was found and nothing was decided.
     /// </summary>
     private async Task<bool> ProbeCommitConflicts(TransactionContext context, CancellationToken cancellationToken)
     {
@@ -2876,11 +2894,12 @@ internal sealed class TransactionCoordinator : IDisposable
 
         foreach ((KeyValueResponseType type, string key, KeyValueDurability durability) in results)
         {
-            // Two results for one key can only differ if one of them found a conflict, and a conflict is the
-            // answer that matters: never let a second, cleaner answer overwrite it. NotSet is the staged-base
-            // fence's "compare failed" — a conflict answer just like Aborted.
+            // Two results for one key can only differ if one of them did not answer clean, and that answer is
+            // the one that matters: never let a second, cleaner answer overwrite it. A found conflict (Aborted,
+            // or NotSet, the staged-base fence's "compare failed") outranks a lost own intent, which outranks
+            // an answer that proved nothing, which outranks the clean answer.
             if (byKey.TryGetValue((key, durability), out KeyValueResponseType existing)
-                && existing is KeyValueResponseType.Aborted or KeyValueResponseType.NotSet)
+                && ProbeAnswerRank(existing) >= ProbeAnswerRank(type))
                 continue;
 
             byKey[(key, durability)] = type;
@@ -2951,8 +2970,35 @@ internal sealed class TransactionCoordinator : IDisposable
                 return false;
             }
 
-            if (type != KeyValueResponseType.Aborted)
+            if (type == KeyValueResponseType.DoesNotExist)
                 continue;
+
+            // Any other answer proved nothing about the key: the leader could not confirm its leadership for
+            // the key's partition (the read-index failed, or the partition is gated as incomplete), no leader
+            // was known for it, or a newer peer answered something this node does not know. Reading such a key
+            // as clean would silently disable every guard the probe was asked about — the write-skew guard on a
+            // read key, the range-lock fence and the staged-intent hold on a written key — and the one-phase
+            // bundle would propose with no term to fence it to. Nothing was found and nothing was decided, so
+            // the refusal is MustRetry rather than Aborted: the retry's probe asks again, and a leader that
+            // then answers finds the intent held or gone.
+            if (type != KeyValueResponseType.Aborted)
+            {
+                DurableTransactionMetrics.CommitProbeUnproven();
+
+                context.Result = new()
+                {
+                    Type = KeyValueResponseType.MustRetry,
+                    Reason = isReadKey
+                        ? $"Commit probe could not be completed for read key {key}: the leader answered {type}"
+                        : $"Commit probe could not be completed for written key {key}: the leader answered {type}"
+                };
+
+                logger.LogWarning(
+                    "Commit probe of transaction {TransactionId} proved nothing about key {Key} (the leader answered {Answer}); refusing with MustRetry",
+                    context.TransactionId, key, type);
+
+                return false;
+            }
 
             if (!isReadKey)
                 DurableTransactionMetrics.RangeLockFenceAborts.Add(1);
@@ -2972,6 +3018,19 @@ internal sealed class TransactionCoordinator : IDisposable
 
         return true;
     }
+
+    /// <summary>
+    /// How much a commit probe answer matters when two answers cover one key (see
+    /// <see cref="ProbeCommitConflicts"/>): a found conflict first, then a lost own intent, then an answer that
+    /// proved nothing, then the clean answer.
+    /// </summary>
+    private static int ProbeAnswerRank(KeyValueResponseType type) => type switch
+    {
+        KeyValueResponseType.Aborted or KeyValueResponseType.NotSet => 3,
+        KeyValueResponseType.Unlocked => 2,
+        KeyValueResponseType.DoesNotExist => 0,
+        _ => 1
+    };
 
     /// <summary>
     /// The finalize pin for a yielding transaction. Before any prepare, it claims every write intent the

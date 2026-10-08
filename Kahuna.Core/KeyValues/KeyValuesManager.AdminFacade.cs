@@ -255,6 +255,9 @@ internal sealed partial class KeyValuesManager
     /// <summary>Gates and relinquishes a partition whose local projection is proven incomplete; see <see cref="PartitionDivergenceContainment"/>.</summary>
     internal PartitionDivergenceContainment DivergenceContainment => runtime.DivergenceContainment;
 
+    /// <summary>The data partition a key routes to on this node. Diagnostic/test access.</summary>
+    internal int RouteKey(string key) => locator.RouteKey(key);
+
     /// <summary>The Raft-facing dispatcher, for tests that drive its notifications or its test hooks directly.</summary>
     internal KeyValueReplicationDispatcher ReplicationDispatcher => replicationDispatcher;
 
