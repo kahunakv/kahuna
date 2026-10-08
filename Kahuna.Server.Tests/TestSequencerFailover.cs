@@ -292,21 +292,23 @@ public sealed class TestSequencerFailover : BaseCluster
     }
 
     /// <summary>
-    /// The owner-direct entry points — the ones a forwarded request lands on — re-check leadership
-    /// themselves: on a node that does not lead the sequence's partition they answer
-    /// <c>MustRetry</c> instead of serving, so a stale forward can neither put a second actor behind
-    /// the sequence nor be forwarded onward into a routing loop.
+    /// A request another node forwarded here re-enters the locator under the forwarded marker. On the
+    /// node that leads the sequence's partition it is served. On a node that hosts the partition
+    /// without leading it, it is redirected once more to the leader resolved from local Raft state,
+    /// so it succeeds instead of answering <c>MustRetry</c> to a sender that would only guess the same
+    /// target again. A chain that already spent its hop budget is refused on the follower, so nodes
+    /// with disagreeing leadership views cannot bounce one request between each other.
     /// </summary>
     [Fact]
-    public async Task OwnerDirectCallsOnANonLeaderAnswerMustRetry()
+    public async Task AForwardedRequestOnANonLeaderRedirectsOnceToTheLeader()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
-        (IRaft raft1, IRaft raft2, IRaft raft3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3) =
-            await AssembleThreNodeCluster("memory", DataPartitions, raftLogger, kahunaLogger, c => c.SequencerBlockSize = 16);
+        (IRaft raft1, IRaft raft2, IRaft raft3, IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3,
+         MemoryInterNodeCommmunication transport) =
+            await AssembleThreNodeClusterWithTransport("memory", DataPartitions, raftLogger, kahunaLogger, c => c.SequencerBlockSize = 16);
 
         IRaft[] rafts = [raft1, raft2, raft3];
-        IKahuna[] nodes = [kahuna1, kahuna2, kahuna3];
 
         try
         {
@@ -318,37 +320,65 @@ public sealed class TestSequencerFailover : BaseCluster
             await WaitForAnyLeader(partitionId, rafts);
 
             bool sawLeader = false, sawFollower = false;
+            HashSet<long> issued = [];
 
-            for (int i = 0; i < nodes.Length; i++)
+            foreach (IRaft raft in rafts)
             {
-                bool isLeader = await rafts[i].AmILeader(partitionId, ct);
+                bool isLeader = await raft.AmILeader(partitionId, ct);
+                int forwardsBefore = transport.SequenceForwardCallCount;
 
-                (SequenceResponseType response, SequenceAllocation allocation) = await nodes[i].ReserveSequenceRange(
-                    name, 1, null, SequenceDurability.Persistent, ct);
+                // The transport call is what a forwarded request looks like on the receiving node.
+                (SequenceResponseType response, SequenceAllocation allocation) = await transport.ReserveSequenceRange(
+                    raft.GetLocalEndpoint(), name, 1, null, SequenceDurability.Persistent, ct);
+
+                Assert.Equal(SequenceResponseType.Success, response);
+                Assert.True(issued.Add(allocation.Start), $"value {allocation.Start} was issued more than once");
+
+                int hops = transport.SequenceForwardCallCount - forwardsBefore;
 
                 if (isLeader)
                 {
                     sawLeader = true;
-                    Assert.Equal(SequenceResponseType.Success, response);
-                    Assert.True(allocation.Start >= 1);
+                    Assert.Equal(1, hops);
                 }
                 else
                 {
                     sawFollower = true;
-                    Assert.Equal(SequenceResponseType.MustRetry, response);
+
+                    // The hop to the follower, plus the follower's one redirect to the leader.
+                    Assert.Equal(2, hops);
                 }
             }
 
             Assert.True(sawLeader, "no node considered itself leader for the sequence's partition");
-            Assert.True(sawFollower, "every node considered itself leader; the guard was never exercised");
+            Assert.True(sawFollower, "every node considered itself leader; the redirect was never exercised");
+
+            // A request that reaches a follower as the last hop of its budget may not be forwarded
+            // onward: the follower refuses it instead of chaining to its leader.
+            foreach (IRaft raft in rafts)
+            {
+                if (await raft.AmILeader(partitionId, ct))
+                    continue;
+
+                int forwardsBefore = transport.SequenceForwardCallCount;
+                SequenceResponseType response;
+
+                using (ForwardedRequestScope.EnterAt(ForwardedRequestScope.MaxForwardHops - 1))
+                {
+                    (response, _) = await transport.ReserveSequenceRange(
+                        raft.GetLocalEndpoint(), name, 1, null, SequenceDurability.Persistent, ct);
+                }
+
+                Assert.Equal(SequenceResponseType.MustRetry, response);
+                Assert.Equal(1, transport.SequenceForwardCallCount - forwardsBefore);
+                break;
+            }
         }
         finally
         {
             await LeaveCluster(raft1, raft2, raft3);
         }
     }
-
-    // ── harness ─────────────────────────────────────────────────────────────────────────────────
 
     private static EmbeddedKahunaOptions PersistentOptions(string storagePath, string walPath) => new()
     {

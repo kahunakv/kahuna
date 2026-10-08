@@ -2594,6 +2594,13 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
     // Forwarded as plain unary calls on the shared channel rather than through the batcher. Sequence
     // traffic between nodes is sparse by construction — a node reserves a block of values with one
     // write and then serves the rest from memory — so there is nothing for a batching lane to coalesce.
+    //
+    // Each request carries the hop count of the chain it continues, read here on the forwarding
+    // call's own async flow where the ambient marker is visible, so the receiver's forward budget
+    // spans the whole chain instead of restarting at the process boundary.
+
+    /// <summary>The hop count a request written now belongs at: the chain so far, plus this hop.</summary>
+    private static int NextForwardHop => ForwardedRequestScope.ChainedHops + 1;
 
     /// <summary>Forwards a sequence create to the node that owns the sequence's partition.</summary>
     public async Task<(SequenceResponseType, long)> CreateSequence(
@@ -2612,7 +2619,8 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             Name = name,
             InitialValue = initialValue,
             Increment = increment,
-            Durability = (GrpcSequenceDurability)durability
+            Durability = (GrpcSequenceDurability)durability,
+            ForwardHops = NextForwardHop
         };
 
         if (maxValue.HasValue)
@@ -2656,7 +2664,8 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             Name = name,
             RemoveMaxValue = update.RemoveMaxValue,
             RemoveBlockSize = update.RemoveBlockSize,
-            Durability = (GrpcSequenceDurability)durability
+            Durability = (GrpcSequenceDurability)durability,
+            ForwardHops = NextForwardHop
         };
 
         if (update.CurrentValue.HasValue)
@@ -2702,7 +2711,8 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         GrpcGetSequenceRequest request = new()
         {
             Name = name,
-            Durability = (GrpcSequenceDurability)durability
+            Durability = (GrpcSequenceDurability)durability,
+            ForwardHops = NextForwardHop
         };
 
         GrpcSequenceResponse response;
@@ -2753,7 +2763,8 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         GrpcNextSequenceRequest request = new()
         {
             Name = name,
-            Durability = (GrpcSequenceDurability)durability
+            Durability = (GrpcSequenceDurability)durability,
+            ForwardHops = NextForwardHop
         };
 
         if (idempotencyKey is not null)
@@ -2790,7 +2801,8 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         {
             Name = name,
             Count = count,
-            Durability = (GrpcSequenceDurability)durability
+            Durability = (GrpcSequenceDurability)durability,
+            ForwardHops = NextForwardHop
         };
 
         if (idempotencyKey is not null)
@@ -2824,7 +2836,8 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         GrpcDeleteSequenceRequest request = new()
         {
             Name = name,
-            Durability = (GrpcSequenceDurability)durability
+            Durability = (GrpcSequenceDurability)durability,
+            ForwardHops = NextForwardHop
         };
 
         GrpcSequenceResponse response;

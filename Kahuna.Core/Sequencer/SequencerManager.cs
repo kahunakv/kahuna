@@ -174,11 +174,12 @@ internal sealed class SequencerManager
     }
 
     // ── owning-node entry points ────────────────────────────────────────────────────────────────
-    // Reached once this node is established as the leader for the sequence's partition, either by the
-    // locator above or by another node forwarding here. Each re-checks leadership itself: a forward
-    // races the very leader change that made it stale, and serving on a non-leader would put two
-    // actors in the cluster behind one sequence. A stale forward gets MustRetry — never re-forwarded,
-    // so disagreeing leadership views cannot bounce a request between nodes.
+    // Reached only through the locator, once it has resolved this node as the leader for the
+    // sequence's partition. A request another node forwarded here re-enters the locator as well: a
+    // hosting non-leader redirects it once more to the leader it resolves locally, within the hop
+    // budget in ForwardedRequestScope. Each entry point still re-checks leadership itself: the
+    // resolution races the very leader change that made it stale, and serving on a non-leader would
+    // put two actors in the cluster behind one sequence. A stale resolution gets MustRetry.
 
     /// <summary>
     /// Confirms this node leads the partition owning <paramref name="normalizedName"/>'s record.

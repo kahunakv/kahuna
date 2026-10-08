@@ -240,7 +240,7 @@ public sealed class TestInterNodeMutualTls : IDisposable
         Assert.Equal(LockResponseType.Locked, lockType);
         Assert.Equal(7, fencingToken);
 
-        Assert.Equal(["Get", "LocateAndTryLock"], to.Kahuna.Calls.Skip(before));
+        Assert.Equal(["LocateAndGet(forwarded)", "LocateAndTryLock"], to.Kahuna.Calls.Skip(before));
     }
 
     private static GrpcInterNodeCommunication InterNodeClient(RaftTransportSecurityOptions options) =>
@@ -414,15 +414,11 @@ public sealed class TestInterNodeMutualTls : IDisposable
             lock (calls) calls.Add(call);
         }
 
-        public override Task<(SequenceResponseType, ReadOnlySequenceEntry?)> GetSequence(string name, SequenceDurability durability, CancellationToken cancellationToken)
-        {
-            Record("Get");
-            return Task.FromResult<(SequenceResponseType, ReadOnlySequenceEntry?)>((SequenceResponseType.NotFound, null));
-        }
-
         public override Task<(SequenceResponseType, ReadOnlySequenceEntry?)> LocateAndGetSequence(string name, SequenceDurability durability, CancellationToken cancellationToken)
         {
-            Record("LocateAndGet");
+            // A peer's forward and a client request reach the same entry point; the forwarded marker
+            // is what tells them apart.
+            Record(ForwardedRequestScope.IsActive ? "LocateAndGet(forwarded)" : "LocateAndGet");
             return Task.FromResult<(SequenceResponseType, ReadOnlySequenceEntry?)>((SequenceResponseType.NotFound, null));
         }
 

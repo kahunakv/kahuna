@@ -105,7 +105,7 @@ public sealed class TestSequenceAllocationGrpcWire
 
     private static ServerCallContext Context(bool forwarded) => new StubServerCallContext(forwarded);
 
-    /// <summary>Answers both the routed and the already-forwarded entry points with one fixed result.</summary>
+    /// <summary>Answers the routed entry points, which serve client and forwarded requests alike, with one fixed result.</summary>
     private sealed class FixedSequenceResultKahuna : FakeKahunaBase
     {
         private readonly (SequenceResponseType, SequenceAllocation) result;
@@ -119,15 +119,7 @@ public sealed class TestSequenceAllocationGrpcWire
             string name, string? idempotencyKey, SequenceDurability durability, CancellationToken cancellationToken)
             => Task.FromResult(result);
 
-        public override Task<(SequenceResponseType, SequenceAllocation)> NextSequenceValue(
-            string name, string? idempotencyKey, SequenceDurability durability, CancellationToken cancellationToken)
-            => Task.FromResult(result);
-
         public override Task<(SequenceResponseType, SequenceAllocation)> LocateAndReserveSequenceRange(
-            string name, int count, string? idempotencyKey, SequenceDurability durability, CancellationToken cancellationToken)
-            => Task.FromResult(result);
-
-        public override Task<(SequenceResponseType, SequenceAllocation)> ReserveSequenceRange(
             string name, int count, string? idempotencyKey, SequenceDurability durability, CancellationToken cancellationToken)
             => Task.FromResult(result);
     }

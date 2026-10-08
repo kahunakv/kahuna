@@ -18,6 +18,11 @@ message GrpcCreateSequenceRequest {
   optional int64 MaxValue = 4;
   GrpcSequenceDurability Durability = 5;
   optional int32 BlockSize = 6;
+  // How many times this operation was already forwarded when the sender wrote it, this hop
+  // included. Only read on a request that carries the forwarded marker; the receiver serves under
+  // that count so the forward budget spans the whole chain instead of restarting at every node.
+  // Absent (0) from an older peer still means "forwarded".
+  int32 ForwardHops = 7;
 }
 
 // Every field of the change set is optional: an absent one leaves that parameter of the record alone.
@@ -33,17 +38,32 @@ message GrpcUpdateSequenceRequest {
   optional int32 BlockSize = 7;
   bool RemoveBlockSize = 8;
   GrpcSequenceDurability Durability = 9;
+  // How many times this operation was already forwarded when the sender wrote it, this hop
+  // included. Only read on a request that carries the forwarded marker; the receiver serves under
+  // that count so the forward budget spans the whole chain instead of restarting at every node.
+  // Absent (0) from an older peer still means "forwarded".
+  int32 ForwardHops = 10;
 }
 
 message GrpcGetSequenceRequest {
   string Name = 1;
   GrpcSequenceDurability Durability = 2;
+  // How many times this operation was already forwarded when the sender wrote it, this hop
+  // included. Only read on a request that carries the forwarded marker; the receiver serves under
+  // that count so the forward budget spans the whole chain instead of restarting at every node.
+  // Absent (0) from an older peer still means "forwarded".
+  int32 ForwardHops = 3;
 }
 
 message GrpcNextSequenceRequest {
   string Name = 1;
   optional string IdempotencyKey = 2;
   GrpcSequenceDurability Durability = 3;
+  // How many times this operation was already forwarded when the sender wrote it, this hop
+  // included. Only read on a request that carries the forwarded marker; the receiver serves under
+  // that count so the forward budget spans the whole chain instead of restarting at every node.
+  // Absent (0) from an older peer still means "forwarded".
+  int32 ForwardHops = 4;
 }
 
 message GrpcReserveSequenceRangeRequest {
@@ -51,11 +71,21 @@ message GrpcReserveSequenceRangeRequest {
   int32 Count = 2;
   optional string IdempotencyKey = 3;
   GrpcSequenceDurability Durability = 4;
+  // How many times this operation was already forwarded when the sender wrote it, this hop
+  // included. Only read on a request that carries the forwarded marker; the receiver serves under
+  // that count so the forward budget spans the whole chain instead of restarting at every node.
+  // Absent (0) from an older peer still means "forwarded".
+  int32 ForwardHops = 5;
 }
 
 message GrpcDeleteSequenceRequest {
   string Name = 1;
   GrpcSequenceDurability Durability = 2;
+  // How many times this operation was already forwarded when the sender wrote it, this hop
+  // included. Only read on a request that carries the forwarded marker; the receiver serves under
+  // that count so the forward budget spans the whole chain instead of restarting at every node.
+  // Absent (0) from an older peer still means "forwarded".
+  int32 ForwardHops = 3;
 }
 
 message GrpcSequenceEntry {

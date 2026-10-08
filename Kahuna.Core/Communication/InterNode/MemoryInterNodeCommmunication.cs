@@ -328,7 +328,13 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         if (TryGetNode(node, out IKahuna? kahunaNode))
         {
             Interlocked.Increment(ref sequenceForwardCallCount);
-            return await kahunaNode.CreateSequence(name, initialValue, increment, maxValue, blockSize, durability, cancellationToken);
+
+            // Re-enter the locator (like the production gRPC transport does) so a hosting non-leader
+            // receiver redirects once to its accurately-resolved local leader instead of refusing;
+            // the forwarded marker keeps a non-hosting receiver from forwarding onward.
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.LocateAndCreateSequence(name, initialValue, increment, maxValue, blockSize, durability, cancellationToken);
         }
 
         throw Unreachable(node);
@@ -346,7 +352,10 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         if (TryGetNode(node, out IKahuna? kahunaNode))
         {
             Interlocked.Increment(ref sequenceForwardCallCount);
-            return await kahunaNode.UpdateSequence(name, update, durability, cancellationToken);
+
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.LocateAndUpdateSequence(name, update, durability, cancellationToken);
         }
 
         throw Unreachable(node);
@@ -363,7 +372,10 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         if (TryGetNode(node, out IKahuna? kahunaNode))
         {
             Interlocked.Increment(ref sequenceForwardCallCount);
-            return await kahunaNode.GetSequence(name, durability, cancellationToken);
+
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.LocateAndGetSequence(name, durability, cancellationToken);
         }
 
         throw Unreachable(node);
@@ -381,7 +393,10 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         if (TryGetNode(node, out IKahuna? kahunaNode))
         {
             Interlocked.Increment(ref sequenceForwardCallCount);
-            return await kahunaNode.NextSequenceValue(name, idempotencyKey, durability, cancellationToken);
+
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.LocateAndNextSequenceValue(name, idempotencyKey, durability, cancellationToken);
         }
 
         throw Unreachable(node);
@@ -400,7 +415,10 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         if (TryGetNode(node, out IKahuna? kahunaNode))
         {
             Interlocked.Increment(ref sequenceForwardCallCount);
-            return await kahunaNode.ReserveSequenceRange(name, count, idempotencyKey, durability, cancellationToken);
+
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.LocateAndReserveSequenceRange(name, count, idempotencyKey, durability, cancellationToken);
         }
 
         throw Unreachable(node);
@@ -417,7 +435,10 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         if (TryGetNode(node, out IKahuna? kahunaNode))
         {
             Interlocked.Increment(ref sequenceForwardCallCount);
-            return await kahunaNode.DeleteSequence(name, durability, cancellationToken);
+
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.LocateAndDeleteSequence(name, durability, cancellationToken);
         }
 
         throw Unreachable(node);

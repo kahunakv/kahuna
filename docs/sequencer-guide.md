@@ -11,10 +11,13 @@ A sequence is a durable record stored as a key-value entry under `__kahuna:seque
 whole `__kahuna:` namespace is reserved: the public key-value API rejects reads, writes, deletes,
 expiry extensions, and locks on keys under it with `InvalidInput`, so a client cannot corrupt a
 sequence record out from under its owner. The sequence is *owned* by the node leading that key's
-partition: a request arriving anywhere else is redirected there, exactly as a lock request is — and
-redirected at most once: the receiving node re-checks leadership itself and answers `MustRetry` if
-the forward went stale, rather than forwarding again. Because the owner also leads the partition
-holding the record, the writes below are local.
+partition: a request arriving anywhere else is redirected there, exactly as a lock request is. The
+redirect chain is budgeted, not unbounded: a receiving node that hosts the partition but does not
+lead it (a stale forward, or a guess from a node outside the partition's replica set) redirects
+once more to the leader it resolves from its own Raft state, while a node that does not host the
+partition, or a chain that has spent its budget, answers `MustRetry`. The owner re-checks leadership
+itself before serving. Because the owner also leads the partition holding the record, the writes
+below are local.
 
 The owner keeps an in-memory *block*: a window of values it reserved by compare-and-swapping the
 record's high-water mark upwards in a single write. Values are handed out of that window with no storage

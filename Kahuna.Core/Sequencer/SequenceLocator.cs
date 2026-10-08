@@ -189,7 +189,7 @@ internal sealed class SequenceLocator
 
         if (leader is null)
         {
-            logger.LogWarning("Sequence leader not resolved for partition {PartitionId} ('{Name}'): partition is not hosted on this node", partitionId, name);
+            logger.LogWarning("Sequence leader not resolved for partition {PartitionId} ('{Name}'): no forward target, the partition is not hosted here or the request already spent its forward budget", partitionId, name);
 
             return (false, "");
         }

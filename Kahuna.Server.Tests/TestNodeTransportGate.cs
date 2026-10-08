@@ -113,7 +113,9 @@ public sealed class TestNodeTransportGate : IDisposable
         foreach (Func<ServerCallContext, Task> call in SequenceCalls(service))
             await call(Context(Caller.Trusted, forwarded: true));
 
-        Assert.Equal(["Create", "Update", "Get", "Next", "Reserve", "Delete"], kahuna.Calls);
+        Assert.Equal(
+            ["LocateAndCreate(forwarded)", "LocateAndUpdate(forwarded)", "LocateAndGet(forwarded)", "LocateAndNext(forwarded)", "LocateAndReserve(forwarded)", "LocateAndDelete(forwarded)"],
+            kahuna.Calls);
     }
 
     [Fact]
@@ -137,7 +139,9 @@ public sealed class TestNodeTransportGate : IDisposable
         foreach (Func<ServerCallContext, Task> call in SequenceCalls(service))
             await call(Context(Caller.NoHttpContext, forwarded: true));
 
-        Assert.Equal(["Create", "Update", "Get", "Next", "Reserve", "Delete"], kahuna.Calls);
+        Assert.Equal(
+            ["LocateAndCreate(forwarded)", "LocateAndUpdate(forwarded)", "LocateAndGet(forwarded)", "LocateAndNext(forwarded)", "LocateAndReserve(forwarded)", "LocateAndDelete(forwarded)"],
+            kahuna.Calls);
     }
 
     [Fact]
@@ -263,10 +267,13 @@ public sealed class TestNodeTransportGate : IDisposable
         return new CertificateRequest($"CN={name}", key, HashAlgorithmName.SHA256).CreateSelfSigned(notBefore, notAfter);
     }
 
-    /// <summary>Records which sequence entry point ran; the forwarded path and the routed path differ.</summary>
+    /// <summary>Records which sequence entry point ran, and whether it ran under the forwarded marker.</summary>
     private sealed class RecordingKahuna : FakeKahunaBase
     {
         public List<string> Calls { get; } = [];
+
+        /// <summary>Marks a call served under the forwarded marker, which is what distinguishes a peer's forward from a client request.</summary>
+        private static string ForwardedSuffix => ForwardedRequestScope.IsActive ? "(forwarded)" : "";
 
         private Task<(SequenceResponseType, long)> Revision(string call)
         {
@@ -292,18 +299,12 @@ public sealed class TestNodeTransportGate : IDisposable
             return Task.FromResult<(SequenceResponseType, ReadOnlySequenceEntry?)>((SequenceResponseType.NotFound, null));
         }
 
-        public override Task<(SequenceResponseType, long)> CreateSequence(string name, long initialValue, long increment, long? maxValue, int? blockSize, SequenceDurability durability, CancellationToken cancellationToken) => Revision("Create");
-        public override Task<(SequenceResponseType, long)> LocateAndCreateSequence(string name, long initialValue, long increment, long? maxValue, int? blockSize, SequenceDurability durability, CancellationToken cancellationToken) => Revision("LocateAndCreate");
-        public override Task<(SequenceResponseType, long)> UpdateSequence(string name, SequenceUpdate update, SequenceDurability durability, CancellationToken cancellationToken) => Revision("Update");
-        public override Task<(SequenceResponseType, long)> LocateAndUpdateSequence(string name, SequenceUpdate update, SequenceDurability durability, CancellationToken cancellationToken) => Revision("LocateAndUpdate");
-        public override Task<(SequenceResponseType, ReadOnlySequenceEntry?)> GetSequence(string name, SequenceDurability durability, CancellationToken cancellationToken) => Entry("Get");
-        public override Task<(SequenceResponseType, ReadOnlySequenceEntry?)> LocateAndGetSequence(string name, SequenceDurability durability, CancellationToken cancellationToken) => Entry("LocateAndGet");
-        public override Task<(SequenceResponseType, SequenceAllocation)> NextSequenceValue(string name, string? idempotencyKey, SequenceDurability durability, CancellationToken cancellationToken) => Allocation("Next");
-        public override Task<(SequenceResponseType, SequenceAllocation)> LocateAndNextSequenceValue(string name, string? idempotencyKey, SequenceDurability durability, CancellationToken cancellationToken) => Allocation("LocateAndNext");
-        public override Task<(SequenceResponseType, SequenceAllocation)> ReserveSequenceRange(string name, int count, string? idempotencyKey, SequenceDurability durability, CancellationToken cancellationToken) => Allocation("Reserve");
-        public override Task<(SequenceResponseType, SequenceAllocation)> LocateAndReserveSequenceRange(string name, int count, string? idempotencyKey, SequenceDurability durability, CancellationToken cancellationToken) => Allocation("LocateAndReserve");
-        public override Task<SequenceResponseType> DeleteSequence(string name, SequenceDurability durability, CancellationToken cancellationToken) => Deleted("Delete");
-        public override Task<SequenceResponseType> LocateAndDeleteSequence(string name, SequenceDurability durability, CancellationToken cancellationToken) => Deleted("LocateAndDelete");
+        public override Task<(SequenceResponseType, long)> LocateAndCreateSequence(string name, long initialValue, long increment, long? maxValue, int? blockSize, SequenceDurability durability, CancellationToken cancellationToken) => Revision("LocateAndCreate" + ForwardedSuffix);
+        public override Task<(SequenceResponseType, long)> LocateAndUpdateSequence(string name, SequenceUpdate update, SequenceDurability durability, CancellationToken cancellationToken) => Revision("LocateAndUpdate" + ForwardedSuffix);
+        public override Task<(SequenceResponseType, ReadOnlySequenceEntry?)> LocateAndGetSequence(string name, SequenceDurability durability, CancellationToken cancellationToken) => Entry("LocateAndGet" + ForwardedSuffix);
+        public override Task<(SequenceResponseType, SequenceAllocation)> LocateAndNextSequenceValue(string name, string? idempotencyKey, SequenceDurability durability, CancellationToken cancellationToken) => Allocation("LocateAndNext" + ForwardedSuffix);
+        public override Task<(SequenceResponseType, SequenceAllocation)> LocateAndReserveSequenceRange(string name, int count, string? idempotencyKey, SequenceDurability durability, CancellationToken cancellationToken) => Allocation("LocateAndReserve" + ForwardedSuffix);
+        public override Task<SequenceResponseType> LocateAndDeleteSequence(string name, SequenceDurability durability, CancellationToken cancellationToken) => Deleted("LocateAndDelete" + ForwardedSuffix);
     }
 
     private sealed class CountingReader<T> : IAsyncStreamReader<T>

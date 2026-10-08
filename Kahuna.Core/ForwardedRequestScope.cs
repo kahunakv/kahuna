@@ -112,6 +112,19 @@ internal static class ForwardedRequestScope
         return new Scope(previous);
     }
 
+    /// <summary>
+    /// <see cref="EnterAt"/> when <paramref name="forwarded"/> is set; otherwise a scope that leaves
+    /// the marker as it is. Lets one receive path serve a client request and a peer-forwarded one
+    /// through the same locator call under a single <c>using</c>.
+    /// </summary>
+    /// <exception cref="ForwardLoopException">
+    /// The flow already nests <see cref="MaxNestedForwards"/> forwards. See that constant.
+    /// </exception>
+    public static Scope EnterAtIf(bool forwarded, int arrivedAtHops)
+    {
+        return forwarded ? EnterAt(arrivedAtHops) : new Scope(state.Value);
+    }
+
     /// <summary>Restores the marker captured when <see cref="Enter"/> was entered; the value
     /// captured by tasks spawned inside the scope is unaffected.</summary>
     public readonly struct Scope(ForwardState previous) : IDisposable
