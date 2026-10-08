@@ -391,4 +391,7 @@ public static partial class KahunaLoggerExtensions
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "RangeSplitter: refusing to split {Space} at {Key}: the source partition {PartitionId} leader {Leader} holds {LeaderHeads} committed heads while replica {Peer} holds {PeerHeads} at the same applied kv log id {AppliedLogId}. A copy from an incomplete source would move the loss into the new partition")]
     public static partial void LogRangeSplitRefusedIncompleteSource(this ILogger<IKahuna> logger, string space, string key, int partitionId, string leader, long leaderHeads, string peer, long peerHeads, long appliedLogId);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Snapshot read of {Key} at {ReadTimestamp} refused: the timestamp leads this node's clock ({Now}) by {LeadMs} ms, past the {MaxLeadMs} ms clock-fence bound. Served unfenced it could disagree with a later read at the same timestamp; the caller retries once the clocks converge (a wall-clock jump on the node that minted it spreads with its next Raft message)")]
+    public static partial void LogSnapshotReadRefusedClockLead(this ILogger<IKahuna> logger, string key, HLCTimestamp readTimestamp, HLCTimestamp now, long leadMs, long maxLeadMs);
 }

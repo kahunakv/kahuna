@@ -130,9 +130,14 @@ them:
 A snapshot read waits when another live writer may commit at or before `T`, including when a
 committed intent supplies the candidate value. The serving actor folds `T` into its HLC before
 answering; durable commit timestamps are minted above every participant's staged timestamp.
-If `T` is more than **5 seconds ahead** of the serving node's HLC, the read is served without this
-clock fence and `kahuna.kv.snapshot_clock_fence_skipped_total` increments. Such a future timestamp
-can include writes that start after the first read. Use cluster-minted timestamps.
+If `T` is more than **5 seconds ahead** of the serving node's HLC, the read is refused with
+`MustRetry` and `kahuna.kv.snapshot_clock_fence_refused_total` increments; it is never served without
+the clock fence, because an unfenced read at `T` could be followed by a commit stamped below `T` and
+a later read at `T` would then disagree with it. The refusal is short for a cluster-minted `T`: a
+forward wall-clock jump on one node mints such timestamps until its next Raft message (one heartbeat)
+folds the jump into every other node, after which the same read is served fenced. A timestamp minted
+outside the cluster's clocks stays refused until the serving node's clock reaches it, so use
+cluster-minted timestamps.
 
 Persisted history may lag committed state. The archive retains unflushed revisions, and a disk
 fallback that could omit a queued revision answers `MustRetry` until flush progress makes it safe.

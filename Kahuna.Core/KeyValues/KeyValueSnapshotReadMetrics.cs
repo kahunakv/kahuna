@@ -34,11 +34,13 @@ internal static class KeyValueSnapshotReadMetrics
 
     /// <summary>
     /// Snapshot reads whose timestamp was too far ahead of the serving node's clock to be folded into it. Such a
-    /// read is served without the clock fence, so a commit that starts after it can still land inside its
-    /// snapshot. Any non-zero rate means a caller mints snapshots from a clock far ahead of the cluster.
+    /// read is refused with MustRetry instead of being served without the clock fence, because an unfenced read
+    /// lets a commit that starts after it land inside its snapshot. A short burst follows a forward wall-clock
+    /// jump on one node, until its next Raft message spreads the jump; a sustained rate means a caller mints
+    /// snapshots from a clock far ahead of the cluster.
     /// </summary>
-    internal static readonly Counter<long> SnapshotClockFenceSkipped =
+    internal static readonly Counter<long> SnapshotClockFenceRefused =
         Meter.CreateCounter<long>(
-            "kahuna.kv.snapshot_clock_fence_skipped_total",
-            description: "Snapshot reads served without the clock fence because their timestamp was too far ahead.");
+            "kahuna.kv.snapshot_clock_fence_refused_total",
+            description: "Snapshot reads refused because their timestamp was too far ahead of the serving node's clock to be fenced.");
 }

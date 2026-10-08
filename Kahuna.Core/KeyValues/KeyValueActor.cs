@@ -405,8 +405,12 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
     /// </summary>
     private async ValueTask<KeyValueResponse?> RunHandler(KeyValueRequest message)
     {
-        if (!message.ReadTimestamp.IsNull() && IsSnapshotRead(message.Type))
-            FenceClockAtSnapshot(message.ReadTimestamp);
+        // A snapshot read is served only once this node's clock is past its timestamp. A read the fence
+        // cannot cover is refused rather than served: an unfenced answer at T lets a commit that starts
+        // after it land at or below T, and a later read at T then disagrees with it.
+        if (!message.ReadTimestamp.IsNull() && IsSnapshotRead(message.Type)
+            && !FenceClockAtSnapshot(message.Key, message.ReadTimestamp))
+            return KeyValueStaticResponses.MustRetryResponse;
 
     return message.Type switch
         {
@@ -487,37 +491,62 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
     /// How far ahead of this node's clock a snapshot timestamp may be and still be folded into it. The timestamp
     /// arrives from the caller; folding an arbitrary one would drag the node's clock — and every lease and expiry
     /// derived from it — forward by the same amount. Legitimate snapshots come from cluster clocks that agree to
-    /// well within this bound.
+    /// well within this bound, except right after one node's wall clock jumps forward: a snapshot minted on
+    /// that node leads every other node until their next Raft message from it folds the jump in, which takes
+    /// one heartbeat. A read that arrives inside that window is refused (see <see cref="FenceClockAtSnapshot"/>),
+    /// never served without the fence.
     /// </summary>
     private const long MaxSnapshotClockLeadMs = 5_000;
 
+    /// <summary>Spacing of the warning that names a refused snapshot read; the counter records every one.</summary>
+    private const long SnapshotRefusalWarningSpacingMs = 1_000;
+
+    /// <summary>Tick of the last refused-snapshot warning across every actor on the node.</summary>
+    private static long lastSnapshotRefusalWarningTick;
+
     /// <summary>
-    /// Advances this node's clock past a snapshot read's timestamp before the read is served. A read at T that
-    /// found no writer to wait for has promised that nothing else commits at or below T for what it read; every
-    /// write staged on this node afterwards is stamped from this clock, and a durable commit is minted above its
-    /// staged stamps, so the fence is what keeps a later commit from landing inside the snapshot — including when
-    /// T was minted on a node whose clock runs ahead of this one. A timestamp further ahead than
-    /// <see cref="MaxSnapshotClockLeadMs"/> is served without the fence and counted.
+    /// Advances this node's clock past a snapshot read's timestamp before the read is served, and returns whether
+    /// the read may be served at all. A read at T that found no writer to wait for has promised that nothing else
+    /// commits at or below T for what it read; every write staged on this node afterwards is stamped from this
+    /// clock, and a durable commit is minted above its staged stamps, so the fence is what keeps a later commit
+    /// from landing inside the snapshot — including when T was minted on a node whose clock runs ahead of this one.
+    ///
+    /// <para>A timestamp further ahead than <see cref="MaxSnapshotClockLeadMs"/> is not folded, and the read is
+    /// refused (false) so the caller retries. Serving it unfenced is not an option: a wall clock that jumps
+    /// forward by more than the bound on one node mints snapshots that far ahead, and an unfenced read at such a
+    /// T followed by a commit stamped below T is exactly a non-repeatable read inside one snapshot. The refusal
+    /// is transient for a cluster-minted timestamp: the jumped node's next Raft message folds its clock into this
+    /// one, after which the same read is served fenced. Only a timestamp minted outside the cluster's clocks stays
+    /// refused, until this node's clock reaches it.</para>
     /// </summary>
-    private void FenceClockAtSnapshot(HLCTimestamp readTimestamp)
+    private bool FenceClockAtSnapshot(string key, HLCTimestamp readTimestamp)
     {
         if (kvContext is null)
-            return;
+            return true;
 
         HybridLogicalClock clock = kvContext.Raft.HybridLogicalClock;
         int nodeId = kvContext.Raft.GetLocalNodeId();
 
         HLCTimestamp now = clock.TrySendOrLocalEvent(nodeId);
         if (readTimestamp.CompareTo(now) < 0)
-            return;
+            return true;
 
-        if (readTimestamp.L - now.L > MaxSnapshotClockLeadMs)
+        long leadMs = readTimestamp.L - now.L;
+        if (leadMs > MaxSnapshotClockLeadMs)
         {
-            KeyValueSnapshotReadMetrics.SnapshotClockFenceSkipped.Add(1);
-            return;
+            KeyValueSnapshotReadMetrics.SnapshotClockFenceRefused.Add(1);
+
+            long tick = Environment.TickCount64;
+            long lastTick = Volatile.Read(ref lastSnapshotRefusalWarningTick);
+            if (tick - lastTick >= SnapshotRefusalWarningSpacingMs
+                && Interlocked.CompareExchange(ref lastSnapshotRefusalWarningTick, tick, lastTick) == lastTick)
+                kvContext.Logger.LogSnapshotReadRefusedClockLead(key, readTimestamp, now, leadMs, MaxSnapshotClockLeadMs);
+
+            return false;
         }
 
         clock.ReceiveEvent(nodeId, readTimestamp);
+        return true;
     }
 
     /// <summary>
