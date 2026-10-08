@@ -96,6 +96,33 @@ internal sealed class RangeMapStore : IDisposable
     /// <summary>Monotonic stamp of the installed map: changes whenever <see cref="Current"/> is swapped.</summary>
     public long MapVersion => Interlocked.Read(ref mapVersion);
 
+    /// <summary>
+    /// Meta-log index of the entry that produced <see cref="current"/>, or -1 when the map came from
+    /// the durable snapshot or a state transfer rather than from a log entry. Guarded by
+    /// <see cref="installLock"/>.
+    /// <para>
+    /// Two writers install committed entries: <see cref="MutateMapAsync"/> installs its own entry as
+    /// soon as the proposal commits, and <see cref="Apply"/> installs every committed entry again
+    /// when the log applicator delivers it (the leader echo, or a follower apply). The applicator
+    /// can deliver an entry after a later mutation already installed a newer map; installing it
+    /// then would regress the map, and the next mutation would rewrite the whole map from that
+    /// stale base and discard every change committed in between. An entry is therefore installed
+    /// only when its index is above the index installed so far, which is exactly the log order
+    /// every node applies.
+    /// </para>
+    /// </summary>
+    private long installedLogIndex = -1;
+
+    /// <summary>
+    /// Meta-log index of the map written to <see cref="snapshotPath"/>, or -1 when nothing was
+    /// written from a log entry yet. Guarded by <see cref="fileLock"/>. Keeps the durable snapshot
+    /// from being overwritten by an older entry that is persisted after a newer one.
+    /// </summary>
+    private long persistedLogIndex = -1;
+
+    /// <summary>Serializes the index check and the swap of <see cref="current"/>.</summary>
+    private readonly object installLock = new();
+
     /// <param name="storagePath">Directory for the durable snapshot file; empty disables disk persistence.</param>
     /// <param name="storageRevision">Per-node revision so each node's snapshot file is distinct and stable across restarts.</param>
     /// <param name="checkpointEveryMutations">Committed mutations between meta-partition checkpoints; ≤ 0 disables periodic checkpointing.</param>
@@ -226,12 +253,11 @@ internal sealed class RangeMapStore : IDisposable
 
                 if (result.Success)
                 {
-                    current = candidate;
-                    Interlocked.Increment(ref mapVersion);
-
                     // Durable snapshot first (so this entry survives meta-WAL compaction), then maybe
-                    // checkpoint to let Kommander trim the now-redundant log history.
-                    PersistToDisk(candidate);
+                    // checkpoint to let Kommander trim the now-redundant log history. The echo of this
+                    // very entry may already have installed it through the apply path; the index
+                    // guard then makes this a no-op.
+                    InstallCommitted(candidate, result.LogIndex);
                     TriggerCheckpointIfDue();
 
                     return true;
@@ -611,7 +637,49 @@ internal sealed class RangeMapStore : IDisposable
         _ = CheckpointNowAsync();
     }
 
-    private void PersistToDisk(RangeMap map)
+    /// <summary>
+    /// Installs the map committed at meta-log index <paramref name="logIndex"/> and persists it,
+    /// unless a map from a higher (or the same) index is already installed. Returns whether the map
+    /// was installed. See <see cref="installedLogIndex"/> for why the order matters.
+    /// </summary>
+    private bool InstallCommitted(RangeMap map, long logIndex)
+    {
+        if (logIndex <= 0)
+        {
+            // Meta-log indexes start at 1. A commit that reports none cannot be ordered against the
+            // echoes, so it is installed the way the pre-guard store did: unconditionally, and
+            // without moving the index, so the entry's own echo still lands on top of it.
+            lock (installLock)
+            {
+                current = map;
+                Interlocked.Increment(ref mapVersion);
+            }
+
+            PersistToDisk(map, logIndex: null);
+            return true;
+        }
+
+        lock (installLock)
+        {
+            if (logIndex <= installedLogIndex)
+                return false;
+
+            current = map;
+            installedLogIndex = logIndex;
+            Interlocked.Increment(ref mapVersion);
+        }
+
+        PersistToDisk(map, logIndex);
+        return true;
+    }
+
+    /// <summary>
+    /// Writes <paramref name="map"/> to <see cref="snapshotPath"/>. A map from a meta-log entry
+    /// carries its <paramref name="logIndex"/> and is skipped when an entry at or above that index
+    /// was already written, so a late write of an older entry cannot leave the file behind the map.
+    /// A map from a state transfer passes <c>null</c>: it is always written and moves no index.
+    /// </summary>
+    private void PersistToDisk(RangeMap map, long? logIndex)
     {
         if (snapshotPath is null)
             return;
@@ -622,9 +690,17 @@ internal sealed class RangeMapStore : IDisposable
 
             lock (fileLock)
             {
+                if (logIndex is { } index && index <= persistedLogIndex)
+                    return;
+
                 string tmp = snapshotPath + ".tmp";
                 File.WriteAllBytes(tmp, data);
                 File.Move(tmp, snapshotPath, overwrite: true);
+
+                // Advanced only after the file is in place: a failed write leaves the index where it
+                // was, so the next entry (older or newer) still gets a chance to land on disk.
+                if (logIndex is { } written)
+                    persistedLogIndex = written;
             }
         }
         catch (Exception ex)
@@ -654,8 +730,12 @@ internal sealed class RangeMapStore : IDisposable
                 return;
             }
 
-            current = loaded;
-            Interlocked.Increment(ref mapVersion);
+            lock (installLock)
+            {
+                current = loaded;
+                Interlocked.Increment(ref mapVersion);
+            }
+
             logger.LogRangeMapSnapshotLoaded(snapshotPath, loaded.Descriptors.Count);
         }
         catch (Exception ex)
@@ -695,12 +775,13 @@ internal sealed class RangeMapStore : IDisposable
                 return false;
             }
 
-            current = rebuilt;
-            Interlocked.Increment(ref mapVersion);
-
-            // Give followers (and the restore replay) a durable local copy too, so a follower whose
+            // Also gives followers (and the restore replay) a durable local copy, so a follower whose
             // meta WAL is later compacted can still reconstruct the map from disk on restart.
-            PersistToDisk(rebuilt);
+            if (!InstallCommitted(rebuilt, log.Id) && logger.IsEnabled(LogLevel.Debug))
+                logger.LogDebug(
+                    "Ignored range-map entry {LogIndex}: a newer map (entry {InstalledLogIndex}) is already installed",
+                    log.Id, Volatile.Read(ref installedLogIndex));
+
             return true;
         }
         catch (Exception ex)
@@ -740,9 +821,16 @@ internal sealed class RangeMapStore : IDisposable
     /// </summary>
     public void CommitState(RangeMap parsed)
     {
-        current = parsed;
-        Interlocked.Increment(ref mapVersion);
-        PersistToDisk(parsed);
+        // The transfer carries no meta-log index, so the installed index is left where it was: every
+        // entry Kommander delivers after the transfer sits above the compaction floor, hence above
+        // anything installed before it, and still applies.
+        lock (installLock)
+        {
+            current = parsed;
+            Interlocked.Increment(ref mapVersion);
+        }
+
+        PersistToDisk(parsed, logIndex: null);
     }
 
     private static RangeMapMessage ToMessage(RangeMap map)
