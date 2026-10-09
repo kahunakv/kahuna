@@ -30,13 +30,18 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// <c>upToIndex</c>; newer state is allowed, because the receiver installs its WAL boundary at
 /// <c>upToIndex</c> and replays any retained entries above it — re-applying an entry already
 /// reflected in the snapshot converges (in-order replay ends at the log tail). To guarantee the
-/// floor, the export first drains the background writer: every applied entry's row is then visible
-/// to the physical-family scan the enumerator reads. The export is not one consistent cut — keys
-/// read late in the paged scan may reflect later applies than keys read early, and the durable
-/// stores' slices are walked lock-free with the ownership filter inside the walk — which the
-/// at-least contract explicitly permits. The export costs O(partition) memory, not O(node): each
-/// store streams only its owned rows, and the snapshot is built in pooled 64 KB segments rather
-/// than one doubling buffer.
+/// floor, the export drains the background writer before the row scan: every applied entry's row is
+/// then visible to the physical-family scan the enumerator reads. The export is not one consistent
+/// cut — keys read late in the paged scan may reflect later applies than keys read early, and the
+/// durable stores' slices are walked lock-free with the ownership filter inside the walk — which the
+/// at-least contract explicitly permits. One ordering inside the export is not negotiable, though:
+/// the pending intents and the committed-head ledger are captured <i>before</i> the drain and the
+/// row scan, never after. A by-reference materialization record carries no value, so a receiver that
+/// finds neither the intent nor a row at the head's revision has lost the write; capturing the intent
+/// side first makes every head the snapshot carries be backed by a row the later scan reads, or by
+/// the intent that still holds the value (see <see cref="ExportPartitionState"/>). The export costs
+/// O(partition) memory, not O(node): each store streams only its owned rows, and the snapshot is built
+/// in pooled 64 KB segments rather than one doubling buffer.
 /// </para>
 ///
 /// <para>
@@ -166,19 +171,40 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
 
     public async Task<Stream> ExportPartitionState(int partitionId, long upToIndex, CancellationToken ct)
     {
-        // Every applied entry's row must be visible to the scan before it can be exported, or the
-        // snapshot could reflect less than upToIndex and lose data on the receiver.
-        await drainPersistence().ConfigureAwait(false);
-
         RangeMap map = currentMap();
+        Func<string, bool> isOwned = key => PartitionDataEnumerator.OwnerOfKey(map, key, hashPoolSize) == partitionId;
 
         // Segmented and pooled: the snapshot grows one 64 KB segment at a time, so an export of any size
         // allocates no doubling-growth ladder of ever-larger large-object-heap buffers, and an export that
         // repeats on a cadence (a rescue loop re-seeding a follower) reuses the segments it returned.
         SegmentedBufferStream stream = new();
+        SegmentedBufferStream intents = new();
 
         try
         {
+            // The intent side (the pending intents plus the committed-head ledger) is captured FIRST, before
+            // the drain and before the row scan, and that order is load-bearing for the by-reference
+            // materialization of committed transactions. A by-reference record carries no value: the
+            // receiver rebuilds the row from the intent the record names, and when the intent is gone it
+            // trusts a committed head at or above the record's revision as proof that the row is already its
+            // own. The head and the row therefore have to agree in the snapshot. A settlement removes the
+            // intent and records the head in the same apply, and the row write of its materialization was
+            // enqueued by an earlier entry of the same ordered apply path; so capturing the intent side before
+            // the drain guarantees that any key whose intent is absent and whose head is present had its row
+            // flushed by the drain, and the scan after it reads that row. With the rows scanned first, a key
+            // settled between its row page and the ledger capture was exported with the old row, no intent and
+            // the new head, and the receiver's replay dismissed the record as redundant and kept the old row
+            // for good (the committed writes a re-seeded replica lost on the CamusDB bank workload).
+            //
+            // Always written, even with no intents: the section carries the ledger (possibly empty) and the
+            // marker that tells the importer it was written by a build that has one.
+            preparedIntentStore.WritePartitionSection(intents, partitionId, isOwned);
+
+            // Every applied entry's row must be visible to the scan before it can be exported, or the
+            // snapshot could reflect less than upToIndex and lose data on the receiver. The drain runs after
+            // the intent capture so that it also covers every row write the captured ledger accounts for.
+            await drainPersistence().ConfigureAwait(false);
+
             new PartitionStateHeader { PartitionId = partitionId, UpToIndex = upToIndex }.WriteDelimitedTo(stream);
 
             await foreach (IReadOnlyList<(string Key, ReadOnlyKeyValueEntry Entry)> page in
@@ -193,7 +219,7 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
 
             WriteLockPage(stream, [], hasMore: false);
 
-            WriteStoreSection(stream, partitionId, map);
+            WriteStoreSection(stream, partitionId, intents, isOwned);
         }
         catch
         {
@@ -202,13 +228,22 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
             stream.Dispose();
             throw;
         }
+        finally
+        {
+            intents.Dispose();
+        }
 
         logger.LogExportedPartitionState(partitionId, upToIndex, stream.Length);
 
         return stream;
     }
 
-    private void WriteStoreSection(Stream stream, int partitionId, RangeMap map)
+    /// <summary>
+    /// Captures the record and receipt slices and writes the store section over them and the
+    /// <paramref name="intents"/> payload the export captured before its drain and row scan (see
+    /// <see cref="ExportPartitionState"/> for why the intent side comes first).
+    /// </summary>
+    private void WriteStoreSection(Stream stream, int partitionId, SegmentedBufferStream intents, Func<string, bool> isOwned)
     {
         // Each store streams its owned slice straight into a pooled payload buffer through one reused entry
         // message, with the ownership filter inside the walk: an export reads every entry the node holds
@@ -217,23 +252,18 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
         // by hand, byte-for-byte what serialising a PartitionStateStoreSection over them would produce, so
         // no exact-size copy of a payload is ever taken.
         //
-        // The intent side (intents plus the partition's committed-head ledger) is captured BEFORE the record
-        // side, and the order is load-bearing: the installing replica re-judges every bundled commit delivered
-        // after the boundary against the installed intent set and ledger, unless the installed record already
-        // carries the outcome. Capturing the intent side first puts its position at or before the record
-        // side's, so each such commit is either already decided in the records or judged against intent/ledger
-        // state that is exact at its position once the entries between them are applied. The walks are not
-        // point-in-time cuts (see each store's writer); the argument holds per key because every entry above
-        // the boundary — which precedes every walk — is replayed in order on top of what was captured.
-        Func<string, bool> isOwned = key => PartitionDataEnumerator.OwnerOfKey(map, key, hashPoolSize) == partitionId;
-
-        using SegmentedBufferStream intents = new();
+        // The intent side (intents plus the partition's committed-head ledger) was captured BEFORE the record
+        // side, and that order is load-bearing too: the installing replica re-judges every bundled commit
+        // delivered after the boundary against the installed intent set and ledger, unless the installed
+        // record already carries the outcome. Capturing the intent side first puts its position at or before
+        // the record side's, so each such commit is either already decided in the records or judged against
+        // intent/ledger state that is exact at its position once the entries between them are applied. The
+        // walks are not point-in-time cuts (see each store's writer); the argument holds per key because every
+        // entry above the boundary — which precedes every walk — is replayed in order on top of what was
+        // captured.
         using SegmentedBufferStream records = new();
         using SegmentedBufferStream receipts = new();
 
-        // Always written, even with no intents: the section carries the ledger (possibly empty) and the
-        // marker that tells the importer it was written by a build that has one.
-        preparedIntentStore.WritePartitionSection(intents, partitionId, isOwned);
         int recordCount = transactionRecordStore.WritePartitionRecords(records, isOwned);
         int receiptCount = completionReceiptStore.WritePartitionReceipts(receipts, partitionId, isOwned);
 

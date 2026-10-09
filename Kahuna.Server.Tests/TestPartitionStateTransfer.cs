@@ -634,6 +634,54 @@ public sealed class TestPartitionStateTransfer : IDisposable
         Assert.Equal(3, target.Backend.GetKeyValue("hspace/k")!.Revision);
     }
 
+    [Fact]
+    public async Task Export_CapturesTheIntentSideBeforeTheRowScan_SoASettleDuringTheScanLeavesItsValueInTheSnapshot()
+    {
+        // A by-reference materialization record carries no value: a receiver rebuilds the row from the intent
+        // the record names, or trusts a committed head at or above the record's revision as proof that it
+        // already holds the row. The exporter must therefore never ship a head without the row it stands for
+        // and without the intent that still holds the value. Here the key settles — head recorded, intent
+        // removed — while the row scan runs, with its row still queued behind the flush: the shape of a
+        // transfer taken under load, which exported the old row, no intent and the new head when the rows
+        // were scanned before the intent side, and lost the write on every replica seeded from it.
+        int partitionId = PartitionDataEnumerator.HashPartitionOfKeySpace("hspace", HashPoolSize);
+        SettlingScanBackend backend = new(new MemoryPersistenceBackend());
+        Node source = MakeNode(backend);
+
+        PreparedIntent intent = Intent("hspace/k", 10_000);   // revision 3 over base revision 2
+        Assert.True(source.Backend.StoreKeyValues([KvItem("hspace/k", 2)]));
+        Assert.True(source.Intents.Replicate(partitionId, IntentLog(new PrepareIntentCommand(intent))));
+
+        backend.OnFirstKeyValueScan = () =>
+        {
+            Assert.True(source.Intents.Replicate(partitionId, IntentLog(new ResolveIntentCommand(intent.TransactionId, intent.Epoch, intent.Key, Commit: true))));
+            Assert.True(source.Intents.Replicate(partitionId, IntentLog(new RemoveIntentCommand(intent.TransactionId, intent.Epoch, intent.Key))));
+        };
+
+        byte[] snapshot = await Export(source, partitionId);
+
+        Assert.True(backend.ScanHookFired);
+        Assert.True(source.Intents.TryGetCommittedHead("hspace/k", out long sourceHead, out _) && sourceHead == 3);
+
+        // The section the receiver installs still carries the intent to rebuild revision 3 from, and its
+        // ledger does not claim revision 3 for the key.
+        PartitionStateStoreSection section = PartitionStateStoreSection.Parser.ParseDelimitedFrom(new MemoryStream(StoreSectionOf(snapshot)));
+        PreparedIntentStore.PartitionIntentSection intentSide = PreparedIntentStore.DeserializePartitionIntents(section.PreparedIntents.ToByteArray());
+
+        Assert.Contains(intentSide.Intents, i => i.Key == "hspace/k" && i.Revision == 3);
+        Assert.NotNull(intentSide.Ledger);
+        Assert.DoesNotContain(intentSide.Ledger!, head => head.Key == "hspace/k" && head.Revision >= 3);
+
+        // Installed on a replica: the intent is live and the head is below the record's revision, so the
+        // replay of the by-reference record installs the value instead of dismissing it as already held.
+        Node target = MakeNode();
+        await Import(target, partitionId, snapshot);
+
+        Assert.NotNull(target.Intents.GetByIdentity(intent.TransactionId, intent.Epoch, intent.Key));
+        Assert.False(target.Intents.TryGetCommittedHead("hspace/k", out long targetHead, out _) && targetHead >= 3);
+        Assert.Equal(2, target.Backend.GetKeyValue("hspace/k")!.Revision);
+    }
+
     /// <summary>Delegating backend whose next StoreKeyValues fails once — the crash-mid-install seam.</summary>
     // ── export cost and wire fidelity ────────────────────────────────────────────
 
@@ -952,6 +1000,44 @@ public sealed class TestPartitionStateTransfer : IDisposable
         Assert.Equal(8 * 1024, target.Backend.GetKeyValue("ranged1/k000000")!.Value!.Length);
         Assert.NotNull(target.Intents.Get("ranged1/i000399"));
         Assert.Equal(source.Intents.SnapshotLedger(2), target.Intents.SnapshotLedger(2));
+    }
+
+    /// <summary>Delegating backend that runs a callback on the first key-value scan page — the seam that
+    /// lets a settlement land on the exporter's stores while its row scan is in progress.</summary>
+    private sealed class SettlingScanBackend(IPersistenceBackend inner) : IPersistenceBackend
+    {
+        public Action? OnFirstKeyValueScan;
+
+        public bool ScanHookFired;
+
+        public KeyValueScanPage ScanKeyValues(string? cursor, int limit)
+        {
+            if (!ScanHookFired && OnFirstKeyValueScan is { } hook)
+            {
+                ScanHookFired = true;
+                hook();
+            }
+
+            return inner.ScanKeyValues(cursor, limit);
+        }
+
+        public bool StoreKeyValues(List<PersistenceRequestItem> items) => inner.StoreKeyValues(items);
+        public bool StoreLocks(List<PersistenceRequestItem> items) => inner.StoreLocks(items);
+        public LockEntry? GetLock(string resource) => inner.GetLock(resource);
+        public KeyValueEntry? GetKeyValue(string keyName) => inner.GetKeyValue(keyName);
+        public KeyValueEntry? GetKeyValueRevision(string keyName, long revision) => inner.GetKeyValueRevision(keyName, revision);
+        public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) =>
+            inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);
+        public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName) => inner.GetKeyValueByPrefix(prefixKeyName);
+        public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit) =>
+            inner.GetKeyValueByRange(prefix, startKey, limit);
+        public LockScanPage ScanLocks(string? cursor, int limit) => inner.ScanLocks(cursor, limit);
+        public bool DeleteKeyValues(IReadOnlyList<string> keys) => inner.DeleteKeyValues(keys);
+        public bool DeleteLocks(IReadOnlyList<string> resources) => inner.DeleteLocks(resources);
+        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, HLCTimestamp floorTimestamp, out RevisionPruneResult result) =>
+            inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, floorTimestamp, out result);
+        public Kahuna.Server.Persistence.Pitr.CheckpointResult CreateCheckpoint(string destinationPath, long appliedIndex, HLCTimestamp appliedTime) =>
+            inner.CreateCheckpoint(destinationPath, appliedIndex, appliedTime);
     }
 
     private sealed class FailingStoreBackend(IPersistenceBackend inner) : IPersistenceBackend

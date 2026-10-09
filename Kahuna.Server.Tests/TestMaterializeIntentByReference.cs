@@ -567,6 +567,61 @@ public sealed class TestMaterializeIntentByReference : BaseCluster, IDisposable
     }
 
     [Fact]
+    public async Task Replicator_HistoricalRecordWithNoIntent_IsVerifiedAgainstTheBackend_NotDismissedByTheInstalledHead()
+    {
+        // The committed head of an entry at or below the installed position came with the installed ledger: it
+        // says what the exporter had settled, not what this node holds. A by-reference record replayed there
+        // with its intent gone must be checked against the persisted row, and a row below the revision is a
+        // miss — the shape that lost committed writes on a re-seeded replica, which the head used to dismiss
+        // in silence. The first entry above the position is the node's own apply, where the head is this
+        // node's own settlement and remains a valid proof.
+        string storeDir = Path.Combine(tempRoot, "installed-head");
+        Directory.CreateDirectory(storeDir);
+
+        PreparedIntentStore checkpointed = new(storeDir, "rev", null);
+        checkpointed.AttachPartitionResolver(_ => PartitionId);
+        Assert.True(checkpointed.PersistSnapshot(PartitionId, appliedThroughIndex: 10));
+
+        PreparedIntentStore store = new(storeDir, "rev", null);
+        store.AttachPartitionResolver(_ => PartitionId);
+
+        KeyValueEntry stale = new() { Revision = 8, Value = [1], State = KeyValueState.Set, LastModified = Ts(1_000) };
+        int hydrations = 0;
+
+        KeyValueReplicator replicator = new(
+            null!, null!, null!, null!, null!, null!, loggerFactory.CreateLogger<IKahuna>(),
+            hydrateFromBackend: (_, _) =>
+            {
+                Interlocked.Increment(ref hydrations);
+                return Task.FromResult<KeyValueEntry?>(stale);
+            },
+            committedHeadRevisionProbe: key => key == "acct/installed" ? 9 : -1,
+            preparedIntentStore: store,
+            keyOwner: _ => PartitionId);
+
+        PreparedIntent intent = Intent("acct/installed", revision: 9, value: [4, 5, 6]);
+        byte[] record = PreparedIntentMaterializer.ToKeyValueRecord(intent, new KeyValueMessage(), byReference: true);
+
+        long missed = await MeasureCounter(MissCounter, async () =>
+        {
+            Assert.True(replicator.Replicate(PartitionId, KvLog(10, record)));
+            await WaitUntilAsync(() => logLines.Containing(LiveMissLine).Any(line => line.Message.Contains("acct/installed")));
+        });
+
+        Assert.Equal(1, missed);
+        Assert.Equal(1, Volatile.Read(ref hydrations));
+
+        missed = await MeasureCounter(MissCounter, async () =>
+        {
+            Assert.True(replicator.Replicate(PartitionId, KvLog(11, record)));
+            await Task.Delay(300, TestContext.Current.CancellationToken);
+        });
+
+        Assert.Equal(0, missed);
+        Assert.Equal(1, Volatile.Read(ref hydrations));
+    }
+
+    [Fact]
     public async Task Replicator_LegacyShiftedByReferenceRecord_TakesTheByReferencePath()
     {
         // A follower on this build that receives a record from a leader still on the shifted build must expand it

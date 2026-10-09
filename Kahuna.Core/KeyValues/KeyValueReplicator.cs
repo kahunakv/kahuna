@@ -968,9 +968,11 @@ internal sealed class KeyValueReplicator
     /// settlement racing the recovery sweep), so a second record can legitimately arrive after the settle
     /// removed the intent. That miss is redundant and silent, and this node proves it from state it can read
     /// without I/O: the unflushed overlay or the committed-head memory already stands at or beyond the
-    /// record's revision. Anything else may be a replica missing a committed value, which is a correctness
-    /// alarm — but proving it needs the persisted row, and this apply path must never block on a backend read
-    /// (an awaited read here parks the whole message loop). So the verdict is reached off this path, by
+    /// record's revision (the head counts only for an entry this node applied itself, not for the replay of
+    /// history an installed snapshot reflects — see <see cref="MaterializationRedundant"/>). Anything else may
+    /// be a replica missing a committed value, which is a correctness alarm — but proving it needs the
+    /// persisted row, and this apply path must never block on a backend read (an awaited read here parks the
+    /// whole message loop). So the verdict is reached off this path, by
     /// <see cref="VerifyMaterializationMiss"/>, which owns the counter and the error log.</para>
     /// </summary>
     private void ApplyMaterializeIntent(int partitionId, RaftLog log, KeyValueMessage keyValueMessage)
@@ -984,7 +986,7 @@ internal sealed class KeyValueReplicator
         {
             // Nothing durable will land for this entry, so it must not be registered pending: a registration
             // whose artifacts never arrive parks the partition's durability floor below this index for good.
-            if (!MaterializationRedundant(keyValueMessage))
+            if (!MaterializationRedundant(partitionId, log.Id, keyValueMessage))
                 VerifyMaterializationMiss(partitionId, log.Id, transactionId, keyValueMessage.Epoch, keyValueMessage.Key, keyValueMessage.Revision);
 
             return;
@@ -1019,13 +1021,26 @@ internal sealed class KeyValueReplicator
     /// settled for the key. Either standing at or beyond the record's revision means the value this record
     /// names is already this node's, so the record is a second producer's duplicate and applying it again
     /// would change nothing.
+    ///
+    /// <para>The committed-head proof holds only for an entry this node reached through its own apply: a head
+    /// recorded here was recorded by the settlement of a transaction whose materialization this node applied
+    /// earlier on the same ordered path, so the row is here. It does not hold for an entry at or below the
+    /// installed snapshot's reflected position (<see cref="Transactions.PreparedIntentStore.IsHistoricalApply"/>):
+    /// there the head came with the installed ledger, which says what the <i>exporter</i> had settled, not what
+    /// this node holds — and an exporter that settled the key between its row scan and its ledger capture
+    /// shipped the head without the row. Dismissing the record on that head left the old row in place for good
+    /// (the committed writes a re-seeded replica lost on the CamusDB bank workload). For history the proof is
+    /// therefore the persisted row alone, read off this path by <see cref="VerifyMaterializationMiss"/>.</para>
     /// </summary>
-    private bool MaterializationRedundant(KeyValueMessage keyValueMessage)
+    private bool MaterializationRedundant(int partitionId, long logIndex, KeyValueMessage keyValueMessage)
     {
         if (unflushedWrites is not null
             && unflushedWrites.TryGet(keyValueMessage.Key, out UnflushedKeyValueWrite pending)
             && pending.Revision >= keyValueMessage.Revision)
             return true;
+
+        if (preparedIntentStore is not null && preparedIntentStore.IsHistoricalApply(partitionId, logIndex))
+            return false;
 
         return committedHeadRevisionProbe is not null
             && committedHeadRevisionProbe(keyValueMessage.Key) >= keyValueMessage.Revision;
