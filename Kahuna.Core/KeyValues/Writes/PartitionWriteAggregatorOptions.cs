@@ -17,17 +17,21 @@ internal sealed record PartitionWriteAggregatorOptions
     /// re-dispatch. Trades up to the hold in extra write latency for fewer, larger Raft rounds.</summary>
     public int PostCompletionHoldMs { get; init; }
 
-    /// <summary>Fires the aggregator's flush wakes (the post-completion hold and the linger) on a
-    /// high-resolution wait instead of <see cref="Task.Delay(TimeSpan, TimeProvider)"/>: the last
-    /// <see cref="PreciseWakeSpinWindowMs"/> of each wait spin-yields on a thread-pool thread against the
-    /// monotonic clock. The timer queue fires a millisecond-scale delay late by its own granularity, which a
-    /// 1-2 ms hold pays on every cycle; the spin removes that lateness at the cost of up to the window of one
-    /// thread-pool thread's CPU per wake. Queue-age release wakes keep the timer queue. Off by default.</summary>
+    /// <summary>Fires the aggregator's wakes (post-completion hold, linger and queue-age) from one dedicated
+    /// timer thread (<see cref="PartitionWriteWakeTimer"/>) instead of a <see cref="Task.Delay(TimeSpan, TimeProvider)"/>
+    /// per wake. The timer queue fires a millisecond-scale delay 1-3 ms late — its granularity plus a
+    /// thread-pool hop — which a 1-2 ms hold pays on every cycle; a kernel wait on a thread of its own lands
+    /// within about a quarter of a millisecond, and only a sub-millisecond remainder is ever spun. Off by
+    /// default.</summary>
     public bool PreciseWake { get; init; }
 
-    /// <summary>Tail of each wait, in milliseconds, spent spin-yielding when <see cref="PreciseWake"/> is on;
-    /// the part of a longer wait before it still sleeps on the timer queue.</summary>
-    public const int PreciseWakeSpinWindowMs = 2;
+    /// <summary>Fill-or-time dispatch: a held or lingering buffer dispatches as soon as it reaches the learned
+    /// fill target — the median size of the batches the timer has recently dispatched for that partition —
+    /// instead of waiting out the hold, so a batch that is already as dense as the hold produces does not pay
+    /// the rest of the hold. Periodic probe cycles still wait for the timer so the target follows the load
+    /// (see <see cref="PartitionWriteState"/>). A full batch (item/byte threshold) dispatches at once as
+    /// before. Off by default.</summary>
+    public bool FillTargetTrigger { get; init; }
 
     /// <summary>Maximum batches a single partition may have awaiting their Raft result at once. 1 keeps the
     /// classic serial pipeline (one round trip at a time); a higher value overlaps the rounds' quorum waits so

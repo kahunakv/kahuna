@@ -238,6 +238,7 @@ internal sealed class KeyValuesManagerBuilder
                 LingerMs = configuration.KeyValueWriteLingerMs,
                 PostCompletionHoldMs = configuration.KeyValueWritePostCompletionHoldMs,
                 PreciseWake = configuration.KeyValueWritePreciseWake,
+                FillTargetTrigger = configuration.KeyValueWriteFillTargetTrigger,
                 MaxBatchItems = configuration.KeyValueWriteMaxBatchItems,
                 MaxInFlightBatchesPerPartition = configuration.KeyValueWriteMaxInFlightBatchesPerPartition,
                 MaxBatchBytes = configuration.KeyValueWriteMaxBatchBytes,

@@ -389,9 +389,14 @@ public sealed class EmbeddedKahunaOptions
     /// immediately; 0 (the default) keeps the immediate re-dispatch on completion.</summary>
     public int KeyValueWritePostCompletionHoldMs { get; set; }
 
-    /// <summary>Fires the aggregator's wakes on a spin-tailed high-resolution wait instead of the timer queue,
-    /// so a millisecond-scale hold is not lengthened by timer granularity. Off by default.</summary>
+    /// <summary>Fires the aggregator's wakes from one dedicated timer thread instead of the timer queue, so a
+    /// millisecond-scale hold is not lengthened by the timer queue's lateness. Off by default.</summary>
     public bool KeyValueWritePreciseWake { get; set; }
+
+    /// <summary>Fill-or-time dispatch: a held or lingering partition buffer dispatches once it reaches the
+    /// learned fill target (median of recent timer-dispatched batch sizes) instead of waiting out the hold.
+    /// Off by default.</summary>
+    public bool KeyValueWriteFillTargetTrigger { get; set; }
 
     public int KeyValueWriteMaxBatchItems { get; set; } = 512;
 

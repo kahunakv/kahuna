@@ -25,9 +25,28 @@ namespace Kahuna.Server.KeyValues.Writes;
 /// load a completion otherwise re-dispatches immediately and every batch carries only what arrived during the
 /// previous Raft round, so the linger never engages. The hold extends the flush deadline, never the age
 /// deadline: a full batch still flushes at once, and over-age items are still released on time.</para>
+///
+/// <para>An optional learned fill target (fill-or-time) lets a held or lingering buffer dispatch as soon as it
+/// is as large as the batches the timer has been producing, instead of waiting out the hold: the target is
+/// the median size of recent timer-dispatched batches. Because a target can only be learned from batches
+/// that waited for their timer, a run of fill-triggered dispatches would freeze it at a stale value — a target
+/// learned under light load would then pin a later heavy load to tiny batches. So after
+/// <see cref="FillProbeInterval"/> consecutive fill-triggered dispatches the next batch waits for its timer
+/// again and is sampled, and a probe that comes back more than twice the target discards the samples and
+/// relearns from scratch, which falls back to the plain hold until enough new samples exist.</para>
 /// </summary>
 internal sealed class PartitionWriteState
 {
+    /// <summary>Recent timer-dispatched batch sizes the fill target is learned from.</summary>
+    private const int FillSampleWindow = 16;
+
+    /// <summary>Samples needed before a fill target applies; below it the plain hold/linger is used.</summary>
+    private const int FillSampleMinimum = 8;
+
+    /// <summary>Consecutive fill-triggered dispatches after which the next batch waits for its timer so the
+    /// natural batch size is re-sampled.</summary>
+    private const int FillProbeInterval = 8;
+
     /// <summary>Sentinel deadline meaning "no wake needed / none armed".</summary>
     public const long NoWake = long.MaxValue;
 
@@ -38,7 +57,17 @@ internal sealed class PartitionWriteState
 
     private long armedWakeDeadline = NoWake;
 
+    private long armedWakeId;
+
     private int inFlightBatches;
+
+    private int[]? fillSamples;
+
+    private int fillSampleCount;
+
+    private int fillSampleNext;
+
+    private int fillDispatchesSinceSample;
 
     // Post-completion hold deadline (ms tick): until it elapses, a sub-threshold buffer must not dispatch, so
     // arrivals accumulate into a denser batch instead of the completion re-dispatching whatever queued behind
@@ -53,6 +82,18 @@ internal sealed class PartitionWriteState
 
     /// <summary>Stopwatch stamps of this partition's dispatch-to-dispatch cycle, for the cycle-stage metrics.</summary>
     public PartitionWriteCycleTrace Cycle { get; } = new();
+
+    /// <summary>This partition's slot on the shared wake timer, created by the lane on first use; null while
+    /// wakes are scheduled on the timer queue instead.</summary>
+    public PartitionWriteWakeTimer.Wake? TimerWake { get; set; }
+
+    /// <summary>Id of the wake currently armed (the value <see cref="TryArmWake"/> assigned), carried on the
+    /// timer message so <see cref="ClearArmedWake"/> ignores a wake that was superseded before it fired.</summary>
+    public long ArmedWakeId => armedWakeId;
+
+    /// <summary>The learned fill target in submissions, or 0 while none applies (too few samples, or the
+    /// trigger is not in use).</summary>
+    public int FillTarget { get; private set; }
 
     /// <summary>Serialized bytes of the items still waiting (not yet selected into a batch).</summary>
     public long QueuedBytes { get; private set; }
@@ -124,18 +165,67 @@ internal sealed class PartitionWriteState
 
     /// <summary>Arms a wake for <paramref name="deadline"/> only if it is earlier than the one already armed,
     /// so a steady arrival stream does not start a timer per item. Returns true if the caller should start the
-    /// timer.</summary>
+    /// timer, with <see cref="ArmedWakeId"/> identifying the wake it must carry.</summary>
     public bool TryArmWake(long deadline)
     {
         if (deadline >= armedWakeDeadline)
             return false;
 
         armedWakeDeadline = deadline;
+        armedWakeId++;
         return true;
     }
 
-    /// <summary>Clears the armed-wake marker when its timer fires, so the next schedule can re-arm.</summary>
-    public void ClearArmedWake() => armedWakeDeadline = NoWake;
+    /// <summary>Clears the armed-wake marker when the wake it identifies fires, so the next schedule can
+    /// re-arm. A wake that was superseded by an earlier one (its timer was never cancelled) leaves the marker
+    /// alone: clearing it would let the next schedule arm a second wake for the deadline already in flight.</summary>
+    public void ClearArmedWake(long wakeId)
+    {
+        if (wakeId == armedWakeId)
+            armedWakeDeadline = NoWake;
+    }
+
+    /// <summary>True when the buffered backlog reached the learned fill target and no probe is due, so a held
+    /// or lingering buffer may dispatch now instead of waiting for its timer. Never true without a target.</summary>
+    public bool FillTargetReached =>
+        FillTarget > 0 && fillDispatchesSinceSample < FillProbeInterval && PendingCount >= FillTarget;
+
+    /// <summary>Counts a dispatch the fill target triggered, towards the next probe.</summary>
+    public void OnFillTargetDispatch() => fillDispatchesSinceSample++;
+
+    /// <summary>Records the size of a batch its timer dispatched (the hold or linger ran out) and relearns the
+    /// fill target from the recent window. Returns true when the target changed. A batch more than twice the
+    /// current target means the load moved up a regime: the window is discarded so the target lapses at once
+    /// instead of pinning the new load to the old batch size while the median catches up.</summary>
+    public bool RecordTimedBatch(int submissions)
+    {
+        int previous = FillTarget;
+        fillDispatchesSinceSample = 0;
+
+        if (FillTarget > 0 && submissions > 2 * FillTarget)
+        {
+            fillSampleCount = 0;
+            fillSampleNext = 0;
+            FillTarget = 0;
+        }
+
+        fillSamples ??= new int[FillSampleWindow];
+        fillSamples[fillSampleNext] = submissions;
+        fillSampleNext = (fillSampleNext + 1) % FillSampleWindow;
+        if (fillSampleCount < FillSampleWindow)
+            fillSampleCount++;
+
+        if (fillSampleCount < FillSampleMinimum)
+            return FillTarget != previous;
+
+        Span<int> sorted = stackalloc int[FillSampleWindow];
+        sorted = sorted[..fillSampleCount];
+        fillSamples.AsSpan(0, fillSampleCount).CopyTo(sorted);
+        sorted.Sort();
+
+        FillTarget = sorted[fillSampleCount / 2];
+        return FillTarget != previous;
+    }
 
     /// <summary>True when the linger window of the oldest pending item has elapsed at <paramref name="nowMs"/>,
     /// no post-completion hold is still active, and a flush is possible (in-flight capacity remains) — the

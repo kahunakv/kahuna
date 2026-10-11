@@ -623,8 +623,11 @@ public sealed class KahunaCommandLineOptions
     [Option("kv-write-post-completion-hold-ms", Required = false, HelpText = "Hold after each partition batch completion before the next sub-threshold batch dispatches, so arrivals accumulate into denser batches; a full batch always dispatches at once; 0 = immediate re-dispatch", Default = 0)]
     public int KeyValueWritePostCompletionHoldMs { get; set; }
 
-    [Option("kv-write-precise-wake", Required = false, HelpText = "Fire the write aggregator's hold and linger wakes on a high-resolution wait (the last 2 ms spin-yield on a thread-pool thread) instead of the timer queue, whose granularity lengthens a millisecond-scale hold; costs up to 2 ms of one thread's CPU per wake", Default = false)]
+    [Option("kv-write-precise-wake", Required = false, HelpText = "Fire the write aggregator's wakes (hold, linger, queue-age) from one dedicated timer thread instead of the timer queue, whose granularity and thread-pool hop make a millisecond-scale hold fire 1-3 ms late on every cycle", Default = false)]
     public bool KeyValueWritePreciseWake { get; set; }
+
+    [Option("kv-write-fill-target-trigger", Required = false, HelpText = "Fill-or-time dispatch: a held or lingering partition buffer dispatches once it reaches the learned fill target (median of its recent timer-dispatched batch sizes) instead of waiting out the hold; probe cycles keep the target following the load", Default = false)]
+    public bool KeyValueWriteFillTargetTrigger { get; set; }
 
     [Option("kv-write-max-batch-items", Required = false, HelpText = "Maximum log entries per aggregator Raft call", Default = 512)]
     public int KeyValueWriteMaxBatchItems { get; set; } = 512;

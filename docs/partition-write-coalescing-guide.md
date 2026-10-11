@@ -271,7 +271,8 @@ options and on `EmbeddedKahunaOptions` for the embedded/standalone engine):
 |---|---:|---|
 | `KeyValueWriteLingerMs` | `1` | Delay from the oldest queued item before a partition batch is proposed. `0` dispatches an idle partition immediately (still batching work that accumulates behind an in-flight batch). |
 | `KeyValueWritePostCompletionHoldMs` | `0` | Hold after each batch completion before the next sub-threshold batch may dispatch, so arrivals accumulate into a denser batch. A full batch always dispatches at once, and queue-age releases are unaffected. `0` re-dispatches on completion immediately. |
-| `KeyValueWritePreciseWake` | `false` | Fire the flush wakes (post-completion hold, linger) on a spin-tailed high-resolution wait instead of the timer queue: the last 2 ms of each wait spin-yields on a thread-pool thread. Aims to reduce the timer's lateness at the cost of up to 2 ms of one thread's CPU per wake. Queue-age release wakes keep the timer queue. |
+| `KeyValueWritePreciseWake` | `false` | Fire the aggregator's wakes (post-completion hold, linger, queue-age) from one dedicated timer thread instead of the timer queue. The timer queue fires a millisecond-scale delay 1–3 ms late (its granularity plus a thread-pool hop for the continuation); a kernel timed wait on a thread of its own returns within about a quarter of a millisecond, so the thread sleeps the whole milliseconds and spins only a sub-millisecond remainder. One thread per node, started on first use. |
+| `KeyValueWriteFillTargetTrigger` | `false` | Fill-or-time dispatch: a held or lingering partition buffer dispatches as soon as it reaches the learned fill target — the median size of that partition's recent timer-dispatched batches — instead of waiting out the hold. After eight consecutive fill-triggered dispatches the next batch waits for its timer again (a probe) so the target follows the load, and a probe more than twice the target discards the samples and relearns. A full batch still dispatches at once. |
 | `KeyValueWriteMaxBatchItems` | `512` | Maximum log entries per Raft call. |
 | `KeyValueWriteMaxBatchBytes` | `4 MiB` | Target serialized bytes per Raft call; an oversized single item dispatches alone. |
 | `KeyValueWriteMaxQueuedItemsPerPartition` | `8192` | Maximum admitted items per partition, including those in flight. |
@@ -324,11 +325,28 @@ dispatch, which raises entries per batch at the cost of up to the hold in extra 
 hold never delays a full batch and never extends the queue-age release deadline. Keep it `0` unless a
 measured workload shows batch sizes pinned well below the caps at a saturated round rate.
 
-The hold is armed on the timer queue, which fires a millisecond-scale delay late: on Linux a 2 ms hold
-was measured to wake about 1 ms after its deadline, so the dead time per cycle is the hold plus that
-lateness, not the hold alone. `KeyValueWritePreciseWake` removes most of the lateness for a CPU cost;
-`kahuna.kv.write.cycle_stage` (below) shows both parts of every cycle, so choose the hold against the
-`hold` and `wake_late` stages together.
+By default the hold is armed on the timer queue, which fires a millisecond-scale delay late: on Linux a
+2 ms hold was measured to wake about 1 ms after its deadline (a 1 ms hold, 1.8 ms late), so the dead time
+per cycle is the hold plus that lateness, not the hold alone. `KeyValueWritePreciseWake` moves every wake
+to one dedicated timer thread whose kernel wait lands within about a quarter of a millisecond, so the hold
+you configure is the hold you get; `kahuna.kv.write.cycle_stage` (below) shows both parts of every cycle,
+so choose the hold against the `hold` and `wake_late` stages together.
+
+### Fill-or-time
+
+With a hold, a sub-threshold buffer waits for the hold's end even when it is already as dense as the hold
+ever makes it. `KeyValueWriteFillTargetTrigger` lets it go early: each partition learns a fill target as
+the median size (in submissions) of its last sixteen timer-dispatched batches, and an arrival that brings
+the buffer up to that target dispatches it at once, like a full batch. A target can only be learned from
+batches that waited for their timer, so a run of fill-triggered dispatches would freeze it at a stale
+value — a target learned under light load would pin a later heavy load to tiny batches. Two rules keep it
+honest: after eight consecutive fill-triggered dispatches the next batch waits for its timer again and is
+sampled (a probe), and a probe more than twice the current target discards the window, which falls back
+to the plain hold until eight new samples exist. Under a steady load the target settles a little below the
+hold's natural batch size (the timer-dispatched samples are the batches that did not reach it), so expect
+somewhat thinner batches in exchange for a shorter wait; `kahuna.kv.write.fill_target` against
+`kahuna.kv.write.batch_submissions` shows the gap, and `kahuna.kv.write.cycle_trigger` shows how many
+cycles the target (`submit`) rather than the timer (`wake`) dispatched.
 
 ### Key layout matters
 
@@ -360,9 +378,11 @@ outcome string — never a key, partition id, or transaction id):
   later dispatch, or whose partition went idle, are not recorded. `kahuna.kv.write.cycle_trigger` counts
   closed cycles by what dispatched the next batch (`completion` / `wake` / `submit`),
   `kahuna.kv.write.wake_lateness` records how late each wake fired against its requested delay (tagged
-  `timer` = `delay` / `precise` and `deadline` = `flush` / `age`), `kahuna.kv.write.completion_delay`
-  is the Raft-return-to-end-of-completion tail, and `kahuna.kv.write.batch_submissions` is the batch
-  fill against `KeyValueWriteMaxBatchItems` (which counts submissions; `batch_items` counts their entries).
+  `timer` = `delay` for the timer queue / `precise` for the dedicated timer thread, and `deadline` =
+  `flush` / `age`), `kahuna.kv.write.completion_delay` is the Raft-return-to-end-of-completion tail,
+  `kahuna.kv.write.batch_submissions` is the batch fill against `KeyValueWriteMaxBatchItems` (which counts
+  submissions; `batch_items` counts their entries), and `kahuna.kv.write.fill_target` is the fill-or-time
+  target a partition learned, recorded whenever it changes.
 - **Observable gauges** — queued items, queued serialized bytes, and in-flight partitions; and, from the
   persistence side, `kahuna.persistence.unflushed_items` (writer inbox plus dirty queues),
   `kahuna.persistence.unflushed_bytes` (the dirty queues' exact value bytes plus the inbox sized at

@@ -43,6 +43,10 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
 
     private readonly TimeProvider timeProvider;
 
+    // The dedicated wake timer shared by the node's lanes, used when the precise wake is configured; wakes
+    // go to the timer queue otherwise.
+    private readonly PartitionWriteWakeTimer wakeTimer;
+
     private readonly long stampsPerMs;
 
     // The node's shutdown signal: cancels in-flight batch round trips so a hung executor cannot hold shutdown
@@ -65,7 +69,8 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
         IWriteRangeFence fence,
         ILogger<IKahuna> logger,
         TimeProvider timeProvider,
-        CancellationToken shutdownToken
+        CancellationToken shutdownToken,
+        PartitionWriteWakeTimer wakeTimer
     )
     {
         this.self = context.Self;
@@ -76,6 +81,7 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
         this.logger = logger;
         this.timeProvider = timeProvider;
         this.shutdownToken = shutdownToken;
+        this.wakeTimer = wakeTimer;
         stampsPerMs = Math.Max(1, timeProvider.TimestampFrequency / 1000);
     }
 
@@ -92,7 +98,7 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
                 break;
 
             case PartitionWriteMessageKind.TimerWake:
-                OnTimerWake(message.PartitionId, message.SentTimestamp);
+                OnTimerWake(message.PartitionId, message.SentTimestamp, message.WakeId);
                 break;
 
             case PartitionWriteMessageKind.BatchComplete:
@@ -133,20 +139,32 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
         if (result.OpenedBuffer)
             state.Cycle.OnBufferOpened(Stopwatch.GetTimestamp());
 
-        if (result.ShouldFlushNow || (result.OpenedBuffer && options.LingerMs <= 0 && state.HasDispatchCapacity && state.HoldElapsed(NowMs())))
+        // Fill-or-time: a buffer that would otherwise wait for its hold or linger wake dispatches now once it
+        // is as large as the batches that wake has been producing. Like a full batch, it overrides the hold.
+        bool fillReached = false;
+        if (!result.ShouldFlushNow && options.FillTargetTrigger && state.HasDispatchCapacity && state.FillTargetReached)
+        {
+            fillReached = true;
+            state.OnFillTargetDispatch();
+        }
+
+        if (result.ShouldFlushNow || fillReached || (result.OpenedBuffer && options.LingerMs <= 0 && state.HasDispatchCapacity && state.HoldElapsed(NowMs())))
             Dispatch(item.PartitionId, state, Stopwatch.GetTimestamp(), PartitionWriteDispatchTrigger.Submit);
         else
             ScheduleWake(item.PartitionId, state);
     }
 
-    private void OnTimerWake(int partitionId, long firedTimestamp)
+    private void OnTimerWake(int partitionId, long firedTimestamp, long wakeId)
     {
         if (!states.TryGetValue(partitionId, out PartitionWriteState? state))
             return;
 
         long turnStarted = Stopwatch.GetTimestamp();
 
-        state.ClearArmedWake();
+        // A wake superseded by an earlier deadline still arrives (its timer is never cancelled) and is
+        // processed like any other — the work below is idempotent — but must not clear the marker of the
+        // wake that is actually outstanding, or the next schedule would arm a duplicate for it.
+        state.ClearArmedWake(wakeId);
 
         // Drop an elapsed post-completion hold before recomputing deadlines, so the wake chain cannot re-arm
         // forever on a hold deadline that already passed.
@@ -344,6 +362,11 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
 
             RaftProposalEntry[] entries = [.. entryList];
 
+            // A batch the timer dispatched is what the hold or linger naturally produced at this load: the
+            // sample the fill target is learned from.
+            if (options.FillTargetTrigger && trigger == PartitionWriteDispatchTrigger.Wake && state.RecordTimedBatch(valid.Count))
+                PartitionWriteAggregatorMetrics.FillTargetLearned(state.FillTarget);
+
             PartitionWriteAggregatorMetrics.BatchDispatched(valid.Count, ordinaryEntries, terminalEntries, batchBytes, now - valid[0].EnqueueTicks, valid[0].AdmissionClass);
             admission.IncInFlight();
 
@@ -505,66 +528,52 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
 
     /// <summary>Arms a single timer for this partition's next wake — the earlier of the oldest item's linger
     /// and queue-age deadlines — but only when it is earlier than any wake already armed, so a steady arrival
-    /// stream does not start a timer per item. The wake re-arms itself from <see cref="OnTimerWake"/>.</summary>
+    /// stream does not start a timer per item. The wake re-arms itself from <see cref="OnTimerWake"/>. The
+    /// deadline is a millisecond tick; the wake is due that many whole milliseconds after the arming instant,
+    /// so a hold armed in the completion turn ends exactly the hold after it.</summary>
     private void ScheduleWake(int partitionId, PartitionWriteState state)
     {
         long deadline = state.NextWakeDeadline(options.LingerMs, options.MaxQueueDelayMs);
         if (deadline == PartitionWriteState.NoWake)
             return;
 
-        if (state.TryArmWake(deadline))
-            _ = WakeDelay(partitionId, deadline, flush: deadline != state.AgeDeadline(options.MaxQueueDelayMs));
-    }
+        if (!state.TryArmWake(deadline))
+            return;
 
-    /// <summary>Posts a <c>TimerWake</c> at <paramref name="deadline"/>. Only a <paramref name="flush"/> wake
-    /// (linger or post-completion hold) takes the precise path: its lateness lands on every cycle, while an
-    /// age-deadline wake only releases expired items and is mostly superseded before it fires.</summary>
-    private async Task WakeDelay(int partitionId, long deadline, bool flush)
-    {
+        long wakeId = state.ArmedWakeId;
+        bool flush = deadline != state.AgeDeadline(options.MaxQueueDelayMs);
         long armed = timeProvider.GetTimestamp();
         long delayMs = deadline - armed / stampsPerMs;
-        bool precise = options.PreciseWake && flush;
+
+        // A deadline already reached posts the wake directly; its lateness is not a timer's and is not recorded.
+        if (delayMs <= 0)
+        {
+            self.Send(PartitionWriteMessage.TimerWake(partitionId, Stopwatch.GetTimestamp(), wakeId));
+            return;
+        }
+
+        long due = armed + delayMs * stampsPerMs;
+        if (options.PreciseWake)
+            wakeTimer.Arm(state.TimerWake ??= new PartitionWriteWakeTimer.Wake(self, partitionId), due, wakeId, flush);
+        else
+            _ = WakeDelay(partitionId, wakeId, delayMs, due, flush);
+    }
+
+    /// <summary>Posts the <c>TimerWake</c> for <paramref name="wakeId"/> from the timer queue after
+    /// <paramref name="delayMs"/>, recording how late it fired against <paramref name="due"/>.</summary>
+    private async Task WakeDelay(int partitionId, long wakeId, long delayMs, long due, bool flush)
+    {
         try
         {
-            if (delayMs > 0)
-            {
-                if (precise)
-                    await PreciseDelay(armed + delayMs * stampsPerMs, delayMs);
-                else
-                    await Task.Delay(TimeSpan.FromMilliseconds(delayMs), timeProvider);
-
-                PartitionWriteAggregatorMetrics.WakeFired((timeProvider.GetTimestamp() - armed - delayMs * stampsPerMs) / (double)stampsPerMs, precise, flush);
-            }
+            await Task.Delay(TimeSpan.FromMilliseconds(delayMs), timeProvider);
+            PartitionWriteAggregatorMetrics.WakeFired((timeProvider.GetTimestamp() - due) / (double)stampsPerMs, precise: false, flush);
         }
         catch
         {
             // ignore
         }
 
-        self.Send(PartitionWriteMessage.TimerWake(partitionId, Stopwatch.GetTimestamp()));
-    }
-
-    /// <summary>Waits until the <see cref="timeProvider"/> timestamp <paramref name="due"/>: sleeps on the
-    /// timer queue for all but the last <see cref="PartitionWriteAggregatorOptions.PreciseWakeSpinWindowMs"/>,
-    /// then spin-yields on a thread-pool thread — never on the lane, which called this synchronously.</summary>
-    private async Task PreciseDelay(long due, long delayMs)
-    {
-        long sleepMs = delayMs - PartitionWriteAggregatorOptions.PreciseWakeSpinWindowMs;
-        if (sleepMs > 0)
-            await Task.Delay(TimeSpan.FromMilliseconds(sleepMs), timeProvider);
-
-        await Task.Factory.StartNew(
-            static state =>
-            {
-                (TimeProvider clock, long until) = ((TimeProvider, long))state!;
-                SpinWait spin = default;
-                while (clock.GetTimestamp() < until)
-                    spin.SpinOnce(sleep1Threshold: -1);
-            },
-            (timeProvider, due),
-            CancellationToken.None,
-            TaskCreationOptions.DenyChildAttach,
-            TaskScheduler.Default);
+        self.Send(PartitionWriteMessage.TimerWake(partitionId, Stopwatch.GetTimestamp(), wakeId));
     }
 
     private PartitionWriteState GetState(int partitionId)

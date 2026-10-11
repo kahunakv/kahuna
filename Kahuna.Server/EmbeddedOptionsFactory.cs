@@ -100,6 +100,7 @@ public static class EmbeddedOptionsFactory
         KeyValueWriteLingerMs = opts.KeyValueWriteLingerMs,
         KeyValueWritePostCompletionHoldMs = opts.KeyValueWritePostCompletionHoldMs,
         KeyValueWritePreciseWake = opts.KeyValueWritePreciseWake,
+        KeyValueWriteFillTargetTrigger = opts.KeyValueWriteFillTargetTrigger,
         KeyValueWriteMaxBatchItems = opts.KeyValueWriteMaxBatchItems,
         KeyValueWriteMaxInFlightBatchesPerPartition = opts.KeyValueWriteMaxInFlightBatchesPerPartition,
         KeyValueWriteMaxBatchBytes = opts.KeyValueWriteMaxBatchBytes,

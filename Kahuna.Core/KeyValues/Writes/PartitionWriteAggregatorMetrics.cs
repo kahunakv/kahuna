@@ -127,8 +127,14 @@ internal static class PartitionWriteAggregatorMetrics
     internal static readonly Counter<long> CycleTriggers =
         Meter.CreateCounter<long>("kahuna.kv.write.cycle_trigger", description: "Closed aggregator cycles, tagged by the kind of turn that dispatched the next batch.");
 
+    /// <summary>The fill target a partition learned, in submissions, recorded each time it changes; with
+    /// <c>batch_submissions</c> it shows how far below the hold's natural batch size the fill-or-time trigger
+    /// is dispatching.</summary>
+    internal static readonly Histogram<int> FillTargetSubmissions =
+        Meter.CreateHistogram<int>("kahuna.kv.write.fill_target", unit: "{submissions}", description: "Learned fill-or-time target per partition, recorded when it changes.");
+
     /// <summary>How late each aggregator wake fired against the delay it asked for, tagged by <c>timer</c>
-    /// (<c>delay</c> for the timer queue, <c>precise</c> for the spin-tailed wait) and by <c>deadline</c>
+    /// (<c>delay</c> for the timer queue, <c>precise</c> for the dedicated timer thread) and by <c>deadline</c>
     /// (<c>flush</c> for a linger or post-completion-hold wake, <c>age</c> for a queue-age release wake). A
     /// wake with no delay left (its deadline already passed when armed) is not recorded.</summary>
     internal static readonly Histogram<double> WakeLatenessMs =
@@ -175,6 +181,8 @@ internal static class PartitionWriteAggregatorMetrics
 
     internal static void WakeFired(double latenessMs, bool precise, bool flush) =>
         WakeLatenessMs.Record(latenessMs, precise ? TimerPrecise : TimerDelay, flush ? DeadlineFlush : DeadlineAge);
+
+    internal static void FillTargetLearned(int submissions) => FillTargetSubmissions.Record(submissions);
 
     private static readonly KeyValuePair<string, object?> ClassOrdinary = new("class", "ordinary");
     private static readonly KeyValuePair<string, object?> ClassTerminal = new("class", "terminal");

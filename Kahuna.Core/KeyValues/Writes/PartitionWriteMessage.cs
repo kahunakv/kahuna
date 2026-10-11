@@ -55,13 +55,19 @@ internal sealed class PartitionWriteMessage
     /// timestamp of the batch's dispatch, which identifies the batch in the lane's cycle trace.</summary>
     public long DispatchedTimestamp { get; }
 
+    /// <summary>For <see cref="PartitionWriteMessageKind.TimerWake"/>: the id the lane assigned when it armed
+    /// this wake, so the lane clears its armed-wake marker only for the wake that is actually outstanding and
+    /// not for one an earlier deadline superseded.</summary>
+    public long WakeId { get; }
+
     private PartitionWriteMessage(
         PartitionWriteMessageKind kind,
         int partitionId,
         IProposalSubmission? item,
         IReadOnlyList<BatchSubmissionOutcome>? outcomes,
         long sentTimestamp = 0,
-        long dispatchedTimestamp = 0)
+        long dispatchedTimestamp = 0,
+        long wakeId = 0)
     {
         Kind = kind;
         PartitionId = partitionId;
@@ -69,13 +75,14 @@ internal sealed class PartitionWriteMessage
         Outcomes = outcomes;
         SentTimestamp = sentTimestamp;
         DispatchedTimestamp = dispatchedTimestamp;
+        WakeId = wakeId;
     }
 
     public static PartitionWriteMessage Submit(IProposalSubmission item) =>
         new(PartitionWriteMessageKind.Submit, item.PartitionId, item, null);
 
-    public static PartitionWriteMessage TimerWake(int partitionId, long firedTimestamp) =>
-        new(PartitionWriteMessageKind.TimerWake, partitionId, null, null, firedTimestamp);
+    public static PartitionWriteMessage TimerWake(int partitionId, long firedTimestamp, long wakeId) =>
+        new(PartitionWriteMessageKind.TimerWake, partitionId, null, null, firedTimestamp, wakeId: wakeId);
 
     public static PartitionWriteMessage BatchComplete(int partitionId, IReadOnlyList<BatchSubmissionOutcome> outcomes, long dispatchedTimestamp, long raftReturnedTimestamp) =>
         new(PartitionWriteMessageKind.BatchComplete, partitionId, null, outcomes, raftReturnedTimestamp, dispatchedTimestamp);

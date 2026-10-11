@@ -189,8 +189,76 @@ public sealed class TestPartitionWriteAggregator
         Assert.False(state.TryArmWake(1000));  // equal → no re-arm
         Assert.False(state.TryArmWake(1500));  // later → no re-arm
         Assert.True(state.TryArmWake(800));    // earlier → re-arms
-        state.ClearArmedWake();
+        state.ClearArmedWake(state.ArmedWakeId);
         Assert.True(state.TryArmWake(2000));   // after clear any deadline arms again
+    }
+
+    [Fact]
+    public void State_ClearArmedWake_IgnoresAWakeAnEarlierDeadlineSuperseded()
+    {
+        // A queue-age wake armed behind a round is superseded by the hold wake that follows, but its timer is
+        // never cancelled: when it fires it must leave the hold wake's marker alone, or the next schedule would
+        // arm a second wake for the hold deadline already in flight.
+        PartitionWriteState state = new();
+        Assert.True(state.TryArmWake(1000));
+        long ageWake = state.ArmedWakeId;
+        Assert.True(state.TryArmWake(2));
+        long holdWake = state.ArmedWakeId;
+        Assert.NotEqual(ageWake, holdWake);
+
+        state.ClearArmedWake(ageWake);          // the stale age wake fires
+        Assert.False(state.TryArmWake(2));      // the hold wake is still the one outstanding: no duplicate
+
+        state.ClearArmedWake(holdWake);         // the live wake fires
+        Assert.True(state.TryArmWake(2));
+    }
+
+    [Fact]
+    public void State_FillTarget_LearnsTheMedianOfTimedBatches_OnceEnoughAreSampled()
+    {
+        PartitionWriteState state = new();
+        Assert.Equal(0, state.FillTarget);
+        for (int i = 0; i < 7; i++)
+            Assert.False(state.RecordTimedBatch(10 + i));
+        Assert.Equal(0, state.FillTarget);          // seven samples: no target yet, the plain hold applies
+
+        Assert.True(state.RecordTimedBatch(30));    // eighth: 10..16 and 30 → upper median 14
+        Assert.Equal(14, state.FillTarget);
+        Assert.False(state.FillTargetReached);      // nothing pending
+
+        for (int i = 0; i < 13; i++)
+            state.Enqueue(Item(1, i), 512, long.MaxValue);
+        Assert.False(state.FillTargetReached);
+        state.Enqueue(Item(1, 99), 512, long.MaxValue);
+        Assert.True(state.FillTargetReached);
+    }
+
+    [Fact]
+    public void State_FillTarget_ProbesAfterARunOfFillDispatches_AndRelearnsOnARegimeJump()
+    {
+        PartitionWriteState state = new();
+        for (int i = 0; i < 8; i++)
+            state.RecordTimedBatch(4);
+        Assert.Equal(4, state.FillTarget);
+        for (int i = 0; i < 4; i++)
+            state.Enqueue(Item(1, i), 512, long.MaxValue);
+
+        for (int i = 0; i < 8; i++)
+        {
+            Assert.True(state.FillTargetReached);
+            state.OnFillTargetDispatch();
+        }
+        Assert.False(state.FillTargetReached);      // probe due: this batch waits for its timer
+
+        // The probe comes back more than twice the target: the load moved up, the window is discarded and the
+        // target lapses at once instead of pinning the new load to the old batch size.
+        Assert.True(state.RecordTimedBatch(9));
+        Assert.Equal(0, state.FillTarget);
+        Assert.False(state.FillTargetReached);
+
+        for (int i = 0; i < 7; i++)
+            state.RecordTimedBatch(9);
+        Assert.Equal(9, state.FillTarget);          // relearned from eight new samples
     }
 
     [Fact]
@@ -1077,6 +1145,109 @@ public sealed class TestPartitionWriteAggregator
         await WaitUntil(() => { lock (preciseLateness) return preciseLateness.Count > 0; });
         lock (preciseLateness)
             Assert.All(preciseLateness, l => Assert.InRange(l, 0, 50)); // never early; late only by scheduling noise
+    }
+
+    [Fact]
+    public async Task Aggregator_PreciseWake_HoldWakeSupersedesTheAgeWake_WhichNeverFires()
+    {
+        // On the dedicated timer a partition has one outstanding wake: the hold wake armed at completion
+        // replaces the queue-age wake armed while the round was in flight, so the age wake never fires (on the
+        // timer queue it would fire, late and idle, at its deadline).
+        ConcurrentDictionary<string, int> preciseWakes = new();
+        using MeterListener listener = new();
+        listener.InstrumentPublished = (inst, l) => { if (inst.Name == "kahuna.kv.write.wake_lateness") l.EnableMeasurementEvents(inst); };
+        listener.SetMeasurementEventCallback<double>((inst, val, tags, s) =>
+        {
+            string? timer = null, deadline = null;
+            foreach (KeyValuePair<string, object?> tag in tags)
+            {
+                if (tag.Key == "timer") timer = (string?)tag.Value;
+                if (tag.Key == "deadline") deadline = (string?)tag.Value;
+            }
+            if (timer == "precise" && deadline is not null)
+                preciseWakes.AddOrUpdate(deadline, 1, static (_, n) => n + 1);
+        });
+        listener.Start();
+
+        RecordingExecutor exec = new();
+        RecordingRouter router = new();
+        exec.Gate(74);
+
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
+        {
+            MaxBatchItems = 64,
+            LingerMs = 0,
+            PostCompletionHoldMs = 100,
+            PreciseWake = true,
+            MaxQueueDelayMs = 400,
+            MaxQueuedItemsPerPartition = 1024
+        });
+
+        Assert.True(agg.TryEnqueue(Item(74, 1, sink: router))); // dispatched immediately, gated
+        await WaitUntil(() => exec.Calls.Count == 1);
+        Assert.True(agg.TryEnqueue(Item(74, 2, sink: router))); // queued behind the round: an age wake is armed for +400 ms
+        await Task.Delay(50, TestContext.Current.CancellationToken);
+
+        exec.Release(74); // completion arms the 100 ms hold, whose wake supersedes the age wake
+        await WaitUntil(() => router.Completed.Count == 2);
+        Assert.Equal(2, exec.Calls.Count);
+
+        await Task.Delay(700, TestContext.Current.CancellationToken); // well past the age deadline
+        Assert.True(preciseWakes.TryGetValue("flush", out int flushWakes) && flushWakes >= 1);
+        Assert.False(preciseWakes.ContainsKey("age"));
+    }
+
+    [Fact]
+    public async Task Aggregator_FillTarget_DispatchesAHeldBufferAtTheLearnedSize_ThenProbesTheHold()
+    {
+        // Eight hold-ended batches of three teach the partition that a held batch is three submissions; the
+        // next three arrivals then dispatch on the third without the hold's wake (manual time never advances),
+        // and after eight such cycles the ninth waits for the wake again so the natural size is re-sampled.
+        ManualTimeProvider time = new();
+        RecordingExecutor exec = new();
+        RecordingRouter router = new();
+
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
+        {
+            MaxBatchItems = 64,
+            LingerMs = 0,
+            PostCompletionHoldMs = 50,
+            FillTargetTrigger = true,
+            MaxQueueDelayMs = 60_000,
+            MaxQueuedItemsPerPartition = 1024
+        }, timeProvider: time);
+
+        int next = 1;
+        Assert.True(agg.TryEnqueue(Item(75, next++, sink: router))); // linger 0 on an empty buffer: dispatched at once
+        await WaitUntil(() => router.Completed.Count == 1);          // its completion arms the hold
+
+        for (int cycle = 0; cycle < 8; cycle++)
+        {
+            for (int i = 0; i < 3; i++)
+                Assert.True(agg.TryEnqueue(Item(75, next++, sink: router))); // held
+            int expected = 1 + 3 * (cycle + 1);
+            await Task.Delay(50, TestContext.Current.CancellationToken);
+            Assert.Equal(expected - 3, router.Completed.Count);               // no target yet: held until the wake
+            await AdvanceUntil(time, () => router.Completed.Count == expected, stepMs: 60);
+        }
+        Assert.Equal(9, exec.Calls.Count);
+
+        for (int cycle = 0; cycle < 8; cycle++)
+        {
+            for (int i = 0; i < 3; i++)
+                Assert.True(agg.TryEnqueue(Item(75, next++, sink: router)));
+            await WaitUntil(() => router.Completed.Count == 25 + 3 * (cycle + 1)); // dispatched by the fill target, no time advance
+            Assert.Equal(3, exec.Calls.Last().Count);
+        }
+        Assert.Equal(17, exec.Calls.Count);
+
+        for (int i = 0; i < 3; i++)
+            Assert.True(agg.TryEnqueue(Item(75, next++, sink: router)));
+        await Task.Delay(100, TestContext.Current.CancellationToken);
+        Assert.Equal(17, exec.Calls.Count);                                      // probe: held for the wake
+        await AdvanceUntil(time, () => router.Completed.Count == 52, stepMs: 60);
+        Assert.Equal(18, exec.Calls.Count);
+        Assert.Equal(3, exec.Calls.Last().Count);
     }
 
     [Fact]

@@ -34,6 +34,10 @@ internal sealed class PartitionWriteAggregator : IDisposable
     /// so a disposed node's admission registry is not kept reachable by gauge callbacks.</summary>
     private readonly Meter gaugeMeter;
 
+    /// <summary>The dedicated wake timer every lane arms its partition wakes on when the precise wake is
+    /// configured; its thread starts on the first arm, so it stays inert otherwise. Stopped with the aggregator.</summary>
+    private readonly PartitionWriteWakeTimer wakeTimer;
+
     private volatile bool stopping;
 
     public PartitionWriteAggregator(
@@ -72,6 +76,8 @@ internal sealed class PartitionWriteAggregator : IDisposable
                 or PartitionWriteMessageKind.Stop
         };
 
+        wakeTimer = new PartitionWriteWakeTimer(this.timeProvider);
+
         lanes = new IActorRef<PartitionWriteAggregatorActor, PartitionWriteMessage, PartitionWriteAck>[laneCount];
         for (int i = 0; i < laneCount; i++)
             lanes[i] = actorSystem.SpawnWithOptions<PartitionWriteAggregatorActor, PartitionWriteMessage, PartitionWriteAck>(
@@ -83,7 +89,8 @@ internal sealed class PartitionWriteAggregator : IDisposable
                 fence,
                 logger,
                 this.timeProvider,
-                shutdownCts.Token
+                shutdownCts.Token,
+                wakeTimer
             );
 
         gaugeMeter = PartitionWriteAggregatorMetrics.RegisterGauges(admission);
@@ -208,11 +215,13 @@ internal sealed class PartitionWriteAggregator : IDisposable
     }
 
     /// <summary>Disposes the instance meter so its observable gauges stop publishing and release their capture
-    /// of the admission registry, and the shutdown token source. Idempotent (both tolerate repeated calls).</summary>
+    /// of the admission registry, the shutdown token source, and the wake-timer thread. Idempotent (all
+    /// tolerate repeated calls).</summary>
     private void DisposeMeter()
     {
         gaugeMeter.Dispose();
         shutdownCts.Dispose();
+        wakeTimer.Stop();
     }
 
     /// <summary>Currently reserved items for a partition — capacity accounting that must return to zero once
