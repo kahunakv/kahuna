@@ -632,7 +632,7 @@ public sealed class TestKeyValuePayloadPresence
             => Task.FromResult<(KeyValueResponseType, ReadOnlyKeyValueEntry?)>((KeyValueResponseType.Get, entry));
     }
 
-    /// <summary>Answers the non-locating batch read with one fixed result per requested key.</summary>
+    /// <summary>Answers the routed batch read the inter-node handler issues with one fixed result per requested key.</summary>
     private sealed class FixedBatchGetKahuna : FakeKahunaBase
     {
         private readonly List<(KeyValueResponseType type, string key, ReadOnlyKeyValueEntry? entry)> results;
@@ -640,9 +640,10 @@ public sealed class TestKeyValuePayloadPresence
         public FixedBatchGetKahuna(List<(KeyValueResponseType type, string key, ReadOnlyKeyValueEntry? entry)> results)
             => this.results = results;
 
-        public override Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryGetManyValues(
+        public override Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryGetManyValues(
             HLCTimestamp transactionId, HLCTimestamp readTimestamp,
-            List<(string key, long revision, KeyValueDurability durability)> keys)
+            List<(string key, long revision, KeyValueDurability durability)> keys,
+            CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
         {
             List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses = new(results.Count);
 

@@ -825,10 +825,11 @@ internal static class DurableTransactionMetrics
     /// <summary>
     /// Times the coordinator saw a transaction lose a staging it had confirmed: a key restaged at a revision
     /// that does not continue the earlier staging, or a point read of a staged key that answered the
-    /// committed state instead of the staging. Staged writes live only in the partition leader's memory,
-    /// so every firing marks a leader change that ran under an open transaction. The transaction is refused
-    /// at commit (<see cref="StagedChainBreakAborts"/>); a firing without a matching abort is a transaction
-    /// the client rolled back on its own.
+    /// committed state instead of the staging. Staged writes live only in the partition leader's memory, so a
+    /// firing marks either a leader change that ran under an open transaction or a read that a node other
+    /// than the leader answered from its own state. The transaction is refused at commit
+    /// (<see cref="StagedChainBreakAborts"/>) or ends in a rollback (<see cref="StagedChainBreakRollbacks"/>);
+    /// every firing is matched by one of the two, so a count that neither explains is a transaction still open.
     /// </summary>
     internal static readonly Counter<long> StagedChainBreaks =
         Meter.CreateCounter<long>(
@@ -844,6 +845,16 @@ internal static class DurableTransactionMetrics
         Meter.CreateCounter<long>(
             "kahuna.kv.staged_chain_break_aborts",
             description: "Commits refused because the transaction lost a confirmed staging to a leader change.");
+
+    /// <summary>
+    /// Transactions with a recorded staging loss (see <see cref="StagedChainBreaks"/>) that never asked to
+    /// commit: the client rolled them back, or the reaper reclaimed them. Nothing was installed, so no update
+    /// was lost; the count exists so that every break is accounted for by an abort or by a rollback.
+    /// </summary>
+    internal static readonly Counter<long> StagedChainBreakRollbacks =
+        Meter.CreateCounter<long>(
+            "kahuna.kv.staged_chain_break_rollbacks",
+            description: "Transactions that lost a confirmed staging and were rolled back or reaped instead of committed.");
 
     /// <summary>
     /// Times the coordinator saw two lock grants of one transaction on one partition report different

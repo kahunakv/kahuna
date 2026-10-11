@@ -69,6 +69,52 @@ public sealed class TestManyValuesRoutingOverride
     }
 
     /// <summary>
+    /// The inter-node handlers hold the same contract. The sending node grouped the keys by the leader it believes
+    /// in, but that belief is a hint or a replica guess; a group can arrive at a follower, which must route the
+    /// keys again instead of answering its own actors as a committed read.
+    /// </summary>
+    [Fact]
+    public async Task GetManyInterNodeHandler_RoutesPerKey_NotLocalActorRead()
+    {
+        RoutingRecordingKahuna fake = new();
+        KeyValuesService service = new(fake, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
+
+        GrpcTryGetManyValuesRequest request = new()
+        {
+            ReadTimestampNode = Ts.N, ReadTimestampPhysical = Ts.L, ReadTimestampCounter = Ts.C
+        };
+        request.Items.Add(new GrpcTryManyValuesRequestItem { Key = "a", Revision = -1 });
+        request.Items.Add(new GrpcTryManyValuesRequestItem { Key = "b", Revision = -1 });
+
+        GrpcTryGetManyValuesResponse response = await service.TryGetManyValuesInternal(request, Context());
+
+        Assert.True(fake.LocateGetCalled, "the inter-node handler must call the locating LocateAndTryGetManyValues");
+        Assert.False(fake.LocalGetCalled, "the inter-node handler must not call the non-locating TryGetManyValues");
+        Assert.Equal(Ts, fake.LocateGetReadTimestamp);
+        Assert.Equal(2, response.Items.Count);
+        Assert.All(response.Items, item => Assert.Equal(GrpcKeyValueResponseType.TypeGot, item.Type));
+    }
+
+    [Fact]
+    public async Task ExistsManyInterNodeHandler_RoutesPerKey_NotLocalActorRead()
+    {
+        RoutingRecordingKahuna fake = new();
+        KeyValuesService service = new(fake, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
+
+        GrpcTryExistsManyValuesRequest request = new()
+        {
+            ReadTimestampNode = Ts.N, ReadTimestampPhysical = Ts.L, ReadTimestampCounter = Ts.C
+        };
+        request.Items.Add(new GrpcTryManyValuesRequestItem { Key = "a", Revision = -1 });
+
+        GrpcTryExistsManyValuesResponse response = await service.TryExistsManyValuesInternal(request, Context());
+
+        Assert.True(fake.LocateExistsCalled, "the inter-node handler must call the locating LocateAndTryExistsManyValues");
+        Assert.False(fake.LocalExistsCalled, "the inter-node handler must not call the non-locating TryExistsManyValues");
+        Assert.Single(response.Items);
+    }
+
+    /// <summary>
     /// Records which batch-read manager method the service invoked. The locating methods return a Get/Exists per
     /// requested key (so the response is well-formed); the non-locating ones flip a flag and throw, so any call to
     /// them fails the test loudly rather than silently satisfying it.

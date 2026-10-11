@@ -661,9 +661,25 @@ internal sealed class TransactionCoordinator : IDisposable
 
         logger.LogRolledBackInteractiveTransaction(transactionId);
 
+        AccountStagedChainBreakNotCommitted(context, transactionId, "rolled back");
+
         // The caller (RollbackTransaction) removes the session and retains the outcome for the terminal
         // RolledBack result.
         return new(KeyValueResponseType.RolledBack, null);
+    }
+
+    /// <summary>
+    /// A transaction that recorded a staging loss and ends without a commit attempt leaves the loss counter
+    /// unmatched by an abort. Count and log it here, once per session, at its terminal rollback or reap, so a
+    /// metrics reader can pair every observed break with the outcome that followed it.
+    /// </summary>
+    private void AccountStagedChainBreakNotCommitted(TransactionContext context, HLCTimestamp transactionId, string outcome)
+    {
+        if (context.StagedChainBreak is not { } stagedChainBreak)
+            return;
+
+        DurableTransactionMetrics.StagedChainBreakRollbacks.Add(1);
+        logger.LogWarning("Transaction {TransactionId} was {Outcome} after it lost a staging: {Break}", transactionId, outcome, stagedChainBreak);
     }
 
     // ---- operation registry façade ----
@@ -1150,6 +1166,7 @@ internal sealed class TransactionCoordinator : IDisposable
             // leaves the session in the map for the next sweep.
             if (outcome.IsTerminal)
             {
+                AccountStagedChainBreakNotCommitted(context, transactionId, "reaped");
                 RetainTerminalOutcome(transactionId, outcome, now);
                 FinalizeSession(transactionId);
             }

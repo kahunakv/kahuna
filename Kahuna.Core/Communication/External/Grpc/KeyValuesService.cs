@@ -541,10 +541,10 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
 
         // A client sends the whole batch to one node as a unary RPC without routing per key, so this endpoint must
         // route each key to its partition leader itself — exactly as the single-key TryGetKeyValue does. Reading
-        // the local actors directly (TryGetManyValuesInternal) returns this node's own state, which for a key whose
-        // partition this node does not lead is stale or absent, so a batched read would miss a committed value a
-        // routed single-key read (or a same-transaction scan) sees. The non-locating internal is only correct on
-        // the inter-node path, where the caller already routed the keys to this leader.
+        // the local actors directly returns this node's own state, which for a key whose partition this node does
+        // not lead is stale or absent, so a batched read would miss a committed value a routed single-key read (or
+        // a same-transaction scan) sees. The inter-node handler (TryGetManyValuesInternal) routes on arrival for
+        // the same reason: the sender's belief about who leads is not proof.
         using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
 
         List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses = await keyValues.LocateAndTryGetManyValues(
@@ -639,17 +639,24 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     }
 
     /// <summary>
-    /// Non-locating batch read: serves the requested keys from this node's local actors without routing. Correct
-    /// only on the inter-node path (<c>KeyValueServerBatcher</c>), where the sending node already grouped the keys
-    /// by their partition leader and forwarded each group to the node that leads it. The client-facing
-    /// <see cref="TryGetManyValues"/> override must not use this — it routes per key instead.
+    /// Inter-node batch read (<c>KeyValueServerBatcher</c>): the sending node grouped the keys by the leader it
+    /// believes in and forwarded each group here. That belief is not proof. A gateway that hosts none of the
+    /// partition's replicas resolves the leader from a gossiped hint, and on a hint miss it picks any voter of the
+    /// committed replica set, so a group can land on a follower, or on a leader the partition has since moved
+    /// away from. The keys are therefore routed again on arrival, exactly as the single-key handler does: a
+    /// partition this node leads is served from local state after a quorum-confirmed leadership check, and a
+    /// partition it does not lead is forwarded to its leader within the hop budget (the one extra hop
+    /// <c>ForwardedRequestScope.MaxForwardHops</c> keeps for this case) or answered <c>MustRetry</c>. Serving the
+    /// group from this node's actors on the sender's word alone returned a follower's state as a committed
+    /// read, and a read-modify-write computed over it erased the writes the follower had not applied yet.
     /// </summary>
     private async Task<GrpcTryGetManyValuesResponse> TryGetManyValuesCore(GrpcTryGetManyValuesRequest request, ServerCallContext context)
     {
-        List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses = await keyValues.TryGetManyValues(
+        List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses = await keyValues.LocateAndTryGetManyValues(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
             new(request.ReadTimestampNode, request.ReadTimestampPhysical, request.ReadTimestampCounter),
-            GetRequestManyValuesItems(request.Items)
+            GetRequestManyValuesItems(request.Items),
+            context.CancellationToken
         );
 
         GrpcTryGetManyValuesResponse response = new();
@@ -780,16 +787,17 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     }
 
     /// <summary>
-    /// Non-locating batch exists: the inter-node counterpart of <see cref="TryGetManyValuesInternal"/>. Serves the
-    /// keys from this node's local actors, correct only when the caller already routed them here. The client-facing
-    /// <see cref="TryExistsManyValues"/> override routes per key instead.
+    /// Inter-node batch exists: the counterpart of <see cref="TryGetManyValuesInternal"/>, with the same routing on
+    /// arrival and for the same reason. A commit-time base check that reaches a follower through a stale forward
+    /// would otherwise confirm a base the leader has already moved past.
     /// </summary>
     private async Task<GrpcTryExistsManyValuesResponse> TryExistsManyValuesCore(GrpcTryExistsManyValuesRequest request, ServerCallContext context)
     {
-        List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses = await keyValues.TryExistsManyValues(
+        List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses = await keyValues.LocateAndTryExistsManyValues(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
             new(request.ReadTimestampNode, request.ReadTimestampPhysical, request.ReadTimestampCounter),
-            GetRequestManyValuesItems(request.Items)
+            GetRequestManyValuesItems(request.Items),
+            context.CancellationToken
         );
 
         GrpcTryExistsManyValuesResponse response = new();

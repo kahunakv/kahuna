@@ -93,9 +93,14 @@ revision. A restaging or a read that does not match marks the transaction, and i
 with the reason `Lost staging: …` — `Aborted` for an interactive session, `MustRetry` for a script, which
 is self-contained and re-runs as a new transaction (see the lock proof below for the same split). The
 durable record classes the abort as `LostExclusion`. The counters are `kahuna.kv.staged_chain_breaks`
-(detections) and `kahuna.kv.staged_chain_break_aborts` (commits refused). A blind write with no
-earlier staging of the key needs no fence: it is last-writer-wins by design, and a write under a
-point lock carries the lock's committed base, which the prepare compares with the head.
+(detections), `kahuna.kv.staged_chain_break_aborts` (commits refused) and
+`kahuna.kv.staged_chain_break_rollbacks` (transactions with a detection that were rolled back or reaped
+before any commit attempt). Every detection ends in one of the two, so a detection that neither explains
+is a transaction still open. A detection also fires when a node that does not lead the partition answers a
+read from its own state, because that state has no staging; the section on forwarded reads below closes
+that path. A blind write with no earlier staging of the key needs no fence: it is last-writer-wins by
+design, and a write under a point lock carries the lock's committed base, which the prepare compares
+with the head.
 
 ### Locks lost at a leader change
 
@@ -163,6 +168,33 @@ Refusing to commit transaction HLC(1:…): partition 2 is no longer led under te
 Two limits. A lock whose lease lapses without a leader change is not covered by this proof; the base
 checks on the written keys still are. A node that predates the term report answers none, and the locks
 it granted are not checked.
+
+### Reads forwarded between nodes
+
+A node that does not lead a key's partition forwards the read to the leader. The target comes from the
+node's own view: a hosted partition knows its leader, and a node that hosts no replica of the partition
+takes the gossiped leader hint, or, when the hint has no answer, any voter of the committed replica
+set. During a leader transfer or a placement move that view is stale for a while, so a forwarded read
+can arrive at a follower, or at the node that led the partition a moment ago.
+
+The single-key read and exists handlers always routed the key again on arrival. The batched get-many
+and exists-many handlers did not: they served the keys from the local actors on the sender's word, and a
+follower answered its own state as a committed read. A consumer that computes a new value from such a
+read, then takes the exclusive point lock on the true leader and writes, passes every base check: the
+lock's base is the leader's head, and the stale value replaces it. The acknowledged writes the follower
+had not applied are lost. The nightly Elle soaks found this during a node drain, as an acknowledged
+append absent from every later read, six seconds after a leader transfer to a replica that had just
+caught up. The term proof above does not see it: the lock grant and the commit both happen on the new
+leader, in its term; only the read went elsewhere.
+
+Every inter-node read handler now routes the keys again on arrival, as the single-key handler does. A
+partition this node leads is served from local state after the quorum-confirmed leadership check. A
+partition it does not lead is forwarded to the leader this node knows, within the forward budget: a
+gateway's forward is the first hop, and the receiving node has exactly one more, which is the hop the
+budget keeps for a replica whose leader resolution is better than the gateway's guess. A node past the
+budget answers `MustRetry`, never its own state. The in-memory transport used by the embedded cluster
+and the tests always took the routing path, which is why the gap was visible only on the gRPC wire;
+`TestForwardedBatchReadLeadership` drives the gRPC handlers on a follower whose apply was held back.
 
 ### What to look for in the logs
 
@@ -245,8 +277,8 @@ A divergence that indicts the local node is confirmed by a second comparison and
 
 - **The partition is gated on that node.** Every locally served read or write of the partition
   answers `MustRetry` and routes to the leader: the locator's leadership helpers answer "not the
-  leader here", a leader resolution naming the node answers "no target", and the non-locating
-  inter-node batch reads refuse the key. Logged once at error level
+  leader here", a leader resolution naming the node answers "no target", and a read of the key
+  served from the local actors answers `MustRetry`. Logged once at error level
   (`KeyValues: partition {P} is gated on {Node} after leader change: …`), counted as
   `kahuna.keyvalues.apply_divergence_contained{action=gated}`.
 - **A gated leader relinquishes.** It hands the partition to the fullest peer the evidence names
@@ -332,6 +364,9 @@ Completion of committed durable entry #4917 on partition 2 (PreparedIntent) did 
 | `kahuna.keyvalues.apply_divergence_contained{action}` | counter | Containment actions on this node: `gated`, `transferred`, `stepped_down`, `relinquish_failed` |
 | `kahuna.keyvalues.apply_divergence_repaired` | counter | Gated partitions whose projection a whole-partition install replaced |
 | `kahuna.transactions.recordless_intents_stale_detected` | counter | Record-less holds a majority of the replica set had already settled (transaction lifecycle guide, §6.7) |
+| `kahuna.kv.staged_chain_breaks` | counter | Transactions observed to have lost a confirmed staging: a leader change under the transaction, or a read answered by a node that does not lead |
+| `kahuna.kv.staged_chain_break_aborts` | counter | Commits refused because the transaction lost a confirmed staging |
+| `kahuna.kv.staged_chain_break_rollbacks` | counter | Transactions that lost a confirmed staging and were rolled back or reaped before any commit attempt |
 | `kahuna.transactions.lock_grant_term_changes` | counter | Transactions whose lock grants on one partition reported two leadership terms |
 | `kahuna.transactions.lost_lock_aborts{detected}` | counter | Commits refused because a lock could not be proven held: `regrant`, `commit_probe`, `range_moved`, `unconfirmed`, `bundle_apply`, `lease_lapsed` |
 | `kahuna.durable_tx.one_phase_gated_commit_leader_change_rejections` | counter | One-phase bundled commits rejected at apply because another term than the lock grants' proposed them |

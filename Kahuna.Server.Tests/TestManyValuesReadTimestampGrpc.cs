@@ -3,6 +3,7 @@ using Kahuna.Server.Communication;
 using Kahuna.Server.KeyValues.Data;
 using Kahuna.Server.KeyValues.Writes;
 using Google.Protobuf;
+using Grpc.Core;
 using Kommander.Data;
 using Kommander.Time;
 using Kommander.WAL;
@@ -62,7 +63,7 @@ public class TestManyValuesReadTimestampGrpc
         GrpcTryGetManyValuesRequest parsed = WireRoundTrip(request, GrpcTryGetManyValuesRequest.Parser);
 
         CapturingKahuna fake = new();
-        await NewService(fake).TryGetManyValuesInternal(parsed, null!);
+        await NewService(fake).TryGetManyValuesInternal(parsed, new StubServerCallContext());
 
         Assert.True(fake.GetReadTimestamp.HasValue);
         Assert.Equal(SampleTs, fake.GetReadTimestamp!.Value);
@@ -78,7 +79,7 @@ public class TestManyValuesReadTimestampGrpc
         GrpcTryGetManyValuesRequest parsed = WireRoundTrip(request, GrpcTryGetManyValuesRequest.Parser);
 
         CapturingKahuna fake = new();
-        await NewService(fake).TryGetManyValuesInternal(parsed, null!);
+        await NewService(fake).TryGetManyValuesInternal(parsed, new StubServerCallContext());
 
         Assert.True(fake.GetReadTimestamp.HasValue);
         Assert.Equal(HLCTimestamp.Zero, fake.GetReadTimestamp!.Value);
@@ -100,7 +101,7 @@ public class TestManyValuesReadTimestampGrpc
         GrpcTryExistsManyValuesRequest parsed = WireRoundTrip(request, GrpcTryExistsManyValuesRequest.Parser);
 
         CapturingKahuna fake = new();
-        await NewService(fake).TryExistsManyValuesInternal(parsed, null!);
+        await NewService(fake).TryExistsManyValuesInternal(parsed, new StubServerCallContext());
 
         Assert.True(fake.ExistsReadTimestamp.HasValue);
         Assert.Equal(SampleTs, fake.ExistsReadTimestamp!.Value);
@@ -115,7 +116,7 @@ public class TestManyValuesReadTimestampGrpc
         GrpcTryExistsManyValuesRequest parsed = WireRoundTrip(request, GrpcTryExistsManyValuesRequest.Parser);
 
         CapturingKahuna fake = new();
-        await NewService(fake).TryExistsManyValuesInternal(parsed, null!);
+        await NewService(fake).TryExistsManyValuesInternal(parsed, new StubServerCallContext());
 
         Assert.True(fake.ExistsReadTimestamp.HasValue);
         Assert.Equal(HLCTimestamp.Zero, fake.ExistsReadTimestamp!.Value);
@@ -126,24 +127,46 @@ public class TestManyValuesReadTimestampGrpc
     /// so the handler builds a valid (empty) response without any entry-serialization concerns.
     /// Every other member is unreachable in these tests.
     /// </summary>
+    /// <summary>Minimal context: the handlers read only the cancellation token.</summary>
+    private sealed class StubServerCallContext : ServerCallContext
+    {
+        protected override CancellationToken CancellationTokenCore => CancellationToken.None;
+        protected override string MethodCore => "test";
+        protected override string HostCore => "test";
+        protected override string PeerCore => "test";
+        protected override DateTime DeadlineCore => DateTime.MaxValue;
+        protected override Metadata RequestHeadersCore => new();
+        protected override Metadata ResponseTrailersCore => new();
+        protected override Status StatusCore { get; set; }
+        protected override WriteOptions? WriteOptionsCore { get; set; }
+        protected override AuthContext AuthContextCore => throw new NotSupportedException();
+        protected override ContextPropagationToken CreatePropagationTokenCore(ContextPropagationOptions? options) => throw new NotSupportedException();
+        protected override Task WriteResponseHeadersAsyncCore(Metadata responseHeaders) => throw new NotSupportedException();
+    }
+
     private sealed class CapturingKahuna : IKahuna
     {
         public HLCTimestamp? GetReadTimestamp { get; private set; }
         public HLCTimestamp? ExistsReadTimestamp { get; private set; }
 
-        public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryGetManyValues(HLCTimestamp transactionId, HLCTimestamp readTimestamp, List<(string key, long revision, KeyValueDurability durability)> keys)
+        // The inter-node handlers route the keys again on arrival, so the timestamp reaches the locating entry
+        // points; the non-locating ones below are unreachable from the handlers under test.
+        public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryGetManyValues(HLCTimestamp transactionId, HLCTimestamp readTimestamp, List<(string key, long revision, KeyValueDurability durability)> keys, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
         {
             GetReadTimestamp = readTimestamp;
             return Task.FromResult(new List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>());
         }
 
-        public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryExistsManyValues(HLCTimestamp transactionId, HLCTimestamp readTimestamp, List<(string key, long revision, KeyValueDurability durability)> keys)
+        public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryExistsManyValues(HLCTimestamp transactionId, HLCTimestamp readTimestamp, List<(string key, long revision, KeyValueDurability durability)> keys, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
         {
             ExistsReadTimestamp = readTimestamp;
             return Task.FromResult(new List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>());
         }
 
         // ── Unreachable in these tests ────────────────────────────────────────────
+
+        public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryGetManyValues(HLCTimestamp transactionId, HLCTimestamp readTimestamp, List<(string key, long revision, KeyValueDurability durability)> keys) => throw new NotImplementedException();
+        public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryExistsManyValues(HLCTimestamp transactionId, HLCTimestamp readTimestamp, List<(string key, long revision, KeyValueDurability durability)> keys) => throw new NotImplementedException();
         public Task<bool> DurableOperationLocal(int partitionId, int kind, string logType, byte[] payload, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<byte[]?> LookupTransactionRecordLocal(int partitionId, HLCTimestamp transactionId, long epoch, string anchorKey, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<DurableBundleWireReply?> DurableBundleLocal(int partitionId, IReadOnlyList<(string LogType, byte[] Payload)> entries, bool terminal, int stage, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken) => throw new NotImplementedException();
@@ -172,8 +195,6 @@ public class TestManyValuesReadTimestampGrpc
 
         public Task<List<(KeyValueResponseType type, string key, KeyValueDurability durability)>> LocateAndTryCheckManyWriteIntents(HLCTimestamp transactionId, List<KeyValueConflictProbe> keys, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default) => throw new NotImplementedException();
-        public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryGetManyValues(HLCTimestamp transactionId, HLCTimestamp readTimestamp, List<(string key, long revision, KeyValueDurability durability)> keys, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default) => throw new NotImplementedException();
-        public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryExistsManyValues(HLCTimestamp transactionId, HLCTimestamp readTimestamp, List<(string key, long revision, KeyValueDurability durability)> keys, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default) => throw new NotImplementedException();
         public Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTryDeleteKeyValue(HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default) => throw new NotImplementedException();
         public Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTryExtendKeyValue(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default) => throw new NotImplementedException();
         public Task<KeyValueGetByBucketResult> LocateAndGetByBucket(HLCTimestamp transactionId, string prefixedKey, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default) => throw new NotImplementedException();
