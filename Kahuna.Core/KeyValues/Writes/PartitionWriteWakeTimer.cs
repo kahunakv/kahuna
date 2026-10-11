@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.Versioning;
 using Nixie;
 
 namespace Kahuna.Server.KeyValues.Writes;
@@ -74,6 +75,7 @@ internal sealed class PartitionWriteWakeTimer : IDisposable
 
     /// <summary>Arms <paramref name="wake"/> for the clock timestamp <paramref name="due"/>, replacing any
     /// outstanding deadline of the same partition. <paramref name="wakeId"/> is echoed on the fired message.</summary>
+    [UnsupportedOSPlatform("browser")]
     public void Arm(Wake wake, long due, long wakeId, bool flush)
     {
         lock (gate)
@@ -117,6 +119,7 @@ internal sealed class PartitionWriteWakeTimer : IDisposable
 
     public void Dispose() => Stop();
 
+    [UnsupportedOSPlatform("browser")]
     private void Run()
     {
         while (true)

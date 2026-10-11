@@ -69,8 +69,8 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
         IWriteRangeFence fence,
         ILogger<IKahuna> logger,
         TimeProvider timeProvider,
-        CancellationToken shutdownToken,
-        PartitionWriteWakeTimer wakeTimer
+        PartitionWriteWakeTimer wakeTimer,
+        CancellationToken shutdownToken
     )
     {
         this.self = context.Self;
@@ -553,7 +553,7 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
         }
 
         long due = armed + delayMs * stampsPerMs;
-        if (options.PreciseWake)
+        if (options.PreciseWake && !OperatingSystem.IsBrowser())
             wakeTimer.Arm(state.TimerWake ??= new PartitionWriteWakeTimer.Wake(self, partitionId), due, wakeId, flush);
         else
             _ = WakeDelay(partitionId, wakeId, delayMs, due, flush);

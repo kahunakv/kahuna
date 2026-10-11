@@ -89,8 +89,8 @@ internal sealed class PartitionWriteAggregator : IDisposable
                 fence,
                 logger,
                 this.timeProvider,
-                shutdownCts.Token,
-                wakeTimer
+                wakeTimer,
+                shutdownCts.Token
             );
 
         gaugeMeter = PartitionWriteAggregatorMetrics.RegisterGauges(admission);
