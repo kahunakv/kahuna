@@ -311,8 +311,10 @@ detection requires the periodic ping to be enabled (it is, for cluster mode, by 
 | `--raft-backfill-enabled` | Whether the leader ships catch-up batches at all (off leaves lagging followers permanently stale) | `true` |
 | `--raft-backfill-threshold` | How far behind a follower can be before catch-up kicks in | `10` |
 | `--raft-max-backfill-entries-per-round` | Max log entries shipped per catch-up round | `128` |
+| `--raft-backfill-seeded-catch-up-grace-cap` | Max milliseconds the leader defers escalating a follower that a snapshot install just seeded (`0` disables the grace) | `180000` |
 | `--raft-learner-promotion-lag` | How close a Learner must get before it's eligible for promotion | `10` |
 | `--raft-learner-promotion-stable-window` | Milliseconds it must stay caught up before promotion | `3000` |
+| `--raft-learner-promotion-stall-warning-after` | Milliseconds a Learner may stay not promotable before one warning is logged | `30000` |
 | `--raft-gossip-interval` | Milliseconds between roster/health gossip rounds | `5000` |
 | `--raft-gossip-fanout` | How many peers each gossip round contacts | `2` |
 | `--raft-ping-timeout` | Milliseconds to wait for a direct ping reply | `500` |

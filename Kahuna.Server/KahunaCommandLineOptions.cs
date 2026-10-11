@@ -406,6 +406,9 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-backfill-no-progress-pause-cap", Required = false, HelpText = "Cap on the exponential pause between backfill batches to a follower whose reported commit frontier is not advancing, in milliseconds", Default = 30000)]
     public int RaftBackfillNoProgressPauseCap { get; set; } = 30000;
 
+    [Option("raft-backfill-seeded-catch-up-grace-cap", Required = false, HelpText = "Upper bound, in milliseconds, on how long the leader defers escalating a follower that was just seeded by a snapshot install and is still closing the gap to the commit frontier. Zero disables the grace", Default = 180000)]
+    public int RaftBackfillSeededCatchUpGraceCap { get; set; } = 180000;
+
     [Option("raft-backfill-no-progress-anchor-fallback-ships", Required = false, HelpText = "Consecutive fruitless backfill ships after which the leader re-anchors the next batch at the follower's reported commit frontier instead of nextIndex. Values <= 0 disable the fallback", Default = 2)]
     public int RaftBackfillNoProgressAnchorFallbackShips { get; set; } = 2;
 
@@ -414,6 +417,9 @@ public sealed class KahunaCommandLineOptions
 
     [Option("raft-learner-promotion-stable-window", Required = false, HelpText = "Milliseconds a learner must stay within promotion-lag before being promoted to Voter", Default = 3000)]
     public int RaftLearnerPromotionStableWindow { get; set; } = 3000;
+
+    [Option("raft-learner-promotion-stall-warning-after", Required = false, HelpText = "Milliseconds a placement-added learner may stay not promotable before the placement controller logs one warning naming the last failed check. Diagnostic only", Default = 30000)]
+    public int RaftLearnerPromotionStallWarningAfter { get; set; } = 30000;
 
     [Option("raft-gossip-interval", Required = false, HelpText = "Interval between gossip anti-entropy rounds in milliseconds", Default = 5000)]
     public int RaftGossipInterval { get; set; } = 5000;
