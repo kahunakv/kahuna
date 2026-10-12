@@ -6,8 +6,11 @@
  */
 
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Diagnostics.Metrics;
 using System.Globalization;
+using System.Numerics;
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace Kahuna.Server.Diagnostics;
@@ -82,12 +85,17 @@ internal readonly ref struct EngineMeasurementKey(
 /// reported as a gauge whose value is its cumulative total, since that is what the instrument
 /// publishes.</para>
 ///
-/// <para><b>Hot path.</b> Measurement callbacks fire inside the Raft executor, the WAL writer and
-/// the key-value write aggregator, so the recording path allocates nothing once a tag-set has been
-/// seen: the canonical tag string is built only on first sight, through an alternate lookup that
-/// hashes and compares the incoming tag span directly against the stored string. Dispose stops the
-/// listener — the test suite builds and tears down many nodes, and a leaked listener would keep
-/// observing forever.</para>
+/// <para><b>Hot path.</b> Measurement callbacks fire inside the Raft executor, the WAL writer, the
+/// key-value write aggregator and the point-read path, which records several samples per read at
+/// hundreds of thousands of reads per second. The recording path therefore allocates nothing once a
+/// tag-set has been seen (the canonical tag string is built only on first sight, through an alternate
+/// lookup that hashes and compares the incoming tag span directly against the stored string) and
+/// takes no lock: each aggregate is striped per processor, and a sample folds into its stripe with
+/// interlocked operations only. A snapshot sums the stripes. Because the stripe fields are not
+/// updated as one unit, a snapshot taken while samples arrive can see a count and a sum that differ
+/// by a sample; the dashboard reads rates as differences between two snapshots seconds apart, so
+/// that is immaterial. Dispose stops the listener — the test suite builds and tears down many nodes,
+/// and a leaked listener would keep observing forever.</para>
 /// </summary>
 public sealed class EngineMetricsCollector : IDisposable
 {
@@ -166,29 +174,31 @@ public sealed class EngineMetricsCollector : IDisposable
             EngineMetricKey key = entry.Key;
             Aggregate aggregate = entry.Value;
 
-            lock (aggregate)
+            if (key.Kind == EngineMetricKind.Gauge)
             {
-                if (!aggregate.HasValue)
+                if (!aggregate.TryReadGauge(out double sampled))
                     continue;
 
-                rows.Add(key.Kind switch
-                {
-                    EngineMetricKind.Counter => new EngineMetricRow(
-                        key.Source, key.Metric, key.Tags, key.Kind,
-                        Count: (long)aggregate.Sum, Total: aggregate.Sum,
-                        Min: null, Max: null, Last: null),
+                rows.Add(new EngineMetricRow(
+                    key.Source, key.Metric, key.Tags, key.Kind,
+                    Count: 1, Total: null,
+                    Min: null, Max: null, Last: sampled));
 
-                    EngineMetricKind.Gauge => new EngineMetricRow(
-                        key.Source, key.Metric, key.Tags, key.Kind,
-                        Count: 1, Total: null,
-                        Min: null, Max: null, Last: aggregate.Last),
-
-                    _ => new EngineMetricRow(
-                        key.Source, key.Metric, key.Tags, key.Kind,
-                        Count: aggregate.Count, Total: aggregate.Sum,
-                        Min: aggregate.Min, Max: aggregate.Max, Last: aggregate.Last),
-                });
+                continue;
             }
+
+            if (!aggregate.TryFold(out long count, out double sum, out double min, out double max, out double last))
+                continue;
+
+            rows.Add(key.Kind == EngineMetricKind.Counter
+                ? new EngineMetricRow(
+                    key.Source, key.Metric, key.Tags, key.Kind,
+                    Count: (long)sum, Total: sum,
+                    Min: null, Max: null, Last: null)
+                : new EngineMetricRow(
+                    key.Source, key.Metric, key.Tags, key.Kind,
+                    Count: count, Total: sum,
+                    Min: min, Max: max, Last: last));
         }
 
         rows.Sort(static (a, b) =>
@@ -214,36 +224,32 @@ public sealed class EngineMetricsCollector : IDisposable
     }
 
     /// <summary>
-    /// Folds one measurement into its aggregate. The alternate lookup handles the steady state without
-    /// building a string; only a tag-set never seen before takes the materializing path.
+    /// Folds one measurement into its aggregate. A tag-set recorded recently through the same string
+    /// instances resolves by identity; otherwise the alternate lookup matches the tag span against the
+    /// stored canonical strings without building one, and only a tag-set never seen before takes the
+    /// materializing path.
     /// </summary>
     private void Record(double value, ReadOnlySpan<KeyValuePair<string, object?>> tags, object? state)
     {
         if (state is not InstrumentDescriptor descriptor)
             return;
 
-        EngineMeasurementKey measurement = new(descriptor.Source, descriptor.Metric, descriptor.Kind, tags);
+        Aggregate? aggregate = descriptor.TryGetRecent(tags);
 
-        if (!lookup.TryGetValue(measurement, out Aggregate? aggregate))
-            aggregate = aggregates.GetOrAdd(Comparer.Create(measurement), static _ => new Aggregate());
-
-        lock (aggregate)
+        if (aggregate is null)
         {
-            aggregate.HasValue = true;
-            aggregate.Last = value;
+            EngineMeasurementKey measurement = new(descriptor.Source, descriptor.Metric, descriptor.Kind, tags);
 
-            if (descriptor.Kind == EngineMetricKind.Gauge)
-                return;
+            if (!lookup.TryGetValue(measurement, out aggregate))
+                aggregate = aggregates.GetOrAdd(Comparer.Create(measurement), static _ => new Aggregate());
 
-            aggregate.Count++;
-            aggregate.Sum += value;
-
-            if (value < aggregate.Min)
-                aggregate.Min = value;
-
-            if (value > aggregate.Max)
-                aggregate.Max = value;
+            descriptor.Remember(tags, aggregate);
         }
+
+        if (descriptor.Kind == EngineMetricKind.Gauge)
+            aggregate.SetGauge(value);
+        else
+            aggregate.Add(value);
     }
 
     /// <summary>
@@ -259,21 +265,291 @@ public sealed class EngineMetricsCollector : IDisposable
         _ => EngineMetricKind.Counter,
     };
 
-    /// <summary>Per-instrument constants resolved at publish time and handed back on every measurement.</summary>
-    private sealed record InstrumentDescriptor(string Source, string Metric, EngineMetricKind Kind);
+    /// <summary>
+    /// Per-instrument constants resolved at publish time and handed back on every measurement, plus a
+    /// small cache of the tag-sets this instrument was last recorded with.
+    ///
+    /// <para>The cache is keyed by the identity of the tag strings, not their content: a call site
+    /// that records with the same static tag pairs on every call (the usual shape, and the shape of
+    /// every per-request series) lands on its aggregate with a few reference comparisons instead of
+    /// hashing and matching the canonical rendering, which costs about 60 ns per tag. Identity is a
+    /// sound shortcut only for immutable values, so the cache admits string and null values; a boxed
+    /// number is a fresh object on every call and would never hit anyway. Entries are immutable and
+    /// replaced round-robin without synchronization: a lost insert costs one slow lookup, nothing
+    /// else.</para>
+    /// </summary>
+    private sealed class InstrumentDescriptor(string source, string metric, EngineMetricKind kind)
+    {
+        private const int RecentSlots = 8;
+
+        public readonly string Source = source;
+        public readonly string Metric = metric;
+        public readonly EngineMetricKind Kind = kind;
+
+        private readonly RecentTagSet?[] recent = new RecentTagSet?[RecentSlots];
+
+        private Aggregate? untagged;
+
+        private int nextSlot;
+
+        /// <summary>The aggregate of a tag-set recorded recently with the same string instances, or null.</summary>
+        public Aggregate? TryGetRecent(ReadOnlySpan<KeyValuePair<string, object?>> tags)
+        {
+            switch (tags.Length)
+            {
+                case 0:
+                    return Volatile.Read(ref untagged);
+
+                case 1:
+                {
+                    KeyValuePair<string, object?> a = tags[0];
+                    RecentTagSet?[] slots = recent;
+
+                    for (int i = 0; i < slots.Length; i++)
+                    {
+                        RecentTagSet? entry = Volatile.Read(ref slots[i]);
+
+                        if (entry is not null && entry.Count == 1
+                            && ReferenceEquals(entry.Key0, a.Key) && ReferenceEquals(entry.Value0, a.Value))
+                            return entry.Aggregate;
+                    }
+
+                    return null;
+                }
+
+                case 2:
+                {
+                    KeyValuePair<string, object?> a = tags[0];
+                    KeyValuePair<string, object?> b = tags[1];
+                    RecentTagSet?[] slots = recent;
+
+                    for (int i = 0; i < slots.Length; i++)
+                    {
+                        RecentTagSet? entry = Volatile.Read(ref slots[i]);
+
+                        if (entry is not null && entry.Count == 2
+                            && ReferenceEquals(entry.Key0, a.Key) && ReferenceEquals(entry.Value0, a.Value)
+                            && ReferenceEquals(entry.Key1, b.Key) && ReferenceEquals(entry.Value1, b.Value))
+                            return entry.Aggregate;
+                    }
+
+                    return null;
+                }
+
+                default:
+                    return null;
+            }
+        }
+
+        /// <summary>Caches the aggregate a tag-set resolved to, when the tag-set is small and its values are immutable.</summary>
+        public void Remember(ReadOnlySpan<KeyValuePair<string, object?>> tags, Aggregate aggregate)
+        {
+            switch (tags.Length)
+            {
+                case 0:
+                    Volatile.Write(ref untagged, aggregate);
+                    return;
+
+                case 1:
+                {
+                    KeyValuePair<string, object?> a = tags[0];
+
+                    if (a.Value is null or string)
+                        Insert(new RecentTagSet(1, a.Key, a.Value, null, null, aggregate));
+
+                    return;
+                }
+
+                case 2:
+                {
+                    KeyValuePair<string, object?> a = tags[0];
+                    KeyValuePair<string, object?> b = tags[1];
+
+                    if (a.Value is null or string && b.Value is null or string)
+                        Insert(new RecentTagSet(2, a.Key, a.Value, b.Key, b.Value, aggregate));
+
+                    return;
+                }
+            }
+        }
+
+        private void Insert(RecentTagSet entry)
+        {
+            // The miss path is rare, so an interlocked step keeps the slot sequence well defined across threads.
+            int slot = (int)((uint)Interlocked.Increment(ref nextSlot) % RecentSlots);
+            Volatile.Write(ref recent[slot], entry);
+        }
+
+        private sealed record RecentTagSet(int Count, string Key0, object? Value0, string? Key1, object? Value1, Aggregate Aggregate);
+    }
 
     /// <summary>
-    /// Mutable running state for one instrument + tag-set. Guarded by locking the instance itself:
-    /// count/sum/min/max must move together, and contention is per tag-set rather than global.
+    /// Running state for one instrument + tag-set, built so that recording never blocks.
+    ///
+    /// <para>Counter and histogram samples land in one of <see cref="StripeCount"/> stripes chosen by
+    /// the recording processor, so threads on different cores write different cache lines and the
+    /// interlocked operations inside a stripe almost never retry. A snapshot folds the stripes: counts
+    /// and sums add, the minimum and maximum take the extremes, and the most recent value is the one
+    /// with the newest stripe stamp. The fold reads each stripe's fields one at a time while samples
+    /// may still arrive, so a count and a sum can be a sample apart; the dashboard reads rates as
+    /// differences between snapshots and is not affected.</para>
+    ///
+    /// <para>A gauge has no history. It is sampled on the snapshot thread, so it keeps a single value
+    /// outside the stripes.</para>
     /// </summary>
     private sealed class Aggregate
     {
-        public bool HasValue;
-        public long Count;
-        public double Sum;
-        public double Min = double.PositiveInfinity;
-        public double Max = double.NegativeInfinity;
-        public double Last;
+        /// <summary>
+        /// Stripes per aggregate: the processor count rounded up to a power of two so the processor id
+        /// masks into an index, capped so a wide host does not spend kilobytes per tag-set.
+        /// </summary>
+        private static readonly int StripeCount = Math.Min(64, (int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(1, Environment.ProcessorCount)));
+
+        private static readonly int StripeMask = StripeCount - 1;
+
+        private readonly Stripe[] stripes = new Stripe[StripeCount];
+
+        private double gaugeLast;
+
+        private bool gaugeHasValue;
+
+        /// <summary>Folds one counter or histogram sample into the stripe of the current processor.</summary>
+        public void Add(double value)
+        {
+            ref Stripe stripe = ref stripes[Thread.GetCurrentProcessorId() & StripeMask];
+
+            // Two plain stores: the fold tolerates a stamp one sample ahead of its value.
+            Volatile.Write(ref stripe.Last, value);
+            Volatile.Write(ref stripe.LastStamp, Stopwatch.GetTimestamp());
+
+            double seen = Volatile.Read(ref stripe.Sum);
+
+            while (true)
+            {
+                double prior = Interlocked.CompareExchange(ref stripe.Sum, seen + value, seen);
+
+                if (BitConverter.DoubleToInt64Bits(prior) == BitConverter.DoubleToInt64Bits(seen))
+                    break;
+
+                seen = prior;
+            }
+
+            seen = Volatile.Read(ref stripe.Min);
+
+            while (value < seen)
+            {
+                double prior = Interlocked.CompareExchange(ref stripe.Min, value, seen);
+
+                if (BitConverter.DoubleToInt64Bits(prior) == BitConverter.DoubleToInt64Bits(seen))
+                    break;
+
+                seen = prior;
+            }
+
+            seen = Volatile.Read(ref stripe.Max);
+
+            while (value > seen)
+            {
+                double prior = Interlocked.CompareExchange(ref stripe.Max, value, seen);
+
+                if (BitConverter.DoubleToInt64Bits(prior) == BitConverter.DoubleToInt64Bits(seen))
+                    break;
+
+                seen = prior;
+            }
+
+            // Published last: a stripe whose count the fold sees as non-zero has every other field of
+            // at least that sample in place.
+            Interlocked.Increment(ref stripe.Count);
+        }
+
+        /// <summary>Replaces the gauge's sampled value.</summary>
+        public void SetGauge(double value)
+        {
+            Volatile.Write(ref gaugeLast, value);
+            Volatile.Write(ref gaugeHasValue, true);
+        }
+
+        /// <summary>The gauge's most recent sample, or false when it was never sampled.</summary>
+        public bool TryReadGauge(out double value)
+        {
+            if (!Volatile.Read(ref gaugeHasValue))
+            {
+                value = 0;
+                return false;
+            }
+
+            value = Volatile.Read(ref gaugeLast);
+            return true;
+        }
+
+        /// <summary>Sums the stripes. Returns false when no sample was recorded.</summary>
+        public bool TryFold(out long count, out double sum, out double min, out double max, out double last)
+        {
+            count = 0;
+            sum = 0;
+            min = double.PositiveInfinity;
+            max = double.NegativeInfinity;
+            last = 0;
+            long lastStamp = long.MinValue;
+
+            Stripe[] all = stripes;
+
+            for (int i = 0; i < all.Length; i++)
+            {
+                ref Stripe stripe = ref all[i];
+
+                long stripeCount = Volatile.Read(ref stripe.Count);
+
+                if (stripeCount == 0)
+                    continue;
+
+                count += stripeCount;
+                sum += Volatile.Read(ref stripe.Sum);
+
+                double stripeMin = Volatile.Read(ref stripe.Min);
+                if (stripeMin < min)
+                    min = stripeMin;
+
+                double stripeMax = Volatile.Read(ref stripe.Max);
+                if (stripeMax > max)
+                    max = stripeMax;
+
+                long stamp = Volatile.Read(ref stripe.LastStamp);
+
+                if (stamp > lastStamp)
+                {
+                    lastStamp = stamp;
+                    last = Volatile.Read(ref stripe.Last);
+                }
+            }
+
+            return count != 0;
+        }
+
+        /// <summary>
+        /// One processor's share of an aggregate, padded to its own cache lines (128 bytes covers the
+        /// widest common line) so neighbouring stripes do not share one.
+        /// </summary>
+        [StructLayout(LayoutKind.Explicit, Size = 128)]
+        private struct Stripe
+        {
+            [FieldOffset(0)] public long Count;
+            [FieldOffset(8)] public double Sum;
+            [FieldOffset(16)] public double Min;
+            [FieldOffset(24)] public double Max;
+            [FieldOffset(32)] public double Last;
+            [FieldOffset(40)] public long LastStamp;
+        }
+
+        public Aggregate()
+        {
+            for (int i = 0; i < stripes.Length; i++)
+            {
+                stripes[i].Min = double.PositiveInfinity;
+                stripes[i].Max = double.NegativeInfinity;
+            }
+        }
     }
 
     // ── Canonical tag rendering ───────────────────────────────────────────────

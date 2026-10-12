@@ -52,6 +52,11 @@ internal sealed class PartitionDivergenceContainment
     // Partitions whose projection this node must not serve, with the evidence that gated them.
     private readonly ConcurrentDictionary<int, GatedPartition> gated = new();
 
+    // Number of entries in the map, kept beside it. The hot paths ask "is anything gated?" on every read and
+    // every leadership check, and ConcurrentDictionary.IsEmpty answers "empty" only after taking every bucket
+    // lock of the map — so the usual state, nothing gated, was the one that serialized every reader on it.
+    private int gatedCount;
+
     // Partitions with a relinquish in flight, so a burst of detections runs one transfer, not a pile.
     private readonly ConcurrentDictionary<int, byte> relinquishInFlight = new();
 
@@ -64,10 +69,10 @@ internal sealed class PartitionDivergenceContainment
     }
 
     /// <summary>Whether this node must refuse to serve <paramref name="partitionId"/> from its own projection.</summary>
-    internal bool IsGated(int partitionId) => !gated.IsEmpty && gated.ContainsKey(partitionId);
+    internal bool IsGated(int partitionId) => AnyGated && gated.ContainsKey(partitionId);
 
     /// <summary>Whether any partition is gated here: the one read a hot path pays before routing a key to ask <see cref="IsGated"/>.</summary>
-    internal bool AnyGated => !gated.IsEmpty;
+    internal bool AnyGated => Volatile.Read(ref gatedCount) > 0;
 
     /// <summary>The gated partitions, for diagnostics and tests.</summary>
     internal IReadOnlyList<int> GatedPartitions => [.. gated.Keys];
@@ -88,6 +93,8 @@ internal sealed class PartitionDivergenceContainment
             throw new InvalidOperationException($"partition {partitionId} is already gated on this node");
         }
 
+        Interlocked.Increment(ref gatedCount);
+
         return new TestGate(this, partitionId, state);
     }
 
@@ -96,7 +103,10 @@ internal sealed class PartitionDivergenceContainment
         public void Dispose()
         {
             if (owner.gated.TryRemove(new KeyValuePair<int, GatedPartition>(partitionId, state)))
+            {
+                Interlocked.Decrement(ref owner.gatedCount);
                 state.Lifetime.Dispose();
+            }
         }
     }
 
@@ -115,6 +125,7 @@ internal sealed class PartitionDivergenceContainment
 
         if (gated.TryAdd(partitionId, state))
         {
+            Interlocked.Increment(ref gatedCount);
             KeyValueApplyMetrics.DivergenceContained.Add(1, new KeyValuePair<string, object?>("action", "gated"));
             logger.LogApplyDivergenceGated(partitionId, raft.GetLocalEndpoint(), moment, evidence, fullerPeer);
 
@@ -323,6 +334,7 @@ internal sealed class PartitionDivergenceContainment
     {
         if (gated.TryRemove(partitionId, out GatedPartition? state))
         {
+            Interlocked.Decrement(ref gatedCount);
             state.Lifetime.Cancel();
             state.Lifetime.Dispose();
 

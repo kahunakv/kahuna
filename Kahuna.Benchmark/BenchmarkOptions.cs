@@ -17,7 +17,7 @@ internal sealed class BenchmarkOptions
     public string ConnectionSource { get; set; } = "";
 
     [Option("workload", Default = "mixed",
-        HelpText = "set | get | mixed | delete | set-many | delete-many | txn | bank | lock | sequence | script | rate-limit")]
+        HelpText = "set | get | mixed | delete | set-many | delete-many | txn | txn-get | bank | lock | sequence | script | rate-limit")]
     public string Workload { get; set; } = "mixed";
 
     [Option("duration", Default = 30,
@@ -49,7 +49,7 @@ internal sealed class BenchmarkOptions
     public int ValueSize { get; set; } = 128;
 
     [Option("read-pct", Default = 50,
-        HelpText = "For mixed: percentage of reads (the rest are writes)")]
+        HelpText = "For mixed: percentage of reads (the rest are writes). For txn-get: percentage of sessions that read a key as it was left; the rest write the key just before the session opens, so the read lands on a fresh revision")]
     public int ReadPct { get; set; } = 50;
 
     [Option("batch-size", Default = 100,
@@ -57,7 +57,7 @@ internal sealed class BenchmarkOptions
     public int BatchSize { get; set; } = 100;
 
     [Option("keys-per-txn", Default = 4,
-        HelpText = "For txn: number of keys written per interactive transaction before commit")]
+        HelpText = "For txn: number of keys written per interactive transaction before commit. For txn-get: number of reads of the same key per session (1 = every read is the session's first)")]
     public int KeysPerTxn { get; set; } = 4;
 
     [Option("txn-locking", Default = "pessimistic",

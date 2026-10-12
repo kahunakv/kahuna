@@ -12,7 +12,31 @@ namespace Kahuna.Benchmark;
 
 internal enum OpOutcome { Success, Error, Timeout, Miss }
 
-internal enum OperationType { Get, Set, Delete, SetMany, DeleteMany, Transaction, Lock, Sequence, Script, RateLimit }
+internal enum OperationType { Get, Set, Delete, SetMany, DeleteMany, Transaction, Lock, Sequence, Script, RateLimit, TxnStart, TxnGetFirst, TxnGetFresh, TxnGetNext, TxnRollback }
+
+/// <summary>
+/// Measurements an operation closure makes beside the one it returns. A workload whose request is several
+/// round trips (a session, its reads, its rollback) times each round trip on its own and queues all but the
+/// primary one here; the worker drains the queue into its own <see cref="WorkerStats"/> after every call.
+/// One instance per worker, so no synchronization: the closure and the drain run on the worker's own task.
+/// </summary>
+internal sealed class ExtraResults
+{
+    private readonly List<(OperationType Op, OpOutcome Outcome, long Micros)> items = new(8);
+
+    public int Count => items.Count;
+
+    public void Add(OperationType op, OpOutcome outcome, long elapsedMicros) => items.Add((op, outcome, elapsedMicros));
+
+    /// <summary>Records every queued measurement into <paramref name="stats"/> and empties the queue.</summary>
+    public void DrainInto(WorkerStats stats)
+    {
+        for (int i = 0; i < items.Count; i++)
+            stats.Record(items[i].Op, items[i].Outcome, items[i].Micros);
+
+        items.Clear();
+    }
+}
 
 /// <summary>
 /// Per-worker latency histograms and counters. Not thread-safe — only the owning

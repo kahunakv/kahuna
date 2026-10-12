@@ -1961,17 +1961,18 @@ internal sealed class PreparedIntentStore
         HLCTimestamp Watermark, long ReflectedThroughIndex, long FullyReflectedThroughIndex,
         List<KeyValuePair<string, CommittedHead>> Heads, List<SettledIdentityEntry> Settled);
 
-    /// <summary>The current intent at <paramref name="key"/>, or null. The emptiness pre-check is
-    /// deliberate: this runs on every point read/write in the actor hot path, and on workloads with
-    /// no durable transactions it skips hashing the key into the shared map entirely (an empty map
-    /// can only ever answer null).</summary>
+    /// <summary>The current intent at <paramref name="key"/>, or null. This runs on every point read/write
+    /// in the actor hot path, so it is a single lock-free lookup. It must not be guarded by an emptiness
+    /// pre-check: <see cref="ConcurrentDictionary{TKey,TValue}.IsEmpty"/> answers "empty" only after taking
+    /// every bucket lock of the map, so on a workload with no durable transactions — the one case the check
+    /// was meant to shortcut — every actor thread serialized on those locks for every read.</summary>
     public PreparedIntent? Get(string key) =>
-        !intents.IsEmpty && intents.TryGetValue(key, out PreparedIntent? intent) ? intent : null;
+        intents.TryGetValue(key, out PreparedIntent? intent) ? intent : null;
 
-    /// <summary>The intent at <paramref name="key"/> only when it belongs to the given transaction attempt.</summary>
+    /// <summary>The intent at <paramref name="key"/> only when it belongs to the given transaction attempt.
+    /// Lock-free for the same reason as <see cref="Get"/>.</summary>
     public PreparedIntent? GetByIdentity(HLCTimestamp transactionId, long epoch, string key) =>
-        !intents.IsEmpty
-        && intents.TryGetValue(key, out PreparedIntent? intent)
+        intents.TryGetValue(key, out PreparedIntent? intent)
         && intent.TransactionId == transactionId
         && intent.Epoch == epoch
             ? intent

@@ -118,6 +118,104 @@ public sealed class TestEngineMetricsCollector
     }
 
     /// <summary>
+    /// The recording path is striped per processor and folded at snapshot time without a lock. Many
+    /// threads recording the same histogram at once must lose no sample: the count, the sum and the
+    /// extremes must equal what a single-threaded fold of the same values gives. Integer values keep
+    /// the double sum exact, so the assertion is on equality and not on tolerance.
+    /// </summary>
+    [Fact]
+    public void ConcurrentRecordsLoseNoSample()
+    {
+        using Meter meter = new(EngineMetricsCollector.KahunaMeterName, "1.0");
+        using EngineMetricsCollector collector = new();
+
+        Histogram<long> histogram = meter.CreateHistogram<long>("test.collector.concurrent_ms");
+        Counter<long> counter = meter.CreateCounter<long>("test.collector.concurrent_total");
+
+        const int threads = 8;
+        const int perThread = 20_000;
+
+        Parallel.For(0, threads, new ParallelOptions { MaxDegreeOfParallelism = threads }, t =>
+        {
+            for (int i = 1; i <= perThread; i++)
+            {
+                histogram.Record(t * perThread + i);
+                counter.Add(1);
+            }
+        });
+
+        // The very last sample on one thread after the burst is the most recent value.
+        histogram.Record(3);
+
+        IReadOnlyList<EngineMetricRow> rows = collector.Snapshot();
+
+        EngineMetricRow? row = Find(rows, "test.collector.concurrent_ms");
+        Assert.NotNull(row);
+
+        const long samples = threads * perThread;
+        Assert.Equal(samples + 1, row.Count);
+        Assert.Equal((double)samples * (samples + 1) / 2 + 3, row.Total);
+        Assert.Equal(1, row.Min);
+        Assert.Equal(samples, row.Max);
+        Assert.Equal(3, row.Last);
+
+        Assert.Equal(samples, Find(rows, "test.collector.concurrent_total")?.Total);
+    }
+
+    /// <summary>
+    /// A snapshot taken while samples arrive must never block a recorder nor report a count outside
+    /// the range of what was recorded so far, and the final snapshot must be exact.
+    /// </summary>
+    [Fact]
+    public void SnapshotWhileRecordingIsBoundedAndFinalIsExact()
+    {
+        using Meter meter = new(EngineMetricsCollector.KahunaMeterName, "1.0");
+        using EngineMetricsCollector collector = new();
+
+        Histogram<int> histogram = meter.CreateHistogram<int>("test.collector.live_ms");
+
+        const int threads = 4;
+        const int perThread = 50_000;
+        const long samples = threads * perThread;
+
+        using CancellationTokenSource stop = new();
+        long snapshots = 0;
+
+        Task reader = Task.Run(() =>
+        {
+            while (!stop.IsCancellationRequested)
+            {
+                EngineMetricRow? row = Find(collector.Snapshot(), "test.collector.live_ms");
+
+                if (row is not null)
+                {
+                    Assert.InRange(row.Count, 1, samples);
+                    Assert.Equal(1, row.Min);
+                    Assert.Equal(1, row.Max);
+                }
+
+                snapshots++;
+            }
+        });
+
+        Parallel.For(0, threads, new ParallelOptions { MaxDegreeOfParallelism = threads }, _ =>
+        {
+            for (int i = 0; i < perThread; i++)
+                histogram.Record(1);
+        });
+
+        stop.Cancel();
+        reader.GetAwaiter().GetResult();
+
+        Assert.True(snapshots > 0);
+
+        EngineMetricRow? final = Find(collector.Snapshot(), "test.collector.live_ms");
+        Assert.NotNull(final);
+        Assert.Equal(samples, final.Count);
+        Assert.Equal(samples, final.Total);
+    }
+
+    /// <summary>
     /// Two call sites that emit the same tags in a different order describe the same thing and must
     /// land on one row. The canonical rendering sorts keys ordinally, which is what makes that true.
     /// </summary>
@@ -141,6 +239,46 @@ public sealed class TestEngineMetricsCollector
 
         Assert.Single(rows, r => r.Metric == "test.collector.tagged_total");
         Assert.Equal(2, Find(rows, "test.collector.tagged_total", "outcome=success,partition_id=7")?.Total);
+    }
+
+    /// <summary>
+    /// A repeated tag-set is resolved by the identity of its strings, so two call sites that spell the
+    /// same tags through different string instances must still land on one row through the canonical
+    /// rendering, and a tag-set that differs in one value must not be captured by the cache.
+    /// </summary>
+    [Fact]
+    public void SameTagsThroughDifferentStringInstancesLandOnOneRow()
+    {
+        using Meter meter = new(EngineMetricsCollector.KahunaMeterName, "1.0");
+        using EngineMetricsCollector collector = new();
+
+        Histogram<int> histogram = meter.CreateHistogram<int>("test.collector.identity_ms");
+
+        string key = "stage";
+        string hit = "hit";
+        string otherKey = new([.. "stage"]);
+        string otherHit = new([.. "hit"]);
+        Assert.False(ReferenceEquals(key, otherKey));
+        Assert.False(ReferenceEquals(hit, otherHit));
+
+        for (int i = 0; i < 3; i++)
+        {
+            histogram.Record(1, new KeyValuePair<string, object?>(key, hit));
+            histogram.Record(2, new KeyValuePair<string, object?>(otherKey, otherHit));
+            histogram.Record(5, new KeyValuePair<string, object?>(key, "miss"));
+        }
+
+        IReadOnlyList<EngineMetricRow> rows = collector.Snapshot();
+
+        EngineMetricRow? hits = Find(rows, "test.collector.identity_ms", "stage=hit");
+        Assert.NotNull(hits);
+        Assert.Equal(6, hits.Count);
+        Assert.Equal(9, hits.Total);
+
+        EngineMetricRow? misses = Find(rows, "test.collector.identity_ms", "stage=miss");
+        Assert.NotNull(misses);
+        Assert.Equal(3, misses.Count);
+        Assert.Equal(15, misses.Total);
     }
 
     /// <summary>Different tag-sets are different rows, so the dashboard can fold them itself.</summary>

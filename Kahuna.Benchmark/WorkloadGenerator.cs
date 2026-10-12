@@ -82,6 +82,7 @@ internal static class WorkloadGenerator
         // (otherwise every op is a miss). set-many/txn write their own keys, so no seeding.
         if (opts.Workload.Equals("get", StringComparison.OrdinalIgnoreCase) ||
             opts.Workload.Equals("mixed", StringComparison.OrdinalIgnoreCase) ||
+            opts.Workload.Equals("txn-get", StringComparison.OrdinalIgnoreCase) ||
             opts.Workload.Equals("delete", StringComparison.OrdinalIgnoreCase) ||
             opts.Workload.Equals("delete-many", StringComparison.OrdinalIgnoreCase))
         {
@@ -115,10 +116,12 @@ internal static class WorkloadGenerator
     /// <summary>
     /// Returns an operation function for the given <paramref name="opts"/> workload.
     /// The closure is self-contained: safe to call concurrently from many workers,
-    /// each with its own <paramref name="rng"/> instance.
+    /// each with its own <paramref name="rng"/> instance. A workload that times more than
+    /// one round trip per call queues the others on <paramref name="extra"/>, which the
+    /// calling worker drains after every call.
     /// </summary>
     public static Func<CancellationToken, ValueTask<(OperationType op, OpOutcome outcome, long elapsedMicros)>>
-        Create(KahunaClient client, BenchmarkOptions opts, Random rng)
+        Create(KahunaClient client, BenchmarkOptions opts, Random rng, ExtraResults? extra = null)
     {
         KeyValueDurability kvDur = ParseKvDurability(opts.Durability);
         LockDurability lockDur = ParseLockDurability(opts.Durability);
@@ -179,6 +182,7 @@ internal static class WorkloadGenerator
                 "set-many"    => OperationType.SetMany,
                 "delete-many" => OperationType.DeleteMany,
                 "txn"           => OperationType.Transaction,
+                "txn-get"       => OperationType.TxnGetFirst,
                 "bank-transfer" => OperationType.Transaction,
                 "lock"        => OperationType.Lock,
                 "sequence"    => OperationType.Sequence,
@@ -302,6 +306,86 @@ internal static class WorkloadGenerator
                         if (!await session.Commit(ct))
                             return (opType, OpOutcome.Error, ElapsedMicros(startTs));
                         break;
+                    }
+
+                    case "txn-get":
+                    {
+                        // A point read the way a SQL consumer issues it: a session, --keys-per-txn reads of
+                        // the same key, a rollback. Every round trip is timed on its own, so the first read of
+                        // a session can be compared with the later reads of the same key, and the session
+                        // start and end stay out of both. The first read is the result this call returns; the
+                        // others are queued on the worker's extra results. With --read-pct below 100, the rest
+                        // of the cycles write the key just before the session opens, so the read lands on a key
+                        // with a fresh, not yet flushed revision.
+                        bool wroteFirst = readPct < 100 && rng.Next(100) >= readPct;
+                        if (wroteFirst)
+                        {
+                            rng.NextBytes(valuePayload);
+                            opType = OperationType.Set;
+                            startTs = Stopwatch.GetTimestamp();
+                            await client.SetKeyValue(key, valuePayload,
+                                (int)TimeSpan.FromHours(5).TotalMilliseconds,
+                                KeyValueFlags.Set, kvDur, ct);
+                            extra?.Add(OperationType.Set, OpOutcome.Success, ElapsedMicros(startTs));
+                        }
+
+                        KahunaTransactionOptions readOpts = new()
+                        {
+                            Timeout = txnTimeoutMs,
+                            Locking = txnLocking,
+                            AutoCommit = false
+                        };
+
+                        opType = OperationType.TxnStart;
+                        startTs = Stopwatch.GetTimestamp();
+                        KahunaTransactionSession readSession = await client.StartTransactionSession(readOpts, ct);
+                        extra?.Add(OperationType.TxnStart, OpOutcome.Success, ElapsedMicros(startTs));
+
+                        OpOutcome firstOutcome;
+                        long firstMicros;
+
+                        // A first read that follows the write is reported as its own row, so the cost of a key
+                        // with a fresh revision is read beside the cost of a key as the seed left it.
+                        OperationType firstType = wroteFirst ? OperationType.TxnGetFresh : OperationType.TxnGetFirst;
+
+                        try
+                        {
+                            opType = firstType;
+                            startTs = Stopwatch.GetTimestamp();
+                            KahunaKeyValue first = await readSession.GetKeyValue(key, kvDur, ct);
+                            firstMicros = ElapsedMicros(startTs);
+                            firstOutcome = first.Success ? OpOutcome.Success : OpOutcome.Miss;
+
+                            for (int j = 1; j < keysPerTxn; j++)
+                            {
+                                opType = OperationType.TxnGetNext;
+                                startTs = Stopwatch.GetTimestamp();
+                                KahunaKeyValue next = await readSession.GetKeyValue(key, kvDur, ct);
+                                extra?.Add(OperationType.TxnGetNext, next.Success ? OpOutcome.Success : OpOutcome.Miss, ElapsedMicros(startTs));
+                            }
+                        }
+                        finally
+                        {
+                            // The rollback is a round trip of its own. A refused rollback is counted as an
+                            // error of that step, not of the read that preceded it.
+                            long rollbackTs = Stopwatch.GetTimestamp();
+                            try
+                            {
+                                bool rolledBack = await readSession.Rollback(ct);
+                                extra?.Add(OperationType.TxnRollback, rolledBack ? OpOutcome.Success : OpOutcome.Error, ElapsedMicros(rollbackTs));
+                            }
+                            catch (Exception ex) when (ex is not OperationCanceledException)
+                            {
+                                RecordError(ex);
+                                extra?.Add(OperationType.TxnRollback, OpOutcome.Error, ElapsedMicros(rollbackTs));
+                            }
+                            finally
+                            {
+                                await readSession.DisposeAsync();
+                            }
+                        }
+
+                        return (firstType, firstOutcome, firstMicros);
                     }
 
                     case "bank-transfer":

@@ -29,7 +29,7 @@ if (endpoints.Length == 0)
     return 1;
 }
 
-string[] validWorkloads = ["set", "get", "mixed", "delete", "set-many", "delete-many", "txn", "bank", "lock", "sequence", "script", "rate-limit"];
+string[] validWorkloads = ["set", "get", "mixed", "delete", "set-many", "delete-many", "txn", "txn-get", "bank", "lock", "sequence", "script", "rate-limit"];
 if (!validWorkloads.Contains(opts.Workload, StringComparer.OrdinalIgnoreCase))
 {
     AnsiConsole.MarkupLine($"[red]--workload must be one of: {string.Join(", ", validWorkloads)}[/]");

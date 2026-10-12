@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 using Kommander;
 using Kommander.Time;
 
@@ -83,11 +85,24 @@ internal sealed class RoutedReadOperations
 
         RegistrationRouting routing = ClassifyRegistration(transactionId, coordinatorKey, operationId);
         if (routing is RegistrationRouting.Legacy)
-            return locator.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken);
+            return TryGetValueDirect(transactionId, key, revision, readTimestamp, durability, cancellationToken);
         if (routing is RegistrationRouting.Malformed)
             return Task.FromResult((KeyValueResponseType.InvalidInput, (ReadOnlyKeyValueEntry?)null));
 
         return RegisterAndTryReadValue(OperationKind.Get, transactionId, coordinatorKey, operationId, key, revision, readTimestamp, durability, cancellationToken);
+    }
+
+    /// <summary>
+    /// A get outside any transaction session: no registration, no completion, just the located read. Stamped
+    /// as a whole so the <c>direct</c> total series exists beside the <c>registered</c> one.
+    /// </summary>
+    private async Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryGetValueDirect(
+        HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
+    {
+        long start = Stopwatch.GetTimestamp();
+        (KeyValueResponseType, ReadOnlyKeyValueEntry?) result = await locator.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken);
+        KeyValueReadMetrics.RecordTotal(start, Stopwatch.GetTimestamp(), registered: false);
+        return result;
     }
 
     /// <summary>
@@ -103,8 +118,12 @@ internal sealed class RoutedReadOperations
     {
         byte[] digest = OperationDigest.ForRead(kind, key, revision, readTimestamp, durability);
 
+        long start = Stopwatch.GetTimestamp();
+
         (OperationRegistrationOutcome outcome, _, _, _, _, _) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, digest, cancellationToken);
+
+        KeyValueReadMetrics.RecordRegister(start, Stopwatch.GetTimestamp());
 
         // Pending means an earlier attempt read but its completion did not land: re-drive it from the retry
         // cache, then re-read below as under an already-completed id.
@@ -169,7 +188,17 @@ internal sealed class RoutedReadOperations
 
         // Owns the shell from here: recycled on an acknowledged fold, retained in the retry cache otherwise.
         // A completion that did not land must not hand the value back over a still-pending record.
-        if (!await CompleteRegisteredOperation(coordinatorKey, transactionId, operationId, type, payload))
+        long completeStart = Stopwatch.GetTimestamp();
+        bool completed = await CompleteRegisteredOperation(coordinatorKey, transactionId, operationId, type, payload);
+        long end = Stopwatch.GetTimestamp();
+
+        if (kind == OperationKind.Get)
+        {
+            KeyValueReadMetrics.RecordComplete(completeStart, end);
+            KeyValueReadMetrics.RecordTotal(start, end, registered: true);
+        }
+
+        if (!completed)
             return (KeyValueResponseType.MustRetry, null);
 
         return (type, entry);

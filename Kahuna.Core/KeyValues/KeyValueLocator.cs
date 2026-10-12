@@ -4,6 +4,7 @@ using Kommander.Time;
 using Kommander.Diagnostics;
 
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 
 using Kahuna.Server.Communication.Internode;
@@ -860,10 +861,21 @@ internal sealed class KeyValueLocator
         if (!raft.Joined)
             return (KeyValueResponseType.MustRetry, null);
 
-        if (await ConfirmLeadershipForRead(partitionId, cancellationToken))
+        // The leadership check is stamped on both sides and tagged by whether it completed synchronously:
+        // a synchronous answer is the leader's lease, an asynchronous one is an executor read-index round.
+        long confirmStart = Stopwatch.GetTimestamp();
+        ValueTask<bool> confirmation = ConfirmLeadershipForRead(partitionId, cancellationToken);
+        bool leaseHit = confirmation.IsCompleted;
+        bool confirmed = await confirmation;
+        long confirmEnd = Stopwatch.GetTimestamp();
+        KeyValueReadMetrics.RecordConfirm(confirmStart, confirmEnd, leaseHit);
+
+        if (confirmed)
         {
             RecordLocalKeyRoute(key, partitionId);
-            return await manager.TryGetValue(transactionId, key, revision, readTimestamp, durability);
+            (KeyValueResponseType, ReadOnlyKeyValueEntry?) local = await manager.TryGetValue(transactionId, key, revision, readTimestamp, durability);
+            KeyValueReadMetrics.RecordActor(confirmEnd, Stopwatch.GetTimestamp());
+            return local;
         }
 
         string? leader = await TryWaitForLeader(partitionId, cancellationToken);

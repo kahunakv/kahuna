@@ -59,6 +59,11 @@ public static class DashboardHandlers
         "kahuna.kv.write.batch_submissions",
         "kahuna.kv.write.fill_target",
 
+        // The point-read path per step, and the coordinator registration hops a transaction-scoped read takes.
+        "kahuna.kv.read.stage",
+        "kahuna.durable_tx.session_registration_forwards",
+        "kahuna.durable_tx.session_registration_forward_ms",
+
         // Persistence back-pressure: the unflushed backlog against its budget, and whether the gate is closed.
         "kahuna.persistence.unflushed_budget_fraction",
         "kahuna.persistence.backlog_gate_closed",

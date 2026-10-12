@@ -65,6 +65,7 @@ stays clean — see §7):
 | `set-many` | One batched request writing `--batch-size` distinct keys (partition-batched write path). |
 | `delete-many` | One batched request deleting `--batch-size` distinct keys. |
 | `txn` | An interactive transaction that writes `--keys-per-txn` keys, then commits (full working-set 2PC). |
+| `txn-get` | A point read the way a SQL consumer issues it: a session, `--keys-per-txn` reads of the same key, a rollback. Each round trip is reported on its own (see §3.2). |
 | `bank` | Contended read-modify-write: move one unit between two accounts inside one transaction. |
 | `lock` | Acquire then release a lock (`GetOrCreateLock`) — one acquire+release per op. |
 | `sequence` | `NextSequenceValue` against a single shared sequence (sequencer hot path). |
@@ -120,19 +121,66 @@ kahuna-bench -c https://localhost:8082 --workload rate-limit --durability epheme
 
 ---
 
+### 3.2 The `txn-get` workload
+
+A SQL consumer such as CamusDB serves a primary-key `SELECT` as a transaction: it opens a session, reads
+the row through that session, and ends the session. The read inside a session is not the same server
+path as a plain `get`: it registers on the transaction coordinator before the read and folds its
+observation into the working set after it. `txn-get` reproduces that shape and times every round trip
+separately, so the rows of the report are the steps of one request:
+
+| Row | Round trip |
+|---|---|
+| `txnstart` | `StartTransactionSession` |
+| `txngetfirst` | the first read of the session (the one that carries the session's first registration), on a key as the seed left it |
+| `txngetfresh` | the first read of a session whose key was written just before the session opened (`--read-pct` below 100) |
+| `txngetnext` | every later read of the same key in the same session (`--keys-per-txn` minus one per session) |
+| `txnrollback` | `Rollback` |
+| `set` | with `--read-pct` below 100: the write of the key that precedes the session |
+
+Run it with `--keys-per-txn 1` to make every read a first read, and with `--keys-per-txn 2` to compare
+the first read with a second read of the same key. `--read-pct 100` (the default for this comparison)
+reads keys as the seed left them; `--read-pct 50` writes the key just before half the sessions, which
+puts a not yet flushed revision in front of the read.
+
+On the server, the same request is split by step in the `kahuna.kv.read.stage` histogram (unit
+milliseconds, tag `stage`): `register` (the coordinator registration), `confirm` (the quorum-confirmed
+leadership check, tagged `lease=hit` when the leader's lease answered it synchronously and `lease=miss`
+when the answer was asynchronous: a wait for the leader's applied frontier under a fresh lease, or an
+executor read-index round when the lease had lapsed), `actor` (the actor round trip that reads the value),
+`complete` (the fold of the observation into the working set), and `total` (the whole get, tagged
+`path=registered` for a session read and `path=direct` for a plain `get`). The dashboard metrics
+endpoint (`/v1/dashboard/metrics`) serves it beside the write-path series, so Δtotal/Δcount over a
+scrape window gives the mean of each step. The collector behind that endpoint folds each sample into a
+per-processor stripe without a lock, so scraping this series costs the leader about 20 to 40 ns per
+sample; a scraped and an unscraped run of the plain `get` at 128 workers agree on reads/s and p99 within
+run-to-run noise.
+
+```sh
+# Every read is a session's first read; keys as seeded
+kahuna-bench -c http://localhost:8087 --workload txn-get --keys-per-txn 1 --read-pct 100 \
+  --key-space 2000 --concurrency 128 --txn-locking optimistic --duration 180
+
+# First read against second read of the same key, half the keys freshly written
+kahuna-bench -c http://localhost:8087 --workload txn-get --keys-per-txn 2 --read-pct 50 \
+  --key-space 2000 --concurrency 128 --txn-locking optimistic --duration 180
+```
+
 ## 4. Flag reference
 
 | Flag | Default | Meaning |
 |---|---|---|
 | `-c, --connection-source` | (required) | Comma-separated endpoints, e.g. `https://h1:8082,https://h2:8084`. |
-| `--workload` | `mixed` | `set` \| `get` \| `mixed` \| `delete` \| `set-many` \| `delete-many` \| `txn` \| `bank` \| `lock` \| `sequence` \| `script` \| `rate-limit`. |
+| `--workload` | `mixed` | `set` \| `get` \| `mixed` \| `delete` \| `set-many` \| `delete-many` \| `txn` \| `txn-get` \| `bank` \| `lock` \| `sequence` \| `script` \| `rate-limit`. |
 | `--duration` | `30` | Measured window, seconds (excludes warmup). |
 | `--warmup` | `5` | Warmup seconds; samples discarded. |
 | `--concurrency` | `64` | Concurrent workers (closed-loop) / consumers (open-loop). |
 | `--rate` | `0` | Target req/s. `0` = closed-loop; `>0` = open-loop at this rate (§6). |
 | `--key-space` | `10000` | Number of distinct keys cycled through. |
 | `--value-size` | `128` | Write payload size, bytes. |
-| `--read-pct` | `50` | For `mixed`: percent reads. |
+| `--read-pct` | `50` | For `mixed`: percent reads. For `txn-get`: percent of sessions that read the key as it was left; the rest write it just before the session opens (§3.2). |
+| `--keys-per-txn` | `4` | For `txn`: keys written per transaction. For `txn-get`: reads of the same key per session (§3.2). |
+| `--txn-locking` | `pessimistic` | For `txn`, `txn-get` and `bank`: `pessimistic` \| `optimistic`. |
 | `--durability` | `persistent` | `persistent` \| `ephemeral`. |
 | `--script` | — | Path to a `.4gl` script for `--workload script`. |
 | `--rate-limit-mode` | `fixed` | For `rate-limit`: `fixed` \| `sliding` (§3.1). |

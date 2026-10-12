@@ -184,7 +184,8 @@ internal static class BenchmarkRunner
                 ? new Random(Environment.TickCount + workerIdx)
                 : new Random(opts.Seed + workerIdx);
 
-            var op = WorkloadGenerator.Create(client, opts, workerRng);
+            ExtraResults extra = new();
+            var op = WorkloadGenerator.Create(client, opts, workerRng, extra);
             WorkerStats workerStats = stats[workerIdx];
 
             workers[i] = Task.Run(async () =>
@@ -197,6 +198,7 @@ internal static class BenchmarkRunner
                         (OperationType opType, OpOutcome outcome, long elapsedMicros) = await op(ct);
                         liveMetrics?.EndOp(outcome, elapsedMicros);
                         workerStats.Record(opType, outcome, elapsedMicros);
+                        extra.DrainInto(workerStats);
                     }
                     catch (OperationCanceledException)
                     {
@@ -293,7 +295,8 @@ internal static class BenchmarkRunner
                 ? new Random(Environment.TickCount + workerIdx)
                 : new Random(opts.Seed + workerIdx);
 
-            var op = WorkloadGenerator.Create(client, opts, workerRng);
+            ExtraResults extra = new();
+            var op = WorkloadGenerator.Create(client, opts, workerRng, extra);
             WorkerStats workerStats = stats[workerIdx];
 
             consumers[i] = Task.Run(async () =>
@@ -323,6 +326,7 @@ internal static class BenchmarkRunner
                                                 * 1_000_000.0 / Stopwatch.Frequency);
                     liveMetrics?.EndOp(outcome, elapsedMicros);
                     workerStats.Record(opType, outcome, elapsedMicros);
+                    extra.DrainInto(workerStats);
                 }
             });
         }
