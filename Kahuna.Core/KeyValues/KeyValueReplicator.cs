@@ -209,6 +209,10 @@ internal sealed class KeyValueReplicator
         HLCTimestamp transactionId,
         bool noRevision)
     {
+        // A published read of the key defers to the actor from this point until the actor processed the
+        // notification: noted before the send, and before the applied frontier moves past this entry.
+        persistentRouter.NotePendingApply(key, revision, lastModified);
+
         // Fire-and-forget with ownership transfer: the actor returns the pooled request after
         // handling it, so no reference may be kept past the send.
         persistentRouter.Send(
@@ -296,6 +300,8 @@ internal sealed class KeyValueReplicator
     private async Task<KeyValueResponseType> AskDurableCommit(
         int partitionId, PreparedIntent intent, ReadOnlyKeyValueEntry? hydratedEntry, bool backendHydrated)
     {
+        persistentRouter.NotePendingApply(intent.Key, intent.Revision, intent.CommitTimestamp);
+
         KeyValueRequest request = KeyValueRequestPool.RentInvalidateOrApply(
             intent.Key,
             intent.Revision,
@@ -380,6 +386,8 @@ internal sealed class KeyValueReplicator
 
                 if (row is null)
                     return;
+
+                persistentRouter.NotePendingApply(key, row.Revision, row.LastModified);
 
                 persistentRouter.Send(
                     KeyValueRequestPool.RentInvalidateOrApply(

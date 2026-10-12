@@ -10,6 +10,50 @@ namespace Kahuna.Server.KeyValues;
 /// </summary>
 internal sealed class KeyValueEntry
 {
+    // Backing fields of the head and intent properties. Every setter below retracts the published head record
+    // and queues a republish, so a reader on another thread can never observe a torn or superseded head: the
+    // record is retracted before the first field of a multi-field install changes, and republished only at the
+    // end of the actor turn, when the install is complete.
+    private byte[]? headValue;
+    private HLCTimestamp expires;
+    private long revision;
+    private HLCTimestamp lastModified;
+    private KeyValueWriteIntent? writeIntent;
+    private KeyValueReplicationIntent? replicationIntent;
+    private InvalidateOrApplyData? pendingCommittedHead;
+    private Dictionary<HLCTimestamp, KeyValueMvccEntry>? mvccEntries;
+    private KeyValueState state = KeyValueState.Set;
+
+    /// <summary>
+    /// The head record published for off-actor latest reads, or null when none is live. Set and cleared on the
+    /// actor thread only (see <see cref="KeyValueContext.FlushHeadPublications"/>).
+    /// </summary>
+    internal PublishedHead? Published;
+
+    /// <summary>
+    /// The context whose store this entry is resident in, or null when it is not resident. Set by
+    /// <see cref="KeyValueContext.InsertStoreEntry"/>, cleared by <see cref="KeyValueContext.RemoveStoreEntry"/>.
+    /// Lets a head change queue the entry for republication without the handler naming the context.
+    /// </summary>
+    internal KeyValueContext? Owner;
+
+    /// <summary>True while the entry waits in its owner's republish queue for the end of the current turn.</summary>
+    internal bool PublishQueued;
+
+    /// <summary>
+    /// Retracts the live published record, if any, and queues the entry for republication at the end of the
+    /// actor turn. Called by every setter whose value an off-actor reader would serve or must defer to.
+    /// </summary>
+    private void HeadChanged()
+    {
+        if (Published is { } published)
+        {
+            published.Retract();
+            Published = null;
+        }
+
+        Owner?.QueueHeadPublication(this);
+    }
     /// <summary>
     /// The current bucket of the key if any
     /// </summary>
@@ -18,17 +62,41 @@ internal sealed class KeyValueEntry
     /// <summary>
     /// The current value of the key.
     /// </summary>
-    public byte[]? Value { get; set; }
+    public byte[]? Value
+    {
+        get => headValue;
+        set
+        {
+            headValue = value;
+            HeadChanged();
+        }
+    }
     
     /// <summary>
     /// HLC timestamp when the key/value will expire
     /// </summary>
-    public HLCTimestamp Expires { get; set; }
+    public HLCTimestamp Expires
+    {
+        get => expires;
+        set
+        {
+            expires = value;
+            HeadChanged();
+        }
+    }
     
     /// <summary>
     /// Current modification revision
     /// </summary>
-    public long Revision { get; set; }
+    public long Revision
+    {
+        get => revision;
+        set
+        {
+            revision = value;
+            HeadChanged();
+        }
+    }
 
     /// <summary>
     /// The highest revision confirmed written to disk. Entry is dirty (ineligible for eviction)
@@ -49,17 +117,41 @@ internal sealed class KeyValueEntry
     /// <summary>
     /// HLC timestamp of the last time the key was modified
     /// </summary>
-    public HLCTimestamp LastModified { get; set; }
+    public HLCTimestamp LastModified
+    {
+        get => lastModified;
+        set
+        {
+            lastModified = value;
+            HeadChanged();
+        }
+    }
 
     /// <summary>
     /// Represents a potential write intent to modify the key
     /// </summary>
-    public KeyValueWriteIntent? WriteIntent { get; set; }
+    public KeyValueWriteIntent? WriteIntent
+    {
+        get => writeIntent;
+        set
+        {
+            writeIntent = value;
+            HeadChanged();
+        }
+    }
     
     /// <summary>
     /// Represents an active replication intent for the key
     /// </summary>
-    public KeyValueReplicationIntent? ReplicationIntent { get; set; }
+    public KeyValueReplicationIntent? ReplicationIntent
+    {
+        get => replicationIntent;
+        set
+        {
+            replicationIntent = value;
+            HeadChanged();
+        }
+    }
     
     /// <summary>
     /// Recently archived revisions, keyed by revision number. Each entry carries the value plus
@@ -104,7 +196,15 @@ internal sealed class KeyValueEntry
     /// a quorum-confirmed leadership check. Drained by the intent's completion/release, or by the
     /// first read or write that finds the blocking intent gone. Null when nothing is parked.
     /// </summary>
-    public InvalidateOrApplyData? PendingCommittedHead { get; set; }
+    public InvalidateOrApplyData? PendingCommittedHead
+    {
+        get => pendingCommittedHead;
+        set
+        {
+            pendingCommittedHead = value;
+            HeadChanged();
+        }
+    }
 
     /// <summary>
     /// Earliest <see cref="LastModified"/> of a head this entry superseded through a revision jump
@@ -133,12 +233,28 @@ internal sealed class KeyValueEntry
     /// <summary>
     /// Multiversion Concurrency Control (MVCC) values per TransactionId
     /// </summary>
-    public Dictionary<HLCTimestamp, KeyValueMvccEntry>? MvccEntries { get; set; }
+    public Dictionary<HLCTimestamp, KeyValueMvccEntry>? MvccEntries
+    {
+        get => mvccEntries;
+        set
+        {
+            mvccEntries = value;
+            HeadChanged();
+        }
+    }
 
     /// <summary>
     /// Current state of the key
     /// </summary>
-    public KeyValueState State { get; set; } = KeyValueState.Set;
+    public KeyValueState State
+    {
+        get => state;
+        set
+        {
+            state = value;
+            HeadChanged();
+        }
+    }
 
     /// <summary>
     /// Running byte estimate for this entry (excluding the key-length contribution).

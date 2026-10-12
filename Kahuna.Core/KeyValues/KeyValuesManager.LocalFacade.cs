@@ -66,6 +66,19 @@ internal sealed partial class KeyValuesManager
     ) =>
         localKeyValueReads.TryGetValue(transactionId, key, revision, readTimestamp, durability);
 
+    /// <summary>
+    /// <see cref="TryGetValue"/> plus which step answered it (the published head record or an actor round trip),
+    /// for the locator's per-stage read metrics.
+    /// </summary>
+    internal Task<LocalPointRead> TryGetValueLocal(
+        HLCTimestamp transactionId,
+        string key,
+        long revision,
+        HLCTimestamp readTimestamp,
+        KeyValueDurability durability
+    ) =>
+        localKeyValueReads.TryGetValueLocal(transactionId, key, revision, readTimestamp, durability);
+
     public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryExistsValue(
         HLCTimestamp transactionId,
         string key,

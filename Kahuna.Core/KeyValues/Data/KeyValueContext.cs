@@ -169,6 +169,17 @@ internal sealed class KeyValueContext
     public KahunaConfiguration Configuration  { get; }
 
     /// <summary>
+    /// The head records this actor publishes for off-actor latest reads, the committed heads pending on its
+    /// mailbox, and its prefix-lock presence. Shared with the readers through the actor ring; this actor is the
+    /// only writer of the records. A bare context (tests) gets a private table.
+    /// </summary>
+    public PublishedHeadTable PublishedHeads { get; }
+
+    // Resident entries whose head or intents changed during the current actor turn, each queued once (see
+    // KeyValueEntry.PublishQueued). Drained by FlushHeadPublications at the end of the turn.
+    private readonly List<KeyValueEntry> headChanges = new();
+
+    /// <summary>
     /// Milliseconds a session-owned (zero-deadline) write intent or range lock may live before it is treated
     /// as orphaned. Resolved per evaluation from the configured value, or derived from the span the session
     /// machinery already bounds itself by when the operator leaves it at zero. Read on the actor thread only.
@@ -212,10 +223,12 @@ internal sealed class KeyValueContext
         CompletionReceiptStore? completionReceiptStore = null,
         Transactions.PreparedIntentStore? preparedIntentStore = null,
         Transactions.TransactionRecordStore? transactionRecordStore = null,
-        LapsedRangeLockRegistry? lapsedRangeLocks = null
+        LapsedRangeLockRegistry? lapsedRangeLocks = null,
+        PublishedHeadTable? publishedHeads = null
     )
     {
         ActorContext = actorContext;
+        PublishedHeads = publishedHeads ?? new PublishedHeadTable();
         Store = store;
         LocksByPrefix = locksByPrefix;
         LocksByRange = locksByRange;
@@ -323,7 +336,10 @@ internal sealed class KeyValueContext
 #endif
             approximateStoreBytes -= (key.Length * sizeof(char)) + existing.CachedBytes;
             if (existing != entry)
+            {
                 Unlink(existing); // replacing with a new entry object; unlink the old one
+                DetachPublishedHead(existing);
+            }
         }
 
         // Initialize CachedBytes the first time an entry enters the store. For new entries
@@ -339,6 +355,10 @@ internal sealed class KeyValueContext
         approximateStoreBytes += (key.Length * sizeof(char)) + entry.CachedBytes;
         if (entry != existing)   // same guard as Unlink above — symmetric, prevents double-link
             LinkAtTail(entry);
+
+        // The head becomes visible to reads through this store; publish it at the end of the turn.
+        entry.Owner = this;
+        QueueHeadPublication(entry);
 
         // Auto-register with the expiry heap and tombstone queue so entries inserted through any
         // path (handlers, disk-load, test helpers) are tracked without requiring callers to enqueue
@@ -365,7 +385,100 @@ internal sealed class KeyValueContext
         approximateStoreBytes -= (key.Length * sizeof(char)) + entry.CachedBytes;
         Unlink(entry);
         entry.StoreKey = null;
+        DetachPublishedHead(entry);
+        PublishedHeads.Remove(key);
         return true;
+    }
+
+    /// <summary>Retracts an entry's live record and detaches it from this context, so a later change to the
+    /// evicted object neither republishes nor touches this actor's table.</summary>
+    private static void DetachPublishedHead(KeyValueEntry entry)
+    {
+        if (entry.Published is { } published)
+        {
+            published.Retract();
+            entry.Published = null;
+        }
+
+        entry.Owner = null;
+        entry.PublishQueued = false;
+    }
+
+    /// <summary>
+    /// Queues a resident entry for republication at the end of the current actor turn. Called by the entry's
+    /// head and intent setters (after they retracted the live record) and by <see cref="InsertStoreEntry"/>.
+    /// Idempotent within a turn.
+    /// </summary>
+    internal void QueueHeadPublication(KeyValueEntry entry)
+    {
+        if (entry.PublishQueued)
+            return;
+
+        entry.PublishQueued = true;
+        headChanges.Add(entry);
+    }
+
+    /// <summary>
+    /// Publishes the head record of every entry whose head or intents changed during the turn, and the
+    /// prefix-lock presence. Runs once at the end of every actor turn, after the handler returned and before
+    /// the reply is sent, so a record is never older than the state that produced the reply.
+    ///
+    /// <para>A record is published only for a quiet <c>Set</c> head: no replication intent, no write intent,
+    /// no parked committed head. A tombstone drops its record; a head under an intent keeps the retracted
+    /// record (the next quiet publish replaces it, one dictionary write instead of two). A head that is behind
+    /// a committed apply still pending on this actor's mailbox is not published: the apply retracts and
+    /// re-queues it when it lands, and until then every reader of the key goes to the actor.</para>
+    /// </summary>
+    internal void FlushHeadPublications()
+    {
+        if (headChanges.Count > 0)
+        {
+            bool enabled = Configuration.PublishedHeadReads;
+
+            for (int i = 0; i < headChanges.Count; i++)
+            {
+                KeyValueEntry entry = headChanges[i];
+                entry.PublishQueued = false;
+
+                string? key = entry.StoreKey;
+                if (key is null || entry.Owner != this || entry.Published is not null)
+                    continue;
+
+                if (!enabled)
+                    continue;
+
+                if (entry.State != KeyValueState.Set)
+                {
+                    PublishedHeads.Remove(key);
+                    continue;
+                }
+
+                if (entry.ReplicationIntent is not null || entry.WriteIntent is not null || entry.PendingCommittedHead is not null)
+                    continue;
+
+                if (PublishedHeads.HasNewerPendingApply(key, entry.Revision, entry.LastModified))
+                {
+                    PublishedHeads.Remove(key);
+                    continue;
+                }
+
+                PublishedHead head = new(
+                    entry.Value,
+                    entry.Revision,
+                    entry.Expires,
+                    entry.LastModified,
+                    entry.State,
+                    mvccHeld: entry.MvccEntries is not null,
+                    lastUsedMs: entry.LastUsed.L);
+
+                entry.Published = head;
+                PublishedHeads.Publish(key, head);
+            }
+
+            headChanges.Clear();
+        }
+
+        PublishedHeads.SetPrefixLocksHeld(LocksByPrefix.Count > 0);
     }
 
     public void AdjustEntryValueBytes(KeyValueEntry entry, int previousValueLength, int newValueLength)

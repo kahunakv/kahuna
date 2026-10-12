@@ -6,9 +6,18 @@ using Kommander.Time;
 
 using Kahuna.Utils;
 using Kahuna.Server.KeyValues.Transactions;
+using Kahuna.Server.Persistence;
+using Kahuna.Server.Persistence.Backend;
 using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Server.KeyValues;
+
+/// <summary>
+/// The answer of a leader-local point get and which step produced it: <see cref="ServedFromPublishedHead"/> is
+/// true when the owning actor's published head record answered it on the caller's thread, false when an actor
+/// round trip did.
+/// </summary>
+internal readonly record struct LocalPointRead(KeyValueResponseType Type, ReadOnlyKeyValueEntry? Entry, bool ServedFromPublishedHead);
 
 /// <summary>
 /// Executes key-value reads — get, exists, their many-key variants, and the write-intent probes — against
@@ -26,10 +35,20 @@ internal sealed class LocalKeyValueReadOperations
 
     private readonly LocalKeyValueOperations localKeyValues;
 
+    private readonly PublishedHeadReader publishedHeads;
+
     internal LocalKeyValueReadOperations(KeyValuesRuntime runtime, LocalKeyValueOperations localKeyValues)
     {
         this.runtime = runtime;
         this.localKeyValues = localKeyValues;
+
+        publishedHeads = new PublishedHeadReader(
+            runtime.Routers.Ephemeral,
+            runtime.Routers.Persistent,
+            (runtime.PersistenceBackend as UnflushedOverlayPersistenceBackend)?.UnflushedWrites,
+            runtime.PreparedIntentStore,
+            runtime.Raft,
+            runtime.Configuration.PublishedHeadReads);
     }
 
     // Aliases matching the field names the moved bodies use, so those bodies stay byte-for-byte as they were.
@@ -75,9 +94,40 @@ internal sealed class LocalKeyValueReadOperations
         KeyValueDurability durability
     )
     {
-        if (IsGatedKey(key))
-            return (KeyValueResponseType.MustRetry, null);
+        LocalPointRead read = await TryGetValueLocal(transactionId, key, revision, readTimestamp, durability);
+        return (read.Type, read.Entry);
+    }
 
+    /// <summary>
+    /// <see cref="TryGetValue"/>, reporting whether the answer came from the owning actor's published head
+    /// record (no actor message) or from a mailbox round trip.
+    /// </summary>
+    public async Task<LocalPointRead> TryGetValueLocal(
+        HLCTimestamp transactionId,
+        string key,
+        long revision,
+        HLCTimestamp readTimestamp,
+        KeyValueDurability durability
+    )
+    {
+        if (IsGatedKey(key))
+            return new(KeyValueResponseType.MustRetry, null, false);
+
+        if (publishedHeads.TryRead(transactionId, key, revision, readTimestamp, durability, out ReadOnlyKeyValueEntry? published))
+            return new(KeyValueResponseType.Get, published, true);
+
+        (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await TryGetValueFromActor(transactionId, key, revision, readTimestamp, durability);
+        return new(type, entry, false);
+    }
+
+    private async Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryGetValueFromActor(
+        HLCTimestamp transactionId,
+        string key,
+        long revision,
+        HLCTimestamp readTimestamp,
+        KeyValueDurability durability
+    )
+    {
         KeyValueRequest request = KeyValueRequestPool.Rent(
             KeyValueRequestType.TryGet,
             transactionId,

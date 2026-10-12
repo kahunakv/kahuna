@@ -334,6 +334,9 @@ internal sealed partial class KeyValuesManager : IDisposable
 
     internal PreparedIntentStore DurablePreparedIntentStore => preparedIntentStore;
 
+    /// <summary>The ephemeral and persistent actor rings with their published-head tables. Diagnostic/test access.</summary>
+    internal KeyValueActorRouters Routers => routers;
+
     /// <summary>Resolves a key to the data partition its durable records are anchored on.</summary>
     internal (int PartitionId, long Generation) LocateDurablePartition(string key) => durableReplication.LocateDurablePartition(key);
 

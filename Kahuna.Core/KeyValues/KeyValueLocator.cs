@@ -873,9 +873,9 @@ internal sealed class KeyValueLocator
         if (confirmed)
         {
             RecordLocalKeyRoute(key, partitionId);
-            (KeyValueResponseType, ReadOnlyKeyValueEntry?) local = await manager.TryGetValue(transactionId, key, revision, readTimestamp, durability);
-            KeyValueReadMetrics.RecordActor(confirmEnd, Stopwatch.GetTimestamp());
-            return local;
+            LocalPointRead local = await manager.TryGetValueLocal(transactionId, key, revision, readTimestamp, durability);
+            KeyValueReadMetrics.RecordActor(confirmEnd, Stopwatch.GetTimestamp(), local.ServedFromPublishedHead);
+            return (local.Type, local.Entry);
         }
 
         string? leader = await TryWaitForLeader(partitionId, cancellationToken);

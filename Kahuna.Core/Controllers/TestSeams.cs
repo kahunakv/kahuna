@@ -56,6 +56,9 @@ public sealed partial class KahunaManager
     /// <summary>Node-local persistent-participant completion receipts. Diagnostic/test access.</summary>
     internal CompletionReceiptStore CompletionReceiptStore => keyValues.CompletionReceiptStore;
 
+    /// <summary>The key-value actor rings and their published-head tables. Diagnostic/test access.</summary>
+    internal Server.KeyValues.KeyValueActorRouters KeyValueRouters => keyValues.Routers;
+
     /// <summary>Durable prepared-intent store. Diagnostic/test access.</summary>
     internal Server.KeyValues.Transactions.PreparedIntentStore DurablePreparedIntentStore => keyValues.DurablePreparedIntentStore;
 

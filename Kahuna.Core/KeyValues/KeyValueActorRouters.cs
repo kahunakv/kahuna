@@ -32,6 +32,10 @@ internal sealed class KeyValueActorRouters
 
     private readonly List<IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse>> persistentInstances = [];
 
+    private readonly PublishedHeadTable[] ephemeralPublishedHeads;
+
+    private readonly PublishedHeadTable[] persistentPublishedHeads;
+
     /// <summary>The ephemeral (in-memory only) actor ring.</summary>
     internal KeyValueActorRing Ephemeral => ephemeralKeyValuesRouter;
 
@@ -47,6 +51,9 @@ internal sealed class KeyValueActorRouters
         this.runtime = runtime;
         this.actorSystem = runtime.ActorSystem;
         this.logger = runtime.Logger;
+
+        ephemeralPublishedHeads = CreatePublishedHeadTables(runtime.Configuration);
+        persistentPublishedHeads = CreatePublishedHeadTables(runtime.Configuration);
 
         ephemeralKeyValuesRouter = GetEphemeralRouter(runtime.Configuration);
         persistentKeyValuesRouter = GetConsistentRouter(runtime.Configuration);
@@ -76,6 +83,16 @@ internal sealed class KeyValueActorRouters
 
     private TransactionRecordStore transactionRecordStore => runtime.TransactionRecordStore;
 
+    /// <summary>One published-head table per actor of a ring, created before the actors so each actor receives the
+    /// table the ring routes its keys to.</summary>
+    private static PublishedHeadTable[] CreatePublishedHeadTables(KahunaConfiguration configuration)
+    {
+        PublishedHeadTable[] tables = new PublishedHeadTable[configuration.KeyValueWorkers];
+        for (int i = 0; i < tables.Length; i++)
+            tables[i] = new PublishedHeadTable();
+        return tables;
+    }
+
     /// <summary>
     /// Builds the bounded-inbox + priority-control options for a key-value actor. The bound applies
     /// only to ordinary user requests; control messages (<see cref="IsControlRequest"/>) are exempt and
@@ -94,7 +111,9 @@ internal sealed class KeyValueActorRouters
     /// internal fire-and-forget/maintenance messages that must never be silently dropped under
     /// backpressure: <c>InvalidateOrApply</c> (follower cache coherence — dropping it yields a stale
     /// read), <c>FlushAck</c> (durability marker), and the periodic <c>Collect</c> / snapshot
-    /// <c>GetSafeTimestamp</c>. Everything else is an external user op and is subject to the bound.
+    /// <c>GetSafeTimestamp</c>, and <c>RecordReadPin</c> (the pin of a read already answered off the actor —
+    /// dropping it would let the transaction's later write skip the conflict check against what it read).
+    /// Everything else is an external user op and is subject to the bound.
     /// </summary>
     internal static bool IsControlRequest(KeyValueRequest request) =>
         request.Type is KeyValueRequestType.ResumeRead
@@ -103,7 +122,8 @@ internal sealed class KeyValueActorRouters
             or KeyValueRequestType.InvalidateOrApply
             or KeyValueRequestType.FlushAck
             or KeyValueRequestType.Collect
-            or KeyValueRequestType.GetSafeTimestamp;
+            or KeyValueRequestType.GetSafeTimestamp
+            or KeyValueRequestType.RecordReadPin;
 
     /// <summary>
     /// Sends a request to a bounded key-value actor ring, mapping inbox-full backpressure (a hot
@@ -166,10 +186,11 @@ internal sealed class KeyValueActorRouters
                 completionReceiptStore,
                 ephemeralPreparedIntentStore,
                 ephemeralTransactionRecordStore,
-                runtime.LapsedRangeLocks
+                runtime.LapsedRangeLocks,
+                ephemeralPublishedHeads[i]
             ));
 
-        return new KeyValueActorRing(ephemeralInstances);
+        return new KeyValueActorRing(ephemeralInstances, ephemeralPublishedHeads);
     }
 
     /// <summary>
@@ -204,9 +225,10 @@ internal sealed class KeyValueActorRouters
                 completionReceiptStore,
                 preparedIntentStore,
                 transactionRecordStore,
-                runtime.LapsedRangeLocks
+                runtime.LapsedRangeLocks,
+                persistentPublishedHeads[i]
             ));
 
-        return new KeyValueActorRing(persistentInstances);
+        return new KeyValueActorRing(persistentInstances, persistentPublishedHeads);
     }
 }

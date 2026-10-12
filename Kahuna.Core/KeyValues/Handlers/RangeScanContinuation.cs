@@ -243,6 +243,9 @@ internal sealed class RangeScanContinuation : ReadContinuation
                     // Converge the resident entry off this scan through the coherence-reconcile apply,
                     // which adopts the durable row only when strictly newer and owns the intent/fence
                     // handling. The scan itself never waits on it and never installs into the store.
+                    // Published reads of the key defer to the actor until the reconcile landed.
+                    context.PublishedHeads.NotePendingApply(keyToProcess, diskEntry.Revision, diskEntry.LastModified);
+
                     context.ActorContext.Self.Send(
                         KeyValueRequestPool.RentInvalidateOrApply(
                             keyToProcess,

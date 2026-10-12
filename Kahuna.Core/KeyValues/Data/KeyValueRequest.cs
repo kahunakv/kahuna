@@ -134,6 +134,13 @@ public sealed class KeyValueRequest : IConsistentHashable
     internal IKeyValueActorTurn? Turn { get; set; }
 
     /// <summary>
+    /// The published head record a transactional latest read was answered from, carried by a
+    /// <see cref="KeyValueRequestType.RecordReadPin"/> so the actor pins exactly the revision the transaction
+    /// observed. Null on every other type.
+    /// </summary>
+    internal PublishedHead? ReadPin { get; set; }
+
+    /// <summary>
     ///
     /// </summary>
     public KeyValueReplyRef Promise { get; private set; }
@@ -288,6 +295,7 @@ public sealed class KeyValueRequest : IConsistentHashable
         ConflictPolicy = TransactionConflictPolicy.Normal;
         Inline = null;
         Turn = null;
+        ReadPin = null;
         ReturnToPoolOnReceive = false;
     }
 

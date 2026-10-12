@@ -261,6 +261,46 @@ A subtle but important interaction: a range scan may encounter keys that live on
 evicted). It reads those without forcing them back into the cache, so a big scan doesn't blow the
 budget or disturb the recency ordering of the keys that are actually hot.
 
+### 7.1 Point reads that skip the actor: published head records
+
+A latest point read of a resident key does about a microsecond of work on the actor, and pays a
+mailbox round trip for it: one thread-pool item to wake the actor, one to resume the caller. On a
+busy leader the wait in that queue is most of the read's service time. The actor therefore
+**publishes** a copy of each quiet resident head beside its store, and the read path answers from
+that copy on the caller's thread when it can prove the actor would answer the same.
+
+- **What is published.** An immutable record per resident key with a `Set` head and no in-flight
+  state: no replication intent (direct write in flight), no write intent (a transaction's lock or
+  staged write), no parked committed head. The record carries the value, revision, expiry, commit
+  stamp, and whether any transaction holds an MVCC snapshot on the key. Tombstones and undefined
+  stubs have no record.
+- **When it changes.** Every setter of a head or intent field on the resident entry retracts the live
+  record first (one flag), so a reader never sees a torn or superseded head. The actor republishes
+  at the end of the turn, after the handler finished and before the reply leaves, so a record is
+  never older than the state a reply was built from.
+- **What sends a read back to the actor.** A by-revision or snapshot read; a read issued from inside
+  an actor turn; a retracted or missing record; a live prefix lock on the actor; a committed head the
+  replicator has sent to the actor but the actor has not processed yet (noted per key before the
+  applied frontier moves, so the lease check cannot outrun the actor); a newer head in the
+  unflushed-writes overlay; a durable prepared intent on the key; an expired head; and, for a read
+  inside a transaction, a key on which any transaction already holds an MVCC snapshot.
+- **Transactional reads.** A read inside a transaction that is served from the record sends the
+  actor a `RecordReadPin` control message carrying the record, so the actor leaves behind exactly the
+  MVCC pin the actor path would have created. The message takes the mailbox ahead of the transaction's
+  next request for the key, so a later write of the key is still validated against the revision the
+  transaction read. Once a pin exists, the key's record says so and transactional reads of that key go
+  back to the actor until the transaction settles.
+- **The collector.** A read served from the record stamps the record, not the entry, so a key that is
+  hot only through published reads would look idle in the LRU list. The collector folds the record's
+  stamp in before it judges an entry idle or cold, and moves such an entry to the hot end instead of
+  evicting it.
+
+The path is on by default (`PublishedHeadReads`; `--disable-published-head-reads` on the server,
+`EmbeddedKahunaOptions.PublishedHeadReads` embedded). With it off the actors publish nothing and
+every point read takes the mailbox. The `kahuna.kv.read.stage` histogram tags its `actor` stage
+with `path=published` or `path=actor`, so the share of reads each path serves and the cost of each
+are visible per node.
+
 ---
 
 ## 8. Observability
@@ -283,6 +323,7 @@ too small for the workload.
 | `CollectBatchMax` | 1,000 | reclaim faster under bursty pressure (longer pauses) | keep collect pauses shorter |
 | `RevisionRetention` | 16 | answer more "as of" reads from memory | shrink per-entry history |
 | `DirtyObjectsWriterDelay` | 1,000 ms (embedded) | batch disk writes more aggressively | flush sooner (smaller dirty window) |
+| `PublishedHeadReads` | on | — | turn it off to send every point read through the actor (diagnosis only) |
 
 General guidance:
 

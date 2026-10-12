@@ -847,7 +847,7 @@ public sealed class TestInvalidateOrApplyConvergence : RaftTrackingTest
 
         UnflushedKeyValueWritesIndex overlay = new();
         KeyValueReplicator replicator = new(
-            writer, new KeyValueActorRing([actorRef]), null!, null!, null!, null!,
+            writer, new KeyValueActorRing([actorRef], [actorInstance!.GetContext().PublishedHeads]), null!, null!, null!, null!,
             NullLogger<IKahuna>.Instance,
             unflushedWrites: overlay,
             // The durable read path this node actually has: the real backend, which holds nothing for

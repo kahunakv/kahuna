@@ -59,6 +59,9 @@ public sealed class KahunaCommandLineOptions
     [Option("disable-routing-hints", Required = false, HelpText = "Do not return advisory routing hints on responses. Clients then keep their configured endpoint selection")]
     public bool DisableRoutingHints { get; set; }
 
+    [Option("disable-published-head-reads", Required = false, HelpText = "Send every point get through the key-value actor instead of serving a quiet resident key from the actor's published head record")]
+    public bool DisablePublishedHeadReads { get; set; }
+
     [Option("storage", Required = false, HelpText = "Storage (rocksdb, sqlite, memory)", Default = "rocksdb")]
     public string Storage { get; set; } = "";
     

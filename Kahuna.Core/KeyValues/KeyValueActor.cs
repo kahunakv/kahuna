@@ -254,6 +254,9 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
 
     private readonly DropLeaderStateHandler dropLeaderStateHandler;
 
+    /// <summary>Records the MVCC pin of a transactional read answered off the actor from a published head record.</summary>
+    private readonly RecordReadPinHandler recordReadPinHandler;
+
     /// <summary>
     /// A high-resolution timer used to measure the time elapsed during the handling of requests within the actor.
     /// The stopwatch is utilized to record and log the duration of operations, aiding in performance monitoring
@@ -332,6 +335,31 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
         Transactions.PreparedIntentStore? preparedIntentStore,
         Transactions.TransactionRecordStore? transactionRecordStore,
         LapsedRangeLockRegistry? lapsedRangeLocks
+    ) : this(actorContext, backgroundWriter, writeAggregator, persistenceBackend, raft, backendReadScheduler,
+             keySpaceRegistry, rangeMapStore, configuration, logger, snapshotFloorStore, completionReceiptStore,
+             preparedIntentStore, transactionRecordStore, lapsedRangeLocks, null)
+    {
+    }
+
+    /// <param name="publishedHeads">The table this actor publishes its head records to, shared with the ring
+    /// that routes the actor's keys; null gives the actor a private table (tests, stand-alone spawns).</param>
+    public KeyValueActor(
+        IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext,
+        IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
+        Writes.PartitionWriteAggregator writeAggregator,
+        IPersistenceBackend persistenceBackend,
+        IRaft raft,
+        IRaftReadScheduler backendReadScheduler,
+        KeySpaceRegistry keySpaceRegistry,
+        RangeMapStore rangeMapStore,
+        KahunaConfiguration configuration,
+        ILogger<IKahuna> logger,
+        SnapshotFloorStore? snapshotFloorStore,
+        CompletionReceiptStore? completionReceiptStore,
+        Transactions.PreparedIntentStore? preparedIntentStore,
+        Transactions.TransactionRecordStore? transactionRecordStore,
+        LapsedRangeLockRegistry? lapsedRangeLocks,
+        PublishedHeadTable? publishedHeads
     )
     {
         this.actorContext = actorContext;
@@ -356,7 +384,8 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
             completionReceiptStore,
             preparedIntentStore,
             transactionRecordStore,
-            lapsedRangeLocks
+            lapsedRangeLocks,
+            publishedHeads
         );
 
         KeyValueContext context = kvContext;
@@ -391,6 +420,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
         invalidateOrApplyHandler = new(context);
         evictPartitionHandler = new(context);
         dropLeaderStateHandler = new(context);
+        recordReadPinHandler = new(context);
     }
 
     /// <summary>
@@ -446,6 +476,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
             KeyValueRequestType.DropLeaderState => dropLeaderStateHandler.Execute(message),
             KeyValueRequestType.Collect => CollectMessage(),
             KeyValueRequestType.RunActorTurn => await RunActorTurn(message),
+            KeyValueRequestType.RecordReadPin => recordReadPinHandler.Execute(message),
             _ => KeyValueStaticResponses.ErroredResponse
         };
     }
@@ -629,6 +660,10 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
         }
         finally
         {
+            // Publish the head records of every entry this turn changed, before the reply leaves the actor, so an
+            // off-actor reader never finds a record older than the state the reply was built from.
+            kvContext?.FlushHeadPublications();
+
             if (logThis)
                 logger.LogKeyValueActorTook(
                     actorContext.Self.Runner.Name,
@@ -866,7 +901,18 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
     // inside this actor's message loop (see the invariant on InvalidateOrApplyHandler.Execute).
     private KeyValueResponse? InvalidateOrApply(KeyValueRequest message)
     {
-        return invalidateOrApplyHandler.Execute(message);
+        try
+        {
+            return invalidateOrApplyHandler.Execute(message);
+        }
+        finally
+        {
+            // The committed head this notification carried is no longer on its way: whatever it did to the
+            // resident entry is done, and the end-of-turn publish sees the result. A newer head noted for the
+            // key meanwhile stays pending.
+            if (message.InvalidateOrApplyData is { } data)
+                kvContext?.PublishedHeads.ClearPendingApply(message.Key, data.Revision, data.LastModified);
+        }
     }
 
     /// <summary>

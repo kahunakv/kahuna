@@ -367,6 +367,12 @@ internal sealed class TryGetHandler : BaseHandler
 
         context.TouchEntry(entry, currentTime);
 
+        // A resident hit with no live published record: the record was dropped behind a pending apply that then
+        // changed nothing, or was never published. Publish it at the end of this turn so the next read of the key
+        // can be answered off the actor.
+        if (entry.Published is null)
+            context.QueueHeadPublication(entry);
+
         return new(KeyValueResponseType.Get, new ReadOnlyKeyValueEntry(
             entry.Value, entry.Revision, entry.Expires,
             entry.LastUsed, entry.LastModified, entry.State));

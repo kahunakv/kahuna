@@ -49,6 +49,7 @@ public sealed class TestKeyValueRequestTypeWireValues
         (KeyValueRequestType.DropLeaderState, 30),
         (KeyValueRequestType.TryFinalizeMutation, 31),
         (KeyValueRequestType.RunActorTurn, 32),
+        (KeyValueRequestType.RecordReadPin, 33),
     ];
 
     [Fact]

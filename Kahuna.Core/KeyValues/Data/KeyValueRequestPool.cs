@@ -287,6 +287,38 @@ internal static class KeyValueRequestPool
         return request;
     }
 
+    /// <summary>
+    /// Rents the pin of a transactional latest read answered off the actor from <paramref name="head"/>: a
+    /// control message to the key's actor that records the MVCC snapshot the read would have left behind.
+    /// Fire-and-forget with ownership transfer; routing keys on <paramref name="key"/>. Rented outside any
+    /// inline scope: the read itself was not served inline, and the pin must take the mailbox so it lands
+    /// before the transaction's next request for the key.
+    /// </summary>
+    public static KeyValueRequest RentReadPin(string key, HLCTimestamp transactionId, KeyValueDurability durability, PublishedHead head)
+    {
+        KeyValueRequest request = Rent(
+            KeyValueRequestType.RecordReadPin,
+            transactionId,
+            HLCTimestamp.Zero,
+            key,
+            null,
+            null,
+            -1,
+            KeyValueFlags.None,
+            0,
+            HLCTimestamp.Zero,
+            durability,
+            0,
+            0,
+            default);
+
+        request.Inline = null;
+        request.ReadPin = head;
+        request.ReturnToPoolOnReceive = true;
+
+        return request;
+    }
+
     public static void Return(KeyValueRequest obj)
     {
         obj.Clear();

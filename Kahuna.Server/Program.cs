@@ -270,6 +270,7 @@ KahunaConfiguration kahunaConfiguration = ConfigurationValidator.Validate(new()
     AdvertisedClientScheme = opts.AdvertisedClientScheme,
     AdvertisePeerEndpoints = !opts.DisablePeerEndpointAdvertisement,
     RoutingHintsEnabled = !opts.DisableRoutingHints,
+    PublishedHeadReads = !opts.DisablePublishedHeadReads,
     LocksWorkers = opts.LocksWorkers,
     KeyValueWorkers = opts.KeyValueWorkers,
     BackgroundWriterWorkers = opts.BackgroundWritersWorkers,

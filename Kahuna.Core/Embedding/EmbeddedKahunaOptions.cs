@@ -947,6 +947,13 @@ public sealed class EmbeddedKahunaOptions
     public int SessionOwnedIntentCeilingMs { get; set; }
 
     /// <summary>
+    /// Serve a leader-local latest point get from the owning actor's published head record when nothing is in
+    /// flight for the key, instead of an actor round trip. See
+    /// <see cref="Server.Configuration.KahunaConfiguration.PublishedHeadReads"/>.
+    /// </summary>
+    public bool PublishedHeadReads { get; set; } = true;
+
+    /// <summary>
     /// Milliseconds the prepare-apply staged-base fence remembers a key's last transactionally committed
     /// head. Must comfortably exceed the longest transaction lifetime the deployment allows, and must be
     /// identical on every node while <see cref="OnePhaseApplyTimeValidation"/> is on. See

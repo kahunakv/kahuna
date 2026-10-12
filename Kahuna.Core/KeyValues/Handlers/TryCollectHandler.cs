@@ -224,6 +224,13 @@ internal sealed class TryCollectHandler : BaseHandler
             KeyValueEntry? next = lruCandidate.LruNext;
             string? candidateKey = lruCandidate.StoreKey;
 
+            // A key read off the actor since its last touch is not cold: move it to the hot end and keep it.
+            if (RefreshFromPublishedRead(lruCandidate, currentTime))
+            {
+                lruCandidate = next;
+                continue;
+            }
+
             if (candidateKey is not null
                 && !keysToEvict.Contains(candidateKey)
                 && !HasLiveWriteIntent(candidateKey, lruCandidate, currentTime)
@@ -320,6 +327,26 @@ internal sealed class TryCollectHandler : BaseHandler
 
         if (backlog)
             context.ScheduleFollowUpCollect();
+    }
+
+    /// <summary>
+    /// Folds the off-actor reads of an entry into its LRU position: a published read stamps the record, not the
+    /// entry, so an entry hot only through published reads sits at the cold end of the list. When the record's
+    /// stamp is later than the entry's own last use, the entry is touched to the stamp (moved to the hot end)
+    /// and reported as refreshed, so the caller skips it. Touching during the walk is safe: the caller captured
+    /// the next node before the call.
+    /// </summary>
+    private bool RefreshFromPublishedRead(KeyValueEntry entry, HLCTimestamp currentTime)
+    {
+        if (entry.Published is not { } published)
+            return false;
+
+        long lastReadMs = published.LastUsedMs;
+        if (lastReadMs <= entry.LastUsed.L)
+            return false;
+
+        context.TouchEntry(entry, new HLCTimestamp(currentTime.N, lastReadMs, 0));
+        return true;
     }
 
     /// <summary>
@@ -459,6 +486,14 @@ internal sealed class TryCollectHandler : BaseHandler
             // more recently used and we can stop. This assumes LastUsed is monotone with list order;
             // if an access ever recorded a stale LastUsed, some idle entries past this point are simply
             // deferred to a later cycle (this only ever under-evicts, never drops a live entry).
+            // A key read off the actor since its last touch is folded in first: its position says idle,
+            // its published record says hot, and the record wins.
+            if (RefreshFromPublishedRead(candidate, currentTime))
+            {
+                candidate = next;
+                continue;
+            }
+
             if ((currentTime - candidate.LastUsed) <= ttl)
                 break;
 

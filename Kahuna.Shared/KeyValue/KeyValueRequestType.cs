@@ -93,4 +93,11 @@ public enum KeyValueRequestType
     /// the key are served without a mailbox hop each. Local to a node; never replicated, never sent between nodes.
     /// </summary>
     RunActorTurn = 32,
+
+    /// <summary>
+    /// Records the MVCC read pin of a transactional latest read that was answered off the actor from the key's
+    /// published head record, so the transaction's later write or commit of the key is validated against the
+    /// revision it read. Local to a node; never replicated, never sent between nodes.
+    /// </summary>
+    RecordReadPin = 33,
 }

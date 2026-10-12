@@ -53,6 +53,13 @@ public sealed class KahunaConfiguration
     /// </summary>
     public bool RoutingHintsEnabled { get; set; } = true;
 
+    /// <summary>
+    /// Serve a leader-local latest point get from the owning actor's published head record when nothing is in
+    /// flight for the key, instead of a mailbox round trip. Off, every point get takes the actor path and the
+    /// actors publish no records. See <see cref="KeyValues.PublishedHeadTable"/>.
+    /// </summary>
+    public bool PublishedHeadReads { get; set; } = true;
+
     public int LocksWorkers { get; set; }
     
     public int KeyValueWorkers { get; set; }

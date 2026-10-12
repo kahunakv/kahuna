@@ -3,6 +3,10 @@ using System.Diagnostics.CodeAnalysis;
 
 using Nixie;
 
+using Kommander.Time;
+
+using Kommander;
+
 namespace Kahuna.Server.KeyValues;
 
 /// <summary>
@@ -18,16 +22,40 @@ internal sealed class KeyValueActorRing
 {
     private readonly IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse>[] instances;
 
-    internal KeyValueActorRing(IReadOnlyList<IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse>> instances)
+    private readonly PublishedHeadTable[] publishedHeads;
+
+    internal KeyValueActorRing(
+        IReadOnlyList<IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse>> instances,
+        IReadOnlyList<PublishedHeadTable> publishedHeads)
     {
         if (instances.Count == 0)
             throw new ArgumentException("A ring must have at least one actor.", nameof(instances));
 
+        if (publishedHeads.Count != instances.Count)
+            throw new ArgumentException("A ring needs one published-head table per actor.", nameof(publishedHeads));
+
         this.instances = [.. instances];
+        this.publishedHeads = [.. publishedHeads];
     }
 
     private IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> Route(KeyValueRequest request) =>
         instances[(request.GetHash() & int.MaxValue) % instances.Length];
+
+    /// <summary>
+    /// The published-head table of the actor that owns <paramref name="key"/>: the same bucket a point request
+    /// on the key routes to (<see cref="KeyValueRequest.GetHash"/> hashes a point key by its key space, exactly
+    /// as this does), so the records a reader consults are the ones written by the actor that serves the key.
+    /// </summary>
+    internal PublishedHeadTable PublishedHeadsFor(string key) =>
+        publishedHeads[((int)HashUtils.InversePrefixedStaticHash(key, '/') & int.MaxValue) % publishedHeads.Length];
+
+    /// <summary>
+    /// Records a committed head that the caller is about to send to the key's actor as an
+    /// <c>InvalidateOrApply</c>, so a published read of the key defers to the actor until that apply landed.
+    /// Must be called before the send and before the applied frontier advances.
+    /// </summary>
+    internal void NotePendingApply(string key, long revision, HLCTimestamp lastModified) =>
+        PublishedHeadsFor(key).NotePendingApply(key, revision, lastModified);
 
     /// <summary>
     /// Admission-checked ask against the key's actor on the pooled reply path. Returns <c>false</c>

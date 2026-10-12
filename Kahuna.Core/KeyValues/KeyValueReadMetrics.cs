@@ -27,7 +27,9 @@ internal static class KeyValueReadMetrics
     /// <summary>
     /// One point get split into its steps, tagged by <c>stage</c>: <c>register</c>, <c>confirm</c>, <c>actor</c>,
     /// <c>complete</c>, and the whole get as <c>total</c>. <c>confirm</c> carries <c>lease=hit|miss</c>;
-    /// <c>total</c> carries <c>path=registered|direct</c>. The tag set is fixed.
+    /// <c>actor</c> carries <c>path=published|actor</c> (answered from the owning actor's published head record
+    /// on the caller's thread, or by a mailbox round trip); <c>total</c> carries <c>path=registered|direct</c>.
+    /// The tag set is fixed.
     /// </summary>
     internal static readonly Histogram<double> StageMs =
         Meter.CreateHistogram<double>("kahuna.kv.read.stage", unit: "ms", description: "Point-get service time per step on the serving node, tagged by stage; the total series is tagged by path.");
@@ -43,6 +45,8 @@ internal static class KeyValueReadMetrics
 
     private static readonly KeyValuePair<string, object?> PathRegistered = new("path", "registered");
     private static readonly KeyValuePair<string, object?> PathDirect = new("path", "direct");
+    private static readonly KeyValuePair<string, object?> PathPublished = new("path", "published");
+    private static readonly KeyValuePair<string, object?> PathActor = new("path", "actor");
 
     /// <summary>Elapsed milliseconds between two <see cref="Stopwatch.GetTimestamp"/> readings.</summary>
     internal static double ElapsedMs(long start, long end) => (end - start) * 1000.0 / Stopwatch.Frequency;
@@ -58,8 +62,13 @@ internal static class KeyValueReadMetrics
     internal static void RecordConfirm(long start, long end, bool leaseHit) =>
         StageMs.Record(ElapsedMs(start, end), StageConfirm, leaseHit ? LeaseHit : LeaseMiss);
 
-    /// <summary>The actor round trip that reads the value: mailbox wait, the turn, and any replication wait.</summary>
-    internal static void RecordActor(long start, long end) => StageMs.Record(ElapsedMs(start, end), StageActor);
+    /// <summary>
+    /// The step that reads the value: a mailbox round trip (mailbox wait, the turn, and any replication wait),
+    /// or, when <paramref name="published"/> is true, the lookup of the owning actor's published head record on
+    /// the caller's thread.
+    /// </summary>
+    internal static void RecordActor(long start, long end, bool published) =>
+        StageMs.Record(ElapsedMs(start, end), StageActor, published ? PathPublished : PathActor);
 
     /// <summary>The completion that folds a transaction-scoped read into the working set, local or forwarded.</summary>
     internal static void RecordComplete(long start, long end) => StageMs.Record(ElapsedMs(start, end), StageComplete);
