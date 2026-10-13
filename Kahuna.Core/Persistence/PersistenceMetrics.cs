@@ -62,6 +62,13 @@ internal static class PersistenceMetrics
         Meter.CreateCounter<long>("kahuna.persistence.revision_prune.sweep_budget_exhausted_total",
             description: "Backend-wide revision sweep passes that paused on the cycle's time budget.");
 
+    /// <summary>Sweep cycles the backend skipped without a walk because its previous complete cycle left the
+    /// store clean and nothing has written to it, moved the floor, or aged a row past the cutoff since. On an
+    /// idle node this is the normal outcome of every cleanup interval.</summary>
+    internal static readonly Counter<long> SweepPassesIdle =
+        Meter.CreateCounter<long>("kahuna.persistence.revision_prune.sweep_idle_total",
+            description: "Backend-wide revision sweep cycles skipped because the store was already clean.");
+
     /// <summary>Wall-clock time one backend-wide sweep pass took; bounded by its time budget plus one key.</summary>
     internal static readonly Histogram<double> SweepPassMs =
         Meter.CreateHistogram<double>("kahuna.persistence.revision_prune.sweep_pass_duration", unit: "ms",

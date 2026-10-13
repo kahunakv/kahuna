@@ -252,8 +252,11 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     // Keys without a memo always walk; a walk that stops on the delete budget drops the memo so the
     // key walks again next cycle.
     //
-    // Bounded: past MaxPruneMemos the table is cleared and rebuilt by the next walks, a
-    // correctness-neutral reset that costs each key one extra walk.
+    // Bounded: past MaxPruneMemos a targeted walk clears the table and the next walks rebuild it, a
+    // correctness-neutral reset that costs each key one extra walk. A sweep walk never clears it: the
+    // sweep visits keys in order, so on a keyspace larger than the bound a clearing sweep would empty
+    // the table before it came back to any key and never get a hit. A full table only stops the sweep
+    // from adding memos, so it keeps a stable share of hits instead.
     private sealed class PruneMemo
     {
         /// <summary>History rows ("&lt;key&gt;~&lt;rev&gt;") known for the key, including the current
@@ -286,6 +289,9 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// <summary>Upper bound on memoized keys; ~100 bytes each, so the table stays well under 32 MB.</summary>
     private const int MaxPruneMemos = 200_000;
 
+    /// <summary>Memo table bound in effect; <see cref="MaxPruneMemos"/> unless a test lowers it.</summary>
+    internal int PruneMemoCapacity { get; set; } = MaxPruneMemos;
+
     private readonly Dictionary<string, PruneMemo> pruneMemos = new(StringComparer.Ordinal);
 
     private readonly Lock _pruneMemoLock = new();
@@ -296,6 +302,84 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// a bounded slice of the keyspace instead of the whole column family every interval.
     /// </summary>
     private byte[]? sweepCursor;
+
+    /// <summary>
+    /// Incremented after every write that adds or removes key/value rows on behalf of a caller
+    /// (<see cref="StoreKeyValues"/>, <see cref="DeleteKeyValues"/>) — never by the prune's own deletes.
+    /// A prune walk reads through an iterator snapshot; a walk that saw the generation move while it ran
+    /// may have missed a row, so it records no memo. The sweep uses the same counter to prove that
+    /// nothing was written since its last complete clean cycle.
+    /// </summary>
+    private long keyRowsGeneration;
+
+    // ── Sweep quiescence ────────────────────────────────────────────────────────────────────
+    //
+    // A cycle is the run of sweep passes from the start of the column family to its end. On a store
+    // with no writes, the only things that can make a key prunable again are a moved snapshot floor,
+    // different retention settings, or age retention reaching the oldest row it may delete. A cycle
+    // that left no work behind therefore proves the store clean until one of those happens, and the
+    // next cycle is skipped in O(1) instead of re-walking every key. Without this, an idle node with
+    // more logical keys than MaxPruneMemos re-walked its whole keyspace on every cleanup interval and,
+    // because a full cycle took longer than the interval, never stopped.
+    //
+    // Touched only by the sweep, which runs on the single background writer under the read side of
+    // the swap fence, and by the recovery reopen, which holds the write side.
+
+    /// <summary>What a complete clean sweep cycle proved; null while no such proof stands.</summary>
+    private sealed record SweepQuiescence(
+        long Generation,
+        HLCTimestamp Floor,
+        int RetentionCount,
+        TimeSpan RetentionAge,
+        long AgeFrontierPhysical);
+
+    private SweepQuiescence? sweepQuiescence;
+
+    /// <summary>False once the running cycle left work behind or its inputs changed between passes.</summary>
+    private bool sweepCycleClean;
+
+    private long sweepCycleGeneration;
+
+    private HLCTimestamp sweepCycleFloor;
+
+    private int sweepCycleRetentionCount;
+
+    private TimeSpan sweepCycleRetentionAge;
+
+    /// <summary>
+    /// Earliest commit time, over the keys the running cycle visited, at which age retention could make
+    /// one of them prunable again (see the frontier that PruneRevisionsForKey reports).
+    /// </summary>
+    private long sweepCycleAgeFrontier;
+
+    /// <summary>
+    /// One maintenance iterator shared by every key walk of a prune call. A fresh iterator per key read
+    /// and decompressed each SST's index block again (the maintenance options do not fill the block
+    /// cache); a shared one loads it once per call. The iterator is a snapshot, so the generation is
+    /// sampled before it is created: a write that lands later moves the generation and voids the memo.
+    /// </summary>
+    private sealed class PruneWalkCursor(RocksDbPersistenceBackend owner) : IDisposable
+    {
+        private Iterator? iterator;
+
+        public long Generation { get; private set; }
+
+        public Iterator Iterator
+        {
+            get
+            {
+                if (iterator is null)
+                {
+                    Generation = Volatile.Read(ref owner.keyRowsGeneration);
+                    iterator = owner.db.NewIterator(readOptions: MaintenanceScanReadOptions, cf: owner.columnFamilyKeys);
+                }
+
+                return iterator;
+            }
+        }
+
+        public void Dispose() => iterator?.Dispose();
+    }
 
     /// <summary>
     /// RocksDbPersistenceBackend is a persistence backend implementation based on RocksDB.
@@ -615,6 +699,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                     db = OpenStore(out columnFamilyKeys, out columnFamilyLocks);
                     InitializeTildeRegistry();
                     ClearPruneMemos();
+                    ResetSweepQuiescence();
                     storageUnavailable = false;
 
                     logger.LogWarning(
@@ -1124,6 +1209,12 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             return false;
         }
 
+        // After the write lands and before the memos move: a walk that sampled the old generation
+        // either sees the new one when it records its memo, or records first and is then corrected
+        // by NotePruneMemoStoredRows below.
+        if (span.Length > 0)
+            Interlocked.Increment(ref keyRowsGeneration);
+
         NotePruneMemoStoredRows(span, writeCurrent, writeHistory, durableHeads);
 
         return true;
@@ -1188,12 +1279,19 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// unprotected row aging past the cutoff can change the answer. False (walk) whenever the key has
     /// no memo.
     /// </summary>
-    private PruneMemoVerdict PruneMemoVerdictFor(string key, int retentionCount, TimeSpan retentionAge, long cutoffPhysical, HLCTimestamp floorTimestamp)
+    private PruneMemoVerdict PruneMemoVerdictFor(string key, int retentionCount, TimeSpan retentionAge, long cutoffPhysical, HLCTimestamp floorTimestamp, out long ageFrontierPhysical)
     {
         lock (_pruneMemoLock)
         {
             if (!pruneMemos.TryGetValue(key, out PruneMemo? memo))
+            {
+                ageFrontierPhysical = long.MinValue;
                 return PruneMemoVerdict.Walk;
+            }
+
+            // The row whose age reopens this verdict: while floor-blocked, only rows below the floor
+            // boundary count; otherwise any non-current row does.
+            ageFrontierPhysical = memo.FloorBlocked ? memo.OldestUnprotectedPhysical : memo.OldestNonCurrentPhysical;
 
             bool needAge = retentionAge > TimeSpan.Zero;
 
@@ -1223,15 +1321,31 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         SkipFloorBlocked
     }
 
-    /// <summary>Records what a completed walk learned about a key (see the memo remarks above).</summary>
-    private void RememberPruneWalk(string key, int historyRows, long oldestNonCurrentPhysical, long oldestUnprotectedPhysical, bool floorBlocked, HLCTimestamp floorTimestamp)
+    /// <summary>
+    /// Records what a completed walk learned about a key (see the memo remarks above). A walk whose
+    /// snapshot predates a caller write (<paramref name="walkGeneration"/> is stale) may have missed a
+    /// row, so it drops the key's memo instead and the next visit walks again. With
+    /// <paramref name="admitWhenFull"/> false a full table gains no new memo and keeps the ones it has.
+    /// </summary>
+    private void RememberPruneWalk(string key, int historyRows, long oldestNonCurrentPhysical, long oldestUnprotectedPhysical, bool floorBlocked, HLCTimestamp floorTimestamp, long walkGeneration, bool admitWhenFull)
     {
         lock (_pruneMemoLock)
         {
+            if (Volatile.Read(ref keyRowsGeneration) != walkGeneration)
+            {
+                pruneMemos.Remove(key);
+                return;
+            }
+
             if (!pruneMemos.TryGetValue(key, out PruneMemo? memo))
             {
-                if (pruneMemos.Count >= MaxPruneMemos)
+                if (pruneMemos.Count >= PruneMemoCapacity)
+                {
+                    if (!admitWhenFull)
+                        return;
+
                     pruneMemos.Clear();
+                }
 
                 memo = new();
                 pruneMemos[key] = memo;
@@ -1271,6 +1385,17 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         lock (_pruneMemoLock)
             pruneMemos.Clear();
     }
+
+    /// <summary>Drops the sweep's proof of a clean store and marks the running cycle dirty, so the
+    /// next complete cycle walks every key. Used after a recovery reopen.</summary>
+    private void ResetSweepQuiescence()
+    {
+        sweepQuiescence = null;
+        sweepCycleClean = false;
+    }
+
+    /// <summary>True when the store has an idle, clean sweep cycle behind it (diagnostics/tests).</summary>
+    internal bool SweepIsQuiescent => sweepQuiescence is not null;
 
     /// <summary>Number of memoized keys (diagnostics/tests).</summary>
     internal int PruneMemoCount
@@ -2903,7 +3028,10 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         db.Write(batch, DefaultWriteOptions);
 
         if (columnFamily == columnFamilyKeys)
+        {
+            Interlocked.Increment(ref keyRowsGeneration);
             ForgetPruneMemos(keys);
+        }
 
         return true;
     }
@@ -3242,6 +3370,8 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
 
         bool BudgetExhausted() => budgeted && Stopwatch.GetElapsedTime(budgetStart) >= timeBudget;
 
+        using PruneWalkCursor walk = new(this);
+
         if (keys is not null)
         {
             IList<string> keyList = keys as IList<string> ?? keys.ToList();
@@ -3261,7 +3391,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 }
 
                 string key = keyList[i];
-                PruneRevisionsForKey(key, retentionCount, retentionAge, batchSize, floorTimestamp, ref deleted, ref floorViolations, ref keysSkipped, ref keysFloorBlocked, out bool keyLimitReached);
+                PruneRevisionsForKey(key, retentionCount, retentionAge, batchSize, floorTimestamp, walk, fromSweep: false, ref deleted, ref floorViolations, ref keysSkipped, ref keysFloorBlocked, out bool keyLimitReached, out _);
                 keysVisited++;
 
                 if (keyLimitReached)
@@ -3289,6 +3419,32 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             // pass on a hot store, taken from the flush every cleanup interval. Deep runs are
             // jumped instead, with the same registry-gated seek the range scans use, so the sweep
             // costs O(logical keys) plus the walks that actually prune.
+            if (sweepCursor is null)
+            {
+                if (SweepStillQuiescent(retentionCount, retentionAge, floorTimestamp))
+                {
+                    result = new(0, 0, false, SweepIdle: true);
+                    return true;
+                }
+
+                // A new cycle. The generation is sampled before any of its iterators exist, so a write
+                // the cycle's snapshots cannot see still moves it before the cycle ends.
+                sweepQuiescence = null;
+                sweepCycleClean = true;
+                sweepCycleGeneration = Volatile.Read(ref keyRowsGeneration);
+                sweepCycleFloor = floorTimestamp;
+                sweepCycleRetentionCount = retentionCount;
+                sweepCycleRetentionAge = retentionAge;
+                sweepCycleAgeFrontier = long.MaxValue;
+            }
+            else if (floorTimestamp != sweepCycleFloor
+                     || retentionCount != sweepCycleRetentionCount
+                     || retentionAge != sweepCycleRetentionAge)
+            {
+                // Keys visited earlier in this cycle were judged under other inputs.
+                sweepCycleClean = false;
+            }
+
             int keyBudget = batchSize;
             bool paused = false;
             int nonCurrentRun = 0;
@@ -3347,11 +3503,15 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                     }
 
                     string logicalKey = Encoding.UTF8.GetString(rawKeySpan[..^CurrentMarkerUtf8.Length]);
-                    PruneRevisionsForKey(logicalKey, retentionCount, retentionAge, batchSize, floorTimestamp, ref deleted, ref floorViolations, ref keysSkipped, ref keysFloorBlocked, out bool keyLimitReached);
+                    PruneRevisionsForKey(logicalKey, retentionCount, retentionAge, batchSize, floorTimestamp, walk, fromSweep: true, ref deleted, ref floorViolations, ref keysSkipped, ref keysFloorBlocked, out bool keyLimitReached, out long keyAgeFrontier);
                     keysVisited++;
+
+                    if (keyAgeFrontier < sweepCycleAgeFrontier)
+                        sweepCycleAgeFrontier = keyAgeFrontier;
 
                     if (keyLimitReached)
                     {
+                        sweepCycleClean = false;
                         // Key only partially pruned — resume at this same key next pass.
                         sweepCursor = rawKeySpan.ToArray(); // ToArray only on pause path
                         batchLimitReached = true;
@@ -3374,11 +3534,41 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
 
             // Reached the end of the column family without pausing: full scan complete, wrap around.
             if (!paused)
+            {
                 sweepCursor = null;
+
+                if (sweepCycleClean && Volatile.Read(ref keyRowsGeneration) == sweepCycleGeneration)
+                    sweepQuiescence = new(sweepCycleGeneration, sweepCycleFloor, sweepCycleRetentionCount, sweepCycleRetentionAge, sweepCycleAgeFrontier);
+            }
         }
 
         result = new(keysVisited, deleted, batchLimitReached, remaining, floorViolations, keysSkipped, timeBudgetExhausted, keysFloorBlocked);
         return true;
+    }
+
+    /// <summary>
+    /// True when the last complete sweep cycle left the store clean and nothing that could make a key
+    /// prunable has happened since: no caller write, the same floor and retention settings, and age
+    /// retention has not yet reached the oldest row it could delete (a key is age-eligible once that
+    /// row is strictly older than the cutoff).
+    /// </summary>
+    private bool SweepStillQuiescent(int retentionCount, TimeSpan retentionAge, HLCTimestamp floorTimestamp)
+    {
+        SweepQuiescence? quiescence = sweepQuiescence;
+        if (quiescence is null)
+            return false;
+
+        if (quiescence.Generation != Volatile.Read(ref keyRowsGeneration)
+            || quiescence.Floor != floorTimestamp
+            || quiescence.RetentionCount != retentionCount
+            || quiescence.RetentionAge != retentionAge)
+            return false;
+
+        if (retentionAge <= TimeSpan.Zero)
+            return true;
+
+        long cutoffPhysical = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - (long)retentionAge.TotalMilliseconds;
+        return cutoffPhysical <= quiescence.AgeFrontierPhysical;
     }
 
     /// <summary>
@@ -3387,6 +3577,12 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// When <paramref name="floorTimestamp"/> is non-zero the floor-boundary revision
     /// (the highest revision whose LastModified ≤ floorTimestamp) and everything newer
     /// are also protected from deletion.
+    /// <para>
+    /// <paramref name="ageFrontierPhysical"/> receives the commit time at which the key's memo verdict
+    /// turns back to "walk" once age retention reaches it — the oldest non-current row, or, when the
+    /// floor blocked the walk, the oldest row below the floor boundary — or <see cref="long.MaxValue"/>
+    /// when there is none. It is meaningless when <paramref name="batchLimitReached"/> is set.
+    /// </para>
     /// </summary>
     private void PruneRevisionsForKey(
         string key,
@@ -3394,13 +3590,17 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         TimeSpan retentionAge,
         int batchSize,
         HLCTimestamp floorTimestamp,
+        PruneWalkCursor walk,
+        bool fromSweep,
         ref int deleted,
         ref int floorViolations,
         ref int keysSkipped,
         ref int keysFloorBlocked,
-        out bool batchLimitReached)
+        out bool batchLimitReached,
+        out long ageFrontierPhysical)
     {
         batchLimitReached = false;
+        ageFrontierPhysical = long.MaxValue;
 
         bool needAge = retentionAge > TimeSpan.Zero;
         bool needFloor = floorTimestamp != HLCTimestamp.Zero;
@@ -3410,18 +3610,18 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
 
         // The memo answers most visits of a hot key without touching the store: nothing to delete
         // yet, so nothing to walk. See the memo remarks for why this is exact-or-conservative.
-        PruneMemoVerdict verdict = PruneMemoVerdictFor(key, retentionCount, retentionAge, cutoffPhysical, floorTimestamp);
+        PruneMemoVerdict verdict = PruneMemoVerdictFor(key, retentionCount, retentionAge, cutoffPhysical, floorTimestamp, out long memoAgeFrontier);
         if (verdict != PruneMemoVerdict.Walk)
         {
             keysSkipped++;
             if (verdict == PruneMemoVerdict.SkipFloorBlocked)
                 keysFloorBlocked++;
+            ageFrontierPhysical = memoAgeFrontier;
             return;
         }
 
         int keyLen = Encoding.UTF8.GetByteCount(key);
-        // ~CURRENT is the longer suffix; one buffer serves both the marker lookup and the ~ prefix.
-        int maxLen = keyLen + CurrentMarkerUtf8.Length;
+        int maxLen = keyLen + 1;
 
         byte[]? rentedKey = null;
         Span<byte> keyBuffer = maxLen <= KeyStackThreshold
@@ -3429,72 +3629,76 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             : (rentedKey = ArrayPool<byte>.Shared.Rent(maxLen));
         try
         {
-            // Encode the key once; both RocksDB lookups reuse these bytes.
             Encoding.UTF8.GetBytes(key.AsSpan(), keyBuffer);
-
-            // Determine the current revision so we never delete its historical record.
-            CurrentMarkerUtf8.CopyTo(keyBuffer[keyLen..]);
-            byte[]? currentData = db.Get(keyBuffer[..(keyLen + CurrentMarkerUtf8.Length)], cf: columnFamilyKeys);
-            if (currentData is null)
-                return;
-
-            StoredKeyValueOrdering currentOrdering = DecodeKeyValueOrdering(currentData);
-            long currentRevision = currentOrdering.Revision;
-
-            // Collect all revision entries for this key by seeking to "<key>~".
-            // Revision entries have numeric suffixes; ~CURRENT is skipped.
-            // Reuse key bytes already in keyBuffer[0..keyLen); overwrite suffix to just "~".
             keyBuffer[keyLen] = (byte)'~';
             ReadOnlySpan<byte> prefixBytes = keyBuffer[..(keyLen + 1)];
 
+            // "<key>~CURRENT" sorts inside the "<key>~" range, so the walk reads the current revision
+            // from the same snapshot as the history rows instead of paying a separate point lookup.
+            int currentKeyLength = keyLen + CurrentMarkerUtf8.Length;
+            bool hasCurrent = false;
+            StoredKeyValueOrdering currentOrdering = default;
+
             List<(long Revision, long LastModifiedPhysical, HLCTimestamp LastModified, byte[] RawKeyBytes)> revisions = [];
 
-            using (Iterator iterator = db.NewIterator(readOptions: MaintenanceScanReadOptions, cf: columnFamilyKeys))
+            Iterator iterator = walk.Iterator;
+            iterator.Seek(prefixBytes);
+
+            while (iterator.Valid())
             {
-                iterator.Seek(prefixBytes);
+                // Filter on the native key span — no per-row string decode. Only rows we keep are
+                // materialised (their key bytes are retained below for the later batch.Delete).
+                ReadOnlySpan<byte> entryKey = iterator.GetKeySpan();
 
-                while (iterator.Valid())
+                if (!entryKey.StartsWith(prefixBytes))
+                    break;
+
+                // Skip the ~CURRENT sentinel — never a candidate for deletion. Only this key's own
+                // marker carries its current revision; a longer one belongs to another key that
+                // shares the prefix.
+                if (entryKey.EndsWith(CurrentMarkerUtf8))
                 {
-                    // Filter on the native key span — no per-row string decode. Only rows we keep are
-                    // materialised (their key bytes are retained below for the later batch.Delete).
-                    ReadOnlySpan<byte> entryKey = iterator.GetKeySpan();
-
-                    if (!entryKey.StartsWith(prefixBytes))
-                        break;
-
-                    // Skip the ~CURRENT sentinel — never a candidate for deletion.
-                    if (entryKey.EndsWith(CurrentMarkerUtf8))
+                    if (entryKey.Length == currentKeyLength)
                     {
-                        iterator.Next();
-                        continue;
+                        currentOrdering = DecodeKeyValueOrdering(iterator.GetValueSpan());
+                        hasCurrent = true;
                     }
 
-                    // The suffix after "<key>~" must be a numeric revision; reject any trailing junk
-                    // so "<key>~123abc" is ignored exactly as long.TryParse would.
-                    ReadOnlySpan<byte> suffix = entryKey[prefixBytes.Length..];
-                    if (!Utf8Parser.TryParse(suffix, out long revisionNum, out int consumed) || consumed != suffix.Length)
-                    {
-                        iterator.Next();
-                        continue;
-                    }
-
-                    // Decode LastModified for every revision (not just when age/floor need it): the
-                    // pruned-history floor is derived from the oldest surviving revision's timestamp,
-                    // which must be known even for count-only retention.
-                    StoredKeyValueOrdering rowOrdering = DecodeKeyValueOrdering(iterator.GetValueSpan());
-                    long lastModifiedPhysical = rowOrdering.LastModifiedPhysical;
-                    HLCTimestamp lastModified = new(rowOrdering.LastModifiedNode, rowOrdering.LastModifiedPhysical, rowOrdering.LastModifiedCounter);
-
-                    // Copy the key out of native memory: it must outlive the iterator for batch.Delete.
-                    revisions.Add((revisionNum, lastModifiedPhysical, lastModified, entryKey.ToArray()));
                     iterator.Next();
+                    continue;
                 }
+
+                // The suffix after "<key>~" must be a numeric revision; reject any trailing junk
+                // so "<key>~123abc" is ignored exactly as long.TryParse would.
+                ReadOnlySpan<byte> suffix = entryKey[prefixBytes.Length..];
+                if (!Utf8Parser.TryParse(suffix, out long revisionNum, out int consumed) || consumed != suffix.Length)
+                {
+                    iterator.Next();
+                    continue;
+                }
+
+                // Decode LastModified for every revision (not just when age/floor need it): the
+                // pruned-history floor is derived from the oldest surviving revision's timestamp,
+                // which must be known even for count-only retention.
+                StoredKeyValueOrdering rowOrdering = DecodeKeyValueOrdering(iterator.GetValueSpan());
+                long lastModifiedPhysical = rowOrdering.LastModifiedPhysical;
+                HLCTimestamp lastModified = new(rowOrdering.LastModifiedNode, rowOrdering.LastModifiedPhysical, rowOrdering.LastModifiedCounter);
+
+                // Copy the key out of native memory: it must outlive the iterator for batch.Delete.
+                revisions.Add((revisionNum, lastModifiedPhysical, lastModified, entryKey.ToArray()));
+                iterator.Next();
             }
+
+            // No current row: the key is gone (or not yet written), and its history is not ours to prune.
+            if (!hasCurrent)
+                return;
+
+            long currentRevision = currentOrdering.Revision;
 
             if (revisions.Count == 0)
             {
                 // No history rows at all (a no-revision key): nothing to prune until one is written.
-                RememberPruneWalk(key, 0, long.MaxValue, long.MaxValue, floorBlocked: false, floorTimestamp);
+                RememberPruneWalk(key, 0, long.MaxValue, long.MaxValue, floorBlocked: false, floorTimestamp, walk.Generation, admitWhenFull: !fromSweep);
                 return;
             }
 
@@ -3616,7 +3820,8 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                         oldestUnprotected = lastModifiedPhysical;
                 }
 
-                RememberPruneWalk(key, revisions.Count - deletedInBatch, oldestNonCurrent, oldestUnprotected, floorBlockedCandidates > 0, floorTimestamp);
+                RememberPruneWalk(key, revisions.Count - deletedInBatch, oldestNonCurrent, oldestUnprotected, floorBlockedCandidates > 0, floorTimestamp, walk.Generation, admitWhenFull: !fromSweep);
+                ageFrontierPhysical = floorBlockedCandidates > 0 ? oldestUnprotected : oldestNonCurrent;
             }
         }
         finally

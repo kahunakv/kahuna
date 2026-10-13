@@ -168,9 +168,15 @@ public sealed class TestRevisionPruneTimeBudget : IDisposable
         Assert.Null(backend.GetKeyValueRevision(keys[^1], depth - 1));
         Assert.NotNull(backend.GetKeyValueRevision(keys[^1], depth));
 
-        // The cursor wrapped: a fresh unbudgeted sweep starts over, sees every key, deletes nothing.
+        // The cycle left only head rows and nothing was written since: the next cycle is idle.
+        Assert.True(backend.PruneKeyValueRevisions(null, 0, Age, 1_000_000, HLCTimestamp.Zero, out RevisionPruneResult idle));
+        Assert.True(idle.SweepIdle);
+        Assert.Equal(0, idle.KeysVisited);
+
+        // The cursor wrapped: once a write reopens the sweep, it starts over, sees every key, deletes nothing.
+        Assert.True(backend.StoreKeyValues([Item("budget/sweep/reopen", 1, NowMs)]));
         Assert.True(backend.PruneKeyValueRevisions(null, 0, Age, 1_000_000, HLCTimestamp.Zero, out RevisionPruneResult wrap));
-        Assert.Equal(keyCount, wrap.KeysVisited);
+        Assert.Equal(keyCount + 1, wrap.KeysVisited);
         Assert.Equal(0, wrap.RevisionsDeleted);
         Assert.False(wrap.BatchLimitReached);
     }
@@ -216,15 +222,20 @@ public sealed class TestRevisionPruneTimeBudget : IDisposable
             $"sweep did not jump over revision blocks: {shallow.TotalMilliseconds:F1} ms at 30 rows/key vs {deep.TotalMilliseconds:F1} ms at 330 rows/key");
     }
 
+    private long reopenRevision;
+
     private TimeSpan TimeSweep(int expectedKeys)
     {
         TimeSpan best = TimeSpan.MaxValue;
         for (int i = 0; i < 3; i++)
         {
+            // A clean store makes the next cycle idle; one write to a side key reopens a full pass.
+            Assert.True(backend.StoreKeyValues([Item("budget/reopen", ++reopenRevision, NowMs)]));
+
             Stopwatch sw = Stopwatch.StartNew();
             Assert.True(backend.PruneKeyValueRevisions(null, 0, Age, 1_000_000, HLCTimestamp.Zero, out RevisionPruneResult r));
             sw.Stop();
-            Assert.Equal(expectedKeys, r.KeysVisited);
+            Assert.Equal(expectedKeys + 1, r.KeysVisited);
             Assert.Equal(0, r.RevisionsDeleted);
             Assert.False(r.BatchLimitReached);
             if (sw.Elapsed < best) best = sw.Elapsed;

@@ -39,6 +39,11 @@ namespace Kahuna.Server.Persistence.Backend;
 /// <c>PruneKeyValueRevisions</c> overload) with keys or keyspace still unvisited. Always accompanied
 /// by <see cref="BatchLimitReached"/>. Backends that ignore the budget never set it.
 /// </param>
+/// <param name="SweepIdle">
+/// <c>true</c> when a backend-wide sweep did no work because the backend proved the store clean: its
+/// previous complete cycle left nothing prunable and nothing that could change that has happened
+/// since. Backends without that proof never set it.
+/// </param>
 public readonly record struct RevisionPruneResult(
     int KeysVisited,
     int RevisionsDeleted,
@@ -47,5 +52,6 @@ public readonly record struct RevisionPruneResult(
     int FloorViolations = 0,
     int KeysSkipped = 0,
     bool TimeBudgetExhausted = false,
-    int KeysFloorBlocked = 0
+    int KeysFloorBlocked = 0,
+    bool SweepIdle = false
 );

@@ -1760,6 +1760,9 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 
             if (success)
             {
+                if (pruneResult.SweepIdle)
+                    PersistenceMetrics.SweepPassesIdle.Add(1);
+
                 PersistenceMetrics.PruneKeysWalked.Add(pruneResult.KeysVisited - pruneResult.KeysSkipped);
                 PersistenceMetrics.PruneKeysSkipped.Add(pruneResult.KeysSkipped);
                 if (pruneResult.KeysFloorBlocked > 0)
