@@ -428,6 +428,18 @@ retention window (otherwise the cluster sends a full copy anyway). Whole-cluster
 restoring every node to one coordinated `T` and bringing the cluster back up — is the case where
 restore alone reconstitutes a running system.
 
+The seed is the PITR bootstrap (`--pitr-bootstrap-from <leafId>` with `--join-existing`, or
+`IKahuna.BootstrapFromPitrBackupAsync` for an embedded host, called before the node joins). It replays
+the chain into the node's store and writes one committed checkpoint per partition into the node's
+WAL at the index the chain reached, so the node tells the leader "I am at N" and receives only N+1
+onwards. A restored directory with an empty WAL presents at index 0 instead, and the leader then
+installs a full snapshot over it. The bootstrap reads the chain as a restore does — the same storage
+target, the same backup-root permission check, every manifest authenticated against the configured
+key — and is stricter in one way: a chain stamped with a `BackupClusterId` other than the node's own
+is refused, because its indexes describe another cluster's log. A chain with no cluster id is
+accepted. Every check runs before the store or the WAL changes, and a failure surfaces as a typed
+`KahunaBackupException`.
+
 > **Decision — keep "restore data" and "join cluster" as separate, composable steps.** Conflating them
 > would tie the backup format to cluster identity and membership, which change independently of data.
 > Keeping them separate means a backup is portable (restore it anywhere), and the seed-then-catch-up
@@ -617,7 +629,8 @@ segments. Protect it accordingly.
   could rewrite a file *and* its recorded digest. Set `--pitr-backup-mac-key-file <path>` (JSON
   `BackupMacKeyFile`) to a file holding a secret key, **identical on every node and kept outside the
   backup directory**, readable only by the server user. Manifests are then signed with HMAC-SHA-256 over
-  their identity, coverage, and digest map, and the tag is verified before restore — so a tampered
+  their identity, coverage, and digest map, and the tag is verified before a restore and before a PITR
+  bootstrap seeds a joining node — so a tampered
   digest/coverage/identity, a swapped file, or a stripped tag fails authentication. Note: enabling the key
   means backups taken **before** it was configured are unsigned and can no longer be restored until
   re-taken; a configured-but-missing/empty key file fails startup rather than silently disabling
@@ -808,6 +821,9 @@ checked before any file is trusted for copy or replay:
 - **Manifest schema is validated before any filesystem work** — type/parent/base-cut consistency, no
   duplicate partition ranges, valid index/HLC bounds, and the artifact-name set the backup type
   requires — so a structurally invalid manifest fails fast instead of part-way through a restore.
+- **Bootstrap authenticates the chain and checks its cluster before it seeds anything.** Each manifest
+  is verified against the configured key, and a chain stamped with another cluster's id is refused,
+  before the backend or the WAL is touched — a refused bootstrap leaves the node exactly as it was.
 - **Bootstrap seeds the WAL one partition at a time and checks each write is durable.** The backend
   restore it follows is idempotent and each checkpoint write overwrites by key, so a partial failure
   is reported precisely and the bootstrap is safe to re-run — rather than being reported as a success

@@ -406,8 +406,15 @@ public interface IKahuna
     /// When <paramref name="targetTime"/> is <see cref="HLCTimestamp.Zero"/> the restore uses
     /// the chain's natural maximum HLC (equivalent to "restore everything").
     /// </para>
-    /// <para>Throws <c>BackupDriverException</c> when the chain is invalid, the backup ID is not
-    /// found, or the target time falls outside the PITR retention window.</para>
+    /// <para>The chain is read as a restore reads it: through the configured backup storage target, from
+    /// a root that passes the backup-root permission check, with every manifest authenticated against
+    /// the configured manifest key. A chain stamped with a cluster id other than this node's configured
+    /// one is refused, because the seeded indexes would describe another cluster's log. Every check runs
+    /// before the backend or the WAL is changed.</para>
+    /// <para>Throws <see cref="Kahuna.Shared.Communication.Rest.KahunaBackupException"/>, classified by its
+    /// outcome, when the chain is invalid or foreign, a manifest fails authentication, the backup ID is not
+    /// found, or the target time falls outside the chain's coverage or the PITR retention window. The full
+    /// detail is logged against the operation id the message carries.</para>
     /// </summary>
     public Task BootstrapFromPitrBackupAsync(
         string backupDir,

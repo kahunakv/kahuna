@@ -57,10 +57,25 @@ internal static class BootstrapHelper
     /// <param name="walAdapter">Raft WAL adapter for this node. Synthetic checkpoint entries are written here.</param>
     /// <param name="pitrWindow">Configured PITR retention window.</param>
     /// <param name="nowUtc">Wall-clock reference for the window guard rail.</param>
+    /// <param name="manifestMacKey">
+    /// The node's manifest-authentication key, or null when none is configured. When set, every manifest
+    /// in the chain must carry a matching MAC, exactly as a restore requires: the seed trusts each
+    /// manifest's coverage bounds and WAL indexes, so a tampered or stripped manifest must fail here.
+    /// </param>
+    /// <param name="clusterId">
+    /// The node's backup cluster id, or null/empty when none is configured. When set, a manifest that
+    /// names a different cluster fails the bootstrap. A restore only requires a chain to be consistent
+    /// with itself, because its output is an offline directory; a seed goes further, because its
+    /// checkpoints tell the leader of <i>this</i> cluster that the node already holds entries up to an
+    /// index, and a foreign chain's indexes describe another cluster's log. A manifest with no cluster id
+    /// (taken before an id was configured) is accepted, as everywhere else in the catalog.
+    /// </param>
     /// <returns>Statistics from the WAL segment replay phase.</returns>
     /// <exception cref="BackupDriverException">
     /// Thrown when <paramref name="targetTime"/> is outside the PITR window or the chain is invalid.
     /// </exception>
+    /// <exception cref="BackupArtifactException">A manifest is unauthenticated or its MAC does not match.</exception>
+    /// <exception cref="BackupChainException">A manifest belongs to a different cluster.</exception>
     internal static async Task<RestoreResult> BootstrapNodeAsync(
         IReadOnlyList<BackupManifest> chain,
         IBackupArtifactStore artifacts,
@@ -69,8 +84,17 @@ internal static class BootstrapHelper
         IWAL walAdapter,
         TimeSpan pitrWindow,
         DateTime nowUtc,
-        TimeSpan baseSnapshotInterval = default)
+        TimeSpan baseSnapshotInterval = default,
+        byte[]? manifestMacKey = null,
+        string? clusterId = null)
     {
+        // Authenticate every manifest before any of its fields is trusted: the checks below read its
+        // partitions, coverage and cluster id, and the seed writes its indexes into the WAL.
+        foreach (BackupManifest manifest in chain)
+            BackupManifestMac.Verify(manifest, manifestMacKey);
+
+        EnsureChainBelongsToCluster(chain, clusterId);
+
         // A chain that covers only part of the cluster (captured by a node hosting a subset of the
         // partitions under replica placement) must not seed a node at all — the missing partitions'
         // absence would be indistinguishable from data loss. Fail closed before touching anything.
@@ -107,6 +131,26 @@ internal static class BootstrapHelper
         SeedWalCheckpoints(chain, targetTime, walAdapter);
 
         return restoreResult;
+    }
+
+    /// <summary>
+    /// Refuses a chain any manifest of which names a cluster other than <paramref name="clusterId"/>.
+    /// Dormant when the node has no cluster id. A manifest without one passes, because it was taken
+    /// before an id was configured and carries no claim either way.
+    /// </summary>
+    private static void EnsureChainBelongsToCluster(IReadOnlyList<BackupManifest> chain, string? clusterId)
+    {
+        if (string.IsNullOrWhiteSpace(clusterId))
+            return;
+
+        foreach (BackupManifest manifest in chain)
+        {
+            if (manifest.ClusterId is not null && !string.Equals(manifest.ClusterId, clusterId, StringComparison.Ordinal))
+                throw new BackupChainException(
+                    $"Backup {manifest.BackupId:N} belongs to cluster '{manifest.ClusterId}', not to this node's cluster " +
+                    $"'{clusterId}'. Seeding a node from another cluster's chain would report WAL indexes this cluster " +
+                    "never wrote; bootstrap from a backup of this cluster instead.");
+        }
     }
 
     /// <summary>

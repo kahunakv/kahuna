@@ -13,23 +13,18 @@ namespace Kahuna;
 public sealed partial class KahunaManager
 {
     /// <inheritdoc/>
-    public async Task BootstrapFromPitrBackupAsync(
+    public Task BootstrapFromPitrBackupAsync(
         string backupDir,
         Guid leafBackupId,
         HLCTimestamp targetTime,
         Kommander.WAL.IWAL walAdapter,
         TimeSpan pitrWindow,
-        TimeSpan baseSnapshotInterval)
-    {
-        BackupCatalog catalog = new(new LocalDirectoryStorageTarget(backupDir));
-        LocalDirectoryArtifactStore artifacts = new(backupDir);
-        IReadOnlyList<BackupManifest> chain = await catalog.ResolveAndValidateAsync(leafBackupId);
-
-        // Coverage validation (Zero → natural end, fail closed on out-of-range / unknown lower bound)
-        // is centralized in BootstrapHelper.BootstrapNode so it happens before any backend/WAL mutation.
-        await FlushPersistenceAsync();
-        await BootstrapHelper.BootstrapNodeAsync(chain, artifacts, targetTime, persistenceBackend, walAdapter, pitrWindow, DateTime.UtcNow, baseSnapshotInterval);
-    }
+        TimeSpan baseSnapshotInterval) =>
+        // Coverage, window, authentication and cluster checks all run before any backend/WAL mutation;
+        // see BackupFacade.BootstrapAsync and BootstrapHelper.BootstrapNodeAsync.
+        BackupFacade.BootstrapAsync(
+            configuration, backupDir, leafBackupId, targetTime, persistenceBackend, walAdapter,
+            pitrWindow, baseSnapshotInterval, FlushPersistenceAsync, logger);
 
     // ── Backup / PITR ──────────────────────────────────────────────────────────────────────
 

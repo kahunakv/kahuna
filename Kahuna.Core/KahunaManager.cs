@@ -44,6 +44,16 @@ public sealed partial class KahunaManager : IKahuna, IDisposable
 
     private readonly SequencerManager sequencer;
 
+    /// <summary>
+    /// The configuration the node was built with. Kept for the PITR bootstrap, which runs before the node
+    /// joins and must read a backup chain with the same storage target, manifest key and cluster id the
+    /// backup service would use, even on a node whose backup service is disabled.
+    /// </summary>
+    private readonly KahunaConfiguration configuration;
+
+    /// <summary>The node's logger; the PITR bootstrap logs the full detail of a failure here.</summary>
+    private readonly ILogger<IKahuna> logger;
+
     private readonly IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter;
 
     /// <summary>Unflushed-backlog gauges and the write aggregator's back-pressure probe; disposed with the node.</summary>
@@ -147,6 +157,8 @@ public sealed partial class KahunaManager : IKahuna, IDisposable
         KahunaNodeComponents components = KahunaNodeComposer.Build(
             actorSystem, raft, configuration, interNodeCommunication, preSeededBackend, logger, raftLogger, writeBatchExecutorDecorator);
 
+        this.configuration = configuration;
+        this.logger = logger;
         persistenceBackend = components.PersistenceBackend;
         backendReadScheduler = components.BackendReadScheduler;
         backendWriteScheduler = components.BackendWriteScheduler;

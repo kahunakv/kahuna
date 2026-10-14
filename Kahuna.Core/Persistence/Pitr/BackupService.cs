@@ -115,7 +115,7 @@ internal sealed class BackupService : IDisposable
     /// configured. Fails closed: a configured-but-missing/empty key file throws at startup rather than
     /// silently leaving backups unauthenticated.
     /// </summary>
-    private static byte[]? LoadMacKey(string? macKeyFile)
+    internal static byte[]? LoadMacKey(string? macKeyFile)
     {
         if (string.IsNullOrWhiteSpace(macKeyFile))
             return null;

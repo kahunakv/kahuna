@@ -61,7 +61,7 @@ internal sealed class BackupFacade : IDisposable
         Func<int, HLCTimestamp> appliedHlcProbe,
         ILogger<IKahuna> logger)
     {
-        BackupStoragePair backupStorage = CreateBackupStorage(configuration);
+        BackupStoragePair backupStorage = CreateBackupStorage(configuration, configuration.BackupDir);
 
         BackupService service = new(
             raft,
@@ -140,7 +140,63 @@ internal sealed class BackupFacade : IDisposable
     }
 
     /// <summary>
-    /// Builds the backup storage pair. A host that registered a
+    /// Seeds a node that is about to join a running cluster from the backup chain ending at
+    /// <paramref name="leafBackupId"/>: replays the chain into <paramref name="persistenceBackend"/> and
+    /// writes a committed checkpoint per partition into <paramref name="walAdapter"/>, so the node presents
+    /// to the leader at the restored index instead of at index 0. Runs before the node joins, so it cannot
+    /// use the node's <see cref="BackupService"/>, which may not exist (no backup directory configured) and
+    /// whose catalog is bound to the configured directory rather than <paramref name="backupDir"/>.
+    ///
+    /// <para>It reads the chain exactly as a restore does: through the same storage target and artifact
+    /// store (a registered <see cref="KahunaConfiguration.BackupStorageProvider"/> included), from a root
+    /// that passes the same permission check, with every manifest authenticated against the configured
+    /// <see cref="KahunaConfiguration.BackupMacKeyFile"/>. It also refuses a chain stamped with another
+    /// <see cref="KahunaConfiguration.BackupClusterId"/>; see <see cref="BootstrapHelper"/> for why a seed
+    /// is stricter than a restore there.</para>
+    ///
+    /// <para>Failures surface as a typed <see cref="KahunaBackupException"/>, as every other backup
+    /// operation does. The full detail is logged against the operation id the message carries.</para>
+    /// </summary>
+    internal static async Task BootstrapAsync(
+        KahunaConfiguration configuration,
+        string backupDir,
+        Guid leafBackupId,
+        HLCTimestamp targetTime,
+        IPersistenceBackend persistenceBackend,
+        Kommander.WAL.IWAL walAdapter,
+        TimeSpan pitrWindow,
+        TimeSpan baseSnapshotInterval,
+        Func<Task> flushPersistenceAsync,
+        ILogger<IKahuna> logger)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(backupDir))
+                throw new BackupDriverException("A PITR bootstrap needs the backup directory that holds the chain.");
+
+            BackupFilePermissions.EnsureRootSecure(backupDir);
+
+            BackupStoragePair storage = CreateBackupStorage(configuration, backupDir);
+            byte[]? macKey = BackupService.LoadMacKey(configuration.BackupMacKeyFile);
+
+            BackupCatalog catalog = new(storage.Manifests);
+            IReadOnlyList<BackupManifest> chain = await catalog.ResolveAndValidateAsync(leafBackupId).ConfigureAwait(false);
+
+            // Every check that can refuse the chain runs inside BootstrapNodeAsync before the backend or
+            // the WAL is touched, so a refusal leaves the node exactly as it was.
+            await flushPersistenceAsync().ConfigureAwait(false);
+            await BootstrapHelper.BootstrapNodeAsync(
+                chain, storage.Artifacts, targetTime, persistenceBackend, walAdapter, pitrWindow, DateTime.UtcNow,
+                baseSnapshotInterval, macKey, configuration.BackupClusterId).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ShouldMap(ex))
+        {
+            throw MapAndLog((operationId, e) => logger.LogError(e, "PITR bootstrap {OperationId} failed", operationId), ex);
+        }
+    }
+
+    /// <summary>
+    /// Builds the backup storage pair rooted at <paramref name="backupDir"/>. A host that registered a
     /// <see cref="KahunaConfiguration.BackupStorageProvider"/> gets whatever it returns; otherwise the
     /// local-directory implementations are used, so an existing deployment behaves exactly as before.
     /// <para>
@@ -150,7 +206,7 @@ internal sealed class BackupFacade : IDisposable
     /// a host that bypassed validation.
     /// </para>
     /// </summary>
-    private static BackupStoragePair CreateBackupStorage(KahunaConfiguration configuration)
+    private static BackupStoragePair CreateBackupStorage(KahunaConfiguration configuration, string backupDir)
     {
         string target = string.IsNullOrWhiteSpace(configuration.BackupTarget) ? "local" : configuration.BackupTarget;
         string? scratch = string.IsNullOrWhiteSpace(configuration.BackupScratchDir) ? null : configuration.BackupScratchDir;
@@ -169,7 +225,7 @@ internal sealed class BackupFacade : IDisposable
         if (configuration.BackupStorageProvider is not null)
         {
             BackupStoragePair pair = configuration.BackupStorageProvider(
-                new BackupStorageContext(target, configuration.BackupDir, scratch));
+                new BackupStorageContext(target, backupDir, scratch));
 
             if (pair.Artifacts.Capabilities.RequiresLocalScratch && scratch is null)
                 throw new KahunaServerException(
@@ -185,8 +241,8 @@ internal sealed class BackupFacade : IDisposable
                 "(object-storage targets ship as separate packages); only 'local' is built in.");
 
         return new BackupStoragePair(
-            new LocalDirectoryStorageTarget(configuration.BackupDir),
-            new LocalDirectoryArtifactStore(configuration.BackupDir));
+            new LocalDirectoryStorageTarget(backupDir),
+            new LocalDirectoryArtifactStore(backupDir));
     }
 
     internal async Task<KahunaBackupInfo> TakeFullAsync(CancellationToken ct = default)
@@ -295,10 +351,13 @@ internal sealed class BackupFacade : IDisposable
     /// outcome with that id appended, so a caller sees only "&lt;stable message&gt; (operation abc123…)" while
     /// an operator can grep the server log for the same id to see the paths/exception behind it.
     /// </summary>
-    private static KahunaBackupException MapAndLog(BackupService svc, Exception ex)
+    private static KahunaBackupException MapAndLog(BackupService svc, Exception ex) =>
+        MapAndLog(svc.LogOperationFailure, ex);
+
+    private static KahunaBackupException MapAndLog(Action<string, Exception> logFailure, Exception ex)
     {
         string operationId = Guid.NewGuid().ToString("N")[..12];
-        svc.LogOperationFailure(operationId, ex);
+        logFailure(operationId, ex);
         KahunaBackupException mapped = MapBackupException(ex);
         return new KahunaBackupException(mapped.Outcome, $"{mapped.Message} (operation {operationId})");
     }
