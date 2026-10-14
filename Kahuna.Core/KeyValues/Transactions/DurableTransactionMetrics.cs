@@ -1766,9 +1766,10 @@ internal static class DurableTransactionMetrics
             description: "Recovery presumed-aborts of records left Undecided past their decision deadline.");
 
     /// <summary>
-    /// The decision-deadline margin (ms past the commit timestamp) chosen for each finalize. Recorded at freeze
-    /// so dashboards can correlate the derived margin with the observed finalize latency and the late-commit /
-    /// deadline-expiry rates when tuning the floor, ceiling, and multiplier.
+    /// The decision-deadline margin (ms past the commit timestamp) chosen for each finalize: the multiplier times
+    /// the larger of the total finalize p99 and the per-intent p99 times the manifest size, clamped. Recorded at
+    /// freeze so dashboards can correlate the derived margin with the observed finalize latency and the
+    /// late-commit / deadline-expiry rates when tuning the floor, ceiling, and multiplier.
     /// </summary>
     internal static readonly Histogram<long> DecisionDeadlineMarginMs =
         Meter.CreateHistogram<long>(

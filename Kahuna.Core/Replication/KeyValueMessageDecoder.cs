@@ -109,6 +109,19 @@ internal static class KeyValueMessageDecoder
     }
 
     /// <summary>
+    /// The state a <see cref="KeyValueRecordKind.ValueMutation"/> type writes, and <c>Undefined</c> for every other
+    /// type. Both readers of a value mutation — the record parse in <see cref="Decode"/> and the leader's reuse of
+    /// its own proposal — take the state from here, so the two cannot disagree on what a type writes.
+    /// </summary>
+    internal static KeyValueState StateOf(KeyValueRequestType type) => type switch
+    {
+        KeyValueRequestType.TrySet    => KeyValueState.Set,
+        KeyValueRequestType.TryExtend => KeyValueState.Set,
+        KeyValueRequestType.TryDelete => KeyValueState.Deleted,
+        _                             => KeyValueState.Undefined
+    };
+
+    /// <summary>
     /// Decodes a <see cref="KeyValueRecordKind.ValueMutation"/> record into the state it writes and its value
     /// bytes. Returns <c>KeyValueState.Undefined</c> for every other kind. Every type that <see cref="Classify"/>
     /// calls a value mutation must map to a defined state here; the coverage test fails otherwise.
@@ -119,13 +132,7 @@ internal static class KeyValueMessageDecoder
     /// </summary>
     internal static (KeyValueState state, byte[]? value) Decode(KeyValueMessage msg)
     {
-        KeyValueState state = RecordType(msg) switch
-        {
-            KeyValueRequestType.TrySet    => KeyValueState.Set,
-            KeyValueRequestType.TryExtend => KeyValueState.Set,
-            KeyValueRequestType.TryDelete => KeyValueState.Deleted,
-            _                             => KeyValueState.Undefined
-        };
+        KeyValueState state = StateOf(RecordType(msg));
 
         if (state == KeyValueState.Undefined)
             return (KeyValueState.Undefined, null);

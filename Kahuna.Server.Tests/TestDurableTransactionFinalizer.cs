@@ -853,19 +853,42 @@ public sealed class TestDurableTransactionFinalizer
         PreparedIntentStore intents = new();
         seam.Records = records;
         seam.Intents = intents;
-        bool latencyRecorded = false;
+        int? recordedIntents = null;
         Func<CancellationToken, Task>? deferredResolution = null;
         DurableTransactionFinalizer finalizer = new(
             records, intents, seam.Replicate,
             resolutionScheduler: r => deferredResolution = r,
-            recordDecisionLatencyMs: _ => latencyRecorded = true);
+            recordDecisionLatencyMs: (_, manifestSize) => recordedIntents = manifestSize);
 
         await finalizer.FinalizeAsync(Input(Ts(1000), 1, (5, "acct/1")), Validate(true), opId: Ts(2000), CancellationToken.None);
 
         // Latency is recorded once the decision is durable, before resolution runs (here it is only scheduled),
-        // so post-decision settlement time never inflates the deadline estimator.
-        Assert.True(latencyRecorded);
+        // so post-decision settlement time never inflates the deadline estimator. The manifest size rides with it,
+        // because the estimator prices the next deadline by the size of the finalize it is for.
+        Assert.Equal(1, recordedIntents);
         Assert.NotNull(deferredResolution);
+    }
+
+    [Fact]
+    public async Task DecisionLatency_CarriesTheWholeManifestSize()
+    {
+        Seam seam = new();
+        TransactionRecordStore records = new();
+        PreparedIntentStore intents = new();
+        seam.Records = records;
+        seam.Intents = intents;
+        int? recordedIntents = null;
+        DurableTransactionFinalizer finalizer = new(
+            records, intents, seam.Replicate,
+            recordDecisionLatencyMs: (_, manifestSize) => recordedIntents = manifestSize);
+
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(Ts(1000), 1, (5, "acct/1"), (5, "acct/2"), (8, "idx/name/bob")), Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        // The estimator prices an intent from this sample, so the size must be the whole manifest across every
+        // participant partition, not the anchor partition's share of it.
+        Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+        Assert.Equal(3, recordedIntents);
     }
 
     [Fact]

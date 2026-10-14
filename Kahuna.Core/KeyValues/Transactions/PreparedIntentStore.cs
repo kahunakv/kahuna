@@ -2188,7 +2188,7 @@ internal sealed class PreparedIntentStore
     // The proposer's decoded commands, keyed by the exact byte array handed to Raft, budgeted for one
     // take per co-hosted node. See ProposedDeltaCache for the reuse and lifetime contract; reusing the
     // producer's instances is safe only because commands and their intents are immutable.
-    private static readonly ProposedDeltaCache<PreparedIntentCommand> locallyProposedDeltas = new();
+    private static readonly ProposedDeltaCache<PreparedIntentCommand[]> locallyProposedDeltas = new();
 
     /// <summary>Applies a delta and reports whether every PREPARE command in it took ownership of its key. Returns
     /// <see langword="false"/> when any prepare is rejected by the state machine — another transaction already

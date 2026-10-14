@@ -328,8 +328,9 @@ public sealed class EmbeddedKahunaOptions
     /// <summary>
     /// Lower clamp (ms) on the durable-transaction decision-deadline margin — the window past the commit
     /// timestamp within which a durable commit is still authorized before recovery may presume-abort it. Also
-    /// the value used while the finalize-latency estimator warms up. Keep it comfortably above a healthy
-    /// finalize's two Raft barriers.
+    /// the value used before the finalize-latency estimator has its first sample. The margin grows with the
+    /// manifest a finalize carries, so a bulk write is not sized by the small commits before it. Keep it
+    /// comfortably above a healthy finalize's two Raft barriers.
     /// </summary>
     public long DurableDecisionDeadlineFloorMs { get; set; } = 5_000;
 

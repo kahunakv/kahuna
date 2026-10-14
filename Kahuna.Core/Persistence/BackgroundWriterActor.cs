@@ -554,6 +554,9 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 break;
             
             case BackgroundWriteType.Flush:
+                // Both queues hold exactly what the producers rented since the last tick, and the drains
+                // below return it: size the request pool to that population first (see the pool's remarks).
+                BackgroundWriteRequestPool.Shared.SizeToQueued(dirtyLocks.Count + dirtyKeyValues.Count);
                 // The checkpoint runs LAST, after the flush it depends on: it advances the WAL
                 // retention floor, so it must only ever see state whose data has already landed in
                 // the backend. Running it first made it self-defeating — under sustained load a tick
@@ -1145,7 +1148,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 
                     // The request has been copied into the item struct and is no longer referenced
                     // (the retry path keeps the items, not the requests), so recycle it.
-                    BackgroundWriteRequestPool.Return(lockRequest);
+                    BackgroundWriteRequestPool.Shared.Return(lockRequest);
 
                     if (++counter >= MaxBatchSize || size >= MaxPacketSize)
                         break;
@@ -1331,7 +1334,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 
                     // The request has been copied into the item struct and is no longer referenced
                     // (the retry path keeps the items, not the requests), so recycle it.
-                    BackgroundWriteRequestPool.Return(keyValueRequest);
+                    BackgroundWriteRequestPool.Shared.Return(keyValueRequest);
 
                     if (firstOccurrence && (++counter >= MaxBatchSize || size >= MaxPacketSize))
                         break;

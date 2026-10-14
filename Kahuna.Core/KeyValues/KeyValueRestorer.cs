@@ -356,7 +356,7 @@ internal sealed class KeyValueRestorer
         unflushedWrites?.Record(mutation.Key, mutation.Value, mutation.Revision,
             mutation.Expires, mutation.LastUsed, mutation.LastModified, mutation.State, mutation.NoRevision);
 
-        backgroundWriter.Send(BackgroundWriteRequestPool.Rent(
+        backgroundWriter.Send(BackgroundWriteRequestPool.Shared.Rent(
             BackgroundWriteType.QueueStoreKeyValue,
             partitionId,
             mutation.Key,

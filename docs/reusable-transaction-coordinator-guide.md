@@ -399,10 +399,14 @@ the race in the log — not what this attempt requested.
 ### The decision deadline
 
 Each finalize freezes a **decision deadline** = commit timestamp + a margin derived as
-`clamp(DurableDecisionDeadlineMultiplier × observed-finalize-p99, floor, ceiling)`. The p99 is a
-rolling estimate of real finalize latency (measured with a monotonic stopwatch — a local duration, not
-a distributed event), so the deadline tracks load instead of a fixed guess: too small spuriously aborts
-slow-but-alive coordinators, too large delays recovery of dead ones. During warmup the floor applies.
+`clamp(DurableDecisionDeadlineMultiplier × max(observed-finalize-p99, observed-per-intent-p99 × intents),
+floor, ceiling)`. Both p99s are rolling estimates of real finalize latency (measured with a monotonic
+stopwatch — a local duration, not a distributed event), so the deadline tracks load instead of a fixed
+guess: too small spuriously aborts slow-but-alive coordinators, too large delays recovery of dead ones.
+The per-intent term sizes the margin by the manifest of *this* finalize, so a bulk write after a stream
+of small commits is not held to a margin those commits sized; it is fed by finalizes of 64 or more
+intents, and by every finalize until one of those is in the window. The estimates are live from the
+first sample; before it the floor applies.
 
 A commit attempt whose HLC has passed the frozen deadline is rejected by the record state machine;
 that rejection increments `kahuna.durable_tx.late_commit_rejections`. The finalizer then drives the
@@ -573,9 +577,9 @@ takes ownership of the lock set, so the transition into finalization does not it
 |---|---:|---|
 | `TransactionOutcomeRetentionMax` | 10,000 | Maximum retained terminal outcomes (exact at rest; exceeded only by the finalizes in flight); a non-positive value disables best-effort outcome retention. Independent of the durable-decision admission budget. |
 | `DurableDecisionOutstandingMax` | 100,000 | Strict maximum **outstanding** (undecided) canonical transaction records this node admits; a non-positive value disables the bound. Decided records do not count against it. |
-| `DurableDecisionDeadlineFloorMs` | 5,000 | Lower clamp on the per-transaction decision-deadline margin, and the value used during estimator warmup. |
+| `DurableDecisionDeadlineFloorMs` | 5,000 | Lower clamp on the per-transaction decision-deadline margin, and the value used before the estimator's first sample. |
 | `DurableDecisionDeadlineCeilingMs` | 60,000 | Upper clamp on the decision-deadline margin, capping how long a dead coordinator's undecided record can block recovery. Must be ≥ the floor. |
-| `DurableDecisionDeadlineMultiplier` | 4 | Multiplier applied to the observed finalize p99 before clamping to the floor/ceiling. |
+| `DurableDecisionDeadlineMultiplier` | 4 | Multiplier applied to the observed finalize cost — the total p99, or the per-intent p99 × the manifest size, whichever is larger — before clamping to the floor/ceiling. |
 | `TransactionOutcomeRetentionTtl` | 5 minutes | Age window for terminal outcomes; a non-positive value disables age-based removal. Also the retention window of the durable-2PC canonical records and the completion receipts they release — see the memory budget below, which makes that window yield. |
 | `DurableRecordRetentionMax` | 200,000 | Memory budget for the durable-2PC metadata resident on a node, as a count of canonical transaction records. Above it the retention sweep reclaims the oldest terminal records **before** their TTL, down to 90% of the budget, each anchor leader taking its proportional share. A non-positive value disables the count budget. |
 | `DurableRecordRetentionMaxBytes` | 256 MiB | The same budget as an estimated heap byte size of resident records plus completion receipts (reported by the `kahuna.durable_tx.resident_record_bytes` / `resident_receipt_bytes` gauges). A non-positive value disables the byte budget. |

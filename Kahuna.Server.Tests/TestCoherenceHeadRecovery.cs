@@ -229,13 +229,13 @@ public sealed class TestCoherenceHeadRecovery : RaftTrackingTest
 
             // The same committed mutation queued twice — once by the owning actor ahead of the
             // client acknowledgement, once by the Raft consumer apply — plus one distinct commit.
-            writer.Send(BackgroundWriteRequestPool.Rent(
+            writer.Send(BackgroundWriteRequestPool.Shared.Rent(
                 BackgroundWriteType.QueueStoreKeyValue, 0, "dup/k", "v5"u8.ToArray(), 5,
                 HLCTimestamp.Zero, Ts(5_000), Ts(5_000), (int)KeyValueState.Set, noRevision: false));
-            writer.Send(BackgroundWriteRequestPool.Rent(
+            writer.Send(BackgroundWriteRequestPool.Shared.Rent(
                 BackgroundWriteType.QueueStoreKeyValue, 0, "dup/k", "v5"u8.ToArray(), 5,
                 HLCTimestamp.Zero, Ts(5_000), Ts(5_000), (int)KeyValueState.Set, noRevision: false));
-            writer.Send(BackgroundWriteRequestPool.Rent(
+            writer.Send(BackgroundWriteRequestPool.Shared.Rent(
                 BackgroundWriteType.QueueStoreKeyValue, 0, "dup/k", "v6"u8.ToArray(), 6,
                 HLCTimestamp.Zero, Ts(6_000), Ts(6_000), (int)KeyValueState.Set, noRevision: false));
 

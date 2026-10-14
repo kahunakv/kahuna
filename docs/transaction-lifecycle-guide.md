@@ -240,9 +240,13 @@ metrics scrape.
 
 ### 6.4 The decision deadline
 
-Each finalize freezes `deadline = commitTimestamp + clamp(multiplier × observed-finalize-p99, floor,
-ceiling)`. The p99 is a rolling *local* stopwatch measure (a duration, not a distributed event), so the
-deadline tracks real load. A commit attempt whose fresh attempt-HLC has passed the frozen deadline is
+Each finalize freezes `deadline = commitTimestamp + clamp(multiplier × max(observed-finalize-p99,
+observed-per-intent-p99 × intents), floor, ceiling)`. Both p99s are rolling *local* stopwatch measures (a
+duration, not a distributed event), so the deadline tracks real load. The per-intent term prices the
+manifest by its own size, so a bulk write after a stream of small commits is not held to a margin sized
+for those commits; it is fed by finalizes of 64 or more intents, where the fixed cost is amortized, and
+by every finalize until one of those is in the window. The estimates are live from the first sample;
+before it the floor applies. A commit attempt whose fresh attempt-HLC has passed the frozen deadline is
 rejected by the state machine and increments `kahuna.durable_tx.late_commit_rejections`. A rising rate
 means the deadline is too tight.
 

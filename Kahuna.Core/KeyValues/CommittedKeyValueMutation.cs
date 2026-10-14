@@ -41,6 +41,22 @@ internal readonly record struct CommittedKeyValueMutation(
         new(message.TransactionIdNode, message.TransactionIdPhysical, message.TransactionIdCounter),
         message.HasRecordAnchorKey ? message.RecordAnchorKey : null);
 
+    /// <summary>The mutation a direct-write proposal carries, read from the proposal the leader still holds instead
+    /// of the record it serialized from it. Must stay field-for-field equal to <see cref="FromRecord"/> over the
+    /// record <c>BaseHandler.SerializeProposal</c> writes: a direct write never belongs to a transaction, so its
+    /// record carries a zero transaction id and no anchor key, and its state follows from its type alone.</summary>
+    public static CommittedKeyValueMutation FromProposal(KeyValueProposal proposal, KeyValueState state) => new(
+        proposal.Key,
+        proposal.Value,
+        state,
+        proposal.Revision,
+        proposal.NoRevision,
+        proposal.Expires,
+        proposal.LastUsed,
+        proposal.LastModified,
+        HLCTimestamp.Zero,
+        null);
+
     /// <summary>The mutation a committed prepared intent stages. The transaction's one commit timestamp stamps
     /// last-modified and last-used, exactly as the materialization record built from the same intent does.</summary>
     public static CommittedKeyValueMutation FromIntent(PreparedIntent intent) => new(

@@ -74,16 +74,19 @@ internal sealed class UnflushedKeyValueWritesIndex
     {
         UnflushedKeyValueWrite incoming = new(value, revision, expires, lastUsed, lastModified, state, noRevision, revision);
 
+        // The incoming row rides along as the factory argument. A lambda that captured it would cost a
+        // display class and a delegate per call, and this runs twice per committed write on the leader.
         entries.AddOrUpdate(
             key,
-            incoming,
-            (_, existing) =>
+            static (_, incoming) => incoming,
+            static (_, existing, incoming) =>
             {
                 long oldest = Math.Min(existing.OldestRevision, incoming.Revision);
                 return IsNewer(existing, incoming.Revision, incoming.LastModified)
                     ? existing with { OldestRevision = oldest }
                     : incoming with { OldestRevision = oldest };
-            });
+            },
+            incoming);
     }
 
     /// <summary>

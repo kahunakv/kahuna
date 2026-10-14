@@ -595,9 +595,10 @@ public sealed class KahunaConfiguration
     /// <summary>
     /// Lower bound (ms) on the durable-transaction decision-deadline margin — the window past the commit timestamp
     /// within which a durable commit is still authorized before recovery may presume-abort it. The margin is
-    /// derived per transaction as <c>clamp(DurableDecisionDeadlineMultiplier × observed-finalize-p99,
-    /// floor, ceiling)</c>, so this floor is what a cold or low-latency node uses before enough finalize samples
-    /// exist. Set it comfortably above a healthy finalize's two Raft barriers so normal commits are never
+    /// derived per transaction as <c>clamp(DurableDecisionDeadlineMultiplier × max(observed-finalize-p99,
+    /// observed-per-intent-p99 × intents), floor, ceiling)</c>, so this floor is what a cold node uses before its
+    /// first finalize sample, and what a low-latency node uses for a manifest no larger than the ones it has seen.
+    /// Set it comfortably above a healthy finalize's two Raft barriers so normal commits are never
     /// presumed-aborted; too low spuriously aborts slow-but-alive coordinators under load.
     /// </summary>
     public long DurableDecisionDeadlineFloorMs { get; set; } = 5_000;
@@ -610,8 +611,9 @@ public sealed class KahunaConfiguration
     public long DurableDecisionDeadlineCeilingMs { get; set; } = 60_000;
 
     /// <summary>
-    /// Multiplier applied to the observed finalize p99 when deriving the decision-deadline margin, giving healthy
-    /// commits headroom above typical latency before the deadline expires. Clamped by the floor and ceiling above.
+    /// Multiplier applied to the observed finalize cost — the total p99, or the per-intent p99 times the manifest
+    /// size, whichever is larger — when deriving the decision-deadline margin, giving healthy commits headroom
+    /// above typical latency before the deadline expires. Clamped by the floor and ceiling above.
     /// </summary>
     public int DurableDecisionDeadlineMultiplier { get; set; } = 4;
 

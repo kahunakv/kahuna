@@ -1575,8 +1575,9 @@ internal sealed class TransactionCoordinator : IDisposable
 
     // ── Durable prepared-intent finalize path ─────────────────────────────
 
-    // Rolling p99 of durable-finalize latency, used to size each transaction's decision-deadline margin so the
-    // deadline tracks real finalize cost instead of a fixed guess (too low spuriously aborts slow-but-alive
+    // Rolling p99s of durable-finalize latency (total, and per intent), used to size each transaction's
+    // decision-deadline margin so the deadline tracks real finalize cost — of the node lately, and of this
+    // transaction's own manifest — instead of a fixed guess (too low spuriously aborts slow-but-alive
     // coordinators; too high delays recovery of dead ones). Latency is a local elapsed-time measurement, not a
     // distributed-event ordering, so it is sampled with a monotonic stopwatch; the deadline itself is an HLC offset.
     private readonly FinalizeLatencyEstimator finalizeLatency = new();
@@ -1737,16 +1738,19 @@ internal sealed class TransactionCoordinator : IDisposable
 
     /// <summary>
     /// Derives this finalize's decision-deadline margin (ms past the commit timestamp) as
-    /// <c>clamp(multiplier × observed-finalize-p99, floor, ceiling)</c>, giving a healthy commit headroom above
-    /// typical finalize latency while capping how long a dead coordinator's undecided record can block recovery.
-    /// During warmup (no p99 yet) the floor applies. The chosen margin is recorded for tuning observability.
+    /// <c>clamp(multiplier × max(observed-finalize-p99, observed-per-intent-p99 × intentCount), floor, ceiling)</c>:
+    /// a healthy commit gets headroom above the latency of the finalizes seen lately <i>and</i> above what its own
+    /// manifest will cost to prepare and decide, while the ceiling caps how long a dead coordinator's undecided
+    /// record can block recovery. Before the first sample the floor applies. The chosen margin is recorded for
+    /// tuning observability. See <see cref="FinalizeLatencyEstimator"/> for why the manifest size is part of it.
     /// </summary>
-    private long DeriveDecisionDeadlineMarginMs()
+    private long DeriveDecisionDeadlineMarginMs(int intentCount)
     {
-        long floor = configuration.DurableDecisionDeadlineFloorMs;
-        long ceiling = Math.Max(configuration.DurableDecisionDeadlineCeilingMs, floor);
-        long derived = (long)configuration.DurableDecisionDeadlineMultiplier * finalizeLatency.P99Ms;
-        long margin = Math.Clamp(derived, floor, ceiling);
+        long margin = finalizeLatency.DeadlineMarginMs(
+            intentCount,
+            configuration.DurableDecisionDeadlineMultiplier,
+            configuration.DurableDecisionDeadlineFloorMs,
+            configuration.DurableDecisionDeadlineCeilingMs);
 
         DurableTransactionMetrics.DecisionDeadlineMarginMs.Record(margin);
         return margin;
@@ -1800,7 +1804,7 @@ internal sealed class TransactionCoordinator : IDisposable
         // served a snapshot read at T before this write was staged fenced its clock past T, and minting from
         // the transaction id alone on a coordinator whose clock lags could still land the commit at or below T.
         HLCTimestamp commitTimestamp = MintDurableCommitTimestamp(raft.HybridLogicalClock, raft.GetLocalNodeId(), txId, staged);
-        HLCTimestamp decisionDeadline = new(commitTimestamp.N, commitTimestamp.L + DeriveDecisionDeadlineMarginMs(), commitTimestamp.C);
+        HLCTimestamp decisionDeadline = new(commitTimestamp.N, commitTimestamp.L + DeriveDecisionDeadlineMarginMs(persistentKeys.Count), commitTimestamp.C);
 
         // The builder reads the session's staged values and written-base observations in place: this freeze runs
         // synchronously after accepted operations drained and under the finalize owner, so neither dictionary can

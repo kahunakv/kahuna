@@ -252,10 +252,11 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     // reusing the operation id as the attempt HLC — used only by protocol tests that supply an explicit late opId.
     private readonly Func<HLCTimestamp>? attemptClock;
 
-    // Records the finalize latency measured up to (and including) the canonical decision — deliberately excluding
-    // post-decision resolution/settlement — so the p99 that sizes future decision deadlines is not inflated by
-    // work that happens after the decision. Null in tests that do not observe latency.
-    private readonly Action<double>? recordDecisionLatencyMs;
+    // Records the finalize latency measured up to (and including) the canonical decision, with the size of the
+    // manifest it finalized — deliberately excluding post-decision resolution/settlement — so the estimates that
+    // size future decision deadlines are not inflated by work that happens after the decision. Null in tests that
+    // do not observe latency.
+    private readonly Action<double, int>? recordDecisionLatencyMs;
 
     private readonly int maxMaterializationBatchItems;
 
@@ -282,7 +283,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         ApplyCommitLocally? applyCommitLocally = null,
         ApplyRollbackLocally? applyRollbackLocally = null,
         Func<HLCTimestamp>? attemptClock = null,
-        Action<double>? recordDecisionLatencyMs = null,
+        Action<double, int>? recordDecisionLatencyMs = null,
         ReplicateFencedDelegate? replicateFenced = null,
         ReplicateAnchorBundleDelegate? replicateAnchorBundle = null,
         int maxMaterializationBatchItems = 512,
@@ -524,7 +525,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
             if (onePhase is { } fastOutcome)
             {
-                recordDecisionLatencyMs?.Invoke(Stopwatch.GetElapsedTime(startTicks).TotalMilliseconds);
+                recordDecisionLatencyMs?.Invoke(Stopwatch.GetElapsedTime(startTicks).TotalMilliseconds, input.Manifest.Count);
                 await FinishResolutionAsync(input, fastOutcome, cancellationToken).ConfigureAwait(false);
                 return fastOutcome;
             }
@@ -833,7 +834,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
         // Record the latency up to the decision only — resolution below is excluded so it never inflates the
         // deadline window that a future finalize's prepare must fit inside.
-        recordDecisionLatencyMs?.Invoke(Stopwatch.GetElapsedTime(startTicks).TotalMilliseconds);
+        recordDecisionLatencyMs?.Invoke(Stopwatch.GetElapsedTime(startTicks).TotalMilliseconds, input.Manifest.Count);
 
         await FinishResolutionAsync(input, outcome, cancellationToken).ConfigureAwait(false);
 

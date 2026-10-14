@@ -728,7 +728,7 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
         unflushedLockWrites?.Record(proposal.Resource, proposal.Owner, proposal.FencingToken,
             proposal.Expires, proposal.LastUsed, proposal.LastModified, proposal.State);
 
-        backgroundWriter.Send(BackgroundWriteRequestPool.Rent(
+        backgroundWriter.Send(BackgroundWriteRequestPool.Shared.Rent(
             BackgroundWriteType.QueueStoreLock,
             message.PartitionId,
             proposal.Resource,

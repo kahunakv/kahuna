@@ -67,7 +67,7 @@ internal sealed class CompleteProposalHandler : BaseHandler
         context.UnflushedWrites?.Record(proposal.Key, proposal.Value, proposal.Revision,
             proposal.Expires, proposal.LastUsed, proposal.LastModified, proposal.State, proposal.NoRevision);
 
-        context.BackgroundWriter.Send(BackgroundWriteRequestPool.Rent(
+        context.BackgroundWriter.Send(BackgroundWriteRequestPool.Shared.Rent(
             BackgroundWriteType.QueueStoreKeyValue,
             message.PartitionId,
             proposal.Key,

@@ -20,19 +20,51 @@ namespace Kahuna.Server.Persistence;
 /// already-built item keeps its own (immutable) key/value references, so it is unaffected.
 /// </para>
 ///
-/// <para><see cref="ConcurrentQueue{T}"/> makes concurrent rent/return safe; the count is bounded so a
-/// burst cannot pin an unbounded population, and returns beyond the cap drop the object for the GC.</para>
+/// <para>
+/// <b>Bound.</b> The writer returns requests only while it drains at a flush tick, so between two ticks
+/// the producers rent a whole interval's population while nothing comes back, and a bound below that
+/// population makes every rent past it allocate. The writer therefore sizes the pool at the start of
+/// every tick from its dirty-queue depth (<see cref="SizeToQueued"/>): the queues at a tick start hold
+/// exactly what was rented since the previous tick, and the drain that follows returns it. One tick later
+/// the pool holds the steady-state demand and <see cref="Rent"/> stops allocating. The bound is clamped to
+/// [<see cref="MinCapacity"/>, <see cref="MaxCapacity"/>], and sizing down trims the excess at once, so an
+/// idle process never retains a past peak.
+/// </para>
+///
+/// <para>
+/// <see cref="Shared"/> is the process-wide pool every producer and the writer use. The sizing assumes one
+/// writer per process. An in-process cluster (tests, the embedded in-memory cluster) runs one writer per
+/// node and the last tick wins; that only lowers how much the pool retains, never correctness.
+/// </para>
+///
+/// <para><see cref="ConcurrentQueue{T}"/> makes concurrent rent/return safe; the count is approximate and
+/// only enforces the bound, so returns beyond it drop the object for the GC.</para>
 /// </summary>
-internal static class BackgroundWriteRequestPool
+internal sealed class BackgroundWriteRequestPool
 {
-    /// <summary>Upper bound on pooled instances. A drained flush returns up to a full batch at a time.</summary>
-    private const int MaxPooled = 4096;
+    /// <summary>Smallest bound: the initial capacity, and the floor the sizing never goes below.</summary>
+    internal const int MinCapacity = 4096;
 
-    private static readonly ConcurrentQueue<BackgroundWriteRequest> pool = new();
+    /// <summary>Largest bound: about 16 MB of pooled requests, no more than the writer's own dirty queue
+    /// holds at that depth.</summary>
+    internal const int MaxCapacity = 131_072;
 
-    private static int count;
+    /// <summary>The process-wide pool.</summary>
+    public static readonly BackgroundWriteRequestPool Shared = new();
 
-    public static BackgroundWriteRequest Rent(
+    private readonly ConcurrentQueue<BackgroundWriteRequest> pool = new();
+
+    private int count;
+
+    private int capacity = MinCapacity;
+
+    /// <summary>The current bound on pooled instances.</summary>
+    internal int Capacity => Volatile.Read(ref capacity);
+
+    /// <summary>Approximate number of pooled instances.</summary>
+    internal int PooledCount => Volatile.Read(ref count);
+
+    public BackgroundWriteRequest Rent(
         BackgroundWriteType type,
         int partitionId,
         string key,
@@ -59,16 +91,32 @@ internal static class BackgroundWriteRequestPool
     /// Returns a fully-consumed request to the pool. Must only be called once the writer has copied the
     /// request into a persistence item and dropped every other reference to it.
     /// </summary>
-    public static void Return(BackgroundWriteRequest request)
+    public void Return(BackgroundWriteRequest request)
     {
         request.Clear();
 
-        // Racy check-then-increment: the count may briefly exceed the cap under contention, which is
+        // Racy check-then-increment: the count may briefly exceed the bound under contention, which is
         // harmless — the bound only exists to stop unbounded growth, not to be exact.
-        if (Volatile.Read(ref count) >= MaxPooled)
+        if (Volatile.Read(ref count) >= Volatile.Read(ref capacity))
             return;
 
         Interlocked.Increment(ref count);
         pool.Enqueue(request);
+    }
+
+    /// <summary>
+    /// Sets the bound to <paramref name="queued"/>, the number of requests the writer found queued at the
+    /// start of a flush tick, clamped to [<see cref="MinCapacity"/>, <see cref="MaxCapacity"/>]. The drain
+    /// that follows returns that many, so the pool then holds what the producers rent until the next tick.
+    /// A smaller bound trims the pooled excess now: without load nothing rents, and a pool left above the
+    /// bound would keep the previous peak for good.
+    /// </summary>
+    public void SizeToQueued(int queued)
+    {
+        int bound = Math.Clamp(queued, MinCapacity, MaxCapacity);
+        Volatile.Write(ref capacity, bound);
+
+        while (Volatile.Read(ref count) > bound && pool.TryDequeue(out _))
+            Interlocked.Decrement(ref count);
     }
 }

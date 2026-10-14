@@ -329,7 +329,7 @@ internal sealed class TransactionRecordStore
     // The proposer's decoded commands, keyed by the exact byte array handed to Raft, budgeted for one
     // take per co-hosted node. See ProposedDeltaCache for the reuse and lifetime contract; reusing the
     // producer's instances is safe only because commands, records, and the participant list are immutable.
-    private static readonly ProposedDeltaCache<TransactionRecordCommand> locallyProposedDeltas = new();
+    private static readonly ProposedDeltaCache<TransactionRecordCommand[]> locallyProposedDeltas = new();
 
     private bool ApplyLog(RaftLog log, int partitionId)
     {

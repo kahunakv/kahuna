@@ -143,7 +143,7 @@ internal sealed class LockRestorer
                         new(lockMessage.LastModifiedNode, lockMessage.LastModifiedPhysical, lockMessage.LastModifiedCounter),
                         LockState.Locked);
 
-                    backgroundWriter.Send(BackgroundWriteRequestPool.Rent(
+                    backgroundWriter.Send(BackgroundWriteRequestPool.Shared.Rent(
             BackgroundWriteType.QueueStoreLock,
                         partitionId,
                         lockMessage.Resource,
@@ -203,7 +203,7 @@ internal sealed class LockRestorer
                         new(lockMessage.LastModifiedNode, lockMessage.LastModifiedPhysical, lockMessage.LastModifiedCounter),
                         LockState.Unlocked);
 
-                    backgroundWriter.Send(BackgroundWriteRequestPool.Rent(
+                    backgroundWriter.Send(BackgroundWriteRequestPool.Shared.Rent(
             BackgroundWriteType.QueueStoreLock,
                         partitionId,
                         lockMessage.Resource,
@@ -265,7 +265,7 @@ internal sealed class LockRestorer
                         new(lockMessage.LastModifiedNode, lockMessage.LastModifiedPhysical, lockMessage.LastModifiedCounter),
                         LockState.Locked);
 
-                    backgroundWriter.Send(BackgroundWriteRequestPool.Rent(
+                    backgroundWriter.Send(BackgroundWriteRequestPool.Shared.Rent(
             BackgroundWriteType.QueueStoreLock,
                         partitionId,
                         lockMessage.Resource,

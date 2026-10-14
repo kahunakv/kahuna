@@ -11,7 +11,7 @@ public sealed class TestProposedDeltaCache
     [Fact]
     public void TakesExactlyTheBudget_ThenMisses()
     {
-        ProposedDeltaCache<string> cache = new();
+        ProposedDeltaCache<string[]> cache = new();
         byte[] bytes = [1, 2, 3];
         string[] commands = ["a", "b"];
 
@@ -27,7 +27,7 @@ public sealed class TestProposedDeltaCache
     [Fact]
     public void EqualContentInADifferentArray_DoesNotHit()
     {
-        ProposedDeltaCache<string> cache = new();
+        ProposedDeltaCache<string[]> cache = new();
         byte[] registered = [1, 2, 3];
         byte[] lookalike = [1, 2, 3];
 

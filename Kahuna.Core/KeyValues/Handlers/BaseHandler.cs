@@ -76,7 +76,13 @@ internal abstract class BaseHandler
         else
             kvm.ClearValue();
 
-        return ReplicationSerializer.Serialize(kvm);
+        byte[] serialized = ReplicationSerializer.Serialize(kvm);
+
+        // The local apply of this record reads the proposal back from here instead of parsing the bytes;
+        // the record itself is still what the WAL keeps and the followers receive.
+        LocallyProposedKeyValueRecords.Register(serialized, type, proposal);
+
+        return serialized;
     }
 
     /// <summary>
@@ -1072,7 +1078,7 @@ internal abstract class BaseHandler
         context.UnflushedWrites?.Record(proposal.Key, proposal.Value, proposal.Revision,
             proposal.Expires, proposal.LastUsed, proposal.LastModified, proposal.State, proposal.NoRevision);
 
-        context.BackgroundWriter.Send(BackgroundWriteRequestPool.Rent(
+        context.BackgroundWriter.Send(BackgroundWriteRequestPool.Shared.Rent(
             BackgroundWriteType.QueueStoreKeyValue,
             partitionId,
             proposal.Key,

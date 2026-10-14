@@ -468,7 +468,7 @@ internal sealed class KeyValueReplicator
             unflushedWrites?.Record(key, recovered.Value, recovered.Revision,
                 recovered.Expires, recovered.LastUsed, recovered.LastModified, recovered.State, noRevision: false);
 
-            backgroundWriter.Send(BackgroundWriteRequestPool.Rent(
+            backgroundWriter.Send(BackgroundWriteRequestPool.Shared.Rent(
                 BackgroundWriteType.QueueStoreKeyValue,
                 partitionId,
                 key,
@@ -751,7 +751,7 @@ internal sealed class KeyValueReplicator
             intent.NoRevision);
 
         // Null only in bare unit-test constructions; production wiring always has the writer.
-        backgroundWriter?.Send(BackgroundWriteRequestPool.Rent(
+        backgroundWriter?.Send(BackgroundWriteRequestPool.Shared.Rent(
             BackgroundWriteType.QueueStoreKeyValue,
             partitionId,
             intent.Key,
@@ -918,7 +918,7 @@ internal sealed class KeyValueReplicator
             mutation.NoRevision
         );
 
-        backgroundWriter.Send(BackgroundWriteRequestPool.Rent(
+        backgroundWriter.Send(BackgroundWriteRequestPool.Shared.Rent(
             BackgroundWriteType.QueueStoreKeyValue,
             partitionId,
             mutation.Key,
@@ -1154,6 +1154,22 @@ internal sealed class KeyValueReplicator
         
         try
         {
+            // A record this process serialized is applied from the proposal it was written from: the
+            // leader (and any co-hosted node that shares the array) skips the parse and its key, value,
+            // and wrapper allocations. The proposal is registered only for a value mutation, so this is
+            // exactly the ValueMutation case below with the same fields read from the proposal.
+            if (LocallyProposedKeyValueRecords.TryTake(log.LogData, out KeyValueProposal? proposal))
+            {
+                KeyValueRequestType proposedType = proposal.Type;
+
+                ApplyLoggedMutation(
+                    partitionId, log.Id,
+                    CommittedKeyValueMutation.FromProposal(proposal, KeyValueMessageDecoder.StateOf(proposedType)),
+                    witnessBelowHead: proposedType != KeyValueRequestType.TryExtend,
+                    witnessCollision: proposedType == KeyValueRequestType.TrySet);
+                return true;
+            }
+
             // Thread-cached shell: valid only within this synchronous call — every field is copied out
             // below before the next entry on this thread reuses it. The extracted value array belongs
             // to this parse's ByteString, not to the shell, so it is safe to hand onward.
