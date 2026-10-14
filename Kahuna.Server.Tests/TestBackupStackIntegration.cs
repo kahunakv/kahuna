@@ -34,6 +34,8 @@ public sealed class TestBackupStackIntegration : IDisposable
 
     private string BakDir(string tag) => Path.Combine(tempRoot, "bak_" + tag);
 
+    private static byte[] Encoded(string value) => Encoding.UTF8.GetBytes(value);
+
     // ── C1: IsBackupConfigured ──────────────────────────────────────────────────────────────
 
     [Fact]
@@ -206,6 +208,74 @@ public sealed class TestBackupStackIntegration : IDisposable
         KahunaBackupInfo inc = await node.Kahuna.TakeIncrementalBackupAsync(full.BackupId, TestContext.Current.CancellationToken);
 
         Assert.Equal("Incremental", inc.Type);
+        Assert.Equal(full.BackupId, inc.ParentBackupId);
+    }
+
+    [Fact]
+    public async Task TakeIncrementalBackupAsync_AfterTheCheckpointAdvancesPastTheFull_StaysIncremental()
+    {
+        // A node that keeps writing checkpoints its partitions every CheckpointInterval, which moves
+        // the last checkpoint above the full's range. With nothing compacted the incremental must
+        // still be an incremental, not a substituted full.
+        string bakDir = BakDir("inc_ckpt");
+        await using EmbeddedKahunaNode node = new(new()
+        {
+            Storage = "memory",
+            WalStorage = "memory",
+            InitialPartitions = 1,
+            BackupDir = bakDir,
+            CheckpointInterval = TimeSpan.FromMilliseconds(250)
+        }, loggerFactory);
+        await node.StartAsync(TestContext.Current.CancellationToken);
+        await node.WaitForLeaderForKeyAsync("inc/k0", TestContext.Current.CancellationToken);
+
+        async Task WriteKeys(int first, int count)
+        {
+            for (int i = first; i < first + count; i++)
+            {
+                (KeyValueResponseType setType, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+                    Kommander.Time.HLCTimestamp.Zero, $"inc/k{i}",
+                    Encoded("v"), null, -1,
+                    KeyValueFlags.Set, 0, KeyValueDurability.Persistent,
+                    TestContext.Current.CancellationToken);
+                Assert.Equal(KeyValueResponseType.Set, setType);
+            }
+        }
+
+        // Writes BEFORE the full so the data partition has a range in the full's manifest: the
+        // incremental then continues that range instead of treating the partition as new.
+        await WriteKeys(0, 5);
+
+        KahunaBackupInfo full = await node.Kahuna.TakeFullBackupAsync(TestContext.Current.CancellationToken);
+
+        Dictionary<int, long> maxBeforeWrites = node.Raft.GetPartitionMap()
+            .ToDictionary(p => p.PartitionId, p => node.Raft.WalAdapter.GetMaxLog(p.PartitionId));
+
+        await WriteKeys(5, 20);
+
+        // The partition the writes landed on, and the log end after them. Wait until that partition's
+        // checkpoint sits above that end, so the incremental's start is below the checkpoint.
+        int dataPartition = node.Raft.GetPartitionMap()
+            .Select(p => p.PartitionId)
+            .OrderByDescending(p => node.Raft.WalAdapter.GetMaxLog(p) - maxBeforeWrites[p])
+            .First();
+        long maxAfterWrites = node.Raft.WalAdapter.GetMaxLog(dataPartition);
+        Assert.True(maxAfterWrites > maxBeforeWrites[dataPartition]);
+
+        long deadline = Environment.TickCount64 + 20_000;
+        while (node.Raft.WalAdapter.GetLastCheckpoint(dataPartition) <= maxAfterWrites)
+        {
+            Assert.True(Environment.TickCount64 < deadline,
+                $"partition {dataPartition}: checkpoint {node.Raft.WalAdapter.GetLastCheckpoint(dataPartition)} never passed log end {maxAfterWrites}");
+            await Task.Delay(50, TestContext.Current.CancellationToken);
+        }
+
+        KahunaBackupInfo inc = await node.Kahuna.TakeIncrementalBackupAsync(full.BackupId, TestContext.Current.CancellationToken);
+
+        Assert.Equal("Incremental", inc.RequestedKind);
+        Assert.Equal("Incremental", inc.ActualKind);
+        Assert.Equal("Incremental", inc.Type);
+        Assert.Null(inc.SubstitutionReason);
         Assert.Equal(full.BackupId, inc.ParentBackupId);
     }
 

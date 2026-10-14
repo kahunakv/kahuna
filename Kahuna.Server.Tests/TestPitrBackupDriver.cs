@@ -356,6 +356,127 @@ public sealed class TestPitrBackupDriver : IDisposable
     }
 
     [Fact]
+    public async Task TakeIncrementalBackup_CheckpointAdvancedPastParent_StillIncremental()
+    {
+        // The application checkpoint moves on every flush cycle; it bounds what compaction MAY remove,
+        // not what it has removed. With nothing compacted, an incremental whose start sits below the
+        // checkpoint must still be produced and cover the whole range after the parent.
+        InMemoryWAL wal = BuildWal((1, 1, 100, RaftLogType.Committed));
+        BackupCatalog catalog = NewCatalog("inc_ckpt");
+        string artifacts = ArtifactsDir("inc_ckpt");
+
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
+
+        wal.Write([(1, [
+            new RaftLog { Id = 2, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, 200, 0) },
+            new RaftLog { Id = 3, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, 300, 0) },
+            new RaftLog { Id = 4, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, 400, 0) },
+            new RaftLog { Id = 5, Type = RaftLogType.CommittedCheckpoint, Time = new HLCTimestamp(0, 500, 0) }])]);
+
+        Assert.Equal(5L, wal.GetLastCheckpoint(1));
+        Assert.Equal(0L, wal.GetCompactionFloor(1));
+
+        BackupManifest inc = await BackupDriver.RunIncrementalAsync(wal, [Part(1)], full.BackupId, BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal(BackupType.Incremental, inc.Type);
+        PartitionBackupRange range = Assert.Single(inc.PartitionRanges);
+        Assert.Equal(2L, range.FromIndex);
+        Assert.Equal(5L, range.ToIndex);
+        Assert.Equal(2, (await catalog.ResolveAndValidateAsync(inc.BackupId, TestContext.Current.CancellationToken)).Count);
+    }
+
+    [Fact]
+    public async Task TakeIncrementalBackup_CompactedPastParent_NeedsFull_ButChainAfterTheFloorContinues()
+    {
+        InMemoryWAL wal = BuildWal((1, 1, 100, RaftLogType.Committed));
+        BackupCatalog catalog = NewCatalog("inc_compacted");
+        string artifacts = ArtifactsDir("inc_compacted");
+
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
+
+        wal.Write([(1, [
+            new RaftLog { Id = 2, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, 200, 0) },
+            new RaftLog { Id = 3, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, 300, 0) },
+            new RaftLog { Id = 4, Type = RaftLogType.CommittedCheckpoint, Time = new HLCTimestamp(0, 400, 0) }])]);
+
+        BackupManifest inc1 = await BackupDriver.RunIncrementalAsync(wal, [Part(1)], full.BackupId, BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
+        Assert.Equal(4L, Assert.Single(inc1.PartitionRanges).ToIndex);
+
+        // A real compaction pass removes everything below the checkpoint: the floor is now 4.
+        (RaftOperationStatus status, int removed) = wal.CompactLogsOlderThan(1, 4, 100);
+        Assert.Equal(RaftOperationStatus.Success, status);
+        Assert.Equal(3, removed);
+        Assert.Equal(4L, wal.GetCompactionFloor(1));
+
+        // A second incremental from the FULL would start at 2, below the floor: refused, full required.
+        BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(async () =>
+            await BackupDriver.RunIncrementalAsync(wal, [Part(1)], full.BackupId, BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken));
+        Assert.True(ex.NeedsFullBackup);
+        Assert.Contains("compaction floor is 4", ex.Message);
+
+        // The chain whose high-water mark sits at or above the floor continues unaffected.
+        wal.Write([(1, [new RaftLog { Id = 5, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, 500, 0) }])]);
+        BackupManifest inc2 = await BackupDriver.RunIncrementalAsync(wal, [Part(1)], inc1.BackupId, BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
+        PartitionBackupRange range = Assert.Single(inc2.PartitionRanges);
+        Assert.Equal(5L, range.FromIndex);
+        Assert.Equal(5L, range.ToIndex);
+        Assert.Equal(3, (await catalog.ResolveAndValidateAsync(inc2.BackupId, TestContext.Current.CancellationToken)).Count);
+    }
+
+    [Fact]
+    public async Task TakeIncrementalBackup_PrefixRemovedButFloorUnreported_NeedsFull_PublishesNothing()
+    {
+        // A backend that does not record its compaction floor reports 0 (the IWAL default). The removed
+        // prefix must still be detected from the entries the log actually returns, and nothing may be
+        // published: a segment that starts above its claimed FromIndex would hide the hole in the chain.
+        InMemoryWAL inner = BuildWal((1, 1, 100, RaftLogType.Committed));
+        BackupCatalog catalog = NewCatalog("inc_hidden_floor");
+        string artifacts = ArtifactsDir("inc_hidden_floor");
+
+        BackupManifest full = await BackupDriver.RunFullAsync(inner, [Part(1)], new MemoryPersistenceBackend(), BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
+
+        inner.Write([(1, [
+            new RaftLog { Id = 2, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, 200, 0) },
+            new RaftLog { Id = 3, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, 300, 0) },
+            new RaftLog { Id = 4, Type = RaftLogType.CommittedCheckpoint, Time = new HLCTimestamp(0, 400, 0) }])]);
+        inner.CompactLogsOlderThan(1, 4, 100);
+        Assert.Equal(4L, inner.GetCompactionFloor(1));
+
+        WalWithFloor wal = new(inner, partitionId: 1, floor: 0);
+        Assert.Equal(0L, wal.GetCompactionFloor(1));
+
+        BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(async () =>
+            await BackupDriver.RunIncrementalAsync(wal, [Part(1)], full.BackupId, BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken));
+        Assert.True(ex.NeedsFullBackup);
+        Assert.Contains("no longer holds index 2", ex.Message);
+
+        Assert.Single(await catalog.ListAsync(TestContext.Current.CancellationToken));
+        Assert.Single(Directory.GetDirectories(artifacts));
+    }
+
+    [Fact]
+    public async Task TakeIncrementalBackup_NewPartitionWithoutRecordedFloor_StartsAtFirstPresentEntry()
+    {
+        // Partition 2 joined after the full and its log starts at 5 (the prefix was compacted on a
+        // backend that reports no floor). The range must claim [5, 6], not [1, 6].
+        InMemoryWAL wal = BuildWal(
+            (1, 1, 100, RaftLogType.Committed),
+            (2, 5, 500, RaftLogType.Committed),
+            (2, 6, 600, RaftLogType.Committed));
+        Assert.Equal(0L, wal.GetCompactionFloor(2));
+
+        BackupCatalog catalog = NewCatalog("inc_new_partition_no_floor");
+        string artifacts = ArtifactsDir("inc_new_partition_no_floor");
+
+        BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], new MemoryPersistenceBackend(), BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
+        BackupManifest inc = await BackupDriver.RunIncrementalAsync(wal, [Part(1), Part(2)], full.BackupId, BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
+
+        PartitionBackupRange p2 = Assert.Single(inc.PartitionRanges, r => r.PartitionId == 2);
+        Assert.Equal(5L, p2.FromIndex);
+        Assert.Equal(6L, p2.ToIndex);
+    }
+
+    [Fact]
     public async Task TakeIncrementalBackup_WalFilesWrittenToDisk()
     {
         InMemoryWAL wal = BuildWal((1, 1, 100, RaftLogType.Committed));
@@ -598,7 +719,8 @@ public sealed class TestPitrBackupDriver : IDisposable
     /// </summary>
     private sealed class WalWithFloor(InMemoryWAL inner, int partitionId, long floor) : IWAL
     {
-        public long GetLastCheckpoint(int p) => p == partitionId ? floor : inner.GetLastCheckpoint(p);
+        public long GetCompactionFloor(int p) => p == partitionId ? floor : inner.GetCompactionFloor(p);
+        public long GetLastCheckpoint(int p) => inner.GetLastCheckpoint(p);
 
         public List<RaftLog> ReadLogs(int p) => inner.ReadLogs(p);
         public List<RaftLog> ReadLogsRange(int p, long start, int max = int.MaxValue) => inner.ReadLogsRange(p, start, max);

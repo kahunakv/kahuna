@@ -1818,9 +1818,11 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     /// <para>
     /// The protected boundary is <c>now − PitrWindow − BaseSnapshotInterval</c>: WAL entries
     /// committed before that point are covered by at least one base snapshot and can be
-    /// compacted.  When the boundary cannot be mapped to a committed index (WAL empty or all
-    /// entries newer than the boundary) a non-positive value is passed so Kommander leaves the
-    /// existing floor unchanged rather than suppressing all compaction with a zero floor.
+    /// compacted. The floor is asserted on every tick, as a positive index: when the retained log
+    /// is entirely newer than the boundary its first retained index is protected (all of it is
+    /// inside the window), and an empty log is protected from its first index so entries landing
+    /// before the next tick are covered. A non-positive value would make Kommander drop this floor
+    /// altogether, not leave it unchanged.
     /// </para>
     /// <para>
     /// Initialised to <see cref="DateTime.MinValue"/> so the first call fires immediately on
@@ -1862,11 +1864,11 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 raft.WalAdapter, partitionId, now,
                 configuration.PitrWindow, configuration.BaseSnapshotInterval);
 
-            // Pass a negative value when no committed entry exists before the boundary so Kommander
-            // clears this floor. This is the legacy single-value floor; Kommander composes it with any
-            // concurrent backup retention holds via minimum (IRaft.AcquireRetentionHold), so a backup
-            // capturing a WAL prefix is no longer clobbered by a horizon advance.
-            raft.SetMinRetainIndex(partitionId, protectedIndex > 0 ? protectedIndex : -1);
+            // Always a positive index (see PitrHorizon.ComputeProtectedIndex). This is the single-value
+            // floor; Kommander composes it with any concurrent backup retention holds via minimum
+            // (IRaft.AcquireRetentionHold), so a backup capturing a WAL prefix is never clobbered by a
+            // horizon advance.
+            raft.SetMinRetainIndex(partitionId, protectedIndex);
 
             // Recomputes the boundary for the log line; ComputeProtectedIndex derives it
             // internally but does not expose it in order to keep the return type simple.

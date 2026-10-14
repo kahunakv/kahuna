@@ -971,6 +971,32 @@ public sealed class TestBackupService : IDisposable
     }
 
     [Fact]
+    public async Task TakeIncrementalAsync_CheckpointAdvancedPastParent_NothingCompacted_StaysIncremental()
+    {
+        // The last checkpoint advances on every flush cycle, so on a node that has written since its
+        // parent it always sits above the parent's range. That is not a reason to substitute a full:
+        // only a compaction floor above the start is.
+        InMemoryWAL wal = BuildWal((1, 1, 100));
+        BackupService svc = MakeService("ckpt_inc", wal, new MemoryPersistenceBackend());
+
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo full = await svc.TakeFullAsync(ct: TestContext.Current.CancellationToken);
+
+        wal.Write([(1, [
+            new RaftLog { Id = 2, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, 200, 0) },
+            new RaftLog { Id = 3, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, 300, 0) },
+            new RaftLog { Id = 4, Type = RaftLogType.CommittedCheckpoint, Time = new HLCTimestamp(0, 400, 0) }])]);
+        Assert.True(wal.GetLastCheckpoint(1) > 2);
+
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo inc = await svc.TakeIncrementalAsync(full.BackupId, ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal("Incremental", inc.RequestedKind);
+        Assert.Equal("Incremental", inc.ActualKind);
+        Assert.Equal("Incremental", inc.Type);
+        Assert.Null(inc.SubstitutionReason);
+        Assert.Equal(full.BackupId, inc.ParentBackupId);
+    }
+
+    [Fact]
     public async Task RestoreTo_Success_ReportsOutcomeOk()
     {
         MemoryPersistenceBackend backend = new();
@@ -1270,7 +1296,8 @@ public sealed class TestBackupService : IDisposable
     /// </summary>
     private sealed class FloorWal(IWAL inner, int partitionId, long floor) : IWAL
     {
-        public long GetLastCheckpoint(int p) => p == partitionId ? floor : inner.GetLastCheckpoint(p);
+        public long GetCompactionFloor(int p) => p == partitionId ? floor : inner.GetCompactionFloor(p);
+        public long GetLastCheckpoint(int p) => inner.GetLastCheckpoint(p);
 
         public List<RaftLog> ReadLogs(int p) => inner.ReadLogs(p);
         public List<RaftLog> ReadLogsRange(int p, long start, int max = int.MaxValue) => inner.ReadLogsRange(p, start, max);

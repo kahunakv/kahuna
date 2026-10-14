@@ -92,6 +92,37 @@ public sealed class TestHostedSetBackgroundGating
     }
 
     [Fact]
+    public async Task PitrHorizon_LogEntirelyInsideTheWindow_AssertsAPositiveFloor()
+    {
+        // Every entry is younger than the boundary (now - 1h - 1m). The tick must protect the log
+        // from its first committed index; a non-positive value would make Kommander drop the floor.
+        TestBackupService.StubRaft raft = MakeRaft(1);
+        long nowMs = (long)(DateTime.UtcNow - DateTime.UnixEpoch).TotalMilliseconds;
+        raft.WalAdapter.Write([(1, [
+            new RaftLog { Id = 1, Type = RaftLogType.Proposed, Time = new HLCTimestamp(0, nowMs, 0) },
+            new RaftLog { Id = 2, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, nowMs, 0) },
+            new RaftLog { Id = 3, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, nowMs, 0) }])]);
+
+        using WriterHarness harness = new(raft, Config(pitrWindow: TimeSpan.FromHours(1)));
+
+        await harness.Writer.Receive(new(BackgroundWriteType.Flush));
+
+        Assert.Equal(2, raft.MinRetainIndexByPartition[1]);
+    }
+
+    [Fact]
+    public async Task PitrHorizon_EmptyLog_AssertsTheFirstIndex()
+    {
+        TestBackupService.StubRaft raft = MakeRaft(1);
+
+        using WriterHarness harness = new(raft, Config(pitrWindow: TimeSpan.FromHours(1)));
+
+        await harness.Writer.Receive(new(BackgroundWriteType.Flush));
+
+        Assert.Equal(1, raft.MinRetainIndexByPartition[1]);
+    }
+
+    [Fact]
     public async Task PitrHorizon_CoversEveryPartitionUnderFullReplication()
     {
         TestBackupService.StubRaft raft = MakeRaft(1, 2, 3);

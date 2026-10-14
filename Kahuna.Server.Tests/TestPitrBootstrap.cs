@@ -303,7 +303,7 @@ public sealed class TestPitrBootstrap : IDisposable
     [Fact]
     public async Task WalSeeding_IncrementalStraddlesT_UsesFullToIndex()
     {
-        // Full at index 3 (t=100). Incremental captures index 8 (t=300), so its ToHlc > T=150.
+        // Full at index 3 (t=100). Incremental captures index 4 (t=300), so its ToHlc > T=150.
         // The incremental straddles T, so the WAL checkpoint must stay at 3 (Full's ToIndex).
         string artifacts = ArtifactsDir("wal_straddle");
         BackupCatalog catalog = NewCatalog("wal_straddle");
@@ -315,10 +315,11 @@ public sealed class TestPitrBootstrap : IDisposable
         // Full backup: ToIndex=3, ToHlc=T(100).
         BackupManifest full = await BackupDriver.RunFullAsync(wal, [Part(1)], src, BackupTestStores.Artifacts(artifacts), catalog, flushBeforeCheckpoint: null, ct: TestContext.Current.CancellationToken);
 
-        // Add the post-Full entry (index 8, t=300) — this is what the incremental will capture.
-        wal.Write([(1, [KvLog(8, 300, "k", "v2", 2)])]);
+        // Add the post-Full entry (index 4, t=300) — this is what the incremental will capture. Ids
+        // are dense: an incremental refuses a log that skips an index after its parent's end.
+        wal.Write([(1, [KvLog(4, 300, "k", "v2", 2)])]);
 
-        // Incremental: ToIndex=8, ToHlc=T(300) > T=150 → straddles.
+        // Incremental: ToIndex=4, ToHlc=T(300) > T=150 → straddles.
         BackupManifest inc = await BackupDriver.RunIncrementalAsync(wal, [Part(1)], full.BackupId, BackupTestStores.Artifacts(artifacts), catalog, ct: TestContext.Current.CancellationToken);
 
         IReadOnlyList<BackupManifest> chain = await catalog.ResolveAndValidateAsync(inc.BackupId, TestContext.Current.CancellationToken);

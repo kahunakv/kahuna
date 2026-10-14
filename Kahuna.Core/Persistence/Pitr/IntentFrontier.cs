@@ -151,7 +151,10 @@ internal sealed class IntentFrontier
             from = Math.Min(appliedThrough + 1, range.ToIndex + 1 - SettledLookbackEntries);
         }
 
-        long floor = wal.GetLastCheckpoint(range.PartitionId);
+        // The compaction floor (first index still present), not the last checkpoint: the checkpoint
+        // is the index applied through, which under load sits far above the settled lookback and
+        // would start the fold past entries the log still holds.
+        long floor = wal.GetCompactionFloor(range.PartitionId);
         return Math.Max(1, Math.Max(from, floor));
     }
 

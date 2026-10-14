@@ -12,7 +12,11 @@ namespace Kahuna.Server.Persistence.Pitr;
 /// monotonically non-decreasing with <see cref="RaftLog.Id"/> — guaranteed by HLC assignment under
 /// Raft log ordering. Uncommitted (Proposed/RolledBack) entries may be interspersed and are skipped.
 ///
-/// Both methods execute synchronously against the raw WAL adapter (suitable for
+/// The searches cover the retained log, [compaction floor, max]: ids below the floor were removed
+/// by compaction, and a probe placed there would only ever see the first retained entry (a backend
+/// clamps such a read at its floor) or nothing, wasting the probe either way.
+///
+/// All methods execute synchronously against the raw WAL adapter (suitable for
 /// background-writer actor threads). Callers on read-path actors must route through
 /// the partition read-scheduler instead.
 /// </summary>
@@ -33,7 +37,7 @@ internal static class LogTimeIndex
         if (hi <= 0)
             return -1;
 
-        long lo = 1;
+        long lo = FirstRetainedIndex(wal, partitionId);
         long result = -1;
 
         while (lo <= hi)
@@ -77,7 +81,7 @@ internal static class LogTimeIndex
         if (hi <= 0)
             return -1;
 
-        long lo = 1;
+        long lo = FirstRetainedIndex(wal, partitionId);
         long result = -1;
 
         while (lo <= hi)
@@ -107,6 +111,23 @@ internal static class LogTimeIndex
 
         return result;
     }
+
+    /// <summary>
+    /// Returns the smallest committed log index the WAL still holds, or -1 when no committed entry is
+    /// retained (WAL empty, fully compacted, or holding only uncommitted entries).
+    /// </summary>
+    public static long FirstCommittedIndex(IWAL wal, int partitionId)
+    {
+        RaftLog? entry = FindFirstCommitted(wal, partitionId, FirstRetainedIndex(wal, partitionId));
+        return entry?.Id ?? -1;
+    }
+
+    /// <summary>
+    /// The lowest id the WAL can still hold: its compaction floor, or 1 when nothing was compacted or
+    /// the backend does not record its floor (it then reports 0 and the search simply starts lower).
+    /// </summary>
+    public static long FirstRetainedIndex(IWAL wal, int partitionId) =>
+        Math.Max(1, wal.GetCompactionFloor(partitionId));
 
     // Returns the first Committed or CommittedCheckpoint entry at or after fromIndex, or null only
     // when no committed entry exists in [fromIndex, GetMaxLog]. Pages forward so a run of more than

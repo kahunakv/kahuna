@@ -41,28 +41,82 @@ public sealed class TestPitrHorizon
     private static long Compute(IWAL wal, DateTime nowUtc) =>
         PitrHorizon.ComputeProtectedIndex(wal, P, nowUtc, PitrWindow, SnapshotInterval);
 
-    // ── boundary empty ────────────────────────────────────────────────────────────
+    // ── nothing at or before the boundary: the floor is still asserted ───────────
 
     [Fact]
-    public void EmptyWal_ReturnsMinusOne()
+    public void EmptyWal_ProtectsFromTheFirstIndex()
     {
+        // Entries that land before the next tick are inside the window from the start; a cleared
+        // floor would let a compaction pass remove them up to the checkpoint.
         IWAL wal = BuildWal();
         long result = Compute(wal, Epoch + TimeSpan.FromHours(3));
-        Assert.Equal(-1, result);
+        Assert.Equal(1, result);
     }
 
     [Fact]
-    public void AllEntriesNewerThanBoundary_ReturnsMinusOne()
+    public void AllEntriesNewerThanBoundary_ProtectsTheFirstCommittedEntry()
     {
         // "now" is T+0, boundary = T+0 - 1h - 30m = T-90m.
-        // All entries are at T+0, so all are newer than boundary.
+        // All entries are at T+0 or later, so the whole log is inside the window and all of it must
+        // be retained: the floor is its first entry, never "no floor".
         IWAL wal = BuildWal(
             (1, Epoch, RaftLogType.Committed),
             (2, Epoch + TimeSpan.FromMinutes(10), RaftLogType.Committed)
         );
 
         long result = Compute(wal, Epoch);
-        Assert.Equal(-1, result);
+        Assert.Equal(1, result);
+    }
+
+    [Fact]
+    public void AllEntriesNewerThanBoundary_LeadingUncommittedEntries_ProtectsTheFirstCommittedOne()
+    {
+        IWAL wal = BuildWal(
+            (1, Epoch, RaftLogType.Proposed),
+            (2, Epoch, RaftLogType.Proposed),
+            (3, Epoch + TimeSpan.FromMinutes(1), RaftLogType.Committed),
+            (4, Epoch + TimeSpan.FromMinutes(2), RaftLogType.Committed)
+        );
+
+        Assert.Equal(3, Compute(wal, Epoch));
+    }
+
+    [Fact]
+    public void CompactedPrefix_RetainedLogEntirelyNewerThanBoundary_ProtectsTheFloor()
+    {
+        // The steady state on a loaded node: compaction already removed everything older than the
+        // checkpoint, and every retained entry is younger than the boundary. The floor must hold the
+        // retained log where it starts rather than clear and let the next pass remove it too.
+        InMemoryWAL wal = (InMemoryWAL)BuildWal(
+            (1, Epoch, RaftLogType.Committed),
+            (2, Epoch + TimeSpan.FromMinutes(1), RaftLogType.Committed),
+            (3, Epoch + TimeSpan.FromMinutes(2), RaftLogType.Committed),
+            (4, Epoch + TimeSpan.FromMinutes(3), RaftLogType.CommittedCheckpoint),
+            (5, Epoch + TimeSpan.FromMinutes(4), RaftLogType.Committed)
+        );
+        (RaftOperationStatus status, int removed) = wal.CompactLogsOlderThan(P, 4, 100);
+        Assert.Equal(RaftOperationStatus.Success, status);
+        Assert.Equal(3, removed);
+        Assert.Equal(4, wal.GetCompactionFloor(P));
+
+        Assert.Equal(4, Compute(wal, Epoch + TimeSpan.FromMinutes(10)));
+    }
+
+    [Fact]
+    public void CompactedPrefix_BoundaryInsideTheRetainedLog_ReturnsTheBoundaryEntry()
+    {
+        // Commits every 10 minutes; the first three were compacted away. The search must still find
+        // the last retained entry at or before the boundary.
+        List<(long id, DateTime time, RaftLogType type)> entries = [];
+        for (int i = 1; i <= 12; i++)
+            entries.Add(((long)i, Epoch + TimeSpan.FromMinutes(i * 10), RaftLogType.Committed));
+        InMemoryWAL wal = (InMemoryWAL)BuildWal([.. entries]);
+        wal.CompactLogsOlderThan(P, 4, 100);
+        Assert.Equal(4, wal.GetCompactionFloor(P));
+
+        // boundary = now - 90m = Epoch + 80m → entry 8.
+        DateTime now = Epoch + TimeSpan.FromMinutes(170);
+        Assert.Equal(8, Compute(wal, now));
     }
 
     // ── single entry ─────────────────────────────────────────────────────────────
@@ -134,8 +188,8 @@ public sealed class TestPitrHorizon
         for (int h = 2; h <= 10; h++)
         {
             long idx = Compute(wal, Epoch + TimeSpan.FromHours(h));
-            Assert.True(idx <= maxId || idx == -1,
-                $"protectedIndex={idx} exceeds maxId={maxId} at h={h}");
+            Assert.True(idx >= 1 && idx <= maxId,
+                $"protectedIndex={idx} is outside [1, maxId={maxId}] at h={h}");
         }
     }
 

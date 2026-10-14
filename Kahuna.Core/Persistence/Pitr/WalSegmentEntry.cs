@@ -57,7 +57,8 @@ internal sealed class WalSegmentEntry
         long ToId,
         HLCTimestamp ToHlc,
         long ToTerm,
-        HLCTimestamp FromHlc);
+        HLCTimestamp FromHlc,
+        long FromId);
 
     /// <summary>
     /// Streams entries from <paramref name="entries"/> straight into <paramref name="destination"/> as
@@ -82,6 +83,7 @@ internal sealed class WalSegmentEntry
         long toTerm = 0;
         HLCTimestamp toHlc = default;
         HLCTimestamp fromHlc = default;
+        long fromId = 0;
         bool first = true;
         byte[] hash;
         long byteLength;
@@ -106,6 +108,7 @@ internal sealed class WalSegmentEntry
                         if (first)
                         {
                             fromHlc = entry.Time;
+                            fromId = entry.Id;
                             first = false;
                         }
                         toId = entry.Id;
@@ -125,7 +128,7 @@ internal sealed class WalSegmentEntry
             return default;
 
         return new SegmentWriteResult(count, byteLength, Convert.ToHexString(hash).ToLowerInvariant(),
-            toId, toHlc, toTerm, fromHlc);
+            toId, toHlc, toTerm, fromHlc, fromId);
     }
 
     /// <summary>

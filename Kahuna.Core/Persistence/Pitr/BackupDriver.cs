@@ -771,27 +771,31 @@ internal sealed class BackupDriver
                 coveredPartitions.Add(partitionId);
 
                 parentRanges.TryGetValue(partitionId, out PartitionBackupRange? pr);
-                long floor = wal.GetLastCheckpoint(partitionId);
+
+                // The compaction floor is the first index the WAL still holds: every id below it was
+                // removed by a compaction pass. It is NOT the last checkpoint (IWAL.GetLastCheckpoint):
+                // that is the index the application has durably applied through, the UPPER bound a pass
+                // MAY truncate to, and it advances on every flush cycle whether or not any pass ran. A
+                // node that has committed anything since its parent backup has a checkpoint above the
+                // parent's range, so gating on the checkpoint refused every incremental under load even
+                // though the whole log was still present.
+                long floor = wal.GetCompactionFloor(partitionId);
 
                 long fromIndex;
                 if (pr is not null)
                 {
                     fromIndex = pr.ToIndex + 1;
                     // Transitive coverage ends before the compaction floor: entries in
-                    // [highWater.ToIndex+1, floor) may already be gone. A new full is required.
-                    if (floor > 0 && fromIndex < floor)
-                        throw new BackupDriverException(
-                            $"Partition {partitionId}: incremental would start at WAL index {fromIndex} " +
-                            $"but the compaction floor is {floor}; a new full backup is required.")
-                        {
-                            NeedsFullBackup = true
-                        };
+                    // [highWater.ToIndex+1, floor) are gone. A new full is required.
+                    if (fromIndex < floor)
+                        throw CompactedPastParent(partitionId, fromIndex, floor);
                 }
                 else
                 {
                     // Partition appears in NO ancestor manifest — genuinely new. Start from the floor
-                    // so we don't request entries that compaction has already removed.
-                    fromIndex = floor > 0 ? floor : 1;
+                    // so we don't request entries that compaction has already removed; the stream below
+                    // then records the first entry the log actually holds as the range start.
+                    fromIndex = Math.Max(1, floor);
                 }
 
                 // Hold the retention floor at fromIndex BEFORE paging the WAL so a concurrent horizon
@@ -801,14 +805,9 @@ internal sealed class BackupDriver
                 if (acquireRetentionHold is not null)
                 {
                     holds.Add(acquireRetentionHold(partitionId, fromIndex));
-                    long floorAfterHold = wal.GetLastCheckpoint(partitionId);
-                    if (pr is not null && floorAfterHold > 0 && fromIndex < floorAfterHold)
-                        throw new BackupDriverException(
-                            $"Partition {partitionId}: WAL prefix from {fromIndex} was compacted before the " +
-                            $"retention hold took effect (floor {floorAfterHold}); a new full backup is required.")
-                        {
-                            NeedsFullBackup = true
-                        };
+                    long floorAfterHold = wal.GetCompactionFloor(partitionId);
+                    if (pr is not null && fromIndex < floorAfterHold)
+                        throw CompactedPastParent(partitionId, fromIndex, floorAfterHold);
                 }
 
                 // Capture the full contiguous committed range by streaming WAL pages straight to the
@@ -823,8 +822,12 @@ internal sealed class BackupDriver
                 await using (IBackupArtifactWriter writer =
                              await artifacts.OpenWriteAsync(backupId, relPath, ct).ConfigureAwait(false))
                 {
+                    // A continuation is anchored at the parent's end: the stream fails closed if the log
+                    // no longer holds that index. The floor read above is advisory — a backend that does
+                    // not record its floor reports 0, and a pass whose cut was computed before the hold
+                    // landed can still delete after it — so the entries actually returned are the proof.
                     seg = await WalSegmentEntry.WriteSegmentStreamingAsync(
-                        writer.Stream, StreamSegmentEntries(wal, partitionId, fromIndex, ct), ct)
+                        writer.Stream, StreamSegmentEntries(wal, partitionId, fromIndex, anchored: pr is not null, ct), ct)
                         .ConfigureAwait(false);
 
                     // No committed entries in this partition's range: abandon the write rather than
@@ -838,8 +841,10 @@ internal sealed class BackupDriver
                 checksums[relPath] = seg.Sha256Hex;
                 sizes[relPath] = seg.ByteLength;
 
+                // A continuation claims exactly [parent.ToIndex + 1, ToId]; the chain validator requires
+                // that start. A partition new to the chain claims what the log actually held.
                 ranges.Add(PartitionBackupRange.Create(
-                    partitionId, fromIndex, seg.FromHlc, seg.ToId, seg.ToHlc, seg.ToTerm));
+                    partitionId, pr is not null ? fromIndex : seg.FromId, seg.FromHlc, seg.ToId, seg.ToHlc, seg.ToTerm));
             }
 
             BackupManifest manifest = BackupManifest.CreateIncremental(parentBackupId, ranges);
@@ -1016,9 +1021,28 @@ internal sealed class BackupDriver
         return (0, default, 0);
     }
 
+    /// <summary>An incremental cannot continue the parent: the WAL's compaction floor passed its start.</summary>
+    private static BackupDriverException CompactedPastParent(int partitionId, long fromIndex, long floor) =>
+        new($"Partition {partitionId}: incremental would start at WAL index {fromIndex} " +
+            $"but the compaction floor is {floor}; a new full backup is required.")
+        {
+            NeedsFullBackup = true
+        };
+
+    /// <summary>An index the segment must hold is no longer in the WAL, whatever the reported floor says.</summary>
+    private static BackupDriverException MissingFromLog(int partitionId, long fromIndex, long expected, long found) =>
+        new($"Partition {partitionId}: the WAL no longer holds index {expected} " +
+            (found > 0 ? $"(the next entry present is {found})" : "(no later entry is present)") +
+            $"; the incremental from {fromIndex} would have a hole, so a new full backup is required.")
+        {
+            NeedsFullBackup = true
+        };
+
     /// <summary>
-    /// Pages through the WAL from <paramref name="fromIndex"/> forward, collecting every committed
-    /// entry as a contiguous index range up to the current WAL end.
+    /// Lazily pages the committed WAL entries at or after <paramref name="fromIndex"/> for a partition,
+    /// yielding one <see cref="WalSegmentEntry"/> at a time. Only committed / committed-checkpoint entries
+    /// are emitted. Nothing is accumulated across pages, so an arbitrarily large range is streamed with
+    /// bounded memory; the consumer (the segment writer) records endpoint metadata as entries flow.
     /// <para>
     /// The segment is deliberately NOT capped at a coordinated snapshot timestamp. Capping by the
     /// per-partition WAL entry <c>Time</c> would drop a committed transaction's entry on the partition
@@ -1029,39 +1053,57 @@ internal sealed class BackupDriver
     /// the coordinated cut is applied at restore time on the commit HLC (see <see cref="RestoreEngine"/>),
     /// which includes or excludes each transaction as a whole.
     /// </para>
-    /// Returns the segment entries, the final log id/hlc/term, and the HLC of the first entry.
-    /// </summary>
-    /// <summary>
-    /// Lazily pages the committed WAL entries at or after <paramref name="fromIndex"/> for a partition,
-    /// yielding one <see cref="WalSegmentEntry"/> at a time. Only committed / committed-checkpoint entries
-    /// are emitted. Nothing is accumulated across pages, so an arbitrarily large range is streamed with
-    /// bounded memory; the consumer (the segment writer) records endpoint metadata as entries flow.
+    /// <para>
+    /// Raft log ids are dense, so the only way an id in [<paramref name="fromIndex"/>, max] can be absent
+    /// is that compaction removed it. When <paramref name="anchored"/> (the range continues a parent
+    /// backup) every id from <paramref name="fromIndex"/> to the last entry read must be present, and a
+    /// missing one fails the stream with <see cref="BackupDriverException.NeedsFullBackup"/> rather than
+    /// publishing a segment whose manifest claims an index it does not hold: the next incremental would
+    /// resume after the hole and the entries would be lost from the chain for good. An unanchored stream
+    /// (a partition new to the chain) starts at whatever entry the log holds first and is contiguous
+    /// from there.
+    /// </para>
     /// </summary>
     private static IEnumerable<WalSegmentEntry> StreamSegmentEntries(
-        IWAL wal, int partitionId, long fromIndex, CancellationToken ct)
+        IWAL wal, int partitionId, long fromIndex, bool anchored, CancellationToken ct)
     {
-        long cursor = fromIndex;
+        // Read the log end BEFORE the first page: an append that lands between the two cannot then be
+        // mistaken for a removed prefix, while an id at or below this end that the page does not return
+        // is genuinely gone.
+        long knownMax = anchored ? wal.GetMaxLog(partitionId) : 0;
+
+        long expected = fromIndex;
+        bool first = true;
 
         while (true)
         {
             ct.ThrowIfCancellationRequested();
-            List<RaftLog> batch = wal.ReadLogsRange(partitionId, cursor, PageSize);
+            List<RaftLog> batch = wal.ReadLogsRange(partitionId, expected, PageSize);
             if (batch.Count == 0)
+            {
+                if (first && anchored && knownMax >= expected)
+                    throw MissingFromLog(partitionId, fromIndex, expected, found: 0);
+
                 yield break;
+            }
 
             foreach (RaftLog log in batch)
             {
+                // A partition new to the chain starts wherever its log starts; everything else is a hole.
+                if (log.Id != expected && (anchored || !first))
+                    throw MissingFromLog(partitionId, fromIndex, expected, log.Id);
+
+                first = false;
+                expected = log.Id + 1;
+
                 if (log.Type is not (RaftLogType.Committed or RaftLogType.CommittedCheckpoint))
                     continue;
 
                 yield return WalSegmentEntry.From(log);
             }
 
-            long lastInBatch = batch[^1].Id;
             if (batch.Count < PageSize)
                 yield break;
-
-            cursor = lastInBatch + 1;
         }
     }
 }
