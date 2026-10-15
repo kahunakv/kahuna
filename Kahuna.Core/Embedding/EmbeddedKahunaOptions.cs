@@ -1104,6 +1104,17 @@ public sealed class EmbeddedKahunaOptions
     public TimeSpan DecommissionDrainTimeout { get; set; } = TimeSpan.FromMinutes(2);
 
     /// <summary>
+    /// Liveness ceiling on join admission and cluster initialization. It does not bound the wait
+    /// for Learner to Voter promotion, which <see cref="JoinPromotionStallTimeout"/> bounds.
+    /// </summary>
+    public TimeSpan JoinTimeout { get; set; } = TimeSpan.FromSeconds(60);
+
+    /// <summary>
+    /// How long a joining learner may make no catch-up progress before the join gives up.
+    /// </summary>
+    public TimeSpan JoinPromotionStallTimeout { get; set; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>
     /// Minimum per-node replica-count imbalance above the even-spread ceiling before the
     /// placement planner emits balancing moves. Under-replicated ranges bypass the deadband.
     /// </summary>

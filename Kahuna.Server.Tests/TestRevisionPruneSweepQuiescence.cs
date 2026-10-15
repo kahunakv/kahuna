@@ -203,7 +203,7 @@ public sealed class TestRevisionPruneSweepQuiescence : IDisposable
         if (NowMs - written < 2_000)
             Assert.True(Sweep(age: age).SweepIdle);
 
-        await Task.Delay(TimeSpan.FromMilliseconds(Math.Max(0, written + 3_500 - NowMs)));
+        await Task.Delay(TimeSpan.FromMilliseconds(Math.Max(0, written + 3_500 - NowMs)), TestContext.Current.CancellationToken);
 
         RevisionPruneResult aged = Sweep(age: age);
         Assert.False(aged.SweepIdle);

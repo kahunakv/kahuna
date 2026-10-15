@@ -832,9 +832,11 @@ public class TestKeyValueScriptControlStructures : BaseCluster
 
         KeyValueLockHelper.GetLocksToAcquire(new ScriptTransactionContext(), ast, ephemeral, persistent, ephemeralPrefixes, persistentPrefixes);
 
-        Assert.Equal(new[] { "first", "fourth" }, persistent.Order(StringComparer.Ordinal));
+        Assert.Equal(ExpectedPersistentKeys, persistent.Order(StringComparer.Ordinal));
         Assert.Equal("second", Assert.Single(ephemeral));
         Assert.Equal("third", Assert.Single(persistentPrefixes));
         Assert.Empty(ephemeralPrefixes);
     }
+
+    private static readonly string[] ExpectedPersistentKeys = ["first", "fourth"];
 }

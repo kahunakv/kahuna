@@ -538,6 +538,12 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-decommission-drain-timeout", Required = false, HelpText = "How long a graceful leave waits for this node's replicas to be evacuated onto survivors before giving up, in milliseconds. On expiry the node is restored to a voter and the leave reports DrainTimedOut; replicas already moved stay moved, so retrying resumes the drain. Size it from the data: an evacuation costs roughly three placement passes per range.", Default = 120000)]
     public int RaftDecommissionDrainTimeout { get; set; } = 120000;
 
+    [Option("raft-join-timeout", Required = false, HelpText = "Liveness ceiling on join admission and cluster initialization when this node joins a cluster, in milliseconds. It does not bound the wait for Learner to Voter promotion; raft-join-promotion-stall-timeout bounds that wait.", Default = 60000)]
+    public int RaftJoinTimeout { get; set; } = 60000;
+
+    [Option("raft-join-promotion-stall-timeout", Required = false, HelpText = "How long a joining learner may make no catch-up progress before the join gives up, in milliseconds. Must be longer than the learner promotion stable window plus the node update interval.", Default = 300000)]
+    public int RaftJoinPromotionStallTimeout { get; set; } = 300000;
+
     [Option("raft-replica-count-deadband", Required = false, HelpText = "Minimum per-node replica-count imbalance above the even-spread ceiling before the placement planner emits balancing moves. Under-replicated ranges bypass the deadband.", Default = 1)]
     public int RaftReplicaCountDeadband { get; set; } = 1;
 

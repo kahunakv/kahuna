@@ -48,6 +48,8 @@ public static class EmbeddedOptionsFactory
         MaxConcurrentReplicaTransfers = opts.RaftMaxConcurrentReplicaTransfers,
         MaxConcurrentReplicaRepairs = opts.RaftMaxConcurrentReplicaRepairs,
         DecommissionDrainTimeout = TimeSpan.FromMilliseconds(opts.RaftDecommissionDrainTimeout),
+        JoinTimeout = TimeSpan.FromMilliseconds(opts.RaftJoinTimeout),
+        JoinPromotionStallTimeout = TimeSpan.FromMilliseconds(opts.RaftJoinPromotionStallTimeout),
         ReplicaCountDeadband = opts.RaftReplicaCountDeadband,
         Zone = opts.RaftZone,
         Storage = opts.Storage,

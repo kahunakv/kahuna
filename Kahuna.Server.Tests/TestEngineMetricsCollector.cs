@@ -167,7 +167,7 @@ public sealed class TestEngineMetricsCollector
     /// the range of what was recorded so far, and the final snapshot must be exact.
     /// </summary>
     [Fact]
-    public void SnapshotWhileRecordingIsBoundedAndFinalIsExact()
+    public async Task SnapshotWhileRecordingIsBoundedAndFinalIsExact()
     {
         using Meter meter = new(EngineMetricsCollector.KahunaMeterName, "1.0");
         using EngineMetricsCollector collector = new();
@@ -196,7 +196,7 @@ public sealed class TestEngineMetricsCollector
 
                 snapshots++;
             }
-        });
+        }, TestContext.Current.CancellationToken);
 
         Parallel.For(0, threads, new ParallelOptions { MaxDegreeOfParallelism = threads }, _ =>
         {
@@ -205,7 +205,7 @@ public sealed class TestEngineMetricsCollector
         });
 
         stop.Cancel();
-        reader.GetAwaiter().GetResult();
+        await reader;
 
         Assert.True(snapshots > 0);
 

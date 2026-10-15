@@ -206,7 +206,7 @@ public sealed class TestPitrBootstrapChainTrust : IDisposable
         foreach (BackupManifest m in chain)
         {
             BackupManifestMac.Sign(m, File.ReadAllBytes(keyFile));
-            await catalog.PutAsync(m);
+            await catalog.PutAsync(m, TestContext.Current.CancellationToken);
         }
 
         await using EmbeddedKahunaNode node = Node(macKeyFile: keyFile);

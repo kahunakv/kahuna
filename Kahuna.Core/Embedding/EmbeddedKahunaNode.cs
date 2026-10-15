@@ -657,6 +657,8 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             MaxConcurrentReplicaTransfers = options.MaxConcurrentReplicaTransfers,
             MaxConcurrentReplicaRepairs = options.MaxConcurrentReplicaRepairs,
             DecommissionDrainTimeout = options.DecommissionDrainTimeout,
+            JoinTimeout = options.JoinTimeout,
+            JoinPromotionStallTimeout = options.JoinPromotionStallTimeout,
             ReplicaCountDeadband = options.ReplicaCountDeadband,
             Zone = options.Zone,
             EnableLoadReports = options.EnableLoadReports,

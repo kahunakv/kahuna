@@ -122,6 +122,8 @@ public sealed class TestKommanderConfigurationSurface
         [nameof(RaftConfiguration.MaxConcurrentReplicaTransfers)] = nameof(KahunaCommandLineOptions.RaftMaxConcurrentReplicaTransfers),
         [nameof(RaftConfiguration.MaxConcurrentReplicaRepairs)] = nameof(KahunaCommandLineOptions.RaftMaxConcurrentReplicaRepairs),
         [nameof(RaftConfiguration.DecommissionDrainTimeout)] = nameof(KahunaCommandLineOptions.RaftDecommissionDrainTimeout),
+        [nameof(RaftConfiguration.JoinTimeout)] = nameof(KahunaCommandLineOptions.RaftJoinTimeout),
+        [nameof(RaftConfiguration.JoinPromotionStallTimeout)] = nameof(KahunaCommandLineOptions.RaftJoinPromotionStallTimeout),
         [nameof(RaftConfiguration.ReplicaCountDeadband)] = nameof(KahunaCommandLineOptions.RaftReplicaCountDeadband),
         [nameof(RaftConfiguration.Zone)] = nameof(KahunaCommandLineOptions.RaftZone),
         [nameof(RaftConfiguration.EnableLoadReports)] = nameof(KahunaCommandLineOptions.RaftEnableLoadReports),
