@@ -1911,6 +1911,9 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             if (result.NextCursor is not null)
                 pageResponse.NextCursor = result.NextCursor;
 
+            if (result.Observation is { } pageObservation)
+                pageResponse.Observation = ScanObservationWire.ToGrpc(pageObservation);
+
             AddKeyValueItems(pageResponse.Items, result.Items);
 
             await responseStream.WriteAsync(pageResponse);
@@ -1965,6 +1968,9 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
 
         if (result.NextCursor is not null)
             response.NextCursor = result.NextCursor;
+
+        if (result.Observation is { } observation)
+            response.Observation = ScanObservationWire.ToGrpc(observation);
 
         AddKeyValueItems(response.Items, result.Items);
 

@@ -104,7 +104,13 @@ public sealed class TestForwardedBatchReadLeadership : BaseCluster
     {
         long staleRevision = await SetAsync(leader, key, "v1", ct);
 
-        await WaitUntilAsync(async () => (await LocalStateOf(follower, key)).revision == staleRevision, timeoutMs: 30_000);
+        // The first write of a fresh key is revision 0, the same number an absent key reports, so only the
+        // value proves the follower applied it. Installing the hold before that apply would drop it too.
+        await WaitUntilAsync(async () =>
+        {
+            (KeyValueResponseType type, long revision, string? value) = await LocalStateOf(follower, key);
+            return type == KeyValueResponseType.Get && revision == staleRevision && value == "v1";
+        }, timeoutMs: 30_000);
 
         follower.KeyValues.ReplicationDispatcher.ApplySkipForTesting =
             (p, log) => p == partition && log.LogType == ReplicationTypes.KeyValues;

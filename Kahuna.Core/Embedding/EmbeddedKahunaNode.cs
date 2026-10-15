@@ -437,8 +437,9 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
     // Process-wide, installed by the first node constructed in the process: an out-of-memory anywhere in the
     // WAL/apply pipeline must terminate the process (or at least mark it unhealthy), never leave a reachable
     // replica that appends nothing. See ProcessFaults for the two layers and why first-chance observation is
-    // needed to see a fault raised inside the WAL writer's own catch-all.
-    private static void InstallProcessFaultPolicy(EmbeddedKahunaOptions options)
+    // needed to see a fault raised inside the WAL writer's own catch-all. A host that assembles a node from
+    // its parts instead of through this class (the clustered server) calls it before it creates the WAL.
+    internal static void InstallProcessFaultPolicy(EmbeddedKahunaOptions options)
     {
         global::Kahuna.Server.Diagnostics.ProcessFaults.FailFastEnabled = options.FailFastOnOutOfMemory;
         global::Kahuna.Server.Diagnostics.ProcessFaults.InstallFirstChancePolicy();
@@ -462,9 +463,9 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
 
 
     /// <summary>
-    /// Builds the Kahuna configuration both constructors run on. Kept in one place because the two
-    /// paths differ by a single flag: duplicating ~85 assignments is how a knob ends up wired on the
-    /// standalone path and silently left on its default in a cluster.
+    /// Builds and validates the Kahuna configuration both constructors run on. Kept in one place because
+    /// the two paths differ by a single flag: duplicating ~85 assignments is how a knob ends up wired on
+    /// the standalone path and silently left on its default in a cluster.
     /// </summary>
     /// <param name="singleProcessRaftGroup">
     /// True for the in-process constructor, which builds the whole Raft group locally (phantom
@@ -473,9 +474,19 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
     /// read-carrying fast path relies on. Always false for a real cluster.
     /// </param>
     internal static KahunaConfiguration CreateKahunaConfiguration(
+        EmbeddedKahunaOptions options, bool singleProcessRaftGroup) =>
+        ConfigurationValidator.Validate(BuildKahunaConfiguration(options, singleProcessRaftGroup), options.WalPath);
+
+    /// <summary>
+    /// The mapping behind <see cref="CreateKahunaConfiguration"/>, before validation. The clustered server
+    /// builds its configuration from this same mapping and adds the settings only a server has (the HTTPS
+    /// certificate, the inter-node scheme, the advertised endpoints) before it validates the result, so a
+    /// knob added here reaches both node shapes.
+    /// </summary>
+    internal static KahunaConfiguration BuildKahunaConfiguration(
         EmbeddedKahunaOptions options, bool singleProcessRaftGroup)
     {
-        return ConfigurationValidator.Validate(new()
+        return new()
         {
             HttpsCertificate = "",
             HttpsCertificatePassword = "",
@@ -591,7 +602,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             FusedEphemeralFinalize = options.FusedEphemeralFinalize,
             ScriptActorTurns = options.ScriptActorTurns,
             SingleProcessRaftGroup = singleProcessRaftGroup
-        }, options.WalPath);
+        };
     }
 
     internal static RaftConfiguration CreateRaftConfiguration(EmbeddedKahunaOptions options)

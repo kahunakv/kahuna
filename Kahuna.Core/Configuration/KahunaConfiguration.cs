@@ -631,7 +631,15 @@ public sealed class KahunaConfiguration
 
     public int CollectBatchMax { get; set; } = 1_000;
 
-    public int RevisionRetention { get; set; } = 16;
+    /// <summary>
+    /// How many recent revisions per key the in-memory archive keeps to answer revision and as-of reads. An
+    /// older revision of a persistent key is read from disk; an ephemeral key has no disk history, so its
+    /// older revisions are gone. The server sets it with <c>--revisions-to-cache</c>.
+    /// </summary>
+    public int RevisionRetention { get; set; } = DefaultRevisionRetention;
+
+    /// <summary>The one default of <see cref="RevisionRetention"/>, shared by the server flag and the embedded options.</summary>
+    public const int DefaultRevisionRetention = 4;
 
     public int DirtyObjectsWriterDelay { get; set; }
 

@@ -24,9 +24,10 @@ namespace Kahuna.Server.Persistence.Pitr;
 internal sealed partial class PitrJsonContext : JsonSerializerContext;
 
 /// <summary>
-/// Source-generated serialization metadata for backup manifests. Manifests are written indented
-/// because operators read them directly on disk.
+/// Source-generated serialization metadata for backup manifests and the bootstrap seed marker. Both are
+/// written indented because operators read them directly on disk.
 /// </summary>
 [JsonSourceGenerationOptions(WriteIndented = true, GenerationMode = JsonSourceGenerationMode.Metadata)]
 [JsonSerializable(typeof(BackupManifest))]
+[JsonSerializable(typeof(BootstrapSeedMarker))]
 internal sealed partial class PitrIndentedJsonContext : JsonSerializerContext;

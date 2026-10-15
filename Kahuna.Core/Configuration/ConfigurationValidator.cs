@@ -126,7 +126,7 @@ public static class ConfigurationValidator
             configuration.MaxBytesPerActor = 256L * 1024 * 1024;
 
         if (configuration.RevisionRetention <= 0)
-            configuration.RevisionRetention = configuration.RevisionsToKeepCached > 0 ? configuration.RevisionsToKeepCached : 16;
+            configuration.RevisionRetention = configuration.RevisionsToKeepCached > 0 ? configuration.RevisionsToKeepCached : KahunaConfiguration.DefaultRevisionRetention;
 
         if (configuration.DefaultTransactionTimeout <= 0)
             throw new KahunaServerException(

@@ -623,8 +623,8 @@ public sealed class KahunaCommandLineOptions
     [Option("function-slow-warn-ms", Required = false, HelpText = "Log a warning when a user-defined script function takes longer than this many milliseconds. The call is synchronous and blocks a request path while the transaction holds its locks. 0 disables the warning", Default = 50)]
     public int FunctionSlowWarnMs { get; set; } = 50;
 
-    [Option("revisions-to-cache", Required = false, HelpText = "Number of revisions to keep cached in memory", Default = 4)]
-    public int RevisionsToKeepCached { get; set; } = 4;
+    [Option("revisions-to-cache", Required = false, HelpText = "Number of recent revisions per key kept in memory to answer revision and as-of reads (at least 1). An older revision of a persistent key is read from disk; an ephemeral key has no disk history, so its older revisions are gone. Default 4.", Default = Kahuna.Server.Configuration.KahunaConfiguration.DefaultRevisionRetention)]
+    public int RevisionsToKeepCached { get; set; } = Kahuna.Server.Configuration.KahunaConfiguration.DefaultRevisionRetention;
 
     [Option("cache-entry-ttl", Required = false, HelpText = "Maximum age of cache entries before eviction (in seconds)", Default = 1800)]
     public int CacheEntryTtl { get; set; } = 1800; // 30 minutes
@@ -743,8 +743,11 @@ public sealed class KahunaCommandLineOptions
     [Option("pitr-allow-unconfined-remote-restore", Required = false, HelpText = "Allow remote restore requests even without a configured restore root. Insecure; disabled by default.", Default = false)]
     public bool PitrAllowUnconfinedRemoteRestore { get; set; }
 
-    [Option("pitr-bootstrap-from", Required = false, HelpText = "Backup ID (GUID) of the leaf backup to restore from before joining the cluster. Must be combined with --join-existing and --pitr-backup-dir. When omitted the node starts normally without seeding.")]
-    public Guid? PitrBootstrapFrom { get; set; }
+    [Option("pitr-bootstrap-from", Required = false, HelpText = "Seed this node from a backup chain before it joins the cluster: the backup ID (GUID) of the leaf backup, or 'latest' for the newest valid chain of --pitr-backup-cluster-id. The server copies the full backup's checkpoint into --storage-path, verifies it, replays the chain and seeds the WAL, then joins. It seeds only when the store is empty: a node whose store holds data, or that already seeded, starts without seeding. Requires --join-existing, --pitr-backup-dir and rocksdb or sqlite storage. When omitted the node starts normally without seeding.")]
+    public string? PitrBootstrapFrom { get; set; }
+
+    [Option("pitr-bootstrap-fallback-to-join", Required = false, HelpText = "When --pitr-bootstrap-from cannot help because the chain is older than the PITR retention window (or 'latest' finds no chain), skip the seed, keep the store empty and join through the normal catch-up instead of failing the start. Corrupt, foreign or unauthenticated chains still fail the start. Default false.")]
+    public bool PitrBootstrapFallbackToJoin { get; set; }
 
     [Option("pitr-target-time-ms", Required = false, HelpText = "HLC target time for PITR restore expressed as milliseconds since Unix epoch (the L/physical component). 0 or omitted means restore to the chain's natural maximum (i.e. the full backup chain).", Default = 0L)]
     public long PitrTargetTimeMs { get; set; }

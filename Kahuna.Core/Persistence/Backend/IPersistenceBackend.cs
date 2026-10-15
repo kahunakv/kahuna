@@ -100,6 +100,17 @@ internal interface IPersistenceBackend
     public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp);
 
     /// <summary>
+    /// <see cref="GetKeyValueRevisionAtOrBefore(string, long, HLCTimestamp)"/> that also adds the
+    /// revision-history rows it read to <paramref name="tally"/>. The default cannot see rows and adds one
+    /// per call; backends that read revision rows one by one override it with the exact count.
+    /// </summary>
+    public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp, ref KeyValueScanTally tally)
+    {
+        tally.RevisionRowsExamined++;
+        return GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);
+    }
+
+    /// <summary>
     /// Hydration read: the current head of <paramref name="keyName"/> together with its newest
     /// <paramref name="recentRevisions"/> archived revisions (<c>head.Revision - 1</c> downward),
     /// newest first. A key whose head is absent returns a null head and an empty list. The default
@@ -185,6 +196,14 @@ internal interface IPersistenceBackend
     }
 
     public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit);
+
+    /// <summary>
+    /// <see cref="GetKeyValueByRange(string, string?, int)"/> that also adds to <paramref name="tally"/> the
+    /// revision-history rows the walk stepped over and the seeks that skipped the rest of a key's revision
+    /// rows. The default adds nothing: a backend that keeps history apart from the heads reads none on this walk.
+    /// </summary>
+    public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit, ref KeyValueScanTally tally) =>
+        GetKeyValueByRange(prefix, startKey, limit);
 
     /// <summary>
     /// Whole-family paged scan over every current key-value row, in bounded pages of at most

@@ -62,16 +62,20 @@ internal sealed class TryGetByRangeHandler : BaseHandler
         long inspectionBudgetRaw = (long)limit + 1 + KeyValueScanLimits.MaxScanInspectionSlack;
         int inspectionBudget = inspectionBudgetRaw > int.MaxValue ? int.MaxValue : (int)inspectionBudgetRaw;
         int inspected = 0;
+        KeyValueScanTally tally = default;
         string? resumeAfterKey = null;
 
         foreach ((string key, KeyValueEntry? _) in context.Store.GetByRange(memStart, memStartIncl, memEnd, memEndIncl, int.MaxValue))
         {
             inspected++;
+            tally.EntriesInspected++;
 
             KeyValueResponse response = await Get(currentTime, message.TransactionId, key, message.Durability, snapshotTs, snapshotRead: !message.ReadTimestamp.IsNull());
 
             if (response.Type == KeyValueResponseType.DoesNotExist)
             {
+                tally.DeadEntriesSkipped++;
+
                 if (inspected >= inspectionBudget)
                 {
                     resumeAfterKey = key;
@@ -81,7 +85,7 @@ internal sealed class TryGetByRangeHandler : BaseHandler
             }
 
             if (response.Type != KeyValueResponseType.Get || response.Entry is null)
-                return new(response.Type, new KeyValueGetByRangeResult(response.Type, [], null, false));
+                return new(response.Type, new KeyValueGetByRangeResult(response.Type, [], null, false, tally.ToObservation(diskFallback: false)));
 
             items.Add((key, response.Entry));
 
@@ -141,12 +145,14 @@ internal sealed class TryGetByRangeHandler : BaseHandler
                         context, i, excludedHeads: null, message.ReadTimestamp.IsNull() ? HLCTimestamp.Zero : message.ReadTimestamp));
                 if (merge.MustRetry)
                     return new(KeyValueResponseType.MustRetry,
-                        new KeyValueGetByRangeResult(KeyValueResponseType.MustRetry, [], null, false));
-                return BuildMergedResponse(prefix, message.Durability, merge, snapshotTs);
+                        new KeyValueGetByRangeResult(KeyValueResponseType.MustRetry, [], null, false, tally.ToObservation(diskFallback: false)));
+
+                tally.IntentsMerged += merge.IntentsMerged;
+                return BuildMergedResponse(prefix, message.Durability, merge, snapshotTs, tally.ToObservation(diskFallback: false));
             }
         }
 
-        return BuildResponse(prefix, message.Durability, items, limit, snapshotTs, resumeAfterKey);
+        return BuildResponse(prefix, message.Durability, items, limit, snapshotTs, tally.ToObservation(diskFallback: false), resumeAfterKey);
     }
 
     // ── Persistent (K-way merge of memory + disk, detached off the actor mailbox) ──────────
@@ -205,10 +211,6 @@ internal sealed class TryGetByRangeHandler : BaseHandler
         HLCTimestamp capturedSnapshotTs = snapshotTs;
         HLCTimestamp capturedCurrentTime = currentTime;
 
-        // An unbounded scan arrives as limit == int.MaxValue; a naive limit + 1 overflows negative,
-        // which the backends treat as "no rows" — silently emptying every disk page of the scan.
-        int diskPageSize = SaturatingPageSize(limit);
-
         Task<RangeDiskPage> readTask;
         try
         {
@@ -225,10 +227,9 @@ internal sealed class TryGetByRangeHandler : BaseHandler
                         return new RangeDiskPage([], false, null);
                     }
 
-                    return ProjectSnapshotPage(
-                        context.PersistenceBackend.GetKeyValueByRange(prefix, diskCursor, diskPageSize),
-                        limit, capturedSnapshotRead, capturedSnapshotTs, capturedCurrentTime,
-                        context.PersistenceBackend, () => cont.Cancelled);
+                    return ReadDiskPage(
+                        context.PersistenceBackend, prefix, diskCursor, limit,
+                        capturedSnapshotRead, capturedSnapshotTs, capturedCurrentTime, () => cont.Cancelled);
                 });
         }
         catch (Exception ex)
@@ -263,6 +264,32 @@ internal sealed class TryGetByRangeHandler : BaseHandler
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     /// <summary>
+    /// Stage 2 of the persistent range scan: reads one raw disk page from <paramref name="diskCursor"/> and
+    /// snapshot-projects it (<see cref="ProjectSnapshotPage"/>). The page carries what the read cost — the
+    /// revision rows and seeks of the walk and the as-of lookups of the projection — so stage 3 can add it to
+    /// the scan's observation. Must run on the off-actor scheduler thread.
+    /// </summary>
+    internal static RangeDiskPage ReadDiskPage(
+        IPersistenceBackend backend,
+        string prefix,
+        string diskCursor,
+        int limit,
+        bool isSnapshotRead,
+        HLCTimestamp snapshotTs,
+        HLCTimestamp currentTime,
+        Func<bool>? shouldAbort)
+    {
+        KeyValueScanTally tally = default;
+
+        // An unbounded scan arrives as limit == int.MaxValue; a naive limit + 1 overflows negative,
+        // which the backends treat as "no rows" — silently emptying every disk page of the scan.
+        List<(string, ReadOnlyKeyValueEntry)> rawPage =
+            backend.GetKeyValueByRange(prefix, diskCursor, SaturatingPageSize(limit), ref tally);
+
+        return ProjectSnapshotPage(rawPage, limit, isSnapshotRead, snapshotTs, currentTime, backend, shouldAbort, tally);
+    }
+
+    /// <summary>
     /// Builds a <see cref="RangeDiskPage"/> from a raw disk page: extracts raw pagination
     /// facts (has-more flag and next-cursor key) from the unfiltered <paramref name="rawPage"/>,
     /// then snapshot-projects the usable rows (excluding the sentinel).
@@ -282,7 +309,8 @@ internal sealed class TryGetByRangeHandler : BaseHandler
         HLCTimestamp snapshotTs,
         HLCTimestamp currentTime,
         IPersistenceBackend backend,
-        Func<bool>? shouldAbort = null)
+        Func<bool>? shouldAbort = null,
+        KeyValueScanTally tally = default)
     {
         // Derive raw pagination facts before any projection filtering.
         bool rawHasMore = rawPage.Count > limit;
@@ -296,7 +324,7 @@ internal sealed class TryGetByRangeHandler : BaseHandler
             List<(string, ReadOnlyKeyValueEntry)> plain = usableCount == rawPage.Count
                 ? rawPage
                 : rawPage.GetRange(0, usableCount);
-            return new RangeDiskPage(plain, rawHasMore, rawNextCursor);
+            return new RangeDiskPage(plain, rawHasMore, rawNextCursor, tally);
         }
 
         List<(string, ReadOnlyKeyValueEntry)> projected = new(usableCount);
@@ -315,15 +343,21 @@ internal sealed class TryGetByRangeHandler : BaseHandler
                 continue;
             }
 
-            KeyValueEntry? snap = backend.GetKeyValueRevisionAtOrBefore(k, e.Revision - 1, snapshotTs);
-            if (snap is null || snap.State is KeyValueState.Deleted or KeyValueState.Undefined)
+            // A dropped row never reaches the stage-3 merge, so it is counted here: the merge counts only the
+            // rows it receives.
+            KeyValueEntry? snap = backend.GetKeyValueRevisionAtOrBefore(k, e.Revision - 1, snapshotTs, ref tally);
+            if (snap is null || snap.State is KeyValueState.Deleted or KeyValueState.Undefined
+                || (snap.Expires != HLCTimestamp.Zero && snap.Expires.CompareTo(currentTime) < 0))
+            {
+                tally.EntriesInspected++;
+                tally.DeadEntriesSkipped++;
                 continue;
-            if (snap.Expires != HLCTimestamp.Zero && snap.Expires.CompareTo(currentTime) < 0)
-                continue;
+            }
+
             projected.Add((k, new ReadOnlyKeyValueEntry(
                 snap.Value, snap.Revision, snap.Expires, snap.LastUsed, snap.LastModified, snap.State)));
         }
-        return new RangeDiskPage(projected, rawHasMore, rawNextCursor);
+        return new RangeDiskPage(projected, rawHasMore, rawNextCursor, tally);
     }
 
     /// <summary>
@@ -354,6 +388,7 @@ internal sealed class TryGetByRangeHandler : BaseHandler
         List<(string, ReadOnlyKeyValueEntry)> items,
         int limit,
         HLCTimestamp snapshotTs,
+        KeyValueScanObservation observation,
         string? resumeAfterKey = null)
     {
         // Two independent "more pages exist" signals: the limit+1 sentinel (a full page of live items)
@@ -373,7 +408,7 @@ internal sealed class TryGetByRangeHandler : BaseHandler
             ? KeyValueRangeCursor.Encode(cursorKey!, durability, prefix, snapshotTs)
             : null;
 
-        KeyValueGetByRangeResult result = new(KeyValueResponseType.Get, items, nextCursor, hasMore);
+        KeyValueGetByRangeResult result = new(KeyValueResponseType.Get, items, nextCursor, hasMore, observation);
         return new(KeyValueResponseType.Get, result);
     }
 
@@ -387,13 +422,14 @@ internal sealed class TryGetByRangeHandler : BaseHandler
         string prefix,
         KeyValueDurability durability,
         PreparedIntentScanMerge.ScanMergeResult merge,
-        HLCTimestamp snapshotTs)
+        HLCTimestamp snapshotTs,
+        KeyValueScanObservation observation)
     {
         string? nextCursor = merge.HasMore && merge.NextCursorKey is not null
             ? KeyValueRangeCursor.Encode(merge.NextCursorKey, durability, prefix, snapshotTs)
             : null;
 
-        KeyValueGetByRangeResult result = new(KeyValueResponseType.Get, merge.Items, nextCursor, nextCursor is not null);
+        KeyValueGetByRangeResult result = new(KeyValueResponseType.Get, merge.Items, nextCursor, nextCursor is not null, observation);
         return new(KeyValueResponseType.Get, result);
     }
 

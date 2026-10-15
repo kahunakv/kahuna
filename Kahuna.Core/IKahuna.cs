@@ -82,6 +82,10 @@ public interface IKahuna
     /// <paramref name="pageSize"/> items. When <paramref name="readTimestamp"/> is non-Zero the whole
     /// scan is pinned to that snapshot; when Zero the snapshot is captured on the first page. Either
     /// way it is held fixed across all subsequent pages for a consistent read.
+    ///
+    /// <para>When <paramref name="observations"/> is given, the scan adds each served page's
+    /// <see cref="KeyValueScanObservation"/> and retry count to it; read it after the enumeration ends.
+    /// Null costs nothing.</para>
     /// </summary>
     public IAsyncEnumerable<(string Key, ReadOnlyKeyValueEntry Entry)> LocateAndScanRange(
         HLCTimestamp txId,
@@ -95,7 +99,8 @@ public interface IKahuna
         KeyValueDurability durability,
         CancellationToken ct,
         string coordinatorKey = "",
-        TransactionOperationId operationId = default);
+        TransactionOperationId operationId = default,
+        KeyValueScanObservationSink? observations = null);
 
     public Task<(KeyValueResponseType, long, HLCTimestamp)> TrySetKeyValue(HLCTimestamp transactionId, string key, byte[]? value, byte[]? compareValue, long compareRevision, KeyValueFlags flags, int expiresMs, KeyValueDurability durability, long routedGeneration = 0);
 
@@ -406,6 +411,11 @@ public interface IKahuna
     /// When <paramref name="targetTime"/> is <see cref="HLCTimestamp.Zero"/> the restore uses
     /// the chain's natural maximum HLC (equivalent to "restore everything").
     /// </para>
+    /// <para>The replay applies the incrementals only, so the backend must already hold the full backup's
+    /// checkpoint. The server puts it in the storage path before the backend opens; an embedded host must
+    /// open its backend over a copy of that checkpoint before it calls this method.
+    /// <paramref name="pitrWindow"/> set to <see cref="Timeout.InfiniteTimeSpan"/> skips the retention-window
+    /// check, for a caller that applied it before it copied the checkpoint.</para>
     /// <para>The chain is read as a restore reads it: through the configured backup storage target, from
     /// a root that passes the backup-root permission check, with every manifest authenticated against
     /// the configured manifest key. A chain stamped with a cluster id other than this node's configured

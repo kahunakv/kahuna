@@ -250,7 +250,7 @@ public sealed class EmbeddedKahunaOptions
     /// </summary>
     public int FunctionSlowWarnMs { get; set; } = 50;
 
-    public int RevisionsToKeepCached { get; set; } = 100;
+    public int RevisionsToKeepCached { get; set; } = Kahuna.Server.Configuration.KahunaConfiguration.DefaultRevisionRetention;
 
     public TimeSpan CacheEntryTtl { get; set; } = TimeSpan.FromMinutes(5);
 
@@ -415,7 +415,7 @@ public sealed class EmbeddedKahunaOptions
 
     public int MaxKeyValueWriteAggregatorInboxSize { get; set; } = 16_384;
 
-    public int RevisionRetention { get; set; } = 16;
+    public int RevisionRetention { get; set; } = Kahuna.Server.Configuration.KahunaConfiguration.DefaultRevisionRetention;
 
     public int DirtyObjectsWriterDelay { get; set; } = 1000;
 

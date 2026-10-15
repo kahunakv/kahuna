@@ -86,6 +86,7 @@ public static class EmbeddedOptionsFactory
         BackendReadQueueDepth = opts.BackendReadQueueDepth,
         DefaultTransactionTimeout = opts.DefaultTransactionTimeout,
         FusedEphemeralFinalize = !opts.DisableFusedEphemeralFinalize,
+        PublishedHeadReads = !opts.DisablePublishedHeadReads,
         ScriptActorTurns = !opts.DisableScriptActorTurns,
         DefaultAdmissionWaitMs = opts.DefaultAdmissionWaitMs,
         MaxAdmissionWaitMs = opts.MaxAdmissionWaitMs,
@@ -98,6 +99,10 @@ public static class EmbeddedOptionsFactory
     MaxScriptLength = opts.MaxScriptLength,
     MaxScriptDepth = opts.MaxScriptDepth,
         CacheEntryTtl = TimeSpan.FromSeconds(opts.CacheEntryTtl),
+        // The in-memory revision archive is RevisionRetention; RevisionsToKeepCached is only its fallback when
+        // the retention is unset. Both carry the flag, so the two fields never disagree.
+        RevisionRetention = opts.RevisionsToKeepCached,
+        RevisionsToKeepCached = opts.RevisionsToKeepCached,
         CacheEntriesToRemove = opts.CacheEntriesToRemove,
         KeyValueWriteLingerMs = opts.KeyValueWriteLingerMs,
         KeyValueWritePostCompletionHoldMs = opts.KeyValueWritePostCompletionHoldMs,
@@ -122,6 +127,7 @@ public static class EmbeddedOptionsFactory
         PersistenceWriteStallWarnMs = opts.PersistenceWriteStallWarnMs,
         PitrWindow = TimeSpan.FromSeconds(opts.PitrWindowSeconds),
         BaseSnapshotInterval = TimeSpan.FromSeconds(opts.BaseSnapshotIntervalSeconds),
+        CheckpointInterval = TimeSpan.FromSeconds(opts.CheckpointIntervalSeconds),
         BackupDir = opts.PitrBackupDir,
         BackupTarget = opts.PitrBackupTarget,
         BackupScratchDir = opts.PitrBackupScratchDir,

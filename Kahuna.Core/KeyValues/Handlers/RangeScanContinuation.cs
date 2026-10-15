@@ -93,6 +93,12 @@ internal sealed class RangeScanContinuation : ReadContinuation
     /// <summary>Items accumulated across all pages so far. Cleared only when the scan is resolved.</summary>
     private readonly List<(string, ReadOnlyKeyValueEntry)> accumulated;
 
+    /// <summary>What the scan cost so far, summed over every disk page and merge step (actor thread only).</summary>
+    private KeyValueScanTally tally;
+
+    /// <summary>The page's observation as it stands; this path always merges with a disk read.</summary>
+    private KeyValueScanObservation Observation => tally.ToObservation(diskFallback: true);
+
     // ─────────────────────────────────────────────────────────────────────────
 
     internal RangeScanContinuation(
@@ -146,6 +152,9 @@ internal sealed class RangeScanContinuation : ReadContinuation
             Resolve(KeyValueStaticResponses.MustRetryResponse);
             return;
         }
+
+        if (RangeScanPage is { } arrived)
+            tally.Add(arrived.Tally);
 
         // RawHasMore and RawNextCursor come from the raw (unprojected) disk page; the
         // projected list may be smaller or empty if rows were filtered by snapshot projection.
@@ -310,9 +319,12 @@ internal sealed class RangeScanContinuation : ReadContinuation
             }
 
             KeyValueResponse? response = EvaluateKeySync(context, keyToProcess, entry, diskProjections);
+            tally.EntriesInspected++;
 
             if (response is null || response.Type == KeyValueResponseType.DoesNotExist)
             {
+                tally.DeadEntriesSkipped++;
+
                 // A head the page leaves out (a delete, an expired value) still supersedes an older committed intent
                 // on the key; remember it for the intent merge, which otherwise sees no row and would inject the
                 // intent's older value.
@@ -323,8 +335,9 @@ internal sealed class RangeScanContinuation : ReadContinuation
 
             if (response.Type != KeyValueResponseType.Get || response.Entry is null)
             {
-                // Scan-aborting response (WaitingForReplication, Aborted, etc.).
-                Resolve(new(response.Type, new KeyValueGetByRangeResult(response.Type, [], null, false)));
+                // Scan-aborting response (WaitingForReplication, Aborted, etc.). It still carries what the
+                // attempt cost, so a page retried from the same cursor can report the sum over its attempts.
+                Resolve(new(response.Type, new KeyValueGetByRangeResult(response.Type, [], null, false, Observation)));
                 return;
             }
 
@@ -361,11 +374,9 @@ internal sealed class RangeScanContinuation : ReadContinuation
                             return new RangeDiskPage([], false, null);
                         }
 
-                        return TryGetByRangeHandler.ProjectSnapshotPage(
-                            context.PersistenceBackend.GetKeyValueByRange(
-                                prefix, capturedCursor, TryGetByRangeHandler.SaturatingPageSize(capturedLimit)),
-                            capturedLimit, capturedSnapshotRead, capturedSnapshotTs, capturedCurrentTime,
-                            context.PersistenceBackend, () => Cancelled);
+                        return TryGetByRangeHandler.ReadDiskPage(
+                            context.PersistenceBackend, prefix, capturedCursor, capturedLimit,
+                            capturedSnapshotRead, capturedSnapshotTs, capturedCurrentTime, () => Cancelled);
                     });
             }
             catch (Exception ex)
@@ -424,16 +435,17 @@ internal sealed class RangeScanContinuation : ReadContinuation
                 if (merge.MustRetry)
                 {
                     Resolve(new(KeyValueResponseType.MustRetry,
-                        new KeyValueGetByRangeResult(KeyValueResponseType.MustRetry, [], null, false)));
+                        new KeyValueGetByRangeResult(KeyValueResponseType.MustRetry, [], null, false, Observation)));
                     return;
                 }
 
-                Resolve(TryGetByRangeHandler.BuildMergedResponse(prefix, durability, merge, snapshotTs));
+                tally.IntentsMerged += merge.IntentsMerged;
+                Resolve(TryGetByRangeHandler.BuildMergedResponse(prefix, durability, merge, snapshotTs, Observation));
                 return;
             }
         }
 
-        Resolve(BuildResponse(accumulated, limit, snapshotTs, prefix, durability));
+        Resolve(BuildResponse(accumulated, limit, snapshotTs, prefix, durability, Observation));
     }
 
     // ── Per-key evaluation (sync; mirrors TryGetByRangeHandler.Get without disk I/O) ──────
@@ -666,7 +678,8 @@ internal sealed class RangeScanContinuation : ReadContinuation
         int limit,
         HLCTimestamp snapshotTs,
         string prefix,
-        KeyValueDurability durability)
+        KeyValueDurability durability,
+        KeyValueScanObservation observation)
     {
         bool hasMore = items.Count > limit;
         if (hasMore)
@@ -676,6 +689,6 @@ internal sealed class RangeScanContinuation : ReadContinuation
             ? KeyValueRangeCursor.Encode(items[^1].Item1, durability, prefix, snapshotTs)
             : null;
 
-        return new(KeyValueResponseType.Get, new KeyValueGetByRangeResult(KeyValueResponseType.Get, items, nextCursor, hasMore));
+        return new(KeyValueResponseType.Get, new KeyValueGetByRangeResult(KeyValueResponseType.Get, items, nextCursor, hasMore, observation));
     }
 }

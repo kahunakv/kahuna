@@ -14,6 +14,7 @@ using Kahuna.Shared.Communication.Rest;
 using Kahuna.Server.Communication;
 using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.Diagnostics;
+using Kahuna.Server.Persistence.Pitr;
 
 using Kommander;
 using Kommander.Diagnostics;
@@ -95,6 +96,11 @@ if (standalone)
 }
 else
 {
+    // The embedded node installs the process fault policy in its constructor; a clustered node is assembled
+    // from its parts below, so it installs it here, before the WAL exists. Without it an out-of-memory
+    // raised inside the WAL writer's catch-all is logged and swallowed, and --fail-fast-on-oom is ignored.
+    EmbeddedKahunaNode.InstallProcessFaultPolicy(EmbeddedOptionsFactory.CreateEmbeddedOptions(opts));
+
     // Assemble a Kahuna cluster from static discovery.
     //
     // When RocksDB shared memory is enabled and both the WAL and the KV/locks backend are RocksDB, create
@@ -261,88 +267,9 @@ ThreadPool.SetMinThreads(256, 128);
 // No process-wide certificate bypass: Kommander's cluster clients and Kahuna's inter-node channels take
 // their certificate policy from the transport-security options, so other HTTP clients validate normally.
 
-KahunaConfiguration kahunaConfiguration = ConfigurationValidator.Validate(new()
-{
-    HttpsCertificate = opts.HttpsCertificate,
-    HttpsCertificatePassword = opts.HttpsCertificatePassword,
-    InterNodeGrpcScheme = opts.RaftGrpcScheme,
-    AdvertisedClientEndpoint = opts.AdvertisedClientEndpoint,
-    AdvertisedClientScheme = opts.AdvertisedClientScheme,
-    AdvertisePeerEndpoints = !opts.DisablePeerEndpointAdvertisement,
-    RoutingHintsEnabled = !opts.DisableRoutingHints,
-    PublishedHeadReads = !opts.DisablePublishedHeadReads,
-    LocksWorkers = opts.LocksWorkers,
-    KeyValueWorkers = opts.KeyValueWorkers,
-    BackgroundWriterWorkers = opts.BackgroundWritersWorkers,
-    SequencerWorkers = opts.SequencerWorkers,
-    SequencerBlockSize = opts.SequencerBlockSize,
-    SequencerIdempotencyRetentionMax = opts.SequencerIdempotencyRetentionMax,
-    SequencerIdempotencyRetentionTtl = TimeSpan.FromSeconds(opts.SequencerIdempotencyRetentionTtl),
-    SequencerMaxSequencesPerActor = opts.SequencerMaxSequencesPerActor,
-    SequencerBlockLease = TimeSpan.FromSeconds(opts.SequencerBlockLease),
-    BackendReadIOThreads = opts.BackendReadIOThreads,
-    BackendWriteIOThreads = opts.BackendWriteIOThreads,
-    BackendReadQueueDepth = opts.BackendReadQueueDepth,
-    Storage = opts.Storage,
-    StoragePath = opts.StoragePath,
-    StorageRevision = opts.StorageRevision,
-    RocksDbDirectReads = opts.GetRocksDbDirectReads(),
-    RocksDbStatistics = opts.RocksDbStatistics,
-    DefaultTransactionTimeout = opts.DefaultTransactionTimeout,
-    FusedEphemeralFinalize = !opts.DisableFusedEphemeralFinalize,
-    ScriptActorTurns = !opts.DisableScriptActorTurns,
-    DefaultAdmissionWaitMs = opts.DefaultAdmissionWaitMs,
-    MaxAdmissionWaitMs = opts.MaxAdmissionWaitMs,
-    MaxConcurrentTransactions = opts.MaxConcurrentTransactions,
-    MaxConcurrentSessions = opts.MaxConcurrentSessions,
-    TransactionPriorityReservedSlots = opts.TransactionPriorityReservedSlots,
-    TransactionPriorityAgingThreshold = opts.TransactionPriorityAgingThreshold,
-    TransactionPriorityMaxQueued = opts.TransactionPriorityMaxQueued,
-    ScriptCacheExpiration = TimeSpan.FromSeconds(opts.ScriptCacheExpiration),
-    MaxScriptLength = opts.MaxScriptLength,
-    MaxScriptDepth = opts.MaxScriptDepth,
-    Functions = extensionFunctions,
-    FunctionSlowWarnMs = opts.FunctionSlowWarnMs,
-    CacheEntryTtl = TimeSpan.FromSeconds(opts.CacheEntryTtl),
-    CacheEntriesToRemove = opts.CacheEntriesToRemove,
-    KeyValueWriteLingerMs = opts.KeyValueWriteLingerMs,
-    KeyValueWritePostCompletionHoldMs = opts.KeyValueWritePostCompletionHoldMs,
-    KeyValueWritePreciseWake = opts.KeyValueWritePreciseWake,
-    KeyValueWriteFillTargetTrigger = opts.KeyValueWriteFillTargetTrigger,
-    KeyValueWriteMaxBatchItems = opts.KeyValueWriteMaxBatchItems,
-    KeyValueWriteMaxInFlightBatchesPerPartition = opts.KeyValueWriteMaxInFlightBatchesPerPartition,
-    KeyValueWriteMaxBatchBytes = opts.KeyValueWriteMaxBatchBytes,
-    KeyValueWriteMaxQueuedItemsPerPartition = opts.KeyValueWriteMaxQueuedItemsPerPartition,
-    KeyValueWriteMaxQueuedBytesPerPartition = opts.KeyValueWriteMaxQueuedBytesPerPartition,
-    KeyValueWriteMaxQueueDelayMs = opts.KeyValueWriteMaxQueueDelayMs,
-    MaxKeyValueWriteAggregatorInboxSize = opts.MaxKeyValueWriteAggregatorInboxSize,
-    DirtyObjectsWriterDelay = opts.DirtyObjectsWriterDelay,
-    CheckpointInterval = TimeSpan.FromSeconds(opts.CheckpointIntervalSeconds),
-    PersistentRevisionRetentionCount = opts.PersistentRevisionRetentionCount,
-    PersistentRevisionRetentionAge = TimeSpan.FromSeconds(opts.PersistentRevisionRetentionAge),
-    PersistentRevisionCleanupInterval = TimeSpan.FromSeconds(opts.PersistentRevisionCleanupInterval),
-    PersistentRevisionCleanupBatchSize = opts.PersistentRevisionCleanupBatchSize,
-    PersistentRevisionCleanupOnWrite = opts.GetPersistentRevisionCleanupOnWrite(),
-    PersistentRevisionCleanupTimeBudget = TimeSpan.FromMilliseconds(opts.PersistentRevisionCleanupTimeBudgetMs),
-    PersistenceMaxUnflushedItems = opts.PersistenceMaxUnflushedItems,
-    PersistenceMaxUnflushedBytes = opts.PersistenceMaxUnflushedBytes,
-    PersistenceWriteStallWarnMs = opts.PersistenceWriteStallWarnMs,
-    PitrWindow = TimeSpan.FromSeconds(opts.PitrWindowSeconds),
-    BaseSnapshotInterval = TimeSpan.FromSeconds(opts.BaseSnapshotIntervalSeconds),
-    // The range knobs are carried here as well as on the embedded options: this is the instance the
-    // validators below inspect, and without them the settle-window check would compare a default
-    // against the operator's leader-stability setting and pass no matter what was asked for.
-    RangeSplitThreshold = opts.RangeSplitThreshold,
-    RangeSplitMinRangeSize = opts.RangeSplitMinRangeSize,
-    RangeSplitSettleWindow = TimeSpan.FromSeconds(opts.RangeSplitSettleWindowSeconds),
-    RangeMoveSettleTimeout = TimeSpan.FromSeconds(opts.RangeMoveSettleTimeoutSeconds),
-    RangeMergeMinSize = opts.RangeMergeMinSize,
-    CollectionInterval = TimeSpan.FromSeconds(opts.RangeCollectionIntervalSeconds),
-    RangeSplitLoadThreshold = opts.RangeSplitLoadThreshold,
-    RangeSplitLoadMinQueueDepth = opts.RangeSplitLoadMinQueueDepth,
-    RangeSplitLoadWindow = TimeSpan.FromSeconds(opts.RangeSplitLoadWindowSeconds),
-    RangeSplitLoadPollInterval = TimeSpan.FromSeconds(opts.RangeSplitLoadPollIntervalSeconds)
-}, opts.WalPath);
+// One mapping for both node shapes: the clustered node runs on this configuration, and the standalone
+// node's embedded engine builds its own from the same mapping.
+KahunaConfiguration kahunaConfiguration = ServerConfigurationFactory.Create(opts, extensionFunctions);
 
 // Process-wide, and this host runs exactly one node: with hints off a served request pays neither
 // the ambient write nor the capture object, so the switch actually removes the cost rather than
@@ -353,6 +280,17 @@ ConfigurationValidator.ValidateSettleWindow(kahunaConfiguration, opts.RaftMinLea
 ConfigurationValidator.ValidateCollectionInterval(kahunaConfiguration);
 
 builder.Services.AddSingleton(kahunaConfiguration);
+
+// The base image of a PITR bootstrap must be in the storage path before the persistence backend opens, and
+// the backend opens when the host resolves the node's services. So this step runs here, before the build.
+PitrBootstrapPlan? bootstrapPlan = await PitrBootstrapStartup.PrepareAsync(
+    opts,
+    kahunaConfiguration,
+    standalone,
+    LoggerFactory.Create(logging => logging.AddConsole()).CreateLogger("Kahuna.PitrBootstrap"));
+
+if (bootstrapPlan is not null)
+    builder.Services.AddSingleton(bootstrapPlan);
 
 // Start server
 WebApplication app = builder.Build();

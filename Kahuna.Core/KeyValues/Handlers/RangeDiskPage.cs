@@ -26,13 +26,22 @@ internal sealed class RangeDiskPage
     /// </summary>
     internal readonly string? RawNextCursor;
 
+    /// <summary>
+    /// What the read cost: the revision rows and seeks of the disk walk, and the rows the as-of projection
+    /// read and dropped. Filled on the scheduler thread and read on the actor thread after the page is handed
+    /// over, never written concurrently.
+    /// </summary>
+    internal readonly KeyValueScanTally Tally;
+
     internal RangeDiskPage(
         List<(string, ReadOnlyKeyValueEntry)> projected,
         bool rawHasMore,
-        string? rawNextCursor)
+        string? rawNextCursor,
+        KeyValueScanTally tally = default)
     {
         Projected = projected;
         RawHasMore = rawHasMore;
         RawNextCursor = rawNextCursor;
+        Tally = tally;
     }
 }

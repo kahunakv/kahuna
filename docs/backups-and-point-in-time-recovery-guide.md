@@ -436,8 +436,10 @@ restoring every node to one coordinated `T` and bringing the cluster back up —
 restore alone reconstitutes a running system.
 
 The seed is the PITR bootstrap (`--pitr-bootstrap-from <leafId>` with `--join-existing`, or
-`IKahuna.BootstrapFromPitrBackupAsync` for an embedded host, called before the node joins). It replays
-the chain into the node's store and installs one committed checkpoint per partition into the node's
+`IKahuna.BootstrapFromPitrBackupAsync` for an embedded host, called before the node joins). It has two
+steps. First, before the persistence backend opens, the server puts the full backup's checkpoint into
+`--storage-path` (see *The base image step* below). Second, it replays
+the chain's incrementals into the node's store and installs one committed checkpoint per partition into the node's
 WAL at the index the chain reached, so the node tells the leader "I am at N" and receives only N+1
 onwards. The checkpoint is installed as a *snapshot boundary*, the same way an installed snapshot
 records its index: a WAL only trusts a checkpoint written as an ordinary entry when every entry below
@@ -452,6 +454,37 @@ key — and is stricter in one way: a chain stamped with a `BackupClusterId` oth
 is refused, because its indexes describe another cluster's log. A chain with no cluster id is
 accepted. Every check runs before the store or the WAL changes, and a failure surfaces as a typed
 `KahunaBackupException`.
+
+**The base image step.** The replay starts after the full backup, so the full's rows must already be in
+the store. The server reads the full's `checkpoint/` objects through the configured backup target (a
+registered storage provider included, so a bucket target needs no external copy tool) and puts them where
+the backend opens: `{storage-path}/{storage-revision}/` for RocksDB, the folder root for SQLite. The copy
+goes to a staging folder inside the storage path. Every file is checked against the full manifest's size and
+digest before anything is published, so a truncated or corrupt object stops the seed with nothing in the
+store. The publish then moves the files into place under a marker file, `kahuna-pitr-seed.json`, which
+records the chain and the names it moved. Memory storage is refused: it has no folder to seed. A full backup
+of another storage engine or another `--storage-revision` is refused too, because the backend could not open
+it as this node's store.
+
+The marker makes the flag safe to pass on every start of a node, new or not:
+
+| What the storage path holds | What the start does |
+|---|---|
+| No marker, no data for this backend and revision | Seeds. Other content (`lost+found`, another revision's folder) is ignored and kept. |
+| No marker, data for this backend and revision | Skips the seed and logs why. A store of a node that ran is never overwritten. |
+| Marker in the `Publishing` state (a crash during the publish) | Removes the names the marker lists, then seeds from the start. |
+| Marker in the `Materialized` state (a crash before the seed completed) | Continues the seed from the recorded chain. The replay and the WAL seed are idempotent. A request for a different backup id is refused, because the WAL can already hold part of the first seed. |
+| Marker in the `Seeded` state | Skips the seed. A node that seeded never seeds again. |
+
+`--pitr-bootstrap-from latest` picks the newest chain that passes every check (authentication, cluster id,
+partition coverage, storage engine and revision), ordered by the newest commit HLC its leaf covers, among the
+manifests stamped with `--pitr-backup-cluster-id`. When that id is empty, every manifest is a candidate.
+
+By default a chain older than the retention window (`now − --pitr-window − --base-snapshot-interval`) fails
+the start, as does `latest` when no valid chain exists. With `--pitr-bootstrap-fallback-to-join` both cases
+log "seed skipped", leave the store empty, and the node joins through the normal catch-up (the leader then
+sends it a snapshot). The flag does not hide anything else: a corrupt, foreign or unauthenticated chain still
+fails the start.
 
 > **Decision — keep "restore data" and "join cluster" as separate, composable steps.** Conflating them
 > would tie the backup format to cluster identity and membership, which change independently of data.
@@ -841,6 +874,10 @@ checked before any file is trusted for copy or replay:
   restore it follows is idempotent and each checkpoint seed overwrites by key, so a partial failure
   is reported precisely and the bootstrap is safe to re-run — rather than being reported as a success
   while the WAL trails the state already restored into the backend.
+- **Bootstrap verifies the base image it copies, and publishes it under a marker.** The full's checkpoint is
+  copied into a staging folder inside the storage path and checked file by file against the manifest before
+  the backend opens it. The marker lists every name the publish moves, so an interrupted publish is removed
+  on the next start and a retry starts clean. A store that holds data and no marker is never touched.
 - **Bootstrap installs the checkpoint as a snapshot boundary, not as a plain entry.** A plain
   checkpoint entry over an empty log is not trusted by the WAL (nothing below it is present), so the
   node would still present at index 0 and the leader would backfill from 1. The boundary install

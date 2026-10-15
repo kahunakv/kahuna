@@ -26,13 +26,15 @@ namespace Kahuna.Server.KeyValues.Transactions;
 internal static class PreparedIntentScanMerge
 {
     /// <summary>The reconciled page plus its pagination outcome: the ordinal-ordered items, whether the whole page
-    /// must retry (an undecided intent within the snapshot), whether a further page exists, and the resume cursor
-    /// key (the last key accounted for on this page; the next page resumes strictly after it).</summary>
+    /// must retry (an undecided intent within the snapshot), whether a further page exists, the resume cursor
+    /// key (the last key accounted for on this page; the next page resumes strictly after it), and how many
+    /// committed intents the merge applied to the page (overrides, injections and removals).</summary>
     public readonly record struct ScanMergeResult(
         List<(string Key, ReadOnlyKeyValueEntry Entry)> Items,
         bool MustRetry,
         bool HasMore,
-        string? NextCursorKey);
+        string? NextCursorKey,
+        int IntentsMerged = 0);
 
     /// <param name="items">The page the scan produced from MVCC/disk, ordinal-ordered by key, up to
     /// <paramref name="limit"/>+1 rows (the pagination sentinel included when present).</param>
@@ -176,16 +178,16 @@ internal static class PreparedIntentScanMerge
         if (result.Count > limit)
         {
             result.RemoveRange(limit, result.Count - limit);
-            return new(result, MustRetry: false, HasMore: true, NextCursorKey: result[^1].Key);
+            return new(result, MustRetry: false, HasMore: true, NextCursorKey: result[^1].Key, overrideCount);
         }
 
         if (kvHasMore)
         {
             string? cursor = kvCeilingKey ?? (result.Count > 0 ? result[^1].Key : null);
-            return new(result, MustRetry: false, HasMore: cursor is not null, NextCursorKey: cursor);
+            return new(result, MustRetry: false, HasMore: cursor is not null, NextCursorKey: cursor, overrideCount);
         }
 
-        return new(result, MustRetry: false, HasMore: false, NextCursorKey: null);
+        return new(result, MustRetry: false, HasMore: false, NextCursorKey: null, overrideCount);
     }
 
     private static ReadOnlyKeyValueEntry ToEntry(PreparedIntent i) =>

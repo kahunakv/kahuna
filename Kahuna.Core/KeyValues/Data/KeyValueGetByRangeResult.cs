@@ -30,15 +30,24 @@ public sealed class KeyValueGetByRangeResult
     /// </summary>
     public bool HasMore { get; }
 
+    /// <summary>
+    /// What the page cost the serving node (see <see cref="KeyValueScanObservation"/>). Null when it is
+    /// unknown: a peer on an older build served the page, or the page never reached a scan handler (a
+    /// refusal before dispatch). Null never means zero.
+    /// </summary>
+    public KeyValueScanObservation? Observation { get; internal set; }
+
     public KeyValueGetByRangeResult(
         KeyValueResponseType type,
         List<(string, ReadOnlyKeyValueEntry)> items,
         string? nextCursor,
-        bool hasMore)
+        bool hasMore,
+        KeyValueScanObservation? observation = null)
     {
         Type = type;
         Items = items;
         NextCursor = nextCursor;
         HasMore = hasMore;
+        Observation = observation;
     }
 }

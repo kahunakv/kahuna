@@ -77,5 +77,12 @@ internal sealed class BackupDriverException : Exception
     /// </summary>
     public bool CutUnverified { get; init; }
 
+    /// <summary>
+    /// True when a bootstrap refused a chain whose target time is older than the leader's worst-case WAL
+    /// compaction floor (now − PITR window − base snapshot interval). The leader sends a full snapshot to such
+    /// a node anyway, so the seed would cost a restore and save nothing.
+    /// </summary>
+    public bool OutsidePitrWindow { get; init; }
+
     public BackupDriverException(string message) : base(message) { }
 }

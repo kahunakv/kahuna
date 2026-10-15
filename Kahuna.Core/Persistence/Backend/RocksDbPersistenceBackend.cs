@@ -2220,10 +2220,21 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// </summary>
     public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp)
     {
+        KeyValueScanTally discarded = default;
+        return GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp, ref discarded);
+    }
+
+    /// <summary>
+    /// <see cref="GetKeyValueRevisionAtOrBefore(string, long, HLCTimestamp)"/> that also counts, into
+    /// <paramref name="tally"/>, every revision row of <paramref name="keyName"/> it read: the rows the probe
+    /// found and the rows the backstop walk stepped over.
+    /// </summary>
+    public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp, ref KeyValueScanTally tally)
+    {
         EnterDbFence();
         try
         {
-            return GetKeyValueRevisionAtOrBeforeFenced(keyName, maxRevision, readTimestamp);
+            return GetKeyValueRevisionAtOrBeforeFenced(keyName, maxRevision, readTimestamp, ref tally);
         }
         finally
         {
@@ -2245,7 +2256,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     // walk, when still needed, runs with its ceiling lowered to lowestProbed - 1 and finds exactly what
     // the unprobed version would have. A batch with no rows at all means the chain ended or has a hole
     // (pruning, a head jump); the walk resolves both, so the probe stops there rather than guessing.
-    private KeyValueEntry? GetKeyValueRevisionAtOrBeforeFenced(string keyName, long maxRevision, HLCTimestamp readTimestamp)
+    private KeyValueEntry? GetKeyValueRevisionAtOrBeforeFenced(string keyName, long maxRevision, HLCTimestamp readTimestamp, ref KeyValueScanTally tally)
     {
         if (maxRevision < 0)
             return null;
@@ -2274,6 +2285,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                         continue;
 
                     anyPresent = true;
+                    tally.RevisionRowsExamined++;
                     if (row.LastModified.CompareTo(readTimestamp) <= 0)
                         return row;
                 }
@@ -2288,12 +2300,12 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 return null;
         }
 
-        return WalkRevisionAtOrBeforeFenced(keyName, walkCeiling, readTimestamp);
+        return WalkRevisionAtOrBeforeFenced(keyName, walkCeiling, readTimestamp, ref tally);
     }
 
     // Forward scan over every revision row of keyName — the pre-probe algorithm, kept as the exact
     // backstop for snapshots older than the probe window and for chains with holes. O(revisions).
-    private KeyValueEntry? WalkRevisionAtOrBeforeFenced(string keyName, long maxRevision, HLCTimestamp readTimestamp)
+    private KeyValueEntry? WalkRevisionAtOrBeforeFenced(string keyName, long maxRevision, HLCTimestamp readTimestamp, ref KeyValueScanTally tally)
     {
         int keyLen = Encoding.UTF8.GetByteCount(keyName);
         int prefixLen = keyLen + 1; // keyName + '~'
@@ -2344,6 +2356,8 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                     iterator.Next();
                     continue;
                 }
+
+                tally.RevisionRowsExamined++;
 
                 if (revision <= maxRevision)
                 {
@@ -2725,10 +2739,21 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// </summary>
     public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit)
     {
+        KeyValueScanTally discarded = default;
+        return GetKeyValueByRange(prefix, startKey, limit, ref discarded);
+    }
+
+    /// <summary>
+    /// <see cref="GetKeyValueByRange(string, string?, int)"/> that also counts, into <paramref name="tally"/>,
+    /// the revision rows the walk stepped over (the ~NOREV provenance row is not a revision row) and the
+    /// seeks that jumped the rest of a key's revision block.
+    /// </summary>
+    public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit, ref KeyValueScanTally tally)
+    {
         EnterDbFence();
         try
         {
-            return GetKeyValueByRangeFenced(prefix, startKey, limit);
+            return GetKeyValueByRangeFenced(prefix, startKey, limit, ref tally);
         }
         finally
         {
@@ -2737,7 +2762,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     }
 
     // Must run under the swap fence (EnterDbFence).
-    private List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRangeFenced(string prefix, string? startKey, int limit)
+    private List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRangeFenced(string prefix, string? startKey, int limit, ref KeyValueScanTally tally)
     {
         List<(string, ReadOnlyKeyValueEntry)> result = [];
 
@@ -2782,12 +2807,16 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
 
                 if (!rawKey.EndsWith(CurrentMarkerUtf8))
                 {
+                    if (!rawKey.EndsWith(NoRevMarkerUtf8))
+                        tally.RevisionRowsExamined++;
+
                     // A long run of non-current rows is a deep revision block. Try once per run
                     // to jump the rest of the block, so a blocked bucket pays one registry check
                     // per run rather than one per row. On a successful seek the iterator already
                     // moved: re-read the landed key without Next.
                     if (++nonCurrentRun == RevisionRunSeekThreshold && TrySeekPastRevisionRun(iterator, rawKey))
                     {
+                        tally.RevisionRunSeeks++;
                         nonCurrentRun = 0;
                         continue;
                     }

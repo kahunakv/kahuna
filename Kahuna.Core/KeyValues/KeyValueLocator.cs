@@ -2777,7 +2777,7 @@ internal sealed class KeyValueLocator
 
             logger.LogGetRangeKeyValueRedirected(prefix, singlePartitionId, singleLeader);
 
-            return await interNodeCommunication.GetByRange(singleLeader, transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken, snapshotAtLeader);
+            return MarkServedRemotely(await interNodeCommunication.GetByRange(singleLeader, transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken, snapshotAtLeader));
         }
 
         // Multi-range path: key-range space has been split; fan out across intersecting descriptors.
@@ -2791,11 +2791,13 @@ internal sealed class KeyValueLocator
         ArraySegment<RangeDescriptor> descriptors = rangeMap.FindIntersecting(keySpace, startKey, endKey);
 
         if (descriptors.Count == 0)
-            return new(KeyValueResponseType.Get, [], null, false);
+            return new(KeyValueResponseType.Get, [], null, false, default(KeyValueScanObservation));
 
         var accumulated = new List<(string, ReadOnlyKeyValueEntry)>();
         int remaining   = limit > 0 ? limit : int.MaxValue;
         bool hasMore    = false;
+        // The stitched page costs the sum of its parts; one part with an unknown cost makes the sum unknown.
+        KeyValueScanObservation? observation = default(KeyValueScanObservation);
 
         foreach (RangeDescriptor descriptor in descriptors)
         {
@@ -2811,8 +2813,14 @@ internal sealed class KeyValueLocator
                 clStart, clStartInc, clEnd, clEndInc,
                 pageLimit, readTimestamp, durability, cancellationToken, snapshotAtLeader);
 
+            observation = KeyValueScanObservation.Combine(observation, part.Observation);
+
             if (part.Type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
+            {
+                // The refused part reports what the whole fan-out cost so far, not only its own attempt.
+                part.Observation = observation;
                 return part;
+            }
 
             if (part.Type != KeyValueResponseType.Get)
                 continue;
@@ -2826,7 +2834,7 @@ internal sealed class KeyValueLocator
         }
 
         if (accumulated.Count == 0)
-            return new(KeyValueResponseType.Get, [], null, false);
+            return new(KeyValueResponseType.Get, [], null, false, observation);
 
         string? cursor = null;
         if (hasMore)
@@ -2839,7 +2847,18 @@ internal sealed class KeyValueLocator
             cursor = KeyValueRangeCursor.Encode(lastKey, durability, prefix, ts);
         }
 
-        return new(KeyValueResponseType.Get, accumulated, cursor, hasMore);
+        return new(KeyValueResponseType.Get, accumulated, cursor, hasMore, observation);
+    }
+
+    /// <summary>
+    /// Flags a page a peer served. A page with no observation (a peer on an older build) stays unknown.
+    /// </summary>
+    private static KeyValueGetByRangeResult MarkServedRemotely(KeyValueGetByRangeResult result)
+    {
+        if (result.Observation is { } observation)
+            result.Observation = observation with { ServedRemotely = true };
+
+        return result;
     }
 
     /// <summary>Routes a GetByRange page to <paramref name="partitionId"/>'s leader.</summary>
@@ -2862,7 +2881,7 @@ internal sealed class KeyValueLocator
         if (leader is null || leader == raft.GetLocalEndpoint())
             return new(KeyValueResponseType.MustRetry, [], null, false);
 
-        return await interNodeCommunication.GetByRange(leader, transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken, snapshotAtLeader);
+        return MarkServedRemotely(await interNodeCommunication.GetByRange(leader, transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken, snapshotAtLeader));
     }
 
     /// <summary>

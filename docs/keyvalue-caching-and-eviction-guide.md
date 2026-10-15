@@ -216,7 +216,7 @@ where they grow, so the collector never has to sweep the whole store to bound th
 
 - **Revision history.** Each entry keeps a small number of recent prior versions so that
   point-in-time ("as of") reads can be answered from memory. This history is trimmed back to
-  `RevisionRetention` (default 16) every time a new revision is archived, **except** that unflushed
+  `RevisionRetention` (`--revisions-to-cache`, default 4) every time a new revision is archived, **except** that unflushed
   revisions and the boundary of a registered snapshot hold are retained beyond the count. Flush
   lag can therefore grow the archive. A disk fallback that could miss an unflushed revision is
   fenced with `MustRetry`; see the [MVCC guide](mvcc-snapshot-floor-guide.md).
@@ -260,6 +260,25 @@ Two read shapes interact with the cache differently, and the distinction matters
 A subtle but important interaction: a range scan may encounter keys that live only on disk (they were
 evicted). It reads those without forcing them back into the cache, so a big scan doesn't blow the
 budget or disturb the recency ordering of the keys that are actually hot.
+
+**What one scan cost.** Each page of a paginated range scan carries a `KeyValueScanObservation`
+(`KeyValueGetByRangeResult.Observation`) that tells you what the page cost the serving node:
+
+| Field | Meaning |
+|---|---|
+| `EntriesInspected` | Entries the walk touched, live or dead. Every page except the last also evaluates one key past its limit, and the next page evaluates that key again. |
+| `DeadEntriesSkipped` | Touched entries the page did not return: tombstones, expired entries, keys with no version at the read timestamp. |
+| `RevisionRowsExamined` | Revision-history rows read on disk. On RocksDB every write stores a revision row next to its head, so a key written once costs one row. The memory and SQLite backends count one row per as-of lookup. |
+| `RevisionRunSeeks` | Seeks that jumped the rest of a key's revision rows (the same events as `kahuna.scan.revision_run_seeks_total`). |
+| `IntentsMerged` | Committed prepared intents applied to the page. |
+| `PageRetries` | Transient retries of the page before it was served. A retried page reports the sum over all of its attempts. |
+| `ServedRemotely` / `DiskFallback` | A peer served the page / the page merged a disk read. |
+
+To total a streamed scan, pass a `KeyValueScanObservationSink` to `IKahuna.LocateAndScanRange` and
+read it when the enumeration ends. A null observation means the cost is unknown (a peer on an older
+build served the page). It never means zero. The sink counts such pages in `PagesUnobserved`, and
+its `Total` is exact only when that count is zero. Observations are advisory and never change
+paging, retries or results.
 
 ### 7.1 Point reads that skip the actor: published head records
 
@@ -321,7 +340,7 @@ too small for the workload.
 | `MaxEntriesPerActor` | 50,000 | cache more keys per actor (more memory, fewer disk reads) | cap memory harder |
 | `MaxBytesPerActor` | 256 MiB | cache more/larger values per actor | cap memory harder |
 | `CollectBatchMax` | 1,000 | reclaim faster under bursty pressure (longer pauses) | keep collect pauses shorter |
-| `RevisionRetention` | 16 | answer more "as of" reads from memory | shrink per-entry history |
+| `RevisionRetention` (`--revisions-to-cache`) | 4 | answer more "as of" reads from memory (ephemeral keys have no disk fallback) | shrink per-entry history |
 | `DirtyObjectsWriterDelay` | 1,000 ms (embedded) | batch disk writes more aggressively | flush sooner (smaller dirty window) |
 | `PublishedHeadReads` | on | — | turn it off to send every point read through the actor (diagnosis only) |
 

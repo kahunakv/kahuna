@@ -196,6 +196,76 @@ internal sealed class BackupFacade : IDisposable
     }
 
     /// <summary>
+    /// The first step of a PITR bootstrap, run before the persistence backend opens: puts the full backup's
+    /// checkpoint into the node's storage path, verified, unless the store already holds data or a completed
+    /// seed. See <see cref="BootstrapBaseImage"/> for the layout, the publish protocol and the restart rules.
+    /// The returned plan tells the caller whether to run <see cref="BootstrapAsync"/> before the join.
+    ///
+    /// <para>The chain is read through the same storage target and artifact store as every other backup
+    /// operation (a registered <see cref="KahunaConfiguration.BackupStorageProvider"/> included), so a bucket
+    /// target needs no tool outside the server. Every refusal leaves no backend data in the storage path.</para>
+    /// </summary>
+    /// <param name="leafBackupId">The leaf to seed from, or null for the newest valid chain of this cluster.</param>
+    /// <param name="fallbackToJoin">
+    /// When true, a chain outside the retention window (or no chain at all, when <paramref name="leafBackupId"/>
+    /// is null) gives a fallback plan with an empty store instead of a failure.
+    /// </param>
+    internal static async Task<PitrBootstrapPlan> PrepareBootstrapAsync(
+        KahunaConfiguration configuration,
+        string backupDir,
+        Guid? leafBackupId,
+        HLCTimestamp targetTime,
+        TimeSpan pitrWindow,
+        TimeSpan baseSnapshotInterval,
+        bool fallbackToJoin,
+        ILogger logger,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(backupDir))
+                throw new BackupDriverException("A PITR bootstrap needs the backup directory that holds the chain.");
+
+            BackupFilePermissions.EnsureRootSecure(backupDir);
+
+            return await BootstrapBaseImage.PrepareAsync(new BootstrapBaseImageRequest(
+                configuration.Storage,
+                configuration.StoragePath,
+                configuration.StorageRevision,
+                CreateBackupStorage(configuration, backupDir),
+                leafBackupId,
+                targetTime,
+                pitrWindow,
+                baseSnapshotInterval,
+                DateTime.UtcNow,
+                BackupService.LoadMacKey(configuration.BackupMacKeyFile),
+                configuration.BackupClusterId,
+                fallbackToJoin,
+                configuration.BackupRestoreThrottleBytesPerSec), ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ShouldMap(ex))
+        {
+            throw MapAndLog((operationId, e) => logger.LogError(e, "PITR bootstrap {OperationId} failed", operationId), ex);
+        }
+    }
+
+    /// <summary>
+    /// Records in the storage path that the seed of a plan from <see cref="PrepareBootstrapAsync"/> completed,
+    /// so a later start skips the seed. Call it after <see cref="BootstrapAsync"/> returned successfully.
+    /// </summary>
+    internal static void CompleteBootstrap(PitrBootstrapPlan plan, ILogger logger)
+    {
+        try
+        {
+            BootstrapBaseImage.MarkSeeded(plan.StoragePath);
+        }
+        catch (Exception ex) when (ShouldMap(ex))
+        {
+            throw MapAndLog((operationId, e) => logger.LogError(e, "PITR bootstrap {OperationId} failed", operationId), ex);
+        }
+    }
+
+    /// <summary>
     /// Builds the backup storage pair rooted at <paramref name="backupDir"/>. A host that registered a
     /// <see cref="KahunaConfiguration.BackupStorageProvider"/> gets whatever it returns; otherwise the
     /// local-directory implementations are used, so an existing deployment behaves exactly as before.
@@ -381,6 +451,10 @@ internal sealed class BackupFacade : IDisposable
         BackupDriverException d when d.TargetConflict =>
             new(KahunaBackupOutcome.TargetConflict,
                 "The restore destination already exists or overlaps a protected path."),
+        BackupDriverException d when d.OutsidePitrWindow =>
+            new(KahunaBackupOutcome.TargetOutsideCoverage,
+                "The backup's restore point is older than the PITR retention window, so the leader would send a " +
+                "full snapshot anyway; use a more recent backup, or join without the bootstrap."),
         BackupDriverException d when d.TargetOutsideCoverage =>
             new(KahunaBackupOutcome.TargetOutsideCoverage,
                 "The requested restore time is outside the recoverable coverage of this backup chain."),

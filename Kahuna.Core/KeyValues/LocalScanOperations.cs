@@ -310,6 +310,11 @@ internal sealed class LocalScanOperations
 
         bool attemptedRoutedResolve = false;
 
+        // What the attempts this loop retried cost, and how many there were. The served page reports the sum
+        // over all of its attempts, so the work a retried attempt did is not lost from the observation.
+        KeyValueScanObservation retriedAttempts = default;
+        int retries = 0;
+
         try
         {
             LazyRetryDelays retryDelays = new(TimeSpan.FromMilliseconds(1), MaxRetries);
@@ -327,6 +332,8 @@ internal sealed class LocalScanOperations
 
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
+                    retriedAttempts = AddRetriedAttempt(retriedAttempts, response.RangeResult);
+                    retries++;
                     Transactions.DurableTransactionMetrics.AddKvRetryWait("GetByRange_6135");
                     if (retryDelays.TryNext(out TimeSpan delay)) await Task.Delay(delay);
                     continue;
@@ -353,22 +360,38 @@ internal sealed class LocalScanOperations
 
                     if (routed is not null)
                     {
+                        retriedAttempts = AddRetriedAttempt(retriedAttempts, response.RangeResult);
+                        retries++;
                         request.ForeignScanDecisions = routed;
                         continue;
                     }
                 }
 
-                if (response.RangeResult is not null)
-                    return response.RangeResult;
+                if (response.RangeResult is { } served)
+                {
+                    // A served page with no observation stays unknown; the retried attempts cannot make it known.
+                    if (retries > 0 && served.Observation is { } observation)
+                        served.Observation = observation + (retriedAttempts with { PageRetries = retriedAttempts.PageRetries + retries });
+
+                    return served;
+                }
 
                 return new(response.Type, [], null, false);
             }
 
-            return new(KeyValueResponseType.MustRetry, [], null, false);
+            return new(KeyValueResponseType.MustRetry, [], null, false,
+                retriedAttempts with { PageRetries = retriedAttempts.PageRetries + retries });
         }
         finally
         {
             KeyValueRequestPool.Return(request);
         }
     }
+
+    /// <summary>
+    /// Adds a retried attempt's cost to <paramref name="sum"/>. An attempt that carries no observation (it was
+    /// refused before a handler walked anything) adds nothing.
+    /// </summary>
+    private static KeyValueScanObservation AddRetriedAttempt(KeyValueScanObservation sum, KeyValueGetByRangeResult? attempt) =>
+        attempt?.Observation is { } observation ? sum + observation : sum;
 }

@@ -26,12 +26,19 @@ public sealed partial class ReplicationService : BackgroundService //, IDisposab
 
     private readonly string localEndpoint;
 
-    public ReplicationService(IKahuna kahuna, IRaft raft, KahunaCommandLineOptions options, ILogger<IRaft> logger)
+    private readonly PitrBootstrapPlan? bootstrapPlan;
+
+    /// <param name="bootstrapPlan">
+    /// The outcome of the base image step of a PITR bootstrap, which runs at startup before the persistence
+    /// backend opens. Registered only when the node starts with <c>--pitr-bootstrap-from</c>.
+    /// </param>
+    public ReplicationService(IKahuna kahuna, IRaft raft, KahunaCommandLineOptions options, ILogger<IRaft> logger, PitrBootstrapPlan? bootstrapPlan = null)
     {
         this.kahuna = kahuna;
         this.raft = raft;
         this.options = options;
         this.logger = logger;
+        this.bootstrapPlan = bootstrapPlan;
         this.statsLogger = new(logger);
         localEndpoint = raft.GetLocalEndpoint();
     }
@@ -48,27 +55,27 @@ public sealed partial class ReplicationService : BackgroundService //, IDisposab
         raft.OnLeadershipLost += kahuna.OnLeadershipLost;
         raft.OnMembershipChanged += OnMembershipChanged;
 
-        if (options.PitrBootstrapFrom.HasValue)
+        // The base image step already ran, before the backend opened, and decided whether a seed is due. The
+        // flag combination was validated there as well.
+        if (bootstrapPlan is { Action: PitrBootstrapAction.Seed, LeafBackupId: { } leafId })
         {
-            if (!options.RaftJoinExisting)
-                throw new InvalidOperationException(
-                    "--pitr-bootstrap-from requires --join-existing (the node must join an existing cluster after seeding).");
-
-            if (string.IsNullOrWhiteSpace(options.PitrBackupDir))
-                throw new InvalidOperationException(
-                    "--pitr-bootstrap-from requires --pitr-backup-dir pointing to the backup catalog/artifacts directory.");
-
-            Guid leafId = options.PitrBootstrapFrom.Value;
             // Shared resolver: bootstrap and the regular restore API (RestoreToAsync) map a millisecond
             // target to the same inclusive end-of-millisecond HLC, so they can never diverge.
             HLCTimestamp targetTime = PitrTargetResolver.FromUnixMilliseconds(options.PitrTargetTimeMs);
-            TimeSpan pitrWindow = TimeSpan.FromSeconds(options.PitrWindowSeconds);
             TimeSpan baseSnapshotInterval = TimeSpan.FromSeconds(options.BaseSnapshotIntervalSeconds);
 
             try
             {
+                // The retention window was checked before the base image was downloaded. It is not checked
+                // again: a long download could close it now, and every restart would then continue the seed
+                // into the same refusal. A seed below the leader's compaction floor is still correct; the
+                // leader catches the node up by snapshot.
                 await kahuna.BootstrapFromPitrBackupAsync(
-                    options.PitrBackupDir, leafId, targetTime, raft.WalAdapter, pitrWindow, baseSnapshotInterval);
+                    options.PitrBackupDir, leafId, targetTime, raft.WalAdapter, Timeout.InfiniteTimeSpan, baseSnapshotInterval);
+
+                // Recorded only after the seed returned, so a crash before this line continues the seed on the
+                // next start instead of skipping it.
+                BackupFacade.CompleteBootstrap(bootstrapPlan, logger);
                 LogBootstrapComplete(logger, leafId, targetTime);
             }
             catch (Exception ex)

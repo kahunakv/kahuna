@@ -373,9 +373,10 @@ public sealed partial class KahunaManager
         KeyValueDurability durability,
         CancellationToken ct,
         string coordinatorKey = "",
-        TransactionOperationId operationId = default)
+        TransactionOperationId operationId = default,
+        KeyValueScanObservationSink? observations = null)
     {
-        return keyValues.LocateAndScanRange(txId, prefix, startKey, startInclusive, endKey, endInclusive, pageSize, readTimestamp, durability, ct, coordinatorKey, operationId);
+        return keyValues.LocateAndScanRange(txId, prefix, startKey, startInclusive, endKey, endInclusive, pageSize, readTimestamp, durability, ct, coordinatorKey, operationId, observations);
     }
 
     /// <summary>

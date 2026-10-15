@@ -1608,7 +1608,8 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             (KeyValueResponseType)remoteResponse.Type,
             GetReadOnlyItem(remoteResponse.Items),
             remoteResponse.HasNextCursor ? remoteResponse.NextCursor : null,
-            remoteResponse.HasMore);
+            remoteResponse.HasMore,
+            ScanObservationWire.FromGrpc(remoteResponse.Observation));
     }
 
     public async Task<KeyValueGetByBucketResult> ScanByPrefix(string node, string prefixedKey, HLCTimestamp readTimestamp, KeyValueDurability durability, bool includeTombstones, CancellationToken cancellationToken)

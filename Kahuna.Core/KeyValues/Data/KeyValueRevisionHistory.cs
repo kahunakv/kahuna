@@ -11,8 +11,8 @@ namespace Kahuna.Server.KeyValues;
 ///
 /// <para>Revision numbers are monotonically increasing at the point of archival, so new
 /// entries are always appended at the tail. Trim removes from the front (oldest first),
-/// making both operations O(1) or O(n) shift at worst for the bounded <c>n ≤ 17</c>
-/// (RevisionRetention + optional floor-boundary entry). Exact-revision lookup uses binary
+/// making both operations O(1) or O(n) shift at worst for the bounded <c>n ≤ RevisionRetention + 1</c>
+/// (the configured retention plus an optional floor-boundary entry). Exact-revision lookup uses binary
 /// search; at-or-before scan is a forward scan through the ordered array.</para>
 /// </summary>
 internal sealed class KeyValueRevisionHistory
@@ -58,8 +58,8 @@ internal sealed class KeyValueRevisionHistory
             }
 
             // Capacity only grows (doubling); it is never shrunk on Remove. This is bounded because the
-            // history itself is bounded (RevisionRetention + optional floor boundary, n ≤ 17), so the
-            // backing array never exceeds ~32 slots regardless of how many trim/append cycles occur.
+            // history itself is bounded (RevisionRetention + optional floor boundary), so the backing
+            // array never exceeds about twice that many slots regardless of how many trim/append cycles occur.
             if (_count == _items.Length)
             {
                 int newCap = _items.Length * 2;

@@ -839,11 +839,25 @@ message GrpcGetByRangeRequest {
   bool SnapshotAtLeader = 17;
 }
 
+// What one range-scan page cost the serving node. Advisory: it never changes paging or results.
+// Absent when the server predates it; a consumer must read an absent message as unknown, never as zero.
+message GrpcScanObservation {
+  int64 EntriesInspected = 1;
+  int64 DeadEntriesSkipped = 2;
+  int64 RevisionRowsExamined = 3;
+  int64 RevisionRunSeeks = 4;
+  int64 IntentsMerged = 5;
+  int64 PageRetries = 6;
+  bool ServedRemotely = 7;
+  bool DiskFallback = 8;
+}
+
 message GrpcGetByRangePageResponse {
   GrpcKeyValueResponseType Type = 1;
   repeated GrpcKeyValueByPrefixItemResponse Items = 2;
   optional string NextCursor = 3;
   bool HasMore = 4;
+  GrpcScanObservation Observation = 5;
 }
 
 message GrpcGetByRangeResponse {
@@ -852,6 +866,7 @@ message GrpcGetByRangeResponse {
   repeated GrpcKeyValueByPrefixItemResponse Items = 3;
   optional string NextCursor = 4;
   bool HasMore = 5;
+  GrpcScanObservation Observation = 6;
 }
 
 message GrpcScanAllByPrefixRequest {

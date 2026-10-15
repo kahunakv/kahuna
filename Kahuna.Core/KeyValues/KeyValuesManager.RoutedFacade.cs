@@ -370,7 +370,8 @@ internal sealed partial class KeyValuesManager
         KeyValueDurability durability,
         CancellationToken ct,
         string coordinatorKey = "",
-        TransactionOperationId operationId = default) =>
-        routedScans.LocateAndScanRange(txId, prefix, startKey, startInclusive, endKey, endInclusive, pageSize, readTimestamp, durability, ct, coordinatorKey, operationId);
+        TransactionOperationId operationId = default,
+        KeyValueScanObservationSink? observations = null) =>
+        routedScans.LocateAndScanRange(txId, prefix, startKey, startInclusive, endKey, endInclusive, pageSize, readTimestamp, durability, ct, coordinatorKey, operationId, observations);
 
 }

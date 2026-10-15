@@ -411,9 +411,10 @@ internal sealed class RoutedScanOperations
         payload.CachedType = result.Type;
 
         // Owns the shell from here: recycled on an acknowledged fold, retained in the retry cache otherwise.
-        // A completion that did not land must not hand the page back over a still-pending record.
+        // A completion that did not land must not hand the page back over a still-pending record. The refusal
+        // keeps what the scan cost, so the retried page reports the sum over its attempts.
         if (!await CompleteRegisteredOperation(coordinatorKey, transactionId, operationId, result.Type, payload))
-            return new KeyValueGetByRangeResult(KeyValueResponseType.MustRetry, [], null, false);
+            return new KeyValueGetByRangeResult(KeyValueResponseType.MustRetry, [], null, false, result.Observation);
 
         return result;
     }
@@ -427,6 +428,11 @@ internal sealed class RoutedScanOperations
     /// Any other non-<see cref="KeyValueResponseType.Get"/> page fails the scan with a
     /// <see cref="KahunaServerException"/> carrying the response type: the stream never ends early on a
     /// failure, so an exhausted enumeration always means the range was scanned completely.
+    /// <para>
+    /// <paramref name="observations"/>, when given, receives each served page's observation summed over every
+    /// attempt of that page, with the retries this loop took for it. Observations never change paging,
+    /// retries or results.
+    /// </para>
     /// </summary>
     public async IAsyncEnumerable<(string Key, ReadOnlyKeyValueEntry Entry)> LocateAndScanRange(
         HLCTimestamp txId,
@@ -440,7 +446,8 @@ internal sealed class RoutedScanOperations
         KeyValueDurability durability,
         [EnumeratorCancellation] CancellationToken ct,
         string coordinatorKey = "",
-        TransactionOperationId operationId = default)
+        TransactionOperationId operationId = default,
+        KeyValueScanObservationSink? observations = null)
     {
         string? cursorKey       = startKey;
         bool    cursorInclusive = startInclusive;
@@ -464,6 +471,10 @@ internal sealed class RoutedScanOperations
         // scan (caller pinned readTimestamp) folds nothing.
         bool foldObservations   = readTimestamp.IsNull();
         int pageIndex           = 0;
+        // What the current page's refused attempts cost, and how many this loop retried. Reset with the
+        // back-off when a page is served.
+        KeyValueScanObservation retriedAttempts = default;
+        long pageRetries        = 0;
 
         while (true)
         {
@@ -510,6 +521,13 @@ internal sealed class RoutedScanOperations
                         page.Type);
                 }
 
+                if (observations is not null)
+                {
+                    if (page.Observation is { } refused)
+                        retriedAttempts += refused;
+                    pageRetries++;
+                }
+
                 Transactions.DurableTransactionMetrics.AddKvRetryWait("LocateAndScanRange_3201");
                 await Task.Delay(backoffMs, ct);
                 backoffMs = Math.Min(backoffMs * 2, 1000);
@@ -534,6 +552,14 @@ internal sealed class RoutedScanOperations
                     $"Range scan page {pageIndex} over '{prefix}' [{cursorKey ?? "-inf"},{endKey ?? "+inf"}) " +
                     $"failed with {page.Type}; the scan was aborted instead of returning a truncated result.",
                     page.Type);
+            }
+
+            if (observations is not null)
+            {
+                // A served page without an observation stays unknown; the sink still counts its retries.
+                observations.Add(page.Observation is { } served ? served + retriedAttempts : null, pageRetries);
+                retriedAttempts = default;
+                pageRetries = 0;
             }
 
             foreach ((string key, ReadOnlyKeyValueEntry entry) in page.Items)

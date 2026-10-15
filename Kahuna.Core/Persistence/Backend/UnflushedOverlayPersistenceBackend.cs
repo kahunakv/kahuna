@@ -180,7 +180,13 @@ internal sealed class UnflushedOverlayPersistenceBackend : IPersistenceBackend, 
 
     public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp)
     {
-        KeyValueEntry? best = inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);
+        KeyValueScanTally discarded = default;
+        return GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp, ref discarded);
+    }
+
+    public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp, ref KeyValueScanTally tally)
+    {
+        KeyValueEntry? best = inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp, ref tally);
 
         if (unflushedWrites.TryGet(keyName, out UnflushedKeyValueWrite queued)
             && !queued.NoRevision
@@ -291,7 +297,13 @@ internal sealed class UnflushedOverlayPersistenceBackend : IPersistenceBackend, 
 
     public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit)
     {
-        List<(string, ReadOnlyKeyValueEntry)> items = inner.GetKeyValueByRange(prefix, startKey, limit);
+        KeyValueScanTally discarded = default;
+        return GetKeyValueByRange(prefix, startKey, limit, ref discarded);
+    }
+
+    public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit, ref KeyValueScanTally tally)
+    {
+        List<(string, ReadOnlyKeyValueEntry)> items = inner.GetKeyValueByRange(prefix, startKey, limit, ref tally);
 
         if (unflushedWrites.IsEmpty)
             return items;

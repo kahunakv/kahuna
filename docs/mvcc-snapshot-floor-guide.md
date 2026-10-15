@@ -41,7 +41,8 @@ A persistent key that retains revisions has its history spread across three laye
 
 - **The live value** — the current committed version (`Value` / `Revision` / `LastModified`).
 - **A bounded in-memory revision archive** — the newest `RevisionRetention` revisions (default
-  **16**), kept per key so recent as-of reads are answered without touching disk.
+  **4**, set with `--revisions-to-cache` on a server), kept per key so recent
+  as-of reads are answered without touching disk.
 - **On-disk revision history** — the full run of past revisions in the backend (SQLite or RocksDB),
   bounded only by the persistent retention knobs (by default **kept forever**).
 
@@ -270,7 +271,7 @@ hold has to protect:
 
 | Knob | Default | Effect on as-of reads / holds |
 |------|---------|-------------------------------|
-| `RevisionRetention` | 16 | How many recent revisions per key answer as-of reads from memory before falling back to disk. A live hold additionally keeps one boundary revision. |
+| `RevisionRetention` (`--revisions-to-cache`) | 4 | How many recent revisions per key answer as-of reads from memory before falling back to disk. A live hold additionally keeps one boundary revision. An ephemeral key has no disk history, so its revisions older than this are gone. |
 | `PersistentRevisionRetentionCount` | 0 (keep all) | How many revisions the persistent sweep keeps per key. The floor clamps this: protected revisions are kept regardless. |
 | `PersistentRevisionRetentionAge` | disabled | Age-based persistent pruning; also clamped by the floor. |
 | `PersistentRevisionCleanupBatchSize` | 10000 | Revision rows one prune pass (a targeted cycle or a sweep pass) may delete. The time budget bounds the pass; this only caps its tombstones. Keep it well above what one hot key sheds per visit: a walk cut short by this limit has already paid for the whole block and must walk it again next cycle. |
