@@ -210,6 +210,10 @@ internal sealed class TryGetByRangeHandler : BaseHandler
         bool capturedSnapshotRead = !message.ReadTimestamp.IsNull();
         HLCTimestamp capturedSnapshotTs = snapshotTs;
         HLCTimestamp capturedCurrentTime = currentTime;
+        // The request's own end bound (not the prefix upper bound ComputeBounds substitutes for the
+        // BTree): the backend already stops at the prefix, and a null bound means just that.
+        string? capturedEndKey = message.EndKey;
+        bool capturedEndInclusive = message.EndInclusive;
 
         Task<RangeDiskPage> readTask;
         try
@@ -228,7 +232,7 @@ internal sealed class TryGetByRangeHandler : BaseHandler
                     }
 
                     return ReadDiskPage(
-                        context.PersistenceBackend, prefix, diskCursor, limit,
+                        context.PersistenceBackend, prefix, diskCursor, capturedEndKey, capturedEndInclusive, limit,
                         capturedSnapshotRead, capturedSnapshotTs, capturedCurrentTime, () => cont.Cancelled);
                 });
         }
@@ -264,15 +268,20 @@ internal sealed class TryGetByRangeHandler : BaseHandler
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Stage 2 of the persistent range scan: reads one raw disk page from <paramref name="diskCursor"/> and
-    /// snapshot-projects it (<see cref="ProjectSnapshotPage"/>). The page carries what the read cost — the
-    /// revision rows and seeks of the walk and the as-of lookups of the projection — so stage 3 can add it to
-    /// the scan's observation. Must run on the off-actor scheduler thread.
+    /// Stage 2 of the persistent range scan: reads one raw disk page from <paramref name="diskCursor"/> up to
+    /// the scan's end bound and snapshot-projects it (<see cref="ProjectSnapshotPage"/>). The backend stops at
+    /// the bound, so a short bounded seek reads and projects only the entries inside it rather than a full
+    /// page; a raw page shorter than the sentinel size because the bound ended it carries no next cursor.
+    /// The page carries what the read cost — the revision rows and seeks of the walk and the as-of lookups
+    /// of the projection — so stage 3 can add it to the scan's observation. Must run on the off-actor
+    /// scheduler thread.
     /// </summary>
     internal static RangeDiskPage ReadDiskPage(
         IPersistenceBackend backend,
         string prefix,
         string diskCursor,
+        string? endKey,
+        bool endInclusive,
         int limit,
         bool isSnapshotRead,
         HLCTimestamp snapshotTs,
@@ -284,7 +293,7 @@ internal sealed class TryGetByRangeHandler : BaseHandler
         // An unbounded scan arrives as limit == int.MaxValue; a naive limit + 1 overflows negative,
         // which the backends treat as "no rows" — silently emptying every disk page of the scan.
         List<(string, ReadOnlyKeyValueEntry)> rawPage =
-            backend.GetKeyValueByRange(prefix, diskCursor, SaturatingPageSize(limit), ref tally);
+            backend.GetKeyValueByRange(prefix, diskCursor, endKey, endInclusive, SaturatingPageSize(limit), ref tally);
 
         return ProjectSnapshotPage(rawPage, limit, isSnapshotRead, snapshotTs, currentTime, backend, shouldAbort, tally);
     }
@@ -292,12 +301,17 @@ internal sealed class TryGetByRangeHandler : BaseHandler
     /// <summary>
     /// Builds a <see cref="RangeDiskPage"/> from a raw disk page: extracts raw pagination
     /// facts (has-more flag and next-cursor key) from the unfiltered <paramref name="rawPage"/>,
-    /// then snapshot-projects the usable rows (excluding the sentinel).
+    /// then snapshot-projects every row, the <c>limit + 1</c> sentinel included.
     ///
     /// Separating pagination from projection fixes a silent correctness bug: when all
     /// <c>limit + 1</c> raw rows are post-snapshot and dropped by projection, the caller must
     /// still know the raw page was full (RawHasMore=true) and fetch the next page rather than
     /// concluding the disk is exhausted.
+    ///
+    /// The sentinel row is a real row of the range, so it takes part in the stage-3 merge like any
+    /// other: a page whose merge ends on it needs no second disk read to learn that more rows exist,
+    /// where a page without it had to fetch the next page to find one more row. The next page starts
+    /// at the sentinel key, and the continuation skips the rows it already merged.
     ///
     /// Must run on the off-actor scheduler thread — per-key GetKeyValueRevisionAtOrBefore
     /// calls do disk I/O and must not block the actor mailbox.
@@ -315,18 +329,11 @@ internal sealed class TryGetByRangeHandler : BaseHandler
         // Derive raw pagination facts before any projection filtering.
         bool rawHasMore = rawPage.Count > limit;
         string? rawNextCursor = rawHasMore ? rawPage[limit].Item1 : null;
-        // Usable rows are rawPage[0..limit]; the (limit+1)-th entry is the pagination sentinel.
-        int usableCount = rawHasMore ? limit : rawPage.Count;
 
         if (!isSnapshotRead)
-        {
-            // No snapshot filtering. Return the usable slice (strip the sentinel when present).
-            List<(string, ReadOnlyKeyValueEntry)> plain = usableCount == rawPage.Count
-                ? rawPage
-                : rawPage.GetRange(0, usableCount);
-            return new RangeDiskPage(plain, rawHasMore, rawNextCursor, tally);
-        }
+            return new RangeDiskPage(rawPage, rawHasMore, rawNextCursor, tally);
 
+        int usableCount = rawPage.Count;
         List<(string, ReadOnlyKeyValueEntry)> projected = new(usableCount);
         for (int i = 0; i < usableCount; i++)
         {

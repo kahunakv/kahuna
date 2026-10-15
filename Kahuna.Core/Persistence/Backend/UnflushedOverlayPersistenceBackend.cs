@@ -301,17 +301,25 @@ internal sealed class UnflushedOverlayPersistenceBackend : IPersistenceBackend, 
         return GetKeyValueByRange(prefix, startKey, limit, ref discarded);
     }
 
-    public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit, ref KeyValueScanTally tally)
+    public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit, ref KeyValueScanTally tally) =>
+        GetKeyValueByRange(prefix, startKey, null, false, limit, ref tally);
+
+    public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(
+        string prefix, string? startKey, string? endKey, bool endInclusive, int limit, ref KeyValueScanTally tally)
     {
-        List<(string, ReadOnlyKeyValueEntry)> items = inner.GetKeyValueByRange(prefix, startKey, limit, ref tally);
+        List<(string, ReadOnlyKeyValueEntry)> items = inner.GetKeyValueByRange(prefix, startKey, endKey, endInclusive, limit, ref tally);
 
         if (unflushedWrites.IsEmpty)
             return items;
 
-        // Mirror the inner seek: start at the greater of prefix and startKey, inclusive.
+        // Mirror the inner seek: start at the greater of prefix and startKey, inclusive. The overlay selection
+        // honors the same end bound as the inner page, so the merge never sees a queued head past it.
         string? effectiveStart = startKey is not null && string.CompareOrdinal(startKey, prefix) > 0 ? startKey : null;
 
-        return MergeScan(items, unflushedWrites.Collect(prefix, effectiveStart, limit, PageCeiling(items, limit)), limit);
+        return MergeScan(
+            items,
+            unflushedWrites.Collect(prefix, effectiveStart, endKey, endInclusive, limit, PageCeiling(items, limit)),
+            limit);
     }
 
     /// <summary>

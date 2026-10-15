@@ -287,6 +287,18 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
     /// </summary>
     public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit)
     {
+        KeyValueScanTally discarded = default;
+        return GetKeyValueByRange(prefix, startKey, null, false, limit, ref discarded);
+    }
+
+    /// <summary>
+    /// Same page, ended at <paramref name="endKey"/>: the sorted key list is binary-searched for both ends of the
+    /// window, so a short bounded seek visits only the keys inside it. The tally is untouched: this backend keeps
+    /// no revision history on the head walk.
+    /// </summary>
+    public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(
+        string prefix, string? startKey, string? endKey, bool endInclusive, int limit, ref KeyValueScanTally tally)
+    {
         List<(string, ReadOnlyKeyValueEntry)> items = [];
 
         lock (kvLock)
@@ -298,7 +310,18 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
                 ? startKey : prefix;
             int start = LowerBound(keys, seekTarget);
 
-            for (int i = start; i < keys.Count && items.Count < limit; i++)
+            // First index past the end bound: the first key >= endKey, plus one when the bound is
+            // inclusive and endKey itself is present. The prefix check below still ends the walk earlier
+            // when the bound lies past the prefix block.
+            int end = keys.Count;
+            if (endKey is not null)
+            {
+                end = LowerBound(keys, endKey);
+                if (endInclusive && end < keys.Count && string.CompareOrdinal(keys[end], endKey) == 0)
+                    end++;
+            }
+
+            for (int i = start; i < end && items.Count < limit; i++)
             {
                 string key = keys[i];
                 if (!key.StartsWith(prefix, StringComparison.Ordinal))

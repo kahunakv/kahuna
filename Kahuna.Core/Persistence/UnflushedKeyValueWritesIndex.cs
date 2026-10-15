@@ -150,7 +150,17 @@ internal sealed class UnflushedKeyValueWritesIndex
     /// <param name="ceilingKey">Largest key that can still enter the page, or null when the inner page
     /// was not full and every larger overlay key remains a candidate.</param>
     public List<KeyValuePair<string, UnflushedKeyValueWrite>> Collect(
-        string prefix, string? startKey, int limit, string? ceilingKey)
+        string prefix, string? startKey, int limit, string? ceilingKey) =>
+        Collect(prefix, startKey, null, false, limit, ceilingKey);
+
+    /// <summary>
+    /// <see cref="Collect(string, string?, int, string?)"/> that also leaves out every key past the scan's
+    /// end bound: keys above <paramref name="endKey"/>, and the key equal to it unless
+    /// <paramref name="endInclusive"/>. The inner page stops at the same bound, so the merge of the two sides
+    /// is bounded too.
+    /// </summary>
+    public List<KeyValuePair<string, UnflushedKeyValueWrite>> Collect(
+        string prefix, string? startKey, string? endKey, bool endInclusive, int limit, string? ceilingKey)
     {
         bool bounded = limit >= 0 && limit < int.MaxValue;
 
@@ -167,6 +177,12 @@ internal sealed class UnflushedKeyValueWritesIndex
                 continue;
             if (ceilingKey is not null && string.CompareOrdinal(kv.Key, ceilingKey) > 0)
                 continue;
+            if (endKey is not null)
+            {
+                int cmpEnd = string.CompareOrdinal(kv.Key, endKey);
+                if (cmpEnd > 0 || (cmpEnd == 0 && !endInclusive))
+                    continue;
+            }
 
             if (!bounded)
             {

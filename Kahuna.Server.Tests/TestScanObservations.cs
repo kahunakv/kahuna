@@ -205,6 +205,93 @@ public sealed class TestScanObservations : BaseCluster
     }
 
     /// <summary>
+    /// A bounded probe of one index key (<c>[key/, key0)</c>, the shape of an equality seek) inspects that
+    /// key's entries and one sentinel per extra page, whatever the page size and however many other keys the
+    /// index holds: the backend stops at the end key instead of filling the page from the keys past it.
+    /// </summary>
+    [Theory]
+    [InlineData("memory")]
+    [InlineData("rocksdb")]
+    public async Task BoundedProbe_InspectsOnlyItsKeysEntries_WhateverThePageSize(string storage)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using EmbeddedKahunaNode node = await StartNode(loggerFactory, storage, ct);
+        IKahuna kahuna = node.Kahuna;
+
+        const int indexKeys = 300;
+        const int fanout = 11;
+        const int wideKey = 150;
+        const int wideFanout = 1500;
+
+        List<KahunaSetKeyValueRequestItem> batch = [];
+        byte[] value = "r"u8.ToArray();
+
+        async Task Write()
+        {
+            List<KahunaSetKeyValueResponseItem> written = await kahuna.LocateAndTrySetManyKeyValue(batch, ct);
+            Assert.All(written, item => Assert.Equal(KeyValueResponseType.Set, item.Type));
+            batch.Clear();
+        }
+
+        for (int key = 0; key < indexKeys; key++)
+        {
+            int entries = key == wideKey ? wideFanout : fanout;
+            for (int row = 0; row < entries; row++)
+            {
+                batch.Add(new()
+                {
+                    Key = $"idx/k{key:D4}/{row:D6}", Value = value, Flags = KeyValueFlags.Set, Durability = KeyValueDurability.Persistent
+                });
+                if (batch.Count == 500)
+                    await Write();
+            }
+        }
+
+        if (batch.Count > 0)
+            await Write();
+
+        await node.FlushAsync();
+
+        static async Task<(int Rows, KeyValueScanObservationSink Sink)> Probe(IKahuna kahuna, int key, int pageSize, CancellationToken ct)
+        {
+            string start = $"idx/k{key:D4}/";
+            string end = $"idx/k{key:D4}0";
+            KeyValueScanObservationSink sink = new();
+            int rows = 0;
+
+            await foreach ((string scanned, ReadOnlyKeyValueEntry _) in kahuna.LocateAndScanRange(
+                HLCTimestamp.Zero, "idx/", start, true, end, false, pageSize, HLCTimestamp.Zero,
+                KeyValueDurability.Persistent, ct, observations: sink))
+            {
+                Assert.StartsWith(start, scanned, StringComparison.Ordinal);
+                rows++;
+            }
+
+            return (rows, sink);
+        }
+
+        (int rows, KeyValueScanObservationSink sink) = await Probe(kahuna, 7, 512, ct);
+        Assert.Equal(fanout, rows);
+        Assert.Equal(1, sink.Pages);
+        Assert.Equal(fanout, sink.Total.EntriesInspected);
+
+        (rows, sink) = await Probe(kahuna, wideKey, 512, ct);
+        Assert.Equal(wideFanout, rows);
+        Assert.Equal(3, sink.Pages);
+        Assert.Equal(wideFanout + sink.Pages - 1, sink.Total.EntriesInspected);
+
+        (rows, sink) = await Probe(kahuna, wideKey, 32, ct);
+        Assert.Equal(wideFanout, rows);
+        Assert.Equal(47, sink.Pages);
+        Assert.Equal(wideFanout + sink.Pages - 1, sink.Total.EntriesInspected);
+
+        (rows, sink) = await Probe(kahuna, indexKeys - 1, 512, ct);
+        Assert.Equal(fanout, rows);
+        Assert.Equal(1, sink.Pages);
+        Assert.Equal(fanout, sink.Total.EntriesInspected);
+    }
+
+    /// <summary>
     /// Writes <c>revisions</c> versions of each of a few keys, pins a snapshot after the first version,
     /// flushes, and scans as of that snapshot. Every row the scan returns must be the first version.
     /// </summary>

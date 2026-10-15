@@ -2753,7 +2753,25 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         EnterDbFence();
         try
         {
-            return GetKeyValueByRangeFenced(prefix, startKey, limit, ref tally);
+            return GetKeyValueByRangeFenced(prefix, startKey, null, false, limit, ref tally);
+        }
+        finally
+        {
+            ExitDbFence();
+        }
+    }
+
+    /// <summary>
+    /// Same page, ended at <paramref name="endKey"/>: the iterator stops at the first row of a key past the
+    /// bound, so a short bounded seek steps neither the heads nor the revision rows beyond it.
+    /// </summary>
+    public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(
+        string prefix, string? startKey, string? endKey, bool endInclusive, int limit, ref KeyValueScanTally tally)
+    {
+        EnterDbFence();
+        try
+        {
+            return GetKeyValueByRangeFenced(prefix, startKey, endKey, endInclusive, limit, ref tally);
         }
         finally
         {
@@ -2762,13 +2780,15 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     }
 
     // Must run under the swap fence (EnterDbFence).
-    private List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRangeFenced(string prefix, string? startKey, int limit, ref KeyValueScanTally tally)
+    private List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRangeFenced(
+        string prefix, string? startKey, string? endKey, bool endInclusive, int limit, ref KeyValueScanTally tally)
     {
         List<(string, ReadOnlyKeyValueEntry)> result = [];
 
         int prefixLen = Encoding.UTF8.GetByteCount(prefix);
         string seekStr = startKey ?? prefix;
         int seekLen = Encoding.UTF8.GetByteCount(seekStr);
+        int endLen = endKey is null ? 0 : Encoding.UTF8.GetByteCount(endKey);
 
         byte[]? rentedPrefix = null;
         Span<byte> prefixBytes = prefixLen <= KeyStackThreshold
@@ -2780,6 +2800,11 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             ? stackalloc byte[KeyStackThreshold]
             : (rentedSeek = ArrayPool<byte>.Shared.Rent(seekLen));
 
+        byte[]? rentedEnd = null;
+        Span<byte> endBytes = endLen <= KeyStackThreshold
+            ? stackalloc byte[KeyStackThreshold]
+            : (rentedEnd = ArrayPool<byte>.Shared.Rent(endLen));
+
         try
         {
             prefixBytes = prefixBytes[..prefixLen];
@@ -2788,6 +2813,16 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             seekBytes = seekBytes[..seekLen];
             Encoding.UTF8.GetBytes(seekStr, seekBytes);
 
+            // The end bound is compared in UTF-8 byte order, the order the seek above already uses for the
+            // start bound and the order the rows are stored in. Every row of a logical key is the key, '~'
+            // and a suffix, so under the row order a row sorts past an exclusive bound exactly when its key
+            // does, and past an inclusive bound when it neither belongs to the bound key (prefix "end~") nor
+            // sorts below it. A key with a '~' extension of the bound key ("end~x") shares that prefix and
+            // sorts above the bound: the per-head check below keeps it out without ending the walk.
+            endBytes = endBytes[..endLen];
+            if (endKey is not null)
+                Encoding.UTF8.GetBytes(endKey, endBytes);
+
             using Iterator iterator = db.NewIterator(readOptions: ScanReadOptions, cf: columnFamilyKeys);
             iterator.Seek(seekBytes);
 
@@ -2795,6 +2830,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             RocksDbKeyValueMessage shell = new();
 
             int nonCurrentRun = 0;
+            bool stoppedAtEndBound = false;
 
             while (iterator.Valid() && result.Count < limit)
             {
@@ -2804,6 +2840,12 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
 
                 if (!rawKey.StartsWith(prefixBytes))
                     break;
+
+                if (endKey is not null && RowIsPastEndBound(rawKey, endBytes, endInclusive))
+                {
+                    stoppedAtEndBound = true;
+                    break;
+                }
 
                 if (!rawKey.EndsWith(CurrentMarkerUtf8))
                 {
@@ -2827,8 +2869,18 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
 
                 nonCurrentRun = 0;
 
-                // Decode only keys that pass both filters.
-                string keyWithoutMarker = Encoding.UTF8.GetString(rawKey[..^CurrentMarkerUtf8.Length]);
+                ReadOnlySpan<byte> keyBytes = rawKey[..^CurrentMarkerUtf8.Length];
+
+                // A '~' extension of an inclusive bound key shares the "end~" row prefix the bound keeps,
+                // but sorts above the bound: leave it out and keep walking to the bound key's own rows.
+                if (endInclusive && endKey is not null && keyBytes.SequenceCompareTo(endBytes) > 0)
+                {
+                    iterator.Next();
+                    continue;
+                }
+
+                // Decode only keys that pass every filter.
+                string keyWithoutMarker = Encoding.UTF8.GetString(keyBytes);
 
                 RocksDbKeyValueMessage message = UnserializeKeyValueMessage(iterator.GetValueSpan(), shell);
 
@@ -2836,6 +2888,11 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
 
                 iterator.Next();
             }
+
+            // A walk that ended at the prefix end (or the end of the family) visited every row inside the
+            // bound; one that ended at the bound or at the limit may have left such heads unvisited.
+            if (endKey is not null && limit > 0 && (stoppedAtEndBound || result.Count >= limit))
+                AddHeadsOfEndKeyPrefixesSortedPastTheBound(iterator, shell, prefixBytes, seekBytes, endBytes, result, limit);
 
             return result;
         }
@@ -2845,6 +2902,109 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 ArrayPool<byte>.Shared.Return(rentedPrefix);
             if (rentedSeek is not null)
                 ArrayPool<byte>.Shared.Return(rentedSeek);
+            if (rentedEnd is not null)
+                ArrayPool<byte>.Shared.Return(rentedEnd);
+        }
+    }
+
+    /// <summary>
+    /// Whether a row of the key family lies past the scan's end bound, in the family's own byte order.
+    /// Rows of one logical key are the key followed by '~' and a suffix, so a row sorts at or above an
+    /// exclusive bound exactly when its key does. For an inclusive bound the rows of the bound key itself
+    /// start with "end~" and are kept; any other row above the bound is past it. The row order equals the
+    /// logical key order except where one key is a proper prefix of another whose next byte sorts below '~';
+    /// the pagination cursor and the page merge already rely on that equality, and this check does the same.
+    /// </summary>
+    private static bool RowIsPastEndBound(ReadOnlySpan<byte> rawKey, ReadOnlySpan<byte> endBytes, bool endInclusive)
+    {
+        int cmp = rawKey.SequenceCompareTo(endBytes);
+        if (cmp < 0)
+            return false;
+        if (!endInclusive)
+            return true;
+        return !(rawKey.Length > endBytes.Length && rawKey[endBytes.Length] == (byte)'~' && rawKey.StartsWith(endBytes));
+    }
+
+    /// <summary>
+    /// Adds the heads the bounded walk cannot reach: a key that is a proper prefix of the end key sorts
+    /// below it, but its rows sort past the bound position whenever the end key's next byte sorts below
+    /// '~' (a key "a" against the bound "a/"), so the walk stops at the bound before it meets them. Such
+    /// a key is looked up directly instead. The candidates are the proper prefixes of the end key that
+    /// are at or after the seek key and inside the prefix: a seek that is not a prefix of the end key
+    /// leaves only the prefixes longer than the two keys' common prefix, so a probe such as "idx/5/"
+    /// against "idx/50" leaves none and pays nothing. A head the walk did visit is found in the page
+    /// again and skipped. Found heads are inserted in ordinal order and the page is cut back to
+    /// <paramref name="limit"/>. Runs with the walk's iterator and parse shell, after the walk.
+    /// </summary>
+    private static void AddHeadsOfEndKeyPrefixesSortedPastTheBound(
+        Iterator iterator,
+        RocksDbKeyValueMessage shell,
+        ReadOnlySpan<byte> prefixBytes,
+        ReadOnlySpan<byte> seekBytes,
+        ReadOnlySpan<byte> endBytes,
+        List<(string, ReadOnlyKeyValueEntry)> result,
+        int limit)
+    {
+        if (!endBytes.StartsWith(prefixBytes))
+            return;
+
+        int common = seekBytes.CommonPrefixLength(endBytes);
+
+        // The end key is at or below the seek key: the bounded range is empty.
+        if (common == endBytes.Length || (common < seekBytes.Length && seekBytes[common] > endBytes[common]))
+            return;
+
+        // Shortest candidate: the seek key itself when it is a prefix of the end key, otherwise one byte
+        // past the common prefix (a shorter prefix of the end key is a prefix of the seek key, so below it).
+        int minLength = Math.Max(prefixBytes.Length, common == seekBytes.Length ? seekBytes.Length : common + 1);
+        int maxLength = endBytes.Length - 1;
+        if (maxLength < minLength)
+            return;
+
+        int targetCapacity = maxLength + CurrentMarkerUtf8.Length;
+        byte[]? rented = null;
+        Span<byte> target = targetCapacity <= KeyStackThreshold
+            ? stackalloc byte[KeyStackThreshold]
+            : (rented = ArrayPool<byte>.Shared.Rent(targetCapacity));
+
+        try
+        {
+            for (int length = maxLength; length >= minLength; length--)
+            {
+                ReadOnlySpan<byte> candidate = endBytes[..length];
+                Span<byte> head = target[..(length + CurrentMarkerUtf8.Length)];
+                candidate.CopyTo(head);
+                CurrentMarkerUtf8.CopyTo(head[length..]);
+
+                iterator.Seek(head);
+                if (!iterator.Valid() || !iterator.GetKeySpan().SequenceEqual(head))
+                    continue;
+
+                string key = Encoding.UTF8.GetString(candidate);
+                ReadOnlyKeyValueEntry entry = DecodeReadOnlyKeyValue(UnserializeKeyValueMessage(iterator.GetValueSpan(), shell));
+
+                int lo = 0, hi = result.Count;
+                while (lo < hi)
+                {
+                    int mid = (lo + hi) >>> 1;
+                    if (string.CompareOrdinal(result[mid].Item1, key) < 0)
+                        lo = mid + 1;
+                    else
+                        hi = mid;
+                }
+
+                if (lo < result.Count && string.CompareOrdinal(result[lo].Item1, key) == 0)
+                    continue;
+
+                result.Insert(lo, (key, entry));
+                if (result.Count > limit)
+                    result.RemoveAt(result.Count - 1);
+            }
+        }
+        finally
+        {
+            if (rented is not null)
+                ArrayPool<byte>.Shared.Return(rented);
         }
     }
 

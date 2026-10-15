@@ -480,6 +480,72 @@ public sealed class TestUnflushedOverlayScanBound
         Assert.Equal(2, page[0].Item2.Revision);
     }
 
+    private static (string? EndKey, bool EndInclusive) RandomEnd(Random random)
+    {
+        string? endKey = random.Next(6) switch
+        {
+            0 => null,
+            1 or 2 => Universe[random.Next(Universe.Length)],
+            3 => $"k/{random.Next(40):D2}\0", // just past a key
+            4 => "k/2",                          // between k/1 and k/20: not itself a key
+            _ => "k/",                           // the prefix itself: everything above it is out
+        };
+
+        return (endKey, random.Next(2) == 0);
+    }
+
+    private static List<(string, ReadOnlyKeyValueEntry)> TrimToBound(
+        List<(string, ReadOnlyKeyValueEntry)> page, string? endKey, bool endInclusive, int limit)
+    {
+        List<(string, ReadOnlyKeyValueEntry)> trimmed = [];
+        foreach ((string key, ReadOnlyKeyValueEntry entry) in page)
+        {
+            if (endKey is not null && !IPersistenceBackend.IsWithinEndBound(key, endKey, endInclusive))
+                continue;
+            if (limit >= 0 && trimmed.Count >= limit)
+                break;
+            trimmed.Add((key, entry));
+        }
+
+        return trimmed;
+    }
+
+    /// <summary>
+    /// The end-bounded page must equal the unbounded union trimmed at the bound and cut at the limit: the
+    /// inner page stops at the bound and the overlay selection leaves out every queued head past it, so
+    /// no queued head past the bound can fill a page the bound ended, and none inside it can go missing.
+    /// </summary>
+    [Fact]
+    public void BoundedRangeRead_MatchesUnboundedUnionTrimmedAtTheBound_OnRandomizedPopulations()
+    {
+        for (int seed = 0; seed < 400; seed++)
+        {
+            Random random = new(seed);
+            using Fixture f = Populate(random);
+
+            foreach (string prefix in Prefixes)
+            {
+                foreach (int limit in Limits)
+                {
+                    string? startKey = RandomStart(random);
+                    (string? endKey, bool endInclusive) = RandomEnd(random);
+
+                    // The inner side reads the whole unbounded range (a negative limit is an empty inner page
+                    // in every backend, mirrored here), so the reference is the full union before the bound.
+                    List<(string, ReadOnlyKeyValueEntry)> disk = f.Inner.GetKeyValueByRange(prefix, startKey, limit < 0 ? limit : int.MaxValue);
+                    string? effectiveStart = startKey is not null && string.CompareOrdinal(startKey, prefix) > 0 ? startKey : null;
+                    List<(string, ReadOnlyKeyValueEntry)> expected = TrimToBound(
+                        ReferenceMerge(disk, f.Mirror, prefix, effectiveStart, int.MaxValue), endKey, endInclusive, limit);
+
+                    KeyValueScanTally tally = default;
+                    List<(string, ReadOnlyKeyValueEntry)> actual = f.Backend.GetKeyValueByRange(prefix, startKey, endKey, endInclusive, limit, ref tally);
+
+                    AssertSamePage(expected, actual);
+                }
+            }
+        }
+    }
+
     /// <summary>A memory backend whose key-value flush always fails, so the overlay must keep covering the rows.</summary>
     private sealed class RefusingBackend : IPersistenceBackend, IDisposable
     {

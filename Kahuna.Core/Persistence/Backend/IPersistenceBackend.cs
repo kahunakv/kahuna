@@ -206,6 +206,53 @@ internal interface IPersistenceBackend
         GetKeyValueByRange(prefix, startKey, limit);
 
     /// <summary>
+    /// <see cref="GetKeyValueByRange(string, string?, int, ref KeyValueScanTally)"/> that also stops at an upper
+    /// bound: no entry whose key sorts after <paramref name="endKey"/> (or equal to it when
+    /// <paramref name="endInclusive"/> is false) is read or returned. A null <paramref name="endKey"/> means the
+    /// prefix is the only bound. The page is the first <paramref name="limit"/> entries of the bounded range, so a
+    /// page shorter than <paramref name="limit"/> means the range is exhausted. Backends override this so the
+    /// walk ends at the bound instead of filling the page past it; the default reads a full page and trims it,
+    /// which is correct but pays the full page.
+    /// </summary>
+    public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(
+        string prefix, string? startKey, string? endKey, bool endInclusive, int limit, ref KeyValueScanTally tally)
+    {
+        List<(string, ReadOnlyKeyValueEntry)> items = GetKeyValueByRange(prefix, startKey, limit, ref tally);
+        TrimToEndKey(items, endKey, endInclusive);
+        return items;
+    }
+
+    /// <summary>
+    /// Removes from an ordinal-ascending page every entry past the bound. Keeps a page whose last key is
+    /// within the bound untouched, so the common case costs one comparison.
+    /// </summary>
+    internal static void TrimToEndKey(List<(string, ReadOnlyKeyValueEntry)> items, string? endKey, bool endInclusive)
+    {
+        if (endKey is null || items.Count == 0 || IsWithinEndBound(items[^1].Item1, endKey, endInclusive))
+            return;
+
+        // First index past the bound, by binary search: the page is ordinal-ascending.
+        int lo = 0, hi = items.Count;
+        while (lo < hi)
+        {
+            int mid = (lo + hi) >>> 1;
+            if (IsWithinEndBound(items[mid].Item1, endKey, endInclusive))
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+
+        items.RemoveRange(lo, items.Count - lo);
+    }
+
+    /// <summary>True when <paramref name="key"/> sorts before <paramref name="endKey"/>, or equals it and the bound is inclusive.</summary>
+    internal static bool IsWithinEndBound(string key, string endKey, bool endInclusive)
+    {
+        int cmp = string.CompareOrdinal(key, endKey);
+        return cmp < 0 || (cmp == 0 && endInclusive);
+    }
+
+    /// <summary>
     /// Whole-family paged scan over every current key-value row, in bounded pages of at most
     /// <paramref name="limit"/> entries. Pass null to start; pass the previous page's
     /// <see cref="KeyValueScanPage.NextCursor"/> to resume — the cursor is opaque and

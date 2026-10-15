@@ -1095,4 +1095,171 @@ public class TestPersistenceBackends
             (backend as IDisposable)?.Dispose();
         }
     }
+
+    // ─── End-bounded range pages (every backend) ─────────────────────────────────
+
+    private static List<string> Keys(List<(string, ReadOnlyKeyValueEntry)> items) => items.Select(static i => i.Item1).ToList();
+
+    private static List<(string, ReadOnlyKeyValueEntry)> Bounded(
+        IPersistenceBackend backend, string prefix, string? startKey, string? endKey, bool endInclusive, int limit)
+    {
+        KeyValueScanTally tally = default;
+        return backend.GetKeyValueByRange(prefix, startKey, endKey, endInclusive, limit, ref tally);
+    }
+
+    /// <summary>
+    /// The end-bounded page contract, identical for every backend: the page holds the first `limit`
+    /// keys of the prefix at or after the start key and inside the end bound, in ordinal order, and a
+    /// page shorter than `limit` means the bounded range is exhausted.
+    /// </summary>
+    private static void AssertEndBoundedRangeContract(IPersistenceBackend backend)
+    {
+        backend.StoreKeyValues(MakeItems("svc", 20));          // svc/0000 .. svc/0019
+        backend.StoreKeyValues([MakeItem("svd/0000", 1)]);    // sibling prefix: never part of an "svc" page
+
+        // Exclusive and inclusive bounds inside the page.
+        Assert.Equal(["svc/0005", "svc/0006", "svc/0007"], Keys(Bounded(backend, "svc", "svc/0005", "svc/0008", false, 100)));
+        Assert.Equal(["svc/0005", "svc/0006", "svc/0007", "svc/0008"], Keys(Bounded(backend, "svc", "svc/0005", "svc/0008", true, 100)));
+
+        // A bound between two keys behaves the same either way.
+        Assert.Equal(["svc/0005", "svc/0006"], Keys(Bounded(backend, "svc", "svc/0005", "svc/0006x", false, 100)));
+        Assert.Equal(["svc/0005", "svc/0006"], Keys(Bounded(backend, "svc", "svc/0005", "svc/0006x", true, 100)));
+
+        // The limit cuts before the bound; the bound cuts before the limit.
+        Assert.Equal(["svc/0005", "svc/0006", "svc/0007"], Keys(Bounded(backend, "svc", "svc/0005", "svc/0015", true, 3)));
+        Assert.Equal(["svc/0005", "svc/0006", "svc/0007", "svc/0008"], Keys(Bounded(backend, "svc", "svc/0005", "svc/0008", true, 4)));
+
+        // A bound past the last key of the prefix: the prefix still ends the page.
+        Assert.Equal(["svc/0017", "svc/0018", "svc/0019"], Keys(Bounded(backend, "svc", "svc/0017", "svc/9999", false, 100)));
+        Assert.Equal(["svc/0017", "svc/0018", "svc/0019"], Keys(Bounded(backend, "svc", "svc/0017", "t", false, 100)));
+
+        // A bound at or below the start.
+        Assert.Equal(["svc/0010"], Keys(Bounded(backend, "svc", "svc/0010", "svc/0010", true, 100)));
+        Assert.Empty(Bounded(backend, "svc", "svc/0010", "svc/0010", false, 100));
+        Assert.Empty(Bounded(backend, "svc", "svc/0010", "svc/0005", true, 100));
+
+        // No start key: the page begins at the prefix.
+        Assert.Equal(["svc/0000", "svc/0001"], Keys(Bounded(backend, "svc", null, "svc/0002", false, 100)));
+
+        // A null bound is the plain page.
+        Assert.Equal(Keys(backend.GetKeyValueByRange("svc", "svc/0015", 100)), Keys(Bounded(backend, "svc", "svc/0015", null, false, 100)));
+
+        // Zero limit returns nothing whatever the bound.
+        Assert.Empty(Bounded(backend, "svc", null, "svc/0010", true, 0));
+    }
+
+    [Fact]
+    public void TestMemoryGetByRangeStopsAtEndKey()
+    {
+        using MemoryPersistenceBackend backend = new();
+        AssertEndBoundedRangeContract(backend);
+    }
+
+    [Fact]
+    public void TestSqliteGetByRangeStopsAtEndKey()
+    {
+        string path = SqliteTempPath();
+        using SqlitePersistenceBackend backend = new(path, "v1");
+        AssertEndBoundedRangeContract(backend);
+    }
+
+    [Fact]
+    public void TestRocksDbGetByRangeStopsAtEndKey()
+    {
+        string path = RocksDbTempPath();
+        using RocksDbPersistenceBackend backend = new(path, "v1");
+        AssertEndBoundedRangeContract(backend);
+    }
+
+    [Fact]
+    public void TestOverlayGetByRangeStopsAtEndKeyForQueuedHeads()
+    {
+        using MemoryPersistenceBackend inner = new();
+        UnflushedKeyValueWritesIndex overlay = new();
+        using UnflushedOverlayPersistenceBackend backend = new(inner, overlay, new UnflushedLockWritesIndex());
+
+        AssertEndBoundedRangeContract(backend);
+
+        // Queued heads past the bound stay out; queued heads inside it merge in order.
+        overlay.Record("svc/0006a", [1], 1, default, default, new HLCTimestamp(0, 50, 0), KeyValueState.Set, false);
+        overlay.Record("svc/0008", [1], 2, default, default, new HLCTimestamp(0, 50, 0), KeyValueState.Set, false);
+        overlay.Record("svc/0009", [1], 2, default, default, new HLCTimestamp(0, 50, 0), KeyValueState.Set, false);
+
+        Assert.Equal(["svc/0005", "svc/0006", "svc/0006a", "svc/0007"], Keys(Bounded(backend, "svc", "svc/0005", "svc/0008", false, 100)));
+        Assert.Equal(["svc/0005", "svc/0006", "svc/0006a", "svc/0007", "svc/0008"], Keys(Bounded(backend, "svc", "svc/0005", "svc/0008", true, 100)));
+        Assert.Equal(["svc/0005", "svc/0006", "svc/0006a"], Keys(Bounded(backend, "svc", "svc/0005", "svc/0008", true, 3)));
+    }
+
+    /// <summary>
+    /// The bound ends the RocksDB walk before the revision rows of the first key past it: the cost of a
+    /// bounded page is the cost of the keys inside the bound only. Each key holds more revisions than the
+    /// run-seek threshold, so a walk that stepped into a key past the bound would show in the tally.
+    /// </summary>
+    [Fact]
+    public void TestRocksDbGetByRangeWithEndKeyStepsNoRevisionRowsPastTheBound()
+    {
+        string path = RocksDbTempPath();
+        using RocksDbPersistenceBackend backend = new(path, "v1");
+
+        for (int i = 1; i <= 6; i++)
+            for (int revision = 1; revision <= 12; revision++)
+                Assert.True(backend.StoreKeyValues([MakeItem($"acct/{i:D4}", (long)revision)]));
+
+        KeyValueScanTally oneKey = default;
+        Assert.Equal(["acct/0001"], Keys(backend.GetKeyValueByRange("acct/0001", null, null, false, 100, ref oneKey)));
+        Assert.True(oneKey.RevisionRowsExamined > 0);
+
+        KeyValueScanTally inclusive = default;
+        Assert.Equal(["acct/0001", "acct/0002"], Keys(backend.GetKeyValueByRange("acct", null, "acct/0002", true, 100, ref inclusive)));
+        Assert.Equal(2 * oneKey.RevisionRowsExamined, inclusive.RevisionRowsExamined);
+        Assert.Equal(2 * oneKey.RevisionRunSeeks, inclusive.RevisionRunSeeks);
+
+        KeyValueScanTally exclusive = default;
+        Assert.Equal(["acct/0001", "acct/0002"], Keys(backend.GetKeyValueByRange("acct", null, "acct/0003", false, 100, ref exclusive)));
+        Assert.Equal(2 * oneKey.RevisionRowsExamined, exclusive.RevisionRowsExamined);
+
+        KeyValueScanTally unbounded = default;
+        Assert.Equal(6, backend.GetKeyValueByRange("acct", null, 100, ref unbounded).Count);
+        Assert.Equal(6 * oneKey.RevisionRowsExamined, unbounded.RevisionRowsExamined);
+    }
+
+    /// <summary>
+    /// A '~' extension of an inclusive bound key shares the bound key's row prefix: it must stay out of
+    /// the page while the bound key itself, whose rows sort after the extension's, is still returned.
+    /// </summary>
+    [Fact]
+    public void TestRocksDbGetByRangeInclusiveEndKeyKeepsTheBoundKeyAndNotItsTildeExtension()
+    {
+        string path = RocksDbTempPath();
+        using RocksDbPersistenceBackend backend = new(path, "v1");
+
+        Assert.True(backend.StoreKeyValues([MakeItem("acct/0001", 1), MakeItem("acct/0002", 1), MakeItem("acct/0002~05x", 1), MakeItem("acct/0003", 1)]));
+
+        Assert.Equal(["acct/0001", "acct/0002"], Keys(Bounded(backend, "acct", null, "acct/0002", true, 100)));
+        Assert.Equal(["acct/0001"], Keys(Bounded(backend, "acct", null, "acct/0002", false, 100)));
+        Assert.Equal(["acct/0001", "acct/0002", "acct/0002~05x"], Keys(Bounded(backend, "acct", null, "acct/0002~05x", true, 100)));
+    }
+
+    /// <summary>
+    /// A key that is a proper prefix of the end key ("bucket" against "bucket/") sorts below the bound, but
+    /// its RocksDB rows sort past the bound position because '/' sorts below the '~' row marker. The bounded
+    /// walk stops before it reaches them, so the backend must look such a head up directly.
+    /// </summary>
+    [Fact]
+    public void TestRocksDbGetByRangeEndKeyKeepsAHeadThatIsAProperPrefixOfTheBound()
+    {
+        string path = RocksDbTempPath();
+        using RocksDbPersistenceBackend backend = new(path, "v1");
+
+        Assert.True(backend.StoreKeyValues([MakeItem("bucket", 1), MakeItem("bucket/x", 1), MakeItem("bucket/y", 1), MakeItem("c", 1)]));
+
+        Assert.Equal(["bucket"], Keys(Bounded(backend, "bucket", "bucket", "bucket/", false, 100)));
+        Assert.Equal(["bucket", "bucket/x"], Keys(Bounded(backend, "bucket", null, "bucket/x", true, 100)));
+        Assert.Equal(["bucket", "bucket/x"], Keys(Bounded(backend, "bucket", null, "bucket/y", false, 100)));
+        Assert.Equal(["bucket"], Keys(Bounded(backend, "bucket", null, "bucket/y", false, 1)));
+        Assert.Equal(["bucket", "bucket/x", "bucket/y"], Keys(Bounded(backend, "bucket", null, "bucket/z", false, 100)));
+
+        // A seek past the prefix key never brings it back.
+        Assert.Equal(["bucket/x"], Keys(Bounded(backend, "bucket", "bucket/", "bucket/y", false, 100)));
+    }
 }

@@ -81,13 +81,10 @@ public sealed class TestTryGetByRangeHandler : RaftTrackingTest
         scheduler.Start();
         try
         {
-            // Five disk-only entries with a page limit of 2. Disk page reads are dispatched
-            // three times:
-            //   page 1 → [doc/a, doc/b, doc/c] (3 items returned; doc/c is the peek cursor)
-            //   page 2 → [doc/c, doc/d, doc/e] (3 items; doc/e is peek cursor)
-            //   page 3 → [doc/e]               (1 item; no more)
-            // The assembled result across all pages must include doc/a … doc/e, then be
-            // capped at the limit (2) with HasMore=true.
+            // Five disk-only entries with a page limit of 2. The first disk page read returns
+            // [doc/a, doc/b, doc/c]: doc/c is the limit+1 sentinel, merged like any row, so the
+            // merge holds three items after one read and knows more rows exist. The response is
+            // capped at the limit (2) with HasMore=true and the cursor at doc/b.
             RangeBackend backend = new([
                 "doc/a", "doc/b", "doc/c", "doc/d", "doc/e"
             ]);
@@ -373,7 +370,11 @@ public sealed class TestTryGetByRangeHandler : RaftTrackingTest
         scheduler.Start();
         try
         {
-            RangeBackend backend = new(["doc/a", "doc/b", "doc/c", "doc/d", "doc/e"]);
+            // The first three keys are tombstones on disk: the first page (limit + 1 = 3 rows) yields
+            // no live row, so the merge must fetch continuation pages to fill the result.
+            RangeBackend backend = new(
+                ["doc/a", "doc/b", "doc/c", "doc/d", "doc/e"],
+                k => k is "doc/a" or "doc/b" or "doc/c" ? KeyValueState.Deleted : KeyValueState.Set);
 
             // Record which scheduler partition each disk page is enqueued under, delegating to
             // the real scheduler so the multi-page scan still runs to completion.
@@ -399,7 +400,7 @@ public sealed class TestTryGetByRangeHandler : RaftTrackingTest
                 HLCTimestamp.Zero,
                 KeyValueDurability.Persistent,
                 0, wrongPartition, default);
-            scan.Limit = 2;               // limit 2 over 5 keys → 3 disk pages (first + continuation)
+            scan.Limit = 2;               // limit 2 over 3 dead + 2 live keys → first page plus continuation pages
             scan.StartInclusive = true;
 
             KeyValueResponse? resp = await actorRef.Ask(scan, TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
@@ -407,7 +408,7 @@ public sealed class TestTryGetByRangeHandler : RaftTrackingTest
             // The scan still works end to end.
             Assert.NotNull(resp);
             Assert.Equal(KeyValueResponseType.Get, resp!.Type);
-            Assert.Equal(2, resp.RangeResult!.Items.Count);
+            Assert.Equal(["doc/d", "doc/e"], resp.RangeResult!.Items.Select(static i => i.Item1).ToList());
 
             // Every page (first + each continuation page) must have been enqueued, and none of them
             // on message.PartitionId — they route to the resolved data partition, consistently.
@@ -459,7 +460,192 @@ public sealed class TestTryGetByRangeHandler : RaftTrackingTest
         finally { scheduler.Stop(); }
     }
 
+    // ── End bound reaches the backend: a bounded seek reads only the entries inside it ────
+
+    private static string[] HundredDocKeys() => Enumerable.Range(0, 100).Select(static i => $"doc/{i:D3}").ToArray();
+
+    private async Task<(KeyValueResponse Response, RangeBackend Backend)> RunBoundedScan(
+        string nodeName, string[] diskKeys, int limit, string? startKey, bool startInclusive, string? endKey, bool endInclusive)
+    {
+        (RaftManager raft, FairReadScheduler scheduler, KahunaConfiguration config,
+            ILogger<IKahuna> logger) = CreateRaftAndConfig(nodeName);
+
+        scheduler.Start();
+        try
+        {
+            RangeBackend backend = new(diskKeys);
+
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
+            IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
+                actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
+                    nodeName + "-actor", null!, null!, backend, raft,
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+
+            KeyValueResponse? resp = await actorRef.Ask(
+                MakeBoundedRangeScan("doc/", limit, startKey, startInclusive, endKey, endInclusive),
+                TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+
+            Assert.NotNull(resp);
+            return (resp!, backend);
+        }
+        finally { scheduler.Stop(); }
+    }
+
+    /// <summary>
+    /// A bounded seek over a large range used to read a full limit+1 page from the backend and discard
+    /// everything past the bound in the merge. The backend must now receive the bound and return only
+    /// the entries inside it, and the page must close without a second read.
+    /// </summary>
+    [Fact]
+    public async Task PersistentRangeScan_EndKeyInsideFirstPage_BackendReadsOnlyTheBoundedEntries()
+    {
+        (KeyValueResponse resp, RangeBackend backend) = await RunBoundedScan(
+            "range-bound-inside", HundredDocKeys(), limit: 50, "doc/010", true, "doc/015", false);
+
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(["doc/010", "doc/011", "doc/012", "doc/013", "doc/014"], resp.RangeResult!.Items.Select(static i => i.Item1).ToList());
+        Assert.False(resp.RangeResult.HasMore);
+
+        PageRead read = Assert.Single(backend.Reads);
+        Assert.Equal("doc/010", read.StartKey);
+        Assert.Equal("doc/015", read.EndKey);
+        Assert.False(read.EndInclusive);
+        Assert.Equal(51, read.Limit);
+        Assert.Equal(5, read.Returned);
+    }
+
+    /// <summary>
+    /// A bound that ends exactly where the page ends: the raw page is `limit` entries, not the
+    /// `limit + 1` sentinel, so the handler knows the range is exhausted without reading a second page.
+    /// </summary>
+    [Theory]
+    [InlineData("doc/009", true)]
+    [InlineData("doc/010", false)]
+    public async Task PersistentRangeScan_EndKeyAtPageEnd_ClosesWithoutASecondRead(string endKey, bool endInclusive)
+    {
+        (KeyValueResponse resp, RangeBackend backend) = await RunBoundedScan(
+            "range-bound-page-end", HundredDocKeys(), limit: 10, "doc/000", true, endKey, endInclusive);
+
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(Enumerable.Range(0, 10).Select(static i => $"doc/{i:D3}").ToList(), resp.RangeResult!.Items.Select(static i => i.Item1).ToList());
+        Assert.False(resp.RangeResult.HasMore);
+
+        PageRead read = Assert.Single(backend.Reads);
+        Assert.Equal(10, read.Returned);
+    }
+
+    /// <summary>A bound past the last key of the prefix: the prefix ends the page, as before.</summary>
+    [Fact]
+    public async Task PersistentRangeScan_EndKeyPastLastKeyOfPrefix_ReturnsThePrefixTail()
+    {
+        (KeyValueResponse resp, RangeBackend backend) = await RunBoundedScan(
+            "range-bound-past-prefix", HundredDocKeys(), limit: 10, "doc/095", true, "doc/zzz", true);
+
+        Assert.Equal(KeyValueResponseType.Get, resp.Type);
+        Assert.Equal(["doc/095", "doc/096", "doc/097", "doc/098", "doc/099"], resp.RangeResult!.Items.Select(static i => i.Item1).ToList());
+        Assert.False(resp.RangeResult.HasMore);
+
+        PageRead read = Assert.Single(backend.Reads);
+        Assert.Equal(5, read.Returned);
+    }
+
+    /// <summary>
+    /// A bound wider than one page: the first page carries the sentinel and a cursor, and the sentinel
+    /// row itself tells the merge that more rows exist, so the page closes on one backend read. The
+    /// continuation page from that cursor stops at the bound with no further read.
+    /// </summary>
+    [Fact]
+    public async Task PersistentRangeScan_EndKeyBeyondOnePage_PaginatesThenStopsAtTheBound()
+    {
+        (KeyValueResponse first, RangeBackend firstBackend) = await RunBoundedScan(
+            "range-bound-two-pages-1", HundredDocKeys(), limit: 4, "doc/000", true, "doc/006", false);
+
+        Assert.Equal(KeyValueResponseType.Get, first.Type);
+        Assert.Equal(["doc/000", "doc/001", "doc/002", "doc/003"], first.RangeResult!.Items.Select(static i => i.Item1).ToList());
+        Assert.True(first.RangeResult.HasMore);
+        PageRead firstRead = Assert.Single(firstBackend.Reads);
+        Assert.Equal(5, firstRead.Returned); // limit + 1 inside the bound: the sentinel
+
+        // The client's next page starts strictly after the last returned key, with the same bound.
+        (KeyValueResponse second, RangeBackend secondBackend) = await RunBoundedScan(
+            "range-bound-two-pages-2", HundredDocKeys(), limit: 4, "doc/003", false, "doc/006", false);
+
+        Assert.Equal(KeyValueResponseType.Get, second.Type);
+        Assert.Equal(["doc/004", "doc/005"], second.RangeResult!.Items.Select(static i => i.Item1).ToList());
+        Assert.False(second.RangeResult.HasMore);
+        PageRead secondRead = Assert.Single(secondBackend.Reads);
+        Assert.Equal(3, secondRead.Returned); // doc/003 (the exclusive start, seeked inclusively), doc/004, doc/005
+    }
+
+    /// <summary>
+    /// Differential check of the bounded path over resident and disk keys: for random start and end bounds,
+    /// inclusive flags and limits, the page must equal the ordinal union of both sources trimmed to the bounds
+    /// and cut at the limit, with HasMore exactly when more keys remain inside the bounds.
+    /// </summary>
+    [Fact]
+    public async Task PersistentRangeScan_WithEndKey_MatchesTheOrderedUnionTrimmedAtTheBounds()
+    {
+        (RaftManager raft, FairReadScheduler scheduler, KahunaConfiguration config,
+            ILogger<IKahuna> logger) = CreateRaftAndConfig("range-bound-differential");
+
+        scheduler.Start();
+        try
+        {
+            Random random = new(1234);
+            string[] universe = HundredDocKeys();
+            List<string> diskKeys = universe.Where(_ => random.Next(2) == 0).ToList();
+            List<string> residentKeys = universe.Where(_ => random.Next(3) == 0).ToList();
+
+            RangeBackend backend = new(diskKeys);
+
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
+            IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
+                actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
+                    "range-bound-differential-actor", null!, null!, backend, raft,
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+
+            foreach (string key in residentKeys)
+                await actorRef.Ask(MakeSet(key, Encoding.UTF8.GetBytes(key + "-mem")), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+            List<string> union = diskKeys.Union(residentKeys).OrderBy(static k => k, StringComparer.Ordinal).ToList();
+
+            for (int round = 0; round < 60; round++)
+            {
+                string? startKey = random.Next(4) == 0 ? null : $"doc/{random.Next(0, 100):D3}";
+                bool startInclusive = random.Next(2) == 0;
+                string? endKey = random.Next(5) == 0 ? null : $"doc/{random.Next(0, 100):D3}";
+                bool endInclusive = random.Next(2) == 0;
+                int limit = random.Next(5) switch { 0 => 1, 1 => 3, 2 => 7, 3 => 50, _ => 200 };
+
+                List<string> inBounds = union.Where(k =>
+                    (startKey is null || string.CompareOrdinal(k, startKey) > 0 || (startInclusive && string.CompareOrdinal(k, startKey) == 0))
+                    && (endKey is null || IPersistenceBackend.IsWithinEndBound(k, endKey, endInclusive))).ToList();
+
+                KeyValueResponse? resp = await actorRef.Ask(
+                    MakeBoundedRangeScan("doc/", limit, startKey, startInclusive, endKey, endInclusive),
+                    TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+
+                Assert.NotNull(resp);
+                Assert.Equal(KeyValueResponseType.Get, resp!.Type);
+                Assert.Equal(inBounds.Take(limit).ToList(), resp.RangeResult!.Items.Select(static i => i.Item1).ToList());
+                Assert.Equal(inBounds.Count > limit, resp.RangeResult.HasMore);
+            }
+        }
+        finally { scheduler.Stop(); }
+    }
+
     // ── Request factories ─────────────────────────────────────────────────────────────────
+
+    private static KeyValueRequest MakeBoundedRangeScan(
+        string prefix, int limit, string? startKey, bool startInclusive, string? endKey, bool endInclusive)
+    {
+        KeyValueRequest req = MakeRangeScan(prefix, limit);
+        req.StartKey = startKey;
+        req.StartInclusive = startInclusive;
+        req.EndKey = endKey;
+        req.EndInclusive = endInclusive;
+        return req;
+    }
 
     private static KeyValueRequest MakeRangeScan(string prefix, int limit)
     {
@@ -532,22 +718,34 @@ public sealed class TestTryGetByRangeHandler : RaftTrackingTest
 
     // ── Inner backends ────────────────────────────────────────────────────────────────────
 
+    /// <summary>One backend page read as the handler issued it, and how many entries it got back.</summary>
+    private readonly record struct PageRead(string? StartKey, string? EndKey, bool EndInclusive, int Limit, int Returned);
+
     /// <summary>
     /// Backend with a flat sorted list of entries. GetKeyValueByRange returns up to `limit`
-    /// items with keys that start with `prefix` and are &gt;= `startKey` (if provided).
+    /// items with keys that start with `prefix` and are &gt;= `startKey` (if provided), and stops at
+    /// the end bound when one is given. Every page read is recorded so a test can assert how many
+    /// entries the handler asked the backend for.
     /// </summary>
     private sealed class RangeBackend : IPersistenceBackend, IDisposable
     {
         private readonly MemoryPersistenceBackend inner = new();
         private readonly List<(string Key, ReadOnlyKeyValueEntry Entry)> allEntries;
+        private readonly List<PageRead> reads = [];
 
-        internal RangeBackend(IEnumerable<string> keys)
+        /// <summary>The page reads so far, oldest first. Read it after the scan's response arrived.</summary>
+        internal List<PageRead> Reads
+        {
+            get { lock (reads) return [.. reads]; }
+        }
+
+        internal RangeBackend(IEnumerable<string> keys, Func<string, KeyValueState>? stateOf = null)
         {
             allEntries = keys
                 .OrderBy(k => k, StringComparer.Ordinal)
                 .Select(k => (k, new ReadOnlyKeyValueEntry(
                     Encoding.UTF8.GetBytes(k + "-val"), 1L,
-                    HLCTimestamp.Zero, HLCTimestamp.Zero, HLCTimestamp.Zero, KeyValueState.Set)))
+                    HLCTimestamp.Zero, HLCTimestamp.Zero, HLCTimestamp.Zero, stateOf?.Invoke(k) ?? KeyValueState.Set)))
                 .ToList();
         }
 
@@ -571,16 +769,31 @@ public sealed class TestTryGetByRangeHandler : RaftTrackingTest
 
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit)
         {
+            KeyValueScanTally discarded = default;
+            return GetKeyValueByRange(prefix, startKey, null, false, limit, ref discarded);
+        }
+
+        public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(
+            string prefix, string? startKey, string? endKey, bool endInclusive, int limit, ref KeyValueScanTally tally)
+        {
             IEnumerable<(string Key, ReadOnlyKeyValueEntry Entry)> candidates =
                 allEntries.Where(e => e.Key.StartsWith(prefix, StringComparison.Ordinal));
 
             if (startKey is not null)
                 candidates = candidates.Where(e => string.CompareOrdinal(e.Key, startKey) >= 0);
 
-            return candidates
+            if (endKey is not null)
+                candidates = candidates.Where(e => IPersistenceBackend.IsWithinEndBound(e.Key, endKey, endInclusive));
+
+            List<(string, ReadOnlyKeyValueEntry)> page = candidates
                 .Take(limit)
                 .Select(e => (e.Key, e.Entry))
                 .ToList();
+
+            lock (reads)
+                reads.Add(new PageRead(startKey, endKey, endInclusive, limit, page.Count));
+
+            return page;
         }
 
         public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, HLCTimestamp floorTimestamp, out RevisionPruneResult result) => inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, floorTimestamp, out result);

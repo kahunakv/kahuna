@@ -14,7 +14,10 @@ namespace Kahuna.Server.KeyValues.Handlers;
 /// </summary>
 internal sealed class RangeDiskPage
 {
-    /// <summary>Snapshot-projected entries from this page (sentinel excluded).</summary>
+    /// <summary>
+    /// Snapshot-projected entries from this page, the <c>limit + 1</c> sentinel row included: it is a row of
+    /// the range like any other, and merging it lets a full page close without a second disk read.
+    /// </summary>
     internal readonly List<(string Key, ReadOnlyKeyValueEntry Entry)> Projected;
 
     /// <summary>True when the raw (unprojected) disk page contained <c>limit + 1</c> rows.</summary>

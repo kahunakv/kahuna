@@ -84,6 +84,13 @@ internal sealed class RangeScanContinuation : ReadContinuation
     private string diskCursor;
 
     /// <summary>
+    /// The largest disk key the merge consumed so far. A disk page carries its limit+1 sentinel row, and the
+    /// next page starts at that row's key (an inclusive seek), so the rows at or below this key at the head
+    /// of a new page were merged already and are skipped.
+    /// </summary>
+    private string? lastDiskKeyMerged;
+
+    /// <summary>
     /// The combined stage-2 result: snapshot-projected entries plus raw pagination facts.
     /// Set by the stage-2 callback (off-actor) before the ResumeRead message is dispatched;
     /// consumed and cleared by Execute (actor thread, stage 3).
@@ -165,6 +172,11 @@ internal sealed class RangeScanContinuation : ReadContinuation
         int diskAvailable = diskPage.Count;
         int diskIdx = 0;
 
+        // A continuation page begins at the previous page's sentinel key, which the merge consumed.
+        if (lastDiskKeyMerged is not null)
+            while (diskIdx < diskAvailable && string.CompareOrdinal(diskPage[diskIdx].Item1, lastDiskKeyMerged) <= 0)
+                diskIdx++;
+
         // For snapshot scans, build a key→projected-entry map from the current disk page so
         // EvaluateKeySync can fall back to it when the in-memory revision archive misses.
         // The disk page has already been snapshot-projected by the stage-2 task (off-actor),
@@ -216,6 +228,7 @@ internal sealed class RangeScanContinuation : ReadContinuation
                 keyToProcess = diskKey!;
                 ReadOnlyKeyValueEntry de = diskPage[diskIdx].Item2;
                 diskIdx++;
+                lastDiskKeyMerged = keyToProcess;
                 // Build a transient entry for the disk-only key; not inserted into the store
                 // (populateCache:false semantics — range scans must not pollute the LRU).
                 entry = new KeyValueEntry
@@ -241,6 +254,7 @@ internal sealed class RangeScanContinuation : ReadContinuation
                 ReadOnlyKeyValueEntry diskEntry = diskPage[diskIdx].Item2;
                 memIdx++;
                 diskIdx++;
+                lastDiskKeyMerged = keyToProcess;
 
                 // In snapshot mode the disk page is as-of projected, so this comparison is only a
                 // staleness signal there, never a serving decision.
@@ -308,9 +322,10 @@ internal sealed class RangeScanContinuation : ReadContinuation
                 string.CompareOrdinal(keyToProcess, startKey) == 0)
                 continue;
 
-            // End-key enforcement: GetKeyValueByRange has no endKey parameter, so the upper
-            // bound must be enforced here for disk keys; the BTree already applies it for
-            // memory keys via the bounds passed to GetByRange.
+            // End-key enforcement: the BTree applies the bound to memory keys via the bounds passed to
+            // GetByRange, and the backend page stops at it for disk keys. This check is the guard for a
+            // backend that reads past the bound (the interface default trims, a test double may not),
+            // and it ends the merge as soon as either side reaches the bound.
             if (endKey is not null)
             {
                 int cmpEnd = string.CompareOrdinal(keyToProcess, endKey);
@@ -357,6 +372,8 @@ internal sealed class RangeScanContinuation : ReadContinuation
             try
             {
                 string capturedCursor = diskCursor;
+                string? capturedEndKey = endKey;
+                bool capturedEndInclusive = endInclusive;
                 bool capturedSnapshotRead = isSnapshotRead;
                 HLCTimestamp capturedSnapshotTs = snapshotTs;
                 HLCTimestamp capturedCurrentTime = currentTime;
@@ -375,7 +392,7 @@ internal sealed class RangeScanContinuation : ReadContinuation
                         }
 
                         return TryGetByRangeHandler.ReadDiskPage(
-                            context.PersistenceBackend, prefix, capturedCursor, capturedLimit,
+                            context.PersistenceBackend, prefix, capturedCursor, capturedEndKey, capturedEndInclusive, capturedLimit,
                             capturedSnapshotRead, capturedSnapshotTs, capturedCurrentTime, () => Cancelled);
                     });
             }

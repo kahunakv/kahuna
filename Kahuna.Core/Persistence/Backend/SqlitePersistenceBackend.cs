@@ -1116,6 +1116,18 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
     /// </summary>
     public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit)
     {
+        KeyValueScanTally discarded = default;
+        return GetKeyValueByRange(prefix, startKey, null, false, limit, ref discarded);
+    }
+
+    /// <summary>
+    /// Same page, ended at <paramref name="endKey"/>: the bound is a predicate of the query, so the index walk
+    /// stops there and a short bounded seek never reads a full page. The tally is untouched: the head table
+    /// holds no revision rows.
+    /// </summary>
+    public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(
+        string prefix, string? startKey, string? endKey, bool endInclusive, int limit, ref KeyValueScanTally tally)
+    {
         List<(string, ReadOnlyKeyValueEntry)> results = [];
 
         int shard = HashUtils.ConsistentHash(prefix, MaxShards);
@@ -1136,23 +1148,27 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
             // byte orders may differ for characters above U+07FF.  If non-ASCII keys are ever
             // needed, add COLLATE BINARY explicitly and document the encoding assumption, or
             // switch the C# layer to UTF-8 byte comparison to stay in sync.
-            string query = upper is not null
-                ? """
-                  SELECT key, value, revision, expiresNode, expiresPhysical, expiresCounter, lastUsedNode, lastUsedPhysical, lastUsedCounter,
-                         lastModifiedNode, lastModifiedPhysical, lastModifiedCounter, state
-                  FROM keys
-                  WHERE key >= @start AND key < @upper
-                  ORDER BY key
-                  LIMIT @limit
-                  """
-                : """
-                  SELECT key, value, revision, expiresNode, expiresPhysical, expiresCounter, lastUsedNode, lastUsedPhysical, lastUsedCounter,
-                         lastModifiedNode, lastModifiedPhysical, lastModifiedCounter, state
-                  FROM keys
-                  WHERE key >= @start
-                  ORDER BY key
-                  LIMIT @limit
-                  """;
+            // The prefix upper bound and the caller's end key are both predicates: SQLite walks the key
+            // index up to the tighter one. The end-key predicate uses the same BINARY collation as the
+            // prefix bound, so the encoding note above applies to it as well.
+            const string select = """
+                SELECT key, value, revision, expiresNode, expiresPhysical, expiresCounter, lastUsedNode, lastUsedPhysical, lastUsedCounter,
+                       lastModifiedNode, lastModifiedPhysical, lastModifiedCounter, state
+                FROM keys
+                WHERE key >= @start
+                """;
+            const string orderAndLimit = " ORDER BY key LIMIT @limit";
+
+            // Constant concatenation folds at compile time: no query string is built per call.
+            string query = (upper is not null, endKey is not null, endInclusive) switch
+            {
+                (true, true, true) => select + " AND key < @upper AND key <= @end" + orderAndLimit,
+                (true, true, false) => select + " AND key < @upper AND key < @end" + orderAndLimit,
+                (true, false, _) => select + " AND key < @upper" + orderAndLimit,
+                (false, true, true) => select + " AND key <= @end" + orderAndLimit,
+                (false, true, false) => select + " AND key < @end" + orderAndLimit,
+                (false, false, _) => select + orderAndLimit
+            };
 
             using SqliteCommand command = new(query, connection);
 
@@ -1160,6 +1176,8 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
             command.Parameters.AddWithValue("@limit", limit);
             if (upper is not null)
                 command.Parameters.AddWithValue("@upper", upper);
+            if (endKey is not null)
+                command.Parameters.AddWithValue("@end", endKey);
 
             using SqliteDataReader reader = command.ExecuteReader();
 
