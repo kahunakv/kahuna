@@ -101,6 +101,17 @@ public sealed class TestPitrBootstrapIntegration : BaseCluster, IDisposable
                 KeyValueDurability.Persistent, opCt);
             Assert.Equal(KeyValueResponseType.Set, setType);
 
+            // Grow every partition's log past index 1. The seed is only tested by a checkpoint with a
+            // GAP below it: a checkpoint at index 1 has nothing missing beneath it, so even a plain
+            // checkpoint write certifies it and a seeded node joins at the restored index by accident.
+            for (int i = 0; i < 24; i++)
+            {
+                (KeyValueResponseType fillType, _, _) = await kahuna1.LocateAndTrySetKeyValue(
+                    HLCTimestamp.Zero, $"pitr-fill-{i}-{Guid.NewGuid():N}", value, null, -1, KeyValueFlags.Set, 0,
+                    KeyValueDurability.Persistent, opCt);
+                Assert.Equal(KeyValueResponseType.Set, fillType);
+            }
+
             // Flush so the persistence backend contains the written data before checkpoint.
             KahunaManager km1 = (KahunaManager)kahuna1;
             await km1.FlushPersistenceAsync();
@@ -126,6 +137,16 @@ public sealed class TestPitrBootstrapIntegration : BaseCluster, IDisposable
             await BootstrapHelper.BootstrapNodeAsync(
                 chain, BackupTestStores.Artifacts(artifactsDir), targetTime, seededBackend, seededWal,
                 TimeSpan.FromHours(24), DateTime.UtcNow);
+
+            // The seed is only worth anything if the WAL CERTIFIES it: the persisted last-checkpoint id
+            // must reach the restored index although no entry below it is present. A checkpoint row
+            // alone leaves the id at "none", the node presents at index 0, and the leader backfills the
+            // whole log from 1 (a join that costs exactly as much as an unseeded one).
+            Assert.NotEmpty(fullManifest.PartitionRanges);
+            Assert.All(fullManifest.PartitionRanges, range => Assert.True(range.ToIndex > 1,
+                $"partition {range.PartitionId} restored at index {range.ToIndex}: no gap below the checkpoint, the scenario does not test the seed"));
+            foreach (PartitionBackupRange range in fullManifest.PartitionRanges)
+                Assert.Equal(range.ToIndex, seededWal.GetLastCheckpoint(range.PartitionId));
 
             // Build node 4 with the seeded WAL + backend.
             (IRaft raft4, IKahuna kahuna4) = BuildNodeWithExternalWal(
@@ -172,6 +193,15 @@ public sealed class TestPitrBootstrapIntegration : BaseCluster, IDisposable
             // The seeded WAL checkpoint carries the correct index + term, so the leader found
             // a non-empty AppendEntries batch and never fell back to InstallSnapshot.
             Assert.Equal(0, tracker.ExportCalls);
+
+            // The leader shipped only entries above the restored index: the joiner's log still starts at
+            // the seeded checkpoint. A backfill from 1 would have landed every earlier entry below it.
+            foreach (PartitionBackupRange range in fullManifest.PartitionRanges)
+            {
+                List<RaftLog> rows = seededWal.ReadLogsRange(range.PartitionId, 0, 1);
+                RaftLog first = Assert.Single(rows);
+                Assert.Equal(range.ToIndex, first.Id);
+            }
 
             // The KV entry written before the backup must be readable on node 4: its state
             // comes from the checkpoint (restored by OpenCheckpoint) together with any delta

@@ -744,6 +744,15 @@ internal sealed class BackupDriver
             // after compaction, or duplicating the whole WAL without it).
             IReadOnlyList<BackupManifest> ancestors =
                 await catalog.ResolveChainAsync(parentBackupId, ct).ConfigureAwait(false);
+
+            // The chain validator refuses a chain whose manifests carry different topology generations, so
+            // an incremental stamped with a generation other than its ancestors' would publish cleanly and
+            // then make every restore from the chain fail. Compare before capturing anything: a membership
+            // change (join, leave, eviction) or a partition split/merge since the chain was taken means a
+            // new full is required, exactly as when the compaction floor passed the parent's range.
+            if (capturedTopologyGeneration.HasValue)
+                EnsureTopologyMatchesChain(ancestors, capturedTopologyGeneration.Value);
+
             Dictionary<int, PartitionBackupRange> parentRanges = BuildHighWaterMarks(ancestors);
 
             List<PartitionBackupRange> ranges = [];
@@ -1028,6 +1037,29 @@ internal sealed class BackupDriver
         {
             NeedsFullBackup = true
         };
+
+    /// <summary>
+    /// An incremental may only extend a chain captured at the cluster topology it sees now. Every
+    /// ancestor that records a generation must match <paramref name="current"/>; an ancestor that records
+    /// none (a legacy or partially stamped manifest) does not constrain it, mirroring how the chain
+    /// validator treats a null generation. The whole chain is checked, not just the immediate parent, so
+    /// an unstamped link cannot hide a root taken at an earlier topology.
+    /// </summary>
+    private static void EnsureTopologyMatchesChain(IReadOnlyList<BackupManifest> ancestors, long current)
+    {
+        foreach (BackupManifest ancestor in ancestors)
+        {
+            if (ancestor.TopologyGeneration is long recorded && recorded != current)
+                throw new BackupDriverException(
+                    $"The cluster topology (partition map or membership) changed since backup {ancestor.BackupId:N} " +
+                    $"was taken (topology generation {recorded}, now {current}); an incremental cannot extend " +
+                    "that chain, so a new full backup is required.")
+                {
+                    NeedsFullBackup = true,
+                    TopologyDivergedFromParent = true
+                };
+        }
+    }
 
     /// <summary>An index the segment must hold is no longer in the WAL, whatever the reported floor says.</summary>
     private static BackupDriverException MissingFromLog(int partitionId, long fromIndex, long expected, long found) =>

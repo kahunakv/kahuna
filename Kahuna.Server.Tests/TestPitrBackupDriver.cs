@@ -660,10 +660,12 @@ public sealed class TestPitrBackupDriver : IDisposable
         // Full backup at a stable topology.
         BackupManifest full = await BackupDriver.RunFullAsync(
             wal, [Part(1)], new MemoryPersistenceBackend(), BackupTestStores.Artifacts(artifacts), catalog,
-            topologyGenerationProbe: () => 999L, ct: TestContext.Current.CancellationToken);
+            topologyGenerationProbe: () => 111L, ct: TestContext.Current.CancellationToken);
 
         wal.Write([(1, [new RaftLog { Id = 2, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, 200, 0) }])]);
 
+        // The incremental starts at the full's generation (so the chain check passes) and the topology
+        // moves while it captures: the pre-publish re-check must abort it.
         int calls = 0;
         long Probe() => calls++ == 0 ? 111L : 222L;
 
@@ -676,6 +678,90 @@ public sealed class TestPitrBackupDriver : IDisposable
         // Only the full remains; the incremental was not published and its directory was swept.
         Assert.Single(await catalog.ListAsync(TestContext.Current.CancellationToken));
         Assert.Single(Directory.GetDirectories(artifacts)); // only the full's artifact dir
+    }
+
+    [Fact]
+    public async Task TakeIncrementalBackup_TopologyDivergedFromParent_RequiresFullAndPublishesNothing()
+    {
+        InMemoryWAL wal = BuildWal((1, 1, 100, RaftLogType.Committed));
+        BackupCatalog catalog = NewCatalog("topo_diverged_inc");
+        string artifacts = ArtifactsDir("topo_diverged_inc");
+
+        BackupManifest full = await BackupDriver.RunFullAsync(
+            wal, [Part(1)], new MemoryPersistenceBackend(), BackupTestStores.Artifacts(artifacts), catalog,
+            topologyGenerationProbe: () => 111L, ct: TestContext.Current.CancellationToken);
+
+        wal.Write([(1, [new RaftLog { Id = 2, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, 200, 0) }])]);
+
+        // The topology is stable for the whole incremental, but it is not the one the full was taken at
+        // (a node was evicted in between). Publishing would leave a chain nothing can restore from.
+        BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(async () =>
+            await BackupDriver.RunIncrementalAsync(wal, [Part(1)], full.BackupId, BackupTestStores.Artifacts(artifacts), catalog,
+                topologyGenerationProbe: () => 222L, ct: TestContext.Current.CancellationToken));
+
+        Assert.True(ex.NeedsFullBackup);
+        Assert.True(ex.TopologyDivergedFromParent);
+        Assert.False(ex.TopologyChanged);
+        Assert.Contains(full.BackupId.ToString("N"), ex.Message);
+        // Only the full remains; the incremental was not published and no artifact directory was left behind.
+        Assert.Single(await catalog.ListAsync(TestContext.Current.CancellationToken));
+        Assert.Single(Directory.GetDirectories(artifacts));
+    }
+
+    [Fact]
+    public async Task TakeIncrementalBackup_TopologyDivergedFromRoot_UnstampedParent_RequiresFull()
+    {
+        InMemoryWAL wal = BuildWal((1, 1, 100, RaftLogType.Committed));
+        BackupCatalog catalog = NewCatalog("topo_diverged_root");
+        string artifacts = ArtifactsDir("topo_diverged_root");
+
+        BackupManifest full = await BackupDriver.RunFullAsync(
+            wal, [Part(1)], new MemoryPersistenceBackend(), BackupTestStores.Artifacts(artifacts), catalog,
+            topologyGenerationProbe: () => 111L, ct: TestContext.Current.CancellationToken);
+
+        wal.Write([(1, [new RaftLog { Id = 2, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, 200, 0) }])]);
+
+        // An intermediate link that records no generation must not hide the root's.
+        BackupManifest inc1 = await BackupDriver.RunIncrementalAsync(
+            wal, [Part(1)], full.BackupId, BackupTestStores.Artifacts(artifacts), catalog,
+            topologyGenerationProbe: null, ct: TestContext.Current.CancellationToken);
+        Assert.Null(inc1.TopologyGeneration);
+
+        wal.Write([(1, [new RaftLog { Id = 3, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, 300, 0) }])]);
+
+        BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(async () =>
+            await BackupDriver.RunIncrementalAsync(wal, [Part(1)], inc1.BackupId, BackupTestStores.Artifacts(artifacts), catalog,
+                topologyGenerationProbe: () => 222L, ct: TestContext.Current.CancellationToken));
+
+        Assert.True(ex.NeedsFullBackup);
+        Assert.True(ex.TopologyDivergedFromParent);
+        Assert.Contains(full.BackupId.ToString("N"), ex.Message);
+        Assert.Equal(2, (await catalog.ListAsync(TestContext.Current.CancellationToken)).Count);
+    }
+
+    [Fact]
+    public async Task TakeIncrementalBackup_ChainWithoutTopologyGeneration_StampsCurrentAndChainValidates()
+    {
+        InMemoryWAL wal = BuildWal((1, 1, 100, RaftLogType.Committed));
+        BackupCatalog catalog = NewCatalog("topo_legacy_parent");
+        string artifacts = ArtifactsDir("topo_legacy_parent");
+
+        // A legacy base records no generation, so it constrains nothing: the validator skips nulls.
+        BackupManifest full = await BackupDriver.RunFullAsync(
+            wal, [Part(1)], new MemoryPersistenceBackend(), BackupTestStores.Artifacts(artifacts), catalog,
+            topologyGenerationProbe: null, ct: TestContext.Current.CancellationToken);
+        Assert.Null(full.TopologyGeneration);
+
+        wal.Write([(1, [new RaftLog { Id = 2, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, 200, 0) }])]);
+
+        BackupManifest inc = await BackupDriver.RunIncrementalAsync(
+            wal, [Part(1)], full.BackupId, BackupTestStores.Artifacts(artifacts), catalog,
+            topologyGenerationProbe: () => 222L, ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal(222L, inc.TopologyGeneration);
+        IReadOnlyList<BackupManifest> chain =
+            await catalog.ResolveAndValidateAsync(inc.BackupId, TestContext.Current.CancellationToken);
+        Assert.Equal(2, chain.Count);
     }
 
     // ── coordinator fence (leadership loss) ──────────────────────────────────────────────────

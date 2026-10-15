@@ -16,8 +16,9 @@ public enum KahunaBackupOutcome
     ParentMissing = 2,
 
     /// <summary>
-    /// An incremental was requested but cannot be produced (its start index is below the WAL
-    /// compaction floor); a full backup is required instead.
+    /// An incremental was requested but cannot be produced: its start index is below the WAL
+    /// compaction floor, or the cluster topology (membership or partition map) changed since its
+    /// parent chain was taken. A full backup is required instead.
     /// </summary>
     NeedsFull = 3,
 

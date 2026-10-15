@@ -371,8 +371,11 @@ internal sealed class BackupFacade : IDisposable
     {
         BackupDriverException d when d.NeedsFullBackup =>
             new(KahunaBackupOutcome.NeedsFull,
-                "An incremental backup could not be produced because the WAL compaction floor " +
-                "advanced past the parent backup; take a full backup instead."),
+                d.TopologyDivergedFromParent
+                    ? "An incremental backup could not be produced because the cluster topology changed " +
+                      "since the parent chain was taken; take a full backup instead."
+                    : "An incremental backup could not be produced because the WAL compaction floor " +
+                      "advanced past the parent backup; take a full backup instead."),
         BackupDriverException d when d.ParentMissing =>
             new(KahunaBackupOutcome.ParentMissing, "The requested parent backup was not found."),
         BackupDriverException d when d.TargetConflict =>

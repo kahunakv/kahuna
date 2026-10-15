@@ -188,10 +188,14 @@ internal sealed class BackupService : IDisposable
             }
             catch (BackupDriverException ex) when (ex.NeedsFullBackup)
             {
+                string cause = ex.TopologyDivergedFromParent
+                    ? "the cluster topology (partition map or membership) changed since the parent chain was taken"
+                    : "the WAL compaction floor advanced past the parent backup's range";
+
                 _logger?.LogWarning(
-                    "Incremental backup from {ParentId} not possible — WAL compaction floor advanced past " +
-                    "parent range. Falling back to full backup. Reason: {Message}",
-                    parentBackupId, ex.Message);
+                    "Incremental backup from {ParentId} not possible: {Cause}. Falling back to full backup. " +
+                    "Reason: {Message}",
+                    parentBackupId, cause, ex.Message);
 
                 BackupManifest full = await _driver.TakeFullBackupAsync(
                     _artifacts, _catalog, snapshotT, BuildOwnerIdentity(), signManifest: ManifestSigner, ct: ct);
@@ -200,8 +204,7 @@ internal sealed class BackupService : IDisposable
                 // Make the substitution observable: the caller asked for an incremental and got a full.
                 dto.RequestedKind = BackupType.Incremental.ToString();
                 dto.SubstitutionReason =
-                    "The WAL compaction floor advanced past the parent backup's range, so an incremental " +
-                    "could not be produced; a full backup was taken instead.";
+                    $"An incremental could not be produced because {cause}; a full backup was taken instead.";
             }
 
             await TryRunGcLockedAsync(ct).ConfigureAwait(false);

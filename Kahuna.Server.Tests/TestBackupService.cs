@@ -997,6 +997,44 @@ public sealed class TestBackupService : IDisposable
     }
 
     [Fact]
+    public async Task TakeIncrementalAsync_MembershipChangedSinceParent_FallsBackToFull_AndChainValidates()
+    {
+        InMemoryWAL wal = BuildWal((1, 1, 100));
+        StubRaft raft = MakeRaft(wal, 1);
+        raft.MembershipVersion = 3;
+        BackupService svc = MakeService("topo_subst", wal, new MemoryPersistenceBackend(), raft: raft);
+
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo full = await svc.TakeFullAsync(ct: TestContext.Current.CancellationToken);
+
+        wal.Write([(1, [new RaftLog { Id = 2, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, 200, 0) }])]);
+
+        // A node is evicted after the full: the roster version advances and with it the topology
+        // generation. The log still holds everything, so only the topology rule can refuse the incremental.
+        raft.MembershipVersion = 4;
+
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo inc = await svc.TakeIncrementalAsync(full.BackupId, ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal("Incremental", inc.RequestedKind);
+        Assert.Equal("Full", inc.ActualKind);
+        Assert.Equal("Full", inc.Type);
+        Assert.NotEqual(full.BackupId, inc.BackupId);
+        Assert.Contains("topology", inc.SubstitutionReason, StringComparison.Ordinal);
+
+        // The substituted full is restorable on its own, and the next incremental extends it normally.
+        IReadOnlyList<Kahuna.Shared.Communication.Rest.KahunaBackupInfo> chain = await svc.ResolveAndValidateAsync(inc.BackupId, TestContext.Current.CancellationToken);
+        Assert.Single(chain);
+
+        wal.Write([(1, [new RaftLog { Id = 3, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, 300, 0) }])]);
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo inc2 = await svc.TakeIncrementalAsync(inc.BackupId, ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal("Incremental", inc2.ActualKind);
+        Assert.Null(inc2.SubstitutionReason);
+        chain = await svc.ResolveAndValidateAsync(inc2.BackupId, TestContext.Current.CancellationToken);
+        Assert.Equal(2, chain.Count);
+        Assert.Equal(inc.BackupId, chain[0].BackupId);
+    }
+
+    [Fact]
     public async Task RestoreTo_Success_ReportsOutcomeOk()
     {
         MemoryPersistenceBackend backend = new();
@@ -1324,7 +1362,10 @@ public sealed class TestBackupService : IDisposable
         public RaftConfiguration Configuration { get; } = new() { Host = "localhost", Port = 19999 };
         public string GetLocalEndpoint() => "localhost:19999";
         public ClusterMemberRole LocalRole => ClusterMemberRole.Voter;
-        public ClusterMembership GetMembership() => new();
+        // Settable so a test can advance the roster (a join, leave or eviction) between two backups and
+        // thereby move the topology generation the driver stamps. Defaults to 0 like a fresh membership.
+        public long MembershipVersion { get; set; }
+        public ClusterMembership GetMembership() => new() { MembershipVersion = MembershipVersion };
         public bool Joined => true;
         public bool IsInitialized => true;
         public ICommunication Communication => null!;

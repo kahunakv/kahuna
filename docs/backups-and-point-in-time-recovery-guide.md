@@ -282,6 +282,13 @@ If an incremental's starting point has already fallen below the retention floor 
 old to still be in the WAL), Kahuna refuses it and tells you a new full backup is required — rather
 than producing an incremental with a hole in it.
 
+The same rule applies when the cluster topology moved since the chain was taken: a node joined, left
+or was evicted, or a partition split or merged. A chain must not span two topologies, so an
+incremental requested after such a change is refused *before* anything is captured, and the
+`/v1/backups/incremental` endpoint substitutes a full backup for it (the response reports
+`requestedKind: Incremental`, `actualKind: Full` and a `substitutionReason` naming the topology
+change). Nothing that cannot be restored is ever published.
+
 ---
 
 ## 7. Point-in-time recovery
@@ -430,10 +437,16 @@ restore alone reconstitutes a running system.
 
 The seed is the PITR bootstrap (`--pitr-bootstrap-from <leafId>` with `--join-existing`, or
 `IKahuna.BootstrapFromPitrBackupAsync` for an embedded host, called before the node joins). It replays
-the chain into the node's store and writes one committed checkpoint per partition into the node's
+the chain into the node's store and installs one committed checkpoint per partition into the node's
 WAL at the index the chain reached, so the node tells the leader "I am at N" and receives only N+1
-onwards. A restored directory with an empty WAL presents at index 0 instead, and the leader then
-installs a full snapshot over it. The bootstrap reads the chain as a restore does — the same storage
+onwards. The checkpoint is installed as a *snapshot boundary*, the same way an installed snapshot
+records its index: a WAL only trusts a checkpoint written as an ordinary entry when every entry below
+it is present, and the bootstrap WAL holds nothing below N, so an ordinary write would leave the node
+presenting at index 0 and the leader backfilling the whole log. The restored store is the proof for
+that prefix, exactly as a snapshot is. The bootstrap also records N as the store's
+application-durability floor, so the WAL and the store agree on what the node already holds. A
+restored directory with an empty WAL presents at index 0 instead, and the leader then installs a full
+snapshot over it. The bootstrap reads the chain as a restore does — the same storage
 target, the same backup-root permission check, every manifest authenticated against the configured
 key — and is stricter in one way: a chain stamped with a `BackupClusterId` other than the node's own
 is refused, because its indexes describe another cluster's log. A chain with no cluster id is
@@ -824,10 +837,14 @@ checked before any file is trusted for copy or replay:
 - **Bootstrap authenticates the chain and checks its cluster before it seeds anything.** Each manifest
   is verified against the configured key, and a chain stamped with another cluster's id is refused,
   before the backend or the WAL is touched — a refused bootstrap leaves the node exactly as it was.
-- **Bootstrap seeds the WAL one partition at a time and checks each write is durable.** The backend
-  restore it follows is idempotent and each checkpoint write overwrites by key, so a partial failure
+- **Bootstrap seeds the WAL one partition at a time and checks each step is durable.** The backend
+  restore it follows is idempotent and each checkpoint seed overwrites by key, so a partial failure
   is reported precisely and the bootstrap is safe to re-run — rather than being reported as a success
   while the WAL trails the state already restored into the backend.
+- **Bootstrap installs the checkpoint as a snapshot boundary, not as a plain entry.** A plain
+  checkpoint entry over an empty log is not trusted by the WAL (nothing below it is present), so the
+  node would still present at index 0 and the leader would backfill from 1. The boundary install
+  certifies the index the way an installed snapshot does, and the node joins at the restored index.
 
 ---
 

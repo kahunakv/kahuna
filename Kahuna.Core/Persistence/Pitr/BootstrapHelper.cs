@@ -128,7 +128,7 @@ internal static class BootstrapHelper
 
         // Pin the WAL adapter at the per-partition applied high-water mark so the Raft
         // layer presents this node at the correct index when it joins.
-        SeedWalCheckpoints(chain, targetTime, walAdapter);
+        SeedWalCheckpoints(chain, targetTime, backend, walAdapter);
 
         return restoreResult;
     }
@@ -156,8 +156,20 @@ internal static class BootstrapHelper
     /// <summary>
     /// Determines the per-partition "safe" WAL index — the highest <see cref="PartitionBackupRange.ToIndex"/>
     /// among ranges whose <see cref="PartitionBackupRange.ToHlc"/> is at or before
-    /// <paramref name="targetTime"/> — and writes one synthetic
-    /// <see cref="RaftLogType.CommittedCheckpoint"/> entry per partition into the WAL.
+    /// <paramref name="targetTime"/> — installs one <see cref="RaftLogType.CommittedCheckpoint"/>
+    /// boundary per partition into the WAL, and records the same index as the store's
+    /// application-durability floor.
+    ///
+    /// <para><b>Why a snapshot boundary and not a plain write:</b> every WAL backend advances its
+    /// persisted last-checkpoint id on a plain <see cref="IWAL.Write(List{ValueTuple{int, List{RaftLog}}})"/>
+    /// only when every id below the checkpoint is present, because a checkpoint row that lands over a
+    /// replication gap must not certify entries the node never held. The bootstrap WAL holds nothing
+    /// below the restored index, so a plain write left the persisted id at "none": the node then
+    /// presented to the leader at index 0, was backfilled from 1, and the seed bought nothing. The
+    /// restored store is the certificate for the whole prefix — exactly what an installed snapshot is —
+    /// and <see cref="IWAL.InstallSnapshotBoundary"/> stamps the row and the persisted id together
+    /// without the prefix scan. Kommander's restart reconstruction trusts that persisted id and
+    /// seeds the presence and commit frontiers from it.</para>
     ///
     /// <para>When an incremental's per-partition range straddles <paramref name="targetTime"/>
     /// (<c>ToHlc &gt; T</c> but some entries within have <c>Time ≤ T</c>), the previous
@@ -173,6 +185,7 @@ internal static class BootstrapHelper
     private static void SeedWalCheckpoints(
         IReadOnlyList<BackupManifest> chain,
         HLCTimestamp targetTime,
+        IPersistenceBackend backend,
         IWAL walAdapter)
     {
         // Per-partition: the highest ToIndex/ToTerm where ToHlc ≤ targetTime.
@@ -201,32 +214,65 @@ internal static class BootstrapHelper
         if (safeWater.Count == 0)
             return;
 
-        // Seed one partition at a time and verify each write is durable. IWAL.Write is atomic per
-        // partition and overwrites any existing entry with the same (partitionId, id) key, so this is
-        // safe to retry: re-running BootstrapNode re-applies the idempotent backend restore and
-        // re-writes these checkpoints without duplication. Writing per partition (rather than one
-        // batch) lets a partial failure be detected and reported precisely rather than reported as a
-        // successful bootstrap while the WAL trails the state already restored into the backend.
+        // Seed one partition at a time and verify each step is durable. Both WAL steps overwrite by
+        // (partitionId, id) and the floor store only ever raises, so this is safe to retry: re-running
+        // BootstrapNode re-applies the idempotent backend restore and re-seeds without duplication.
+        // Seeding per partition (rather than one batch) lets a partial failure be detected and reported
+        // precisely rather than reported as a successful bootstrap while the WAL trails the state
+        // already restored into the backend.
+        List<(int PartitionId, long Floor)> floors = new(safeWater.Count);
+
         foreach (KeyValuePair<int, (long index, HLCTimestamp hlc, long term)> kv in safeWater)
         {
-            List<(int, List<RaftLog>)> write =
-            [
-                (kv.Key, [new RaftLog
-                {
-                    Id   = kv.Value.index,
-                    Type = RaftLogType.CommittedCheckpoint,
-                    Time = kv.Value.hlc,
-                    Term = kv.Value.term,
-                }])
-            ];
+            int partitionId = kv.Key;
+            (long index, HLCTimestamp hlc, long term) = kv.Value;
 
-            RaftOperationStatus status = walAdapter.Write(write);
+            // The boundary install is the step that makes the node present at the restored index: it
+            // persists the last-checkpoint id in the same atomic write as the checkpoint row (see the
+            // method summary). On a fresh WAL there is no row at the index, so the install finds no
+            // suffix to discard; on a retry it finds the row it wrote before, with the same term.
+            (RaftOperationStatus status, _) = walAdapter.InstallSnapshotBoundary(partitionId, index, term, sync: true);
             if (status != RaftOperationStatus.Success)
-                throw new BackupDriverException(
-                    $"Failed to seed the WAL checkpoint for partition {kv.Key} at index {kv.Value.index} " +
-                    $"(status {status}); bootstrap did not complete. The backend restore already applied is " +
-                    "idempotent and the checkpoint write overwrites by key, so the bootstrap can be safely " +
-                    "re-run; do not start the node until it completes successfully.");
+                throw SeedFailed(partitionId, index, status, "install the WAL checkpoint boundary");
+
+            // The boundary row carries no timestamp. Re-stamp it with the range's HLC so the restart clock
+            // floor covers the restored data: Kommander merges the maximum restored entry time into the node
+            // clock before the partition serves, and a node whose wall clock lags the data must not mint a
+            // timestamp below it. The persisted last-checkpoint id already equals this index, so this write
+            // neither scans the prefix nor moves the id; it only overwrites the row by key.
+            status = walAdapter.Write(
+            [
+                (partitionId, [new RaftLog
+                {
+                    Id   = index,
+                    Type = RaftLogType.CommittedCheckpoint,
+                    Time = hlc,
+                    Term = term,
+                }])
+            ]);
+            if (status != RaftOperationStatus.Success)
+                throw SeedFailed(partitionId, index, status, "stamp the WAL checkpoint with its timestamp");
+
+            // The store holds every entry the chain delivered through this index, which is exactly what the
+            // application-durability floor certifies. A floor inherited from the full backup's checkpoint
+            // sits at the full's index, below the checkpoint seeded here, and Kommander then reads its
+            // restart replay window from the lower of the two. Never lowered: a floor the store already
+            // vouched for stays.
+            floors.Add((partitionId, Math.Max(backend.GetDurabilityFloor(partitionId), index)));
         }
+
+        // Stored after every WAL boundary landed, so a failure between the two leaves the floor stale-low
+        // (safe: Kommander redelivers from the checkpoint) and never ahead of a WAL that was not seeded.
+        if (!backend.StoreDurabilityFloors(floors))
+            throw new BackupDriverException(
+                "Failed to record the application-durability floor for the seeded partitions in the " +
+                "persistence backend; bootstrap did not complete. The backend restore already applied and " +
+                "the WAL checkpoints already seeded are idempotent, so the bootstrap can be safely re-run; " +
+                "do not start the node until it completes successfully.");
     }
+
+    private static BackupDriverException SeedFailed(int partitionId, long index, RaftOperationStatus status, string step) =>
+        new($"Failed to {step} for partition {partitionId} at index {index} (status {status}); bootstrap did " +
+            "not complete. The backend restore already applied is idempotent and every seed step overwrites " +
+            "by key, so the bootstrap can be safely re-run; do not start the node until it completes successfully.");
 }

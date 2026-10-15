@@ -8,10 +8,19 @@ namespace Kahuna.Server.Persistence.Pitr;
 internal sealed class BackupDriverException : Exception
 {
     /// <summary>
-    /// True when the incremental range starts below the WAL compaction floor and the caller
-    /// should retry by taking a new full backup instead.
+    /// True when an incremental cannot extend its parent chain and the caller should take a new full
+    /// backup instead: the range starts below the WAL compaction floor, or the cluster topology
+    /// moved since the chain was taken (see <see cref="TopologyDivergedFromParent"/>).
     /// </summary>
     public bool NeedsFullBackup { get; init; }
+
+    /// <summary>
+    /// True when the cluster topology generation captured for an incremental differs from the one
+    /// recorded by an ancestor in its chain (a membership change or a partition split/merge since the
+    /// parent was taken). The chain validator refuses a chain that spans two generations, so such an
+    /// incremental must not be published; <see cref="NeedsFullBackup"/> is set alongside this flag.
+    /// </summary>
+    public bool TopologyDivergedFromParent { get; init; }
 
     /// <summary>
     /// True when the requested parent backup was not found in the catalog.

@@ -17,9 +17,12 @@ namespace Kahuna.Server.Tests;
 
 /// <summary>
 /// Verifies that PITR bootstrap WAL seeding fails atomically: <see cref="BootstrapHelper.BootstrapNode"/>
-/// checks every synthetic checkpoint write's <see cref="RaftOperationStatus"/>, never reports success
-/// while the WAL trails the state already restored into the backend, and is safe to re-run after a
-/// failed seed (the backend restore and the checkpoint writes are both idempotent).
+/// checks every seed step's <see cref="RaftOperationStatus"/>, never reports success while the WAL
+/// trails the state already restored into the backend, and is safe to re-run after a failed seed (the
+/// backend restore and the checkpoint seed are both idempotent). Also verifies that the seeded
+/// checkpoint is CERTIFIED — the WAL's persisted last-checkpoint id reaches it although nothing below it
+/// is present — on the in-memory and the RocksDB backends, since that id is what makes the node present
+/// to the leader at the restored index instead of at 0.
 /// </summary>
 public sealed class TestPitrBootstrapSeeding : IDisposable
 {
@@ -87,16 +90,30 @@ public sealed class TestPitrBootstrapSeeding : IDisposable
         return (chain, artifacts, dst);
     }
 
-    // ── fake WAL that injects write failures, delegating everything else to an inner InMemoryWAL ──
+    // ── fake WAL that injects seed-step failures, delegating everything else to an inner InMemoryWAL ──
 
-    private sealed class FailingWal(InMemoryWAL inner, Func<List<(int, List<RaftLog>)>, RaftOperationStatus?> onWrite) : IWAL
+    /// <summary>
+    /// <paramref name="onSeedStep"/> sees the partition of every seed step (the boundary install and the
+    /// checkpoint write alike) and returns a status to inject, or null to let the inner WAL perform it.
+    /// </summary>
+    private sealed class FailingWal(InMemoryWAL inner, Func<int, RaftOperationStatus?> onSeedStep) : IWAL
     {
-        public int WriteCalls { get; private set; }
+        public int SeedCalls { get; private set; }
+
+        public (RaftOperationStatus Status, bool SuffixTruncated) InstallSnapshotBoundary(
+            int partitionId, long snapshotIndex, long lastIncludedTerm, bool sync)
+        {
+            SeedCalls++;
+            RaftOperationStatus? injected = onSeedStep(partitionId);
+            return injected is null
+                ? inner.InstallSnapshotBoundary(partitionId, snapshotIndex, lastIncludedTerm, sync)
+                : (injected.Value, false);
+        }
 
         public RaftOperationStatus Write(List<(int, List<RaftLog>)> logs)
         {
-            WriteCalls++;
-            RaftOperationStatus? injected = onWrite(logs);
+            SeedCalls++;
+            RaftOperationStatus? injected = onSeedStep(logs[0].Item1);
             return injected ?? inner.Write(logs);
         }
 
@@ -127,8 +144,9 @@ public sealed class TestPitrBootstrapSeeding : IDisposable
         FailingWal wal = new(new InMemoryWAL(Log), _ => RaftOperationStatus.Errored);
 
         BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() => BootstrapHelper.BootstrapNodeAsync(chain, BackupTestStores.Artifacts(artifacts), T(200), dst, wal, TimeSpan.FromHours(1), NowUtc(300)));
-        Assert.Contains("seed the WAL checkpoint", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("WAL checkpoint", ex.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Null(FindCheckpoint(wal, 1)); // nothing durably seeded
+        Assert.True(wal.GetLastCheckpoint(1) <= 0);
     }
 
     [Fact]
@@ -139,7 +157,7 @@ public sealed class TestPitrBootstrapSeeding : IDisposable
 
         // Fail only the write that targets partition 2; partition 1's write succeeds.
         InMemoryWAL inner = new(Log);
-        FailingWal wal = new(inner, logs => logs[0].Item1 == 2 ? RaftOperationStatus.Errored : (RaftOperationStatus?)null);
+        FailingWal wal = new(inner, partition => partition == 2 ? RaftOperationStatus.Errored : (RaftOperationStatus?)null);
 
         await Assert.ThrowsAsync<BackupDriverException>(() => BootstrapHelper.BootstrapNodeAsync(chain, BackupTestStores.Artifacts(artifacts), T(200), dst, wal, TimeSpan.FromHours(1), NowUtc(300)));
 
@@ -168,9 +186,66 @@ public sealed class TestPitrBootstrapSeeding : IDisposable
         RaftLog? cp1 = FindCheckpoint(wal, 1);
         Assert.NotNull(cp1);
         Assert.Equal(5, cp1!.Id);
+        Assert.Equal(5, wal.GetLastCheckpoint(1));
 
         // A further (successful) re-run overwrites by key — exactly one checkpoint, no duplicates.
         await BootstrapHelper.BootstrapNodeAsync(chain, BackupTestStores.Artifacts(artifacts), T(200), dst, wal, TimeSpan.FromHours(1), NowUtc(300));
         Assert.Single(wal.ReadLogsRange(1, 0), l => l.Type == RaftLogType.CommittedCheckpoint);
+        Assert.Equal(5, wal.GetLastCheckpoint(1));
+    }
+
+    // ── the seed must be certified: the persisted last-checkpoint id reaches the restored index ──
+
+    [Fact]
+    public async Task Seed_EmptyWal_CertifiesCheckpointAndRecordsDurabilityFloor_InMemory()
+    {
+        (IReadOnlyList<BackupManifest> chain, string artifacts, MemoryPersistenceBackend dst) =
+            await BuildBootstrap("certify_mem", (1, KvLog(5, 200, "k1", "v1", 1, term: 3)), (2, KvLog(7, 200, "k2", "v2", 1, term: 4)));
+
+        InMemoryWAL wal = new(Log);
+        await BootstrapHelper.BootstrapNodeAsync(chain, BackupTestStores.Artifacts(artifacts), T(200), dst, wal, TimeSpan.FromHours(1), NowUtc(300));
+
+        AssertCertified(wal, partition: 1, index: 5, term: 3, hlc: T(200));
+        AssertCertified(wal, partition: 2, index: 7, term: 4, hlc: T(200));
+
+        // The store vouches for everything the chain delivered through the seeded index.
+        Assert.Equal(5, dst.GetDurabilityFloor(1));
+        Assert.Equal(7, dst.GetDurabilityFloor(2));
+    }
+
+    [Fact]
+    public async Task Seed_EmptyWal_CertifiesCheckpoint_RocksDb_SurvivesReopen()
+    {
+        (IReadOnlyList<BackupManifest> chain, string artifacts, MemoryPersistenceBackend dst) =
+            await BuildBootstrap("certify_rocks", (1, KvLog(5, 200, "k1", "v1", 1, term: 3)));
+
+        string walRoot = Path.Combine(_tempRoot, "wal_rocks");
+        Directory.CreateDirectory(walRoot);
+
+        using (RocksDbWAL wal = new(walRoot, "seed", Log, syncWrites: false))
+        {
+            await BootstrapHelper.BootstrapNodeAsync(chain, BackupTestStores.Artifacts(artifacts), T(200), dst, wal, TimeSpan.FromHours(1), NowUtc(300));
+            AssertCertified(wal, partition: 1, index: 5, term: 3, hlc: T(200));
+
+            // A re-run finds its own row at the index (same term): nothing is truncated and nothing moves.
+            await BootstrapHelper.BootstrapNodeAsync(chain, BackupTestStores.Artifacts(artifacts), T(200), dst, wal, TimeSpan.FromHours(1), NowUtc(300));
+            AssertCertified(wal, partition: 1, index: 5, term: 3, hlc: T(200));
+        }
+
+        // The persisted id is what a restarted node reads before it presents itself to the leader.
+        using RocksDbWAL reopened = new(walRoot, "seed", Log, syncWrites: false);
+        AssertCertified(reopened, partition: 1, index: 5, term: 3, hlc: T(200));
+    }
+
+    private static void AssertCertified(IWAL wal, int partition, long index, long term, HLCTimestamp hlc)
+    {
+        Assert.Equal(index, wal.GetLastCheckpoint(partition));
+
+        List<RaftLog> rows = wal.ReadLogsRange(partition, 0);
+        RaftLog cp = Assert.Single(rows);
+        Assert.Equal(index, cp.Id);
+        Assert.Equal(RaftLogType.CommittedCheckpoint, cp.Type);
+        Assert.Equal(term, cp.Term);
+        Assert.Equal(hlc, cp.Time);
     }
 }
