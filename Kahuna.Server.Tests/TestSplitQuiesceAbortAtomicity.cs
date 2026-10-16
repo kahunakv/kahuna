@@ -468,13 +468,21 @@ public sealed class TestSplitQuiesceAbortAtomicity : BaseCluster
 
         bool splitDone = false;
         int totalCommits = 0;
+        long commitDeadline = long.MaxValue;
+
+        // Every attempt during the quiesce answers MustRetry, and under load the leader changes that follow
+        // a split can refuse a few more. A fixed number of attempts after the split can then end with no
+        // commit at all, so keep going past it until one transfer lands or the deadline passes.
+        bool KeepGoing(int extraAfterSplit) =>
+            extraAfterSplit < 3
+            || (Volatile.Read(ref totalCommits) == 0 && Environment.TickCount64 < Volatile.Read(ref commitDeadline));
 
         async Task Worker(int pair)
         {
             int attempt = 0;
             int extraAfterSplit = 0;
 
-            while (extraAfterSplit < 3)
+            while (KeepGoing(extraAfterSplit))
             {
                 if (Volatile.Read(ref splitDone))
                     extraAfterSplit++;
@@ -504,6 +512,7 @@ public sealed class TestSplitQuiesceAbortAtomicity : BaseCluster
             await Task.Delay(200, ct);
         }
 
+        Volatile.Write(ref commitDeadline, Environment.TickCount64 + 30_000);
         Volatile.Write(ref splitDone, true);
         await Task.WhenAll(workers);
 
