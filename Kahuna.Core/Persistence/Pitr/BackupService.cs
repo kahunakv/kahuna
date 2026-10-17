@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Diagnostics;
+using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.Persistence.Backend;
@@ -16,7 +17,7 @@ namespace Kahuna.Server.Persistence.Pitr;
 /// Exposes full/incremental/coordinated backup, catalog listing, chain resolution,
 /// and offline restore-to-directory operations.
 /// </summary>
-internal sealed class BackupService : IDisposable
+internal sealed partial class BackupService : IDisposable
 {
     private readonly BackupDriver _driver;
     private readonly BackupCatalog _catalog;
@@ -34,6 +35,9 @@ internal sealed class BackupService : IDisposable
     private readonly Func<Task<HLCTimestamp>> _queryMinInFlight;
     private readonly Func<PreparedIntentCommitObservation>? _beginCommitObservation;
     private readonly BackupRetentionPolicy _retentionPolicy;
+    private readonly IInterNodeCommunication? _interNode;
+    private readonly Func<IReadOnlySet<int>, Func<string, bool>>? _keyOwnership;
+    private readonly string? _partScratchRoot;
 
     // Restore checkpoint-copy throughput budget in bytes/second; 0 = unlimited. Caps the bulk copy so a
     // restore does not saturate the disk and starve foreground traffic.
@@ -69,7 +73,10 @@ internal sealed class BackupService : IDisposable
         BackupRetentionPolicy retentionPolicy = default,
         long copyThrottleBytesPerSec = 0,
         Func<PreparedIntentCommitObservation>? beginCommitObservation = null,
-        BackupDriver.WalkLiveIntentsDelegate? walkLiveIntents = null)
+        BackupDriver.WalkLiveIntentsDelegate? walkLiveIntents = null,
+        IInterNodeCommunication? interNodeCommunication = null,
+        Func<IReadOnlySet<int>, Func<string, bool>>? keyOwnership = null,
+        string? partScratchRoot = null)
     {
         // Refuse an unsafe backup root before writing anything: a symlinked or group/world-writable
         // directory would let another user on the host read tenant data or tamper with artifacts and
@@ -94,6 +101,9 @@ internal sealed class BackupService : IDisposable
         _beginCommitObservation = beginCommitObservation;
         _retentionPolicy = retentionPolicy;
         _copyThrottleBytesPerSec = copyThrottleBytesPerSec;
+        _interNode = interNodeCommunication;
+        _keyOwnership = keyOwnership;
+        _partScratchRoot = string.IsNullOrWhiteSpace(partScratchRoot) ? null : partScratchRoot;
     }
 
     public void Dispose()
@@ -176,6 +186,22 @@ internal sealed class BackupService : IDisposable
         long start = Stopwatch.GetTimestamp();
         try
         {
+            // A parent chain composed from several nodes' shares covers partitions this node does not host. Its
+            // incremental must cover them too — a chain is restorable only when every link covers the cluster —
+            // so it is composed the same way.
+            // A missing parent is left to the driver, which reports it as such.
+            if (await _catalog.GetAsync(parentBackupId, ct).ConfigureAwait(false) is not null)
+            {
+                IReadOnlyList<BackupManifest> parentChain =
+                    await _catalog.ResolveChainAsync(parentBackupId, ct).ConfigureAwait(false);
+                List<PartAssignment>? shares = parentChain[0].CoveredPartitions is { } chainCovered
+                    ? AssignShares(chainCovered)
+                    : null;
+
+                if (shares is not null)
+                    return await TakeComposedIncrementalOrSubstituteAsync(parentChain, shares, start, ct).ConfigureAwait(false);
+            }
+
             KahunaBackupInfo dto;
             try
             {
@@ -220,27 +246,49 @@ internal sealed class BackupService : IDisposable
         long start = Stopwatch.GetTimestamp();
         try
         {
-            // A cluster-wide coordinated backup may only be taken by the meta-partition leader (the backup
-            // coordinator). Fail fast on a follower so the caller retries against the leader.
-            const int metaPartition = RangeMapStore.MetaPartitionId;
-            if (!await _raft.AmILeaderIfHosted(metaPartition, ct).ConfigureAwait(false))
-                throw new KahunaBackupException(KahunaBackupOutcome.NotBackupCoordinator,
-                    "This node is not the backup coordinator (it does not lead the meta partition); " +
-                    "retry the coordinated backup against the current leader.");
+            BackupManifest manifest = await TakeCoordinatedLockedAsync(ct).ConfigureAwait(false);
+            RecordBackupSuccess(manifest, start);
+            KahunaBackupInfo dto = ToDto(manifest);
+            await TryRunGcLockedAsync(ct).ConfigureAwait(false);
+            return dto;
+        }
+        catch { BackupIoMetrics.BackupFailures.Add(1); throw; }
+        finally { _gcGate.Release(); }
+    }
 
-            // Capture the coordinator's term now. The driver re-checks — still leader AND same term —
-            // just before publish, so a leadership change mid-backup fails closed rather than publishing
-            // a cut this node no longer has authority over.
-            long coordinatorTerm = _raft.WalAdapter.GetCurrentTerm(metaPartition);
-            async Task<bool> StillCoordinator(CancellationToken fenceCt) =>
-                await _raft.AmILeaderIfHosted(metaPartition, fenceCt).ConfigureAwait(false)
-                && _raft.WalAdapter.GetCurrentTerm(metaPartition) == coordinatorTerm;
+    // Must be called while _gcGate is held.
+    private async Task<BackupManifest> TakeCoordinatedLockedAsync(CancellationToken ct)
+    {
+        // A cluster-wide coordinated backup may only be taken by the meta-partition leader (the backup
+        // coordinator). Fail fast on a follower so the caller retries against the leader.
+        const int metaPartition = RangeMapStore.MetaPartitionId;
+        if (!await _raft.AmILeaderIfHosted(metaPartition, ct).ConfigureAwait(false))
+            throw new KahunaBackupException(KahunaBackupOutcome.NotBackupCoordinator,
+                "This node is not the backup coordinator (it does not lead the meta partition); " +
+                "retry the coordinated backup against the current leader.");
 
-            // The cut is chosen from what this node sees in flight, and a durable prepare that applies here after
-            // the choice is invisible to it. So each attempt also verifies its cut after the capture, against an
-            // observation of the durable intents opened before the choice. An attempt whose cut a transaction
-            // overtook publishes nothing, and the next attempt chooses again with that transaction in view.
-            for (int attempt = 1; ; attempt++)
+        // Capture the coordinator's term now. The driver re-checks — still leader AND same term —
+        // just before publish, so a leadership change mid-backup fails closed rather than publishing
+        // a cut this node no longer has authority over.
+        long coordinatorTerm = _raft.WalAdapter.GetCurrentTerm(metaPartition);
+        async Task<bool> StillCoordinator(CancellationToken fenceCt) =>
+            await _raft.AmILeaderIfHosted(metaPartition, fenceCt).ConfigureAwait(false)
+            && _raft.WalAdapter.GetCurrentTerm(metaPartition) == coordinatorTerm;
+
+        // Nodes an earlier attempt could not reach: their partitions go to another voter replica next time.
+        HashSet<string> unreachable = new(StringComparer.Ordinal);
+
+        // The cut is chosen from what this node sees in flight, and a durable prepare that applies here after
+        // the choice is invisible to it. So each attempt also verifies its cut after the capture, against an
+        // observation of the durable intents opened before the choice. An attempt whose cut a transaction
+        // overtook publishes nothing, and the next attempt chooses again with that transaction in view.
+        for (int attempt = 1; ; attempt++)
+        {
+            // Under a replication factor smaller than the node count this node does not host every partition;
+            // the backup is then composed from one share per hosting node. Otherwise it is captured here alone.
+            List<PartAssignment>? shares = AssignShares(ActivePartitionIds(), unreachable);
+
+            if (shares is null)
             {
                 using PreparedIntentCommitObservation? observation = _beginCommitObservation?.Invoke();
 
@@ -253,13 +301,9 @@ internal sealed class BackupService : IDisposable
 
                 try
                 {
-                    BackupManifest manifest = await _driver.TakeFullBackupAsync(
+                    return await _driver.TakeFullBackupAsync(
                         _artifacts, _catalog, snapshotT, BuildOwnerIdentity(), StillCoordinator,
                         signManifest: ManifestSigner, verifyCut: verifyCut, ct: ct);
-                    RecordBackupSuccess(manifest, start);
-                    KahunaBackupInfo dto = ToDto(manifest);
-                    await TryRunGcLockedAsync(ct).ConfigureAwait(false);
-                    return dto;
                 }
                 catch (BackupDriverException ex) when (ex.CutUnverified && attempt < MaxCoordinatedCutAttempts)
                 {
@@ -267,10 +311,30 @@ internal sealed class BackupService : IDisposable
                         "Coordinated backup attempt {Attempt} discarded its image at cut {Cut}: {Reason} Retrying with a new cut.",
                         attempt, snapshotT, ex.Message);
                 }
+
+                continue;
+            }
+
+            try
+            {
+                return await TakeComposedFullAsync(shares, StillCoordinator, ct).ConfigureAwait(false);
+            }
+            catch (BackupDriverException ex) when (attempt < MaxCoordinatedCutAttempts
+                                                   && (ex.CutUnverified || ex.TopologyChanged || ex.UnreachableNodes.Count > 0))
+            {
+                unreachable.UnionWith(ex.UnreachableNodes);
+
+                // A transaction that overtook the cut is in the next attempt's view: still in flight, its share
+                // proposes below it; settled, its writes are in the images.
+                _logger?.LogWarning(
+                    "Coordinated backup attempt {Attempt} discarded its shares: {Reason} Retrying.",
+                    attempt, ex.Message);
+
+                // A share that saw another topology generation usually trails the committed map by a moment.
+                if (ex.TopologyChanged)
+                    await Task.Delay(TopologyRetryDelayMs * attempt, ct).ConfigureAwait(false);
             }
         }
-        catch { BackupIoMetrics.BackupFailures.Add(1); throw; }
-        finally { _gcGate.Release(); }
     }
 
     /// <summary>How many cuts a coordinated backup tries before it reports the cut as unverified.</summary>

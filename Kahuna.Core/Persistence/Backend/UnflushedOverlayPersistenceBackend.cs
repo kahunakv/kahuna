@@ -383,6 +383,12 @@ internal sealed class UnflushedOverlayPersistenceBackend : IPersistenceBackend, 
 
     public bool SupportsExactAsOfCheckpoint => inner.SupportsExactAsOfCheckpoint;
 
+    public CheckpointResult CreateCheckpointAsOf(
+        string destinationPath, long appliedIndex, HLCTimestamp cut, Func<string, bool> retainKey, CancellationToken ct = default) =>
+        inner.CreateCheckpointAsOf(destinationPath, appliedIndex, cut, retainKey, ct);
+
+    public bool SupportsFilteredCheckpoint => inner.SupportsFilteredCheckpoint;
+
     public HLCTimestamp GetPrunedHistoryFloor() => inner.GetPrunedHistoryFloor();
 
     public void Dispose()

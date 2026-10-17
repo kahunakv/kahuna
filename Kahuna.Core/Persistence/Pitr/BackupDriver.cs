@@ -121,17 +121,22 @@ internal sealed class BackupDriver
     /// last committed entry with <c>Time ≤ T</c> and T is recorded in the manifest as the
     /// cluster-wide consistent-cut timestamp.
     /// </summary>
+    /// <param name="capturePartitions">The partitions to capture — one node's share of a cluster-wide backup —
+    /// instead of every partition this node hosts.</param>
+    /// <param name="retainKey">With <paramref name="capturePartitions"/>: the keys those partitions own. The
+    /// checkpoint and the intent frontier then hold only these keys.</param>
     public Task<BackupManifest> TakeFullBackupAsync(IBackupArtifactStore artifacts, BackupCatalog catalog,
         HLCTimestamp? snapshotT = null, BackupOwnerIdentity identity = default,
         Func<CancellationToken, Task<bool>>? verifyCoordinator = null, Action<BackupManifest>? signManifest = null,
-        VerifyCutDelegate? verifyCut = null, CancellationToken ct = default) =>
+        VerifyCutDelegate? verifyCut = null, IReadOnlySet<int>? capturePartitions = null,
+        Func<string, bool>? retainKey = null, CancellationToken ct = default) =>
         RunFullAsync(_raft.WalAdapter, _raft.GetPartitionMap(), _persistenceBackend,
             artifacts, catalog, _flushBeforeCheckpoint, snapshotT,
             _acquireSnapshotHold, _releaseSnapshotHold, _renewSnapshotHold, _snapshotHoldLeaseMs, _appliedHlcProbe,
             identity: identity, topologyGenerationProbe: ComposeTopologyGeneration,
             hostsPartition: _raft.HostsPartition,
             verifyCoordinator: verifyCoordinator, signManifest: signManifest, verifyCut: verifyCut,
-            walkLiveIntents: _walkLiveIntents, ct: ct);
+            walkLiveIntents: _walkLiveIntents, capturePartitions: capturePartitions, retainKey: retainKey, ct: ct);
 
     /// <summary>
     /// Reads committed WAL entries since the parent backup's <c>ToIndex</c>, serialises them
@@ -143,12 +148,19 @@ internal sealed class BackupDriver
     /// When <paramref name="snapshotT"/> is supplied each partition's segment is capped at the
     /// first entry whose <c>Time > T</c> and T is recorded in the manifest.
     /// </summary>
+    /// <param name="capturePartitions">The partitions to page — one node's share of a cluster-wide incremental —
+    /// instead of every partition this node hosts.</param>
     public Task<BackupManifest> TakeIncrementalBackupAsync(Guid parentBackupId, IBackupArtifactStore artifacts,
         BackupCatalog catalog, HLCTimestamp? snapshotT = null,
         Func<int, long, IDisposable>? acquireRetentionHold = null, BackupOwnerIdentity identity = default,
-        Action<BackupManifest>? signManifest = null, CancellationToken ct = default) =>
+        Action<BackupManifest>? signManifest = null, IReadOnlySet<int>? capturePartitions = null,
+        CancellationToken ct = default) =>
         RunIncrementalAsync(_raft.WalAdapter, _raft.GetPartitionMap(), parentBackupId, artifacts, catalog, snapshotT,
-            acquireRetentionHold, identity, ComposeTopologyGeneration, _raft.HostsPartition, signManifest, ct);
+            acquireRetentionHold, identity, ComposeTopologyGeneration, _raft.HostsPartition, signManifest,
+            capturePartitions, ct);
+
+    /// <summary>This node's live cluster topology generation (see the static overload).</summary>
+    internal long CurrentTopologyGeneration() => ComposeTopologyGeneration();
 
     /// <summary>
     /// Composes the current cluster topology generation from this node's live view: each partition's
@@ -228,6 +240,8 @@ internal sealed class BackupDriver
         Action<BackupManifest>? signManifest = null,
         VerifyCutDelegate? verifyCut = null,
         WalkLiveIntentsDelegate? walkLiveIntents = null,
+        IReadOnlySet<int>? capturePartitions = null,
+        Func<string, bool>? retainKey = null,
         CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
@@ -265,10 +279,21 @@ internal sealed class BackupDriver
                     "The persistence backend cannot produce an exact as-of checkpoint; a full backup " +
                     "with a proven base cut cannot be taken.") { ExactCheckpointUnavailable = true };
 
+            if (retainKey is not null && !persistenceBackend.SupportsFilteredCheckpoint)
+                throw new BackupDriverException(
+                    "The persistence backend cannot produce a key-filtered checkpoint, so this node cannot " +
+                    "capture its share of a cluster-wide backup.") { ExactCheckpointUnavailable = true };
+
             // Walk the live intents BEFORE the range ends are read: an intent still live at a range end read later
             // was then live during the walk, unless it was prepared after the walk's applied position — and the
             // frontier's WAL fold starts there. See IntentFrontier.
             LiveIntentWalk? intentWalk = walkLiveIntents?.Invoke(partitions.Select(p => p.PartitionId).ToArray());
+
+            // A share of a cluster-wide backup records only the intents of the keys its image holds; another
+            // node's share records the rest, and the frontiers are merged with the images.
+            if (intentWalk is { } unfilteredWalk && retainKey is not null)
+                intentWalk = new LiveIntentWalk(
+                    unfilteredWalk.Intents.Where(intent => retainKey(intent.Key)).ToArray(), unfilteredWalk.AppliedThrough);
 
             List<PartitionBackupRange> ranges = [];
             List<int> clusterPartitions = [];
@@ -290,8 +315,10 @@ internal sealed class BackupDriver
                 // reading a non-hosted partition would yield nothing (or leftovers mid-purge) while
                 // making the manifest claim coverage it does not have. The covered set records what
                 // this backup truly holds — a covered partition with no committed entries is still
-                // covered, so it is added before the empty-WAL skip below.
-                if (hostsPartition is not null && !hostsPartition(partitionId))
+                // covered, so it is added before the empty-WAL skip below. A share of a cluster-wide
+                // backup captures exactly the partitions assigned to it instead.
+                if (capturePartitions is not null ? !capturePartitions.Contains(partitionId)
+                        : hostsPartition is not null && !hostsPartition(partitionId))
                     continue;
 
                 coveredPartitions.Add(partitionId);
@@ -320,7 +347,8 @@ internal sealed class BackupDriver
             // the flush cannot miss a committed write that is still mid-apply. Fail closed on timeout —
             // never publish a checkpoint that may lack committed data.
             if (appliedHlcProbe is not null)
-                await WaitForAppliedBarrierAsync(wal, ranges, appliedHlcProbe, applyBarrierTimeoutMs, ct);
+                await WaitForAppliedBarrierAsync(
+                    wal, ranges, appliedHlcProbe, persistenceBackend.GetDurabilityFloor, applyBarrierTimeoutMs, ct);
 
             if (flushBeforeCheckpoint is not null)
                 await flushBeforeCheckpoint();
@@ -397,7 +425,10 @@ internal sealed class BackupDriver
             await using (IBackupCheckpointStagingArea staging =
                          await artifacts.BeginCheckpointAsync(backupId, workCt).ConfigureAwait(false))
             {
-                persistenceBackend.CreateCheckpointAsOf(staging.LocalPath, maxAppliedIndex, cut, workCt);
+                if (retainKey is null)
+                    persistenceBackend.CreateCheckpointAsOf(staging.LocalPath, maxAppliedIndex, cut, workCt);
+                else
+                    persistenceBackend.CreateCheckpointAsOf(staging.LocalPath, maxAppliedIndex, cut, retainKey, workCt);
 
                 // The checkpoint is the capture. Only now can the caller prove that no transaction with a commit
                 // timestamp at or below the cut was decided with part of its writes outside the image — a
@@ -610,14 +641,26 @@ internal sealed class BackupDriver
     /// from the partition's local clock and always at or after the shared commit HLC, so the commit-HLC
     /// probe could never reach it and the backup would hang until timeout.
     /// </para>
+    /// <para>
+    /// Only the entries above the partition's persisted application-durability floor are waited for. The floor is
+    /// written after the flush that persisted every entry at or below it, so those writes are already in the store
+    /// the checkpoint copies. They also never pass through the writer again after a restart (the restart replay
+    /// starts above the floor), so the probe, which counts only what this process enqueued, would never reach
+    /// them: every full backup of a restarted node failed until each partition took a new write.
+    /// </para>
     /// </summary>
     private static async Task WaitForAppliedBarrierAsync(
-        IWAL wal, List<PartitionBackupRange> ranges, Func<int, HLCTimestamp> appliedHlcProbe, int timeoutMs, CancellationToken ct)
+        IWAL wal, List<PartitionBackupRange> ranges, Func<int, HLCTimestamp> appliedHlcProbe,
+        Func<int, long> durabilityFloor, int timeoutMs, CancellationToken ct)
     {
         long deadline = Environment.TickCount64 + timeoutMs;
         foreach (PartitionBackupRange range in ranges)
         {
-            HLCTimestamp target = MaxCommittedKeyValueCommitHlc(wal, range.PartitionId, range.ToIndex, ct);
+            long durable = durabilityFloor(range.PartitionId);
+            if (durable >= range.ToIndex)
+                continue;
+
+            HLCTimestamp target = MaxCommittedKeyValueCommitHlc(wal, range.PartitionId, range.ToIndex, Math.Max(0, durable), ct);
             if (target == HLCTimestamp.Zero)
                 continue;
 
@@ -648,17 +691,25 @@ internal sealed class BackupDriver
     /// Returns <see cref="HLCTimestamp.Zero"/> when no committed key-value entry exists at or below the index.
     /// </summary>
     internal static HLCTimestamp MaxCommittedKeyValueCommitHlc(
-        IWAL wal, int partitionId, long toIndex, CancellationToken ct = default)
+        IWAL wal, int partitionId, long toIndex, CancellationToken ct = default) =>
+        MaxCommittedKeyValueCommitHlc(wal, partitionId, toIndex, afterIndex: 0, ct);
+
+    /// <summary>
+    /// <see cref="MaxCommittedKeyValueCommitHlc(IWAL,int,long,CancellationToken)"/> over the entries above
+    /// <paramref name="afterIndex"/> only; the entries at or below it are not read.
+    /// </summary>
+    internal static HLCTimestamp MaxCommittedKeyValueCommitHlc(
+        IWAL wal, int partitionId, long toIndex, long afterIndex, CancellationToken ct = default)
     {
-        if (toIndex <= 0)
+        if (toIndex <= afterIndex)
             return HLCTimestamp.Zero;
 
         HLCTimestamp max = HLCTimestamp.Zero;
         long ceiling = toIndex;
-        while (ceiling > 0)
+        while (ceiling > afterIndex)
         {
             ct.ThrowIfCancellationRequested();
-            long start = Math.Max(1, ceiling - PageSize + 1);
+            long start = Math.Max(afterIndex + 1, ceiling - PageSize + 1);
             List<RaftLog> batch = wal.ReadLogsRange(partitionId, start, PageSize);
             if (batch.Count == 0)
                 break;
@@ -718,6 +769,7 @@ internal sealed class BackupDriver
         Func<long>? topologyGenerationProbe = null,
         Func<int, bool>? hostsPartition = null,
         Action<BackupManifest>? signManifest = null,
+        IReadOnlySet<int>? capturePartitions = null,
         CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
@@ -773,8 +825,10 @@ internal sealed class BackupDriver
 
                 // Only hosted partitions have a local WAL to page; the covered set records what this
                 // node could actually capture. A hosted partition that produces no segment below
-                // (no new committed entries) is still covered — unchanged is not uncovered.
-                if (hostsPartition is not null && !hostsPartition(partitionId))
+                // (no new committed entries) is still covered — unchanged is not uncovered. A share of a
+                // cluster-wide incremental pages exactly the partitions assigned to it instead.
+                if (capturePartitions is not null ? !capturePartitions.Contains(partitionId)
+                        : hostsPartition is not null && !hostsPartition(partitionId))
                     continue;
 
                 coveredPartitions.Add(partitionId);
@@ -909,7 +963,7 @@ internal sealed class BackupDriver
 
     /// <summary>Writes the frontier artifact and returns its digest and length for the manifest. The frontier is
     /// bounded by the intents in flight and the settled lookback, so it is encoded whole.</summary>
-    private static async Task<(string Digest, long Length)> WriteIntentFrontierAsync(
+    internal static async Task<(string Digest, long Length)> WriteIntentFrontierAsync(
         IBackupArtifactStore artifacts, Guid backupId, IntentFrontier frontier, CancellationToken ct)
     {
         byte[] bytes = frontier.Serialize();

@@ -23,6 +23,7 @@ using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.KeyValues.Writes;
 using Kahuna.Server.Locks.Data;
+using Kahuna.Server.Persistence.Pitr;
 
 namespace Kahuna.Server.Communication.Internode;
 
@@ -2618,6 +2619,36 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             (KeyValueResponseType)response.Type,
             new KeyValueApplyFingerprint(response.AppliedLogId, response.CommittedHeads, response.LiveIntents)
         );
+    }
+
+    /// <summary>
+    /// Asks a node for its share of a cluster-wide backup on a bidirectional stream: the node sends each artifact
+    /// in chunks, a full share waits for Proceed once every share is captured, then the node sends the result. A transport failure throws (the composing node names the share); a cancellation
+    /// the caller asked for surfaces as one, not as a transport failure.
+    /// </summary>
+    public async Task<BackupPartResult> CaptureBackupPart(
+        string node, BackupPartRequest request, IBackupPartSink sink, CancellationToken cancellationToken)
+    {
+        global::Backups.BackupsClient client = new(SharedChannels.GetChannel(ResolveNodeUrl(node), transportSecurity));
+
+        try
+        {
+            using AsyncDuplexStreamingCall<GrpcBackupPartControl, GrpcBackupPartChunk> call = client.CaptureBackupPart(
+                headers: InterNodeHeaders.ForwardedCall, cancellationToken: cancellationToken);
+
+            await call.RequestStream.WriteAsync(
+                new GrpcBackupPartControl { Request = BackupPartWire.ToGrpc(request) }).ConfigureAwait(false);
+
+            BackupPartResult result = await BackupPartWire.ReceiveAsync(
+                call.ResponseStream, call.RequestStream, sink, node, cancellationToken).ConfigureAwait(false);
+
+            await call.RequestStream.CompleteAsync().ConfigureAwait(false);
+            return result;
+        }
+        catch (RpcException ex) when (ex.StatusCode == StatusCode.Cancelled && cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException("The backup share capture was cancelled.", ex, cancellationToken);
+        }
     }
 
     /// <summary>

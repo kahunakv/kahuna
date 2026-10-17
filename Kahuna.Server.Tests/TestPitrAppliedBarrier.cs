@@ -110,6 +110,52 @@ public sealed class TestPitrAppliedBarrier : IDisposable
     }
 
     [Fact]
+    public async Task Barrier_AfterARestart_SkipsTheEntriesTheDurabilityFloorCertifies()
+    {
+        // A restarted node: entries 1-3 were persisted before the restart and the floor certifies them, so the
+        // restart replay starts above it and the writer never sees them again (the probe stays at zero). Only
+        // entry 4, above the floor, has to reach the writer.
+        InMemoryWAL wal = BuildWal((1, 1, 100), (1, 2, 110), (1, 3, 120), (1, 4, 130));
+        MemoryPersistenceBackend backend = new();
+        Put(backend, "k", 50);
+        Assert.True(backend.StoreDurabilityFloors([(1, 3)]));
+
+        // Entry 4 still has to be applied: the backup fails closed while the probe is below it.
+        await Assert.ThrowsAsync<BackupDriverException>(() =>
+            BackupDriver.RunFullAsync(wal, [Part(1)], backend, BackupTestStores.Artifacts(ArtifactsDir("restart_lag")), NewCatalog("restart_lag"),
+                flushBeforeCheckpoint: null, snapshotT: null, ct: TestContext.Current.CancellationToken,
+                appliedHlcProbe: _ => HLCTimestamp.Zero, applyBarrierTimeoutMs: 100));
+
+        // Once the floor covers every captured entry, nothing is left to wait for.
+        Assert.True(backend.StoreDurabilityFloors([(1, 4)]));
+        BackupCatalog cat = NewCatalog("restart");
+        BackupManifest m = await BackupDriver.RunFullAsync(wal, [Part(1)], backend, BackupTestStores.Artifacts(ArtifactsDir("restart")), cat,
+            flushBeforeCheckpoint: null, snapshotT: null, ct: TestContext.Current.CancellationToken,
+            appliedHlcProbe: _ => HLCTimestamp.Zero, applyBarrierTimeoutMs: 100);
+
+        Assert.Equal(4, Assert.Single(m.PartitionRanges).ToIndex);
+        Assert.Single(await cat.ListAsync(TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task Barrier_AfterARestart_WaitsOnlyForTheEntriesAboveTheFloor()
+    {
+        // Entry 3 carries the highest commit HLC but sits at or below the floor; the probe reaches only entry 4's
+        // commit HLC, which is lower. Waiting for entry 3 would never end.
+        InMemoryWAL wal = new(Log);
+        wal.Write([(1, new List<RaftLog> { KvLog(1, 100), KvLog(2, 110), KvLogSplit(3, walTicks: 300, commitTicks: 300), KvLogSplit(4, walTicks: 310, commitTicks: 200) })]);
+        MemoryPersistenceBackend backend = new();
+        Put(backend, "k", 50);
+        Assert.True(backend.StoreDurabilityFloors([(1, 3)]));
+
+        BackupManifest m = await BackupDriver.RunFullAsync(wal, [Part(1)], backend, BackupTestStores.Artifacts(ArtifactsDir("restart_above")), NewCatalog("restart_above"),
+            flushBeforeCheckpoint: null, snapshotT: null, ct: TestContext.Current.CancellationToken,
+            appliedHlcProbe: _ => T(200), applyBarrierTimeoutMs: 500);
+
+        Assert.NotNull(m);
+    }
+
+    [Fact]
     public async Task Barrier_TargetIsCommitHlcNotWalTime_Publishes()
     {
         // The WAL entry Time (200) runs ahead of the commit HLC (100), as on a real node; the applied

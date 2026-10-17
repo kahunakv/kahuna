@@ -41,6 +41,9 @@ public sealed partial class KahunaManager
     public Task<KahunaBackupInfo> TakeCoordinatedBackupAsync(CancellationToken ct = default) =>
         backups.TakeCoordinatedAsync(ct);
 
+    public Task<BackupPartResult> CaptureBackupPartAsync(BackupPartRequest request, IBackupPartSink sink, CancellationToken ct = default) =>
+        backups.CaptureBackupPartAsync(request, sink, ct);
+
     public Task<IReadOnlyList<KahunaBackupInfo>> ListBackupsAsync(CancellationToken ct = default) =>
         backups.ListAsync(ct);
 

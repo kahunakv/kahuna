@@ -91,6 +91,7 @@ public static class BackupsHandlers
         KahunaBackupOutcome.NotBackupCoordinator => 503,
         KahunaBackupOutcome.InsecureRoot => 503,
         KahunaBackupOutcome.CutUnverified => 503,
+        KahunaBackupOutcome.PartitionCaptureFailed => 503,
         KahunaBackupOutcome.ParentMissing => 404,
         KahunaBackupOutcome.TargetConflict => 409,
         KahunaBackupOutcome.Cancelled => 499,

@@ -906,6 +906,7 @@ public sealed class TestMembership : BaseCluster
         public Task<KahunaBackupInfo> TakeFullBackupAsync(CancellationToken ct = default) => throw new NotImplementedException();
         public Task<KahunaBackupInfo> TakeIncrementalBackupAsync(Guid parentBackupId, CancellationToken ct = default) => throw new NotImplementedException();
         public Task<KahunaBackupInfo> TakeCoordinatedBackupAsync(CancellationToken ct = default) => throw new NotImplementedException();
+        public Task<Kahuna.Server.Persistence.Pitr.BackupPartResult> CaptureBackupPartAsync(Kahuna.Server.Persistence.Pitr.BackupPartRequest request, Kahuna.Server.Persistence.Pitr.IBackupPartSink sink, CancellationToken ct = default) => throw new NotImplementedException();
         public Task<IReadOnlyList<KahunaBackupInfo>> ListBackupsAsync(CancellationToken ct = default) => throw new NotImplementedException();
         public Task<IReadOnlyList<KahunaBackupInfo>> GetBackupChainAsync(Guid leafBackupId, CancellationToken ct = default) => throw new NotImplementedException();
         public Task<KahunaRestoreResponse> RestoreToAsync(Guid leafBackupId, string targetDir, long targetTimeMs, CancellationToken ct = default) => throw new NotImplementedException();

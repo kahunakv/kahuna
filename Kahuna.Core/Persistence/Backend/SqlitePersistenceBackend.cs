@@ -2007,8 +2007,19 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
         string destinationPath, long appliedIndex, HLCTimestamp cut, CancellationToken ct = default)
         => CreateCheckpointCore(destinationPath, appliedIndex, cut, cut: cut, ct: ct);
 
+    /// <summary>
+    /// The exact as-of image restricted to the keys <paramref name="retainKey"/> accepts: each copied shard
+    /// first loses every row of a refused key and its durability floors, then is trimmed to the cut.
+    /// </summary>
+    public CheckpointResult CreateCheckpointAsOf(
+        string destinationPath, long appliedIndex, HLCTimestamp cut, Func<string, bool> retainKey, CancellationToken ct = default)
+        => CreateCheckpointCore(destinationPath, appliedIndex, cut, cut: cut, retainKey: retainKey, ct: ct);
+
+    public bool SupportsFilteredCheckpoint => true;
+
     private CheckpointResult CreateCheckpointCore(
-        string destinationPath, long appliedIndex, HLCTimestamp appliedTime, HLCTimestamp? cut, CancellationToken ct = default)
+        string destinationPath, long appliedIndex, HLCTimestamp appliedTime, HLCTimestamp? cut,
+        Func<string, bool>? retainKey = null, CancellationToken ct = default)
     {
         // Write into a temp sibling so any failure — lock timeout or VACUUM error — cannot
         // leave a partial checkpoint at destinationPath that a catalog scan might treat as valid.
@@ -2050,7 +2061,7 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                 // Trim the copy (not the live DB) to the as-of cut. A separate connection to the
                 // copied file — no contention with the live shard.
                 if (cut.HasValue)
-                    TrimShardAsOf(destFile, cut.Value, ct);
+                    TrimShardAsOf(destFile, cut.Value, retainKey, ct);
             }
 
             CheckpointManifest manifest = CheckpointManifest.From(appliedIndex, appliedTime);
@@ -2074,7 +2085,7 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
     /// newer). Uses the same physical→counter→node HLC ordering as
     /// <see cref="GetKeyValueRevisionAtOrBefore"/>.
     /// </summary>
-    private static void TrimShardAsOf(string destFile, HLCTimestamp cut, CancellationToken ct)
+    private static void TrimShardAsOf(string destFile, HLCTimestamp cut, Func<string, bool>? retainKey, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
 
@@ -2107,6 +2118,19 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
         using SqliteConnection conn = new($"Data Source={destFile.Replace("'", "''")};Pooling=False");
         conn.Open();
         using SqliteTransaction tx = conn.BeginTransaction();
+
+        // 0) A key-filtered image loses every row of a refused key before any boundary check runs, so a key
+        //    whose history is another node's to reconstruct cannot fail this image. Its durability floors go
+        //    too: they certify this node's WAL, not the WAL the image is replayed into.
+        if (retainKey is not null)
+        {
+            conn.CreateFunction("kahuna_retain_key", (string key) => retainKey(key) ? 1L : 0L, isDeterministic: true);
+
+            RunTrim(conn, tx, "DELETE FROM keys WHERE kahuna_retain_key(key) = 0;", cut: null);
+            RunTrim(conn, tx, "DELETE FROM keys_revisions WHERE kahuna_retain_key(key) = 0;", cut: null);
+            RunTrim(conn, tx, "DELETE FROM keys_norev WHERE kahuna_retain_key(key) = 0;", cut: null);
+            RunTrim(conn, tx, "DELETE FROM durability_floor;", cut: null);
+        }
 
         // 1) Drop every revision committed after the cut. Afterwards the max surviving revision per
         //    key is that key's boundary (newest revision at/before the cut).
@@ -2205,6 +2229,86 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
             cmd.Parameters.AddWithValue("@cutN", cut.Value.N);
         }
         cmd.ExecuteNonQuery();
+    }
+
+    private const string KeyColumns =
+        "key, revision, value, expiresNode, expiresPhysical, expiresCounter, lastUsedNode, lastUsedPhysical, " +
+        "lastUsedCounter, lastModifiedNode, lastModifiedPhysical, lastModifiedCounter, state";
+
+    /// <summary>
+    /// Copies every key-value row of the checkpoint at <paramref name="sourceDir"/> into the checkpoint at
+    /// <paramref name="targetDir"/>, both of them key-filtered as-of images whose key sets do not overlap.
+    /// A key's shard is a pure function of the key, so each source shard merges into the target shard with
+    /// the same number. The target's file names carry <paramref name="targetRevision"/>; the source may have
+    /// been written by a node with another revision, so its files are found by shard number alone.
+    /// <para>The pruned-history floor of each shard becomes the higher of the two. Durability floors are not
+    /// copied (filtered images have none).</para>
+    /// </summary>
+    internal static void MergeCheckpointInto(string targetDir, string targetRevision, string sourceDir, CancellationToken ct)
+    {
+        foreach (string sourceFile in Directory.GetFiles(sourceDir, "kahuna*_*.db"))
+        {
+            ct.ThrowIfCancellationRequested();
+
+            string name = Path.GetFileName(sourceFile);
+            int underscore = name.IndexOf('_');
+            if (underscore <= "kahuna".Length || !int.TryParse(name.AsSpan("kahuna".Length, underscore - "kahuna".Length), out int shard)
+                || shard < 0 || shard >= MaxShards)
+                throw new InvalidDataException($"A checkpoint being merged has an unrecognized shard file '{name}'.");
+
+            string targetFile = Path.Combine(targetDir, $"kahuna{shard}_{targetRevision}.db");
+            if (!File.Exists(targetFile))
+            {
+                File.Copy(sourceFile, targetFile);
+                continue;
+            }
+
+            using SqliteConnection conn = new($"Data Source={targetFile.Replace("'", "''")};Pooling=False");
+            conn.Open();
+
+            using (SqliteCommand attach = new("ATTACH DATABASE @source AS src;", conn))
+            {
+                attach.Parameters.AddWithValue("@source", sourceFile);
+                attach.ExecuteNonQuery();
+            }
+
+            using (SqliteTransaction tx = conn.BeginTransaction())
+            {
+                RunTrim(conn, tx, $"INSERT OR REPLACE INTO keys ({KeyColumns}) SELECT {KeyColumns} FROM src.keys;", cut: null);
+                RunTrim(conn, tx, $"INSERT OR REPLACE INTO keys_revisions ({KeyColumns}) SELECT {KeyColumns} FROM src.keys_revisions;", cut: null);
+                RunTrim(conn, tx,
+                    "INSERT OR REPLACE INTO keys_norev (key, earliestNode, earliestPhysical, earliestCounter, latestNode, latestPhysical, latestCounter) " +
+                    "SELECT key, earliestNode, earliestPhysical, earliestCounter, latestNode, latestPhysical, latestCounter FROM src.keys_norev;", cut: null);
+
+                HLCTimestamp floor = ReadShardPrunedFloor(conn, tx, "main");
+                HLCTimestamp sourceFloor = ReadShardPrunedFloor(conn, tx, "src");
+                if (sourceFloor.CompareTo(floor) > 0)
+                {
+                    using SqliteCommand put = new(
+                        "INSERT OR REPLACE INTO pitr_meta (k, node, physical, counter) VALUES (@k, @n, @l, @c);", conn, tx);
+                    put.Parameters.AddWithValue("@k", PrunedFloorKey);
+                    put.Parameters.AddWithValue("@n", sourceFloor.N);
+                    put.Parameters.AddWithValue("@l", sourceFloor.L);
+                    put.Parameters.AddWithValue("@c", sourceFloor.C);
+                    put.ExecuteNonQuery();
+                }
+
+                tx.Commit();
+            }
+
+            using (SqliteCommand detach = new("DETACH DATABASE src;", conn))
+                detach.ExecuteNonQuery();
+        }
+    }
+
+    private static HLCTimestamp ReadShardPrunedFloor(SqliteConnection conn, SqliteTransaction tx, string schema)
+    {
+        using SqliteCommand cmd = new($"SELECT node, physical, counter FROM {schema}.pitr_meta WHERE k = @k", conn, tx);
+        cmd.Parameters.AddWithValue("@k", PrunedFloorKey);
+        using SqliteDataReader reader = cmd.ExecuteReader();
+        return reader.Read()
+            ? new HLCTimestamp(reader.GetInt32(0), reader.GetInt64(1), (uint)reader.GetInt64(2))
+            : HLCTimestamp.Zero;
     }
 
     public void Dispose()

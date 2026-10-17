@@ -430,16 +430,51 @@ public sealed class TestBackupService : IDisposable
     }
 
     [Fact]
-    public void CoverageValidation_UnionAcrossChain_ReachingEveryPartition_Passes()
+    public void CoverageValidation_UnionAcrossChain_IsRefused_WhenALinkMissesAPartition()
     {
-        // Coverage is a union over the chain: a link that captured a partition the others did not
-        // still counts toward whole-cluster coverage.
+        // A union over the chain is not coverage: partition 2 has no base image in the full, and partition 1
+        // loses its changes in the incremental's range. Every link must cover the cluster on its own.
         BackupManifest full = BackupManifest.CreateFull([]);
         full.ClusterPartitions = [1, 2];
         full.CoveredPartitions = [1];
         BackupManifest incr = BackupManifest.CreateIncremental(full.BackupId, []);
         incr.ClusterPartitions = [1, 2];
         incr.CoveredPartitions = [2];
+
+        BackupDriverException ex = Assert.Throws<BackupDriverException>(() =>
+            BackupChainCoverage.ValidatePartitionCoverage([full, incr]));
+        Assert.True(ex.RestrictedCoverage);
+        Assert.Contains(full.BackupId.ToString("N"), ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CoverageValidation_FullCoverage_IncrementalMissingAPartition_IsRefused()
+    {
+        // The hole a union hid: a whole-cluster full and an incremental taken on a node that hosts only
+        // partition 1 would restore partition 2 without any of its changes after the full.
+        BackupManifest full = BackupManifest.CreateFull([]);
+        full.ClusterPartitions = [1, 2];
+        full.CoveredPartitions = [1, 2];
+        BackupManifest incr = BackupManifest.CreateIncremental(full.BackupId, []);
+        incr.ClusterPartitions = [1, 2];
+        incr.CoveredPartitions = [1];
+
+        BackupDriverException ex = Assert.Throws<BackupDriverException>(() =>
+            BackupChainCoverage.ValidatePartitionCoverage([full, incr]));
+        Assert.True(ex.RestrictedCoverage);
+        Assert.Contains(incr.BackupId.ToString("N"), ex.Message, StringComparison.Ordinal);
+        Assert.Contains("2", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CoverageValidation_EveryLinkCoversTheCluster_Passes()
+    {
+        BackupManifest full = BackupManifest.CreateFull([]);
+        full.ClusterPartitions = [1, 2];
+        full.CoveredPartitions = [2, 1];
+        BackupManifest incr = BackupManifest.CreateIncremental(full.BackupId, []);
+        incr.ClusterPartitions = [1, 2];
+        incr.CoveredPartitions = [1, 2];
         BackupChainCoverage.ValidatePartitionCoverage([full, incr]);
     }
 

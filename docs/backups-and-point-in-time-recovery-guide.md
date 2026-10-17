@@ -225,6 +225,12 @@ image is a snapshot of the disk. So the order matters:
 > is missing committed writes. The barrier is keyed on **HLC**, not log index, on purpose: the
 > leader's commit-completion path carries only the change's HLC, not a WAL index, so an HLC barrier
 > keeps this a self-contained Kahuna guarantee with no change to the consensus layer.
+>
+> The barrier waits only for entries above the partition's **persisted application-durability floor**.
+> The floor is written after the flush that persisted every entry at or below it, so those writes are
+> already on disk. After a restart they are not replayed through the writer again (the restart replay
+> starts above the floor), so waiting for them would never end: every full backup of a restarted node
+> would time out until each partition took a new write.
 
 > **Decision — the full backup records the prepared intents its chain needs.** A durable transaction's
 > committed value lives in its prepared intent: a by-reference materialization record, or a
@@ -409,6 +415,49 @@ therefore does two things:
 > leader's actors, and the coordinator sees only its own actors. A plain full backup
 > (`/v1/backups/full`) and an incremental do not pick or verify a cut; use a coordinated backup when
 > you need one consistent cut across partitions.
+
+### Under a replication factor: one share per hosting node
+
+With a replication factor smaller than the node count, the coordinator does not host every partition,
+so it cannot capture the cut alone. It composes the backup from **shares**:
+
+```
+   coordinator (meta leader) assigns each partition to one node that hosts it
+        │
+        ├── own share:  partitions it hosts          ─┐  each proposes: lowest commit in flight on its
+        ├── node B:     partitions led by B           ├─ partitions, newest committed entry of its partitions
+        └── node C:     the rest                     ─┘
+                                  │
+            coordinator agrees one T from every proposal, answers every share
+                                  │
+        each share: as-of checkpoint at T, rows of its own partitions only, streamed to the coordinator
+                                  │
+            every share captured ──► each node makes its final cut check ──► merge ──► one manifest
+```
+
+- **Each share is an ordinary full capture**, with the same snapshot hold, apply barrier and cut check,
+  restricted to its assigned partitions. Its checkpoint drops every row of a key another partition
+  owns, so the shares hold disjoint keys and merge into one image without conflicts.
+- **The final cut check runs after every share is captured.** A share's own check after its capture
+  covers only the transactions decided before that capture. A transaction with a write in another
+  share's image was decided before *that* capture, which can be later; its prepare on this share's
+  partition may have applied only after this share checked. So every share keeps its watch on prepared
+  intents open, waits until all shares are captured, and then confirms local application and checks
+  again. The proof in the box above then holds across the shares.
+- **`T` is agreed from every share's view.** The coordinator cannot see the intents or the log of the
+  partitions it does not host. So each share proposes the lowest commit timestamp in flight on its
+  partitions and the newest committed entry of its partitions, and the coordinator applies the
+  single-node rule to all of them: `T` sits just below the lowest commit in flight anywhere, or, when
+  nothing is in flight, at the newest committed entry anywhere. A write acknowledged on any partition
+  before the request is then in the backup when the cluster is quiet. A share that still finds a
+  transaction at or below `T` in flight after the agreement refuses it, and the next attempt agrees again.
+- **Every share is checked against the topology generation the coordinator captured**, and the
+  coordinator re-checks its own and its meta-partition leadership before it publishes.
+
+The shares stream over the inter-node transport and never enter the backup directory, so another node's
+orphan sweep cannot reclaim one mid-merge. If a share cannot be captured, nothing is published and the
+outcome is `PartitionCaptureFailed`, naming the partitions and the node. See the
+[replication factor guide](replication-factor-guide.md) §8 for the operator view.
 
 ---
 
@@ -641,7 +690,9 @@ rejected with outcome `NotBackupCoordinator` (HTTP 503 / gRPC `Unavailable`) —
 current leader. A coordinated backup can also fail with `CutUnverified` (HTTP 503 / gRPC `Unavailable`)
 when transactions kept overtaking its cut (see §8); nothing is published, so retry it. A full backup
 can fail with the same outcome when it cannot record a prepared intent its chain's restore would need
-(see §5); a retry reads new range ends. Because leadership can move, **the coordinator changes over time**, so a coordinated
+(see §5); a retry reads new range ends. Under a replication factor a coordinated backup can also fail
+with `PartitionCaptureFailed` (HTTP 503 / gRPC `Unavailable`) when one node's share could not be captured;
+the message names the partitions and the node (see §8). Because leadership can move, **the coordinator changes over time**, so a coordinated
 backup is written to whichever node was coordinator at the time.
 
 > **The catalog is whatever is at `BackupDir`.** `ListBackups`, chain resolution, and parent lookup
@@ -656,8 +707,9 @@ To make a partial catalog visible, every listing entry now carries the identity 
 describes: `clusterId` (the configured cluster id) and `coordinatorNode` (the node that produced it).
 On a shared catalog every node returns the same set with a mix of `coordinatorNode` values; if a
 node's listing shows only its own `coordinatorNode`, its `BackupDir` is node-local and the view is
-partial. (The plain `/v1/backups/full` and `/v1/backups/incremental` endpoints remain per-node,
-node-local operations intended for single-node or diagnostic use.)
+partial. (The plain `/v1/backups/full` endpoint remains a per-node operation intended for single-node
+or diagnostic use. `/v1/backups/incremental` is per-node too, except on a chain that covers partitions the
+node does not host: it then collects their segments from the nodes that host them, as §8 describes.)
 
 ### 11a-ii. Confidentiality and authenticity
 

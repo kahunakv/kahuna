@@ -1,4 +1,6 @@
 using Grpc.Core;
+using Kahuna.Server.Communication.Internode.Grpc;
+using Kahuna.Server.Persistence.Pitr;
 using Kahuna.Shared.Communication.Rest;
 
 namespace Kahuna.Communication.External.Grpc;
@@ -140,6 +142,26 @@ public sealed class BackupsService : Backups.BackupsBase
         });
 
     /// <summary>
+    /// Captures this node's share of a cluster-wide backup for the node composing it, streaming every artifact
+    /// and then the result. A refusal travels as the result; only a failure to stream ends the call early.
+    /// </summary>
+    public override async Task CaptureBackupPart(
+        IAsyncStreamReader<GrpcBackupPartControl> requestStream, IServerStreamWriter<GrpcBackupPartChunk> responseStream,
+        ServerCallContext context)
+    {
+        if (!await requestStream.MoveNext(context.CancellationToken)
+            || requestStream.Current.BodyCase != GrpcBackupPartControl.BodyOneofCase.Request)
+            throw new RpcException(new Status(StatusCode.InvalidArgument, "A backup share stream must start with its request."));
+
+        BackupPartResult result = await kahuna.CaptureBackupPartAsync(
+            BackupPartWire.FromGrpc(requestStream.Current.Request),
+            new BackupPartWire.StreamingSink(responseStream, requestStream),
+            context.CancellationToken);
+
+        await responseStream.WriteAsync(new GrpcBackupPartChunk { Result = BackupPartWire.ToGrpc(result) });
+    }
+
+    /// <summary>
     /// Runs a handler, translating a typed <see cref="KahunaBackupException"/> into an
     /// <see cref="RpcException"/> whose trailers carry the <see cref="KahunaBackupOutcome"/> so the
     /// client can reconstruct the typed exception. Other exceptions propagate unchanged.
@@ -164,6 +186,7 @@ public sealed class BackupsService : Backups.BackupsBase
         KahunaBackupOutcome.NotBackupCoordinator => StatusCode.Unavailable,
         KahunaBackupOutcome.InsecureRoot => StatusCode.Unavailable,
         KahunaBackupOutcome.CutUnverified => StatusCode.Unavailable,
+        KahunaBackupOutcome.PartitionCaptureFailed => StatusCode.Unavailable,
         KahunaBackupOutcome.Cancelled => StatusCode.Cancelled,
         KahunaBackupOutcome.IoError => StatusCode.Internal,
         KahunaBackupOutcome.ParentMissing => StatusCode.NotFound,

@@ -287,15 +287,34 @@ Logs at Information: the startup banner (§3), and `Started hosting N partition(
 
 ## 8. Backups under a replication factor
 
-A backup captures the **taking node's** data — under placement, only the partitions that node
-hosts. The manifest records both the cluster's partition set and the covered subset:
+Under placement no node hosts every partition, so a backup that one node captures alone covers only the
+partitions it hosts. Each manifest records both the cluster's partition set and the covered subset.
 
-- Taking a backup on a placed cluster **succeeds** and records its restricted coverage.
-- **Restore and chain validation refuse** an artifact set whose covered partitions do not reach
-  every cluster partition, naming the missing ones (`RestrictedCoverage`). A partial restore would
-  be indistinguishable from data loss, so it fails closed before touching the destination.
-- Composing a cluster-wide backup from per-node artifacts is **not supported yet**; until it is,
-  whole-cluster backups require a node that hosts everything (RF 0, or RF ≥ node count).
+- **A coordinated backup (`POST /v1/backups/coordinated`) covers the whole cluster.** The coordinator
+  (the meta-partition leader) assigns each active partition to one node that hosts it: itself when it
+  hosts the partition, otherwise that partition's leader, otherwise another voter. Each node captures
+  its *share* at the same cut, and the shares stream to the coordinator over the inter-node transport.
+  The coordinator merges them into one checkpoint and publishes one ordinary manifest whose covered set
+  is every partition. Restore, chain validation and `--pitr-bootstrap-from` read it like any backup.
+- **An incremental on such a chain covers the whole cluster too**, whichever node you ask: the node
+  collects the segments of the partitions it does not host from the nodes that host them. When the chain
+  cannot be extended (compaction or a topology change), the substitute is a coordinated full, so ask the
+  coordinator; another node answers `NotBackupCoordinator`.
+- **No shared target is needed to take the backup.** Shares never enter the backup directory: they stay
+  in a private directory (`--pitr-backup-scratch-dir`, else the system temp directory) until the
+  coordinator has merged them. Restore and the bootstrap seed still need to read the coordinator's
+  backup directory, so in practice point every node at shared storage (§11a-i of the backups guide).
+- **If a share cannot be captured, nothing is published.** The outcome is `PartitionCaptureFailed`
+  (HTTP 503 / gRPC `Unavailable`), and the message names the partitions and the node. A node that cannot
+  be reached is replaced by another voter of its partitions on the next attempt. A partition that has
+  just lost its leader cannot confirm its applied state and fails the cut check (`CutUnverified`) until
+  a new leader is elected; retry.
+- **Every node must have backups configured** (`--pitr-backup-dir`) and the same storage engine. A node
+  without it refuses its share.
+- **A plain `/v1/backups/full` stays per-node.** It covers only the partitions the node hosts, and
+  restore and chain validation refuse it (`RestrictedCoverage`), naming the missing partitions. A chain
+  is restorable only when *every* link covers the cluster: a full that misses a partition leaves it
+  without a base, and an incremental that misses one loses its changes in that range.
 
 PITR WAL-retention floors are tracked per hosted partition and are cleaned up automatically when a
 partition leaves a node. See the
@@ -331,7 +350,8 @@ migration — is future work in the consensus layer.
 ## 10. Current limits, in one place
 
 - No in-place migration from full replication (§9); RF applies to clusters bootstrapped with it.
-- No composed cluster-wide backup from per-node artifacts (§8); restores require full coverage.
+- Whole-cluster backups under a factor come from the coordinated endpoint only (§8); a plain full
+  backup covers the taking node's partitions and is not restorable alone.
 - Per-range RF override changes the target only; convergence needs the rebalancer on (§5).
 - A node hosting zero partitions is normal and ready (§3) — do not alarm on it.
 - Only one node can drain at a time; scale down in sequence, not in parallel (§5).

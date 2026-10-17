@@ -84,5 +84,18 @@ internal sealed class BackupDriverException : Exception
     /// </summary>
     public bool OutsidePitrWindow { get; init; }
 
+    /// <summary>
+    /// True when a cluster-wide backup could not get one node's share: the node refused it, failed it, or could
+    /// not be reached. Nothing is published. The message names the partitions of that share and the node, and
+    /// nothing else (no path or backend text), so it is safe to return to the caller.
+    /// </summary>
+    public bool PartitionCaptureFailed { get; init; }
+
+    /// <summary>
+    /// With <see cref="PartitionCaptureFailed"/>: the nodes that could not be reached, so a retry can assign their
+    /// partitions to another replica. Empty when every failed share was refused or failed on a reachable node.
+    /// </summary>
+    public IReadOnlyList<string> UnreachableNodes { get; init; } = [];
+
     public BackupDriverException(string message) : base(message) { }
 }

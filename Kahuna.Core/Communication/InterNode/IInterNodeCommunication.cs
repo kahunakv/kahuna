@@ -5,6 +5,7 @@ using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.KeyValues.Writes;
 using Kahuna.Server.Locks;
 using Kahuna.Server.Locks.Data;
+using Kahuna.Server.Persistence.Pitr;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
 using Kahuna.Shared.Sequences;
@@ -244,6 +245,14 @@ public interface IInterNodeCommunication
     /// when the node does not host the partition, <see cref="KeyValueResponseType.MustRetry"/> on a transport failure.
     /// </summary>
     public Task<(KeyValueResponseType Type, KeyValueApplyFingerprint Fingerprint)> GetPartitionApplyFingerprint(string node, int partitionId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Asks <paramref name="node"/> to capture its share of a cluster-wide backup — the partitions in
+    /// <paramref name="request"/>, which it hosts — and streams the share's artifacts into
+    /// <paramref name="sink"/> before it returns the share's manifest. A refusal is an answer, not an exception;
+    /// a transport failure throws.
+    /// </summary>
+    public Task<BackupPartResult> CaptureBackupPart(string node, BackupPartRequest request, IBackupPartSink sink, CancellationToken cancellationToken);
 
     /// <summary>
     /// Asks <paramref name="node"/> whether it still holds a prepared intent for one transaction attempt on a

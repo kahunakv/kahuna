@@ -401,6 +401,29 @@ internal interface IPersistenceBackend
     public bool SupportsExactAsOfCheckpoint => false;
 
     /// <summary>
+    /// <see cref="CreateCheckpointAsOf(string,long,HLCTimestamp,CancellationToken)"/> restricted to the keys
+    /// <paramref name="retainKey"/> accepts: every row of a refused key — its current value, its revision
+    /// history and its no-revision provenance — is absent from the image. This is one node's share of a
+    /// cluster-wide backup, in which each partition is captured by one of the nodes that host it, so a key
+    /// the node holds for a partition another node captures (or a leftover of a partition it no longer
+    /// hosts) must not reach the image.
+    /// <para>
+    /// The image also carries no per-partition application-durability floor: a floor certifies this node's
+    /// WAL, and an image composed from several nodes is only ever replayed into another WAL, whose seed
+    /// writes its own floors.
+    /// </para>
+    /// </summary>
+    public CheckpointResult CreateCheckpointAsOf(
+        string destinationPath, long appliedIndex, HLCTimestamp cut, Func<string, bool> retainKey, CancellationToken ct = default) =>
+        throw new NotSupportedException("This persistence backend cannot produce a key-filtered checkpoint.");
+
+    /// <summary>
+    /// True when the key-filtered <see cref="CreateCheckpointAsOf(string,long,HLCTimestamp,Func{string,bool},CancellationToken)"/>
+    /// is implemented and its images can be merged by <c>CheckpointComposer</c>.
+    /// </summary>
+    public bool SupportsFilteredCheckpoint => false;
+
+    /// <summary>
     /// The durable pruned-history floor: the highest HLC <c>W</c> such that revision history strictly
     /// below <c>W</c> may have been removed by retention pruning, so an as-of read at a cut below
     /// <c>W</c> can no longer be proven to return each key's true boundary. A full backup whose cut is

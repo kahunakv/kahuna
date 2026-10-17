@@ -289,6 +289,30 @@ internal sealed class IntentFrontier
         }
     }
 
+    /// <summary>
+    /// The frontier of an image composed from several shares of one cluster-wide backup: every share's live
+    /// intents and settled identities. The shares cover disjoint keys, so an identity is live in at most one
+    /// of them; an identity one share saw settled and another still holds live stays live, as in
+    /// <see cref="Capture"/>, because the restore must still be able to expand it.
+    /// </summary>
+    internal static IntentFrontier Merge(IReadOnlyList<IntentFrontier> frontiers)
+    {
+        Dictionary<PreparedIntentIdentity, PreparedIntent> live = [];
+        HashSet<PreparedIntentIdentity> settled = [];
+
+        foreach (IntentFrontier frontier in frontiers)
+        {
+            foreach (PreparedIntent intent in frontier.Live)
+                live.TryAdd(IdentityOf(intent), intent);
+
+            settled.UnionWith(frontier.Settled);
+        }
+
+        settled.ExceptWith(live.Keys);
+
+        return new IntentFrontier([.. live.Values], [.. settled]);
+    }
+
     internal static PreparedIntentIdentity IdentityOf(PreparedIntent intent) =>
         new(intent.TransactionId, intent.Epoch, intent.Key);
 

@@ -152,6 +152,7 @@ internal abstract class FakeKahunaBase : IKahuna
     public virtual Task<KahunaBackupInfo> TakeFullBackupAsync(CancellationToken ct = default) => throw new NotImplementedException();
     public virtual Task<KahunaBackupInfo> TakeIncrementalBackupAsync(Guid parentBackupId, CancellationToken ct = default) => throw new NotImplementedException();
     public virtual Task<KahunaBackupInfo> TakeCoordinatedBackupAsync(CancellationToken ct = default) => throw new NotImplementedException();
+    public virtual Task<Kahuna.Server.Persistence.Pitr.BackupPartResult> CaptureBackupPartAsync(Kahuna.Server.Persistence.Pitr.BackupPartRequest request, Kahuna.Server.Persistence.Pitr.IBackupPartSink sink, CancellationToken ct = default) => throw new NotImplementedException();
     public virtual Task<IReadOnlyList<KahunaBackupInfo>> ListBackupsAsync(CancellationToken ct = default) => throw new NotImplementedException();
     public virtual Task<IReadOnlyList<KahunaBackupInfo>> GetBackupChainAsync(Guid leafBackupId, CancellationToken ct = default) => throw new NotImplementedException();
     public virtual Task<KahunaRestoreResponse> RestoreToAsync(Guid leafBackupId, string targetDir, long targetTimeMs, CancellationToken ct = default) => throw new NotImplementedException();

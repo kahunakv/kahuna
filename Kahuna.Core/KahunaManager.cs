@@ -189,6 +189,7 @@ public sealed partial class KahunaManager : IKahuna, IDisposable
                 // Applied-index barrier probe: the writer's max-enqueued commit HLC per partition.
                 // The backup blocks on it, so a probe stuck at zero fails the backup closed.
                 partitionId => BackgroundWriterActor?.GetMaxEnqueuedHlc(partitionId) ?? HLCTimestamp.Zero,
+                interNodeCommunication,
                 logger);
 
         // Restore is administrative: allow it over the network only when a server-owned restore root

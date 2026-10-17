@@ -492,7 +492,21 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
     /// included only if their latest value is itself ≤ the cut.
     /// </summary>
     public CheckpointResult CreateCheckpointAsOf(
-        string destinationPath, long appliedIndex, HLCTimestamp cut, CancellationToken ct = default)
+        string destinationPath, long appliedIndex, HLCTimestamp cut, CancellationToken ct = default) =>
+        CreateCheckpointAsOfCore(destinationPath, appliedIndex, cut, retainKey: null, ct);
+
+    /// <summary>
+    /// The as-of image restricted to the keys <paramref name="retainKey"/> accepts. The image of this
+    /// backend never carries durability floors, so the filter is the whole difference.
+    /// </summary>
+    public CheckpointResult CreateCheckpointAsOf(
+        string destinationPath, long appliedIndex, HLCTimestamp cut, Func<string, bool> retainKey, CancellationToken ct = default) =>
+        CreateCheckpointAsOfCore(destinationPath, appliedIndex, cut, retainKey, ct);
+
+    public bool SupportsFilteredCheckpoint => true;
+
+    private CheckpointResult CreateCheckpointAsOfCore(
+        string destinationPath, long appliedIndex, HLCTimestamp cut, Func<string, bool>? retainKey, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
 
@@ -502,6 +516,11 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
             kvEntries = new(keyValues.Count);
             foreach (KeyValuePair<string, KeyValueEntry> kv in keyValues)
             {
+                // A refused key is left out before the boundary checks: its history is another node's to
+                // reconstruct, so an unreconstructable boundary here must not fail this image.
+                if (retainKey is not null && !retainKey(kv.Key))
+                    continue;
+
                 // The current value is the latest write. If it is at or before the cut, it is the
                 // exact as-of state regardless of how it was written (revisioned or SetNoRevision) —
                 // nothing newer exists. This is what makes a revisioned→no-revision key correct: a cut
@@ -660,6 +679,40 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
         }
 
         return backend;
+    }
+
+    /// <summary>
+    /// Adds every key-value row of the checkpoint at <paramref name="sourceDir"/> to the checkpoint at
+    /// <paramref name="targetDir"/>, both of them key-filtered as-of images whose key sets do not overlap.
+    /// A key present in both keeps the higher revision, so a merge never moves a key backwards. As-of
+    /// images carry no locks, so the lock file is left as the target wrote it.
+    /// </summary>
+    internal static void MergeCheckpointInto(string targetDir, string sourceDir, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+
+        string targetFile = Path.Combine(targetDir, "store.json");
+        List<MemoryCheckpointEntry> target = JsonSerializer.Deserialize(
+            File.ReadAllText(targetFile), PitrJsonContext.Default.ListMemoryCheckpointEntry) ?? [];
+        List<MemoryCheckpointEntry> source = JsonSerializer.Deserialize(
+            File.ReadAllText(Path.Combine(sourceDir, "store.json")), PitrJsonContext.Default.ListMemoryCheckpointEntry) ?? [];
+
+        Dictionary<string, int> positions = new(target.Count + source.Count, StringComparer.Ordinal);
+        for (int i = 0; i < target.Count; i++)
+            positions[target[i].Key] = i;
+
+        foreach (MemoryCheckpointEntry entry in source)
+        {
+            if (!positions.TryGetValue(entry.Key, out int position))
+            {
+                positions[entry.Key] = target.Count;
+                target.Add(entry);
+            }
+            else if (entry.Revision > target[position].Revision)
+                target[position] = entry;
+        }
+
+        File.WriteAllText(targetFile, JsonSerializer.Serialize(target, PitrJsonContext.Default.ListMemoryCheckpointEntry));
     }
 
     public void Dispose()

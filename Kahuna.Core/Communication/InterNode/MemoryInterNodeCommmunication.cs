@@ -6,6 +6,7 @@ using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.KeyValues.Writes;
 using Kahuna.Server.Locks;
 using Kahuna.Server.Locks.Data;
+using Kahuna.Server.Persistence.Pitr;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
 using Kahuna.Shared.Sequences;
@@ -1910,6 +1911,19 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
 
             return await kahunaNode.GetPartitionApplyFingerprint(partitionId, cancellationToken);
+        }
+
+        throw Unreachable(node);
+    }
+
+    public async Task<BackupPartResult> CaptureBackupPart(
+        string node, BackupPartRequest request, IBackupPartSink sink, CancellationToken cancellationToken)
+    {
+        if (TryGetNode(node, out IKahuna? kahunaNode))
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.CaptureBackupPartAsync(request, sink, cancellationToken);
         }
 
         throw Unreachable(node);

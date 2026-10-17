@@ -2,8 +2,10 @@
 using Nixie;
 using Kommander;
 using Kommander.Time;
+using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues;
+using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
@@ -30,6 +32,12 @@ internal sealed class BackupFacade : IDisposable
     /// window, so the hold outlives a long backup as long as renewal keeps succeeding.
     /// </summary>
     private const int SnapshotBackupHoldLeaseMs = 600_000;
+
+    // How many times a full backup asks for its snapshot hold while the answer is the retryable MustRetry, and
+    // the base delay between asks (it grows with each attempt).
+    private const int SnapshotHoldAttempts = 5;
+
+    private const int SnapshotHoldRetryDelayMs = 50;
 
     private readonly BackupService? service;
 
@@ -59,6 +67,7 @@ internal sealed class BackupFacade : IDisposable
         KeyValuesManager keyValues,
         Func<Task> flushPersistenceAsync,
         Func<int, HLCTimestamp> appliedHlcProbe,
+        IInterNodeCommunication interNodeCommunication,
         ILogger<IKahuna> logger)
     {
         BackupStoragePair backupStorage = CreateBackupStorage(configuration, configuration.BackupDir);
@@ -85,15 +94,37 @@ internal sealed class BackupFacade : IDisposable
             // floor already passed the cut or the hold cannot be acquired.
             acquireSnapshotHold: async (cut, holdCt) =>
             {
-                (KeyValueResponseType floorType, HLCTimestamp floor, _) = await keyValues.GetSnapshotFloor(holdCt);
-                // An unconfirmed floor answer (no node with confirmed meta leadership) cannot
-                // prove the floor has not already passed the cut — fail the backup closed.
-                if (floorType != KeyValueResponseType.Get || floor.CompareTo(cut) > 0)
-                    return null;
+                // One holder id for every attempt: an acquire is idempotent by (holder, timestamp), so a retry
+                // after a lost answer finds the hold the earlier attempt committed instead of adding another.
+                string holderId = "pitr-backup-" + Guid.NewGuid().ToString("N")[..8];
 
-                (KeyValueResponseType type, string holdId, _) = await keyValues.AcquireSnapshotHold(
-                    "pitr-backup-" + Guid.NewGuid().ToString("N")[..8], cut, SnapshotBackupHoldLeaseMs, holdCt);
-                return type == KeyValueResponseType.Set && !string.IsNullOrEmpty(holdId) ? holdId : null;
+                for (int attempt = 1; ; attempt++)
+                {
+                    (KeyValueResponseType floorType, HLCTimestamp floor, _) = await keyValues.GetSnapshotFloor(holdCt);
+
+                    // A confirmed floor above the cut is final: the history the cut needs may already be gone.
+                    if (floorType == KeyValueResponseType.Get && floor.CompareTo(cut) > 0)
+                        return null;
+
+                    KeyValueResponseType answer = floorType;
+                    if (floorType == KeyValueResponseType.Get)
+                    {
+                        (KeyValueResponseType type, string holdId, _) = await keyValues.AcquireSnapshotHold(
+                            holderId, cut, SnapshotBackupHoldLeaseMs, holdCt);
+                        if (type == KeyValueResponseType.Set && !string.IsNullOrEmpty(holdId))
+                            return holdId;
+                        answer = type;
+                    }
+
+                    // An unconfirmed floor answer (no node with confirmed meta leadership) cannot prove the floor
+                    // has not already passed the cut, and a refused acquire protects nothing — both fail the backup
+                    // closed. Only the retryable answer is tried again: a meta-leader change, or a prune that
+                    // overlapped the acquire, which several shares of one cluster-wide backup make more likely.
+                    if (answer != KeyValueResponseType.MustRetry || attempt >= SnapshotHoldAttempts)
+                        return null;
+
+                    await Task.Delay(SnapshotHoldRetryDelayMs * attempt, holdCt);
+                }
             },
             releaseSnapshotHold: async (holdId, holdCt) =>
             {
@@ -124,7 +155,17 @@ internal sealed class BackupFacade : IDisposable
             beginCommitObservation: keyValues.BeginCommitObservation,
             // A full backup records the durable intents live at its range ends, which the restore of every chain
             // built on it needs to expand a commit settled after the range.
-            walkLiveIntents: keyValues.DurablePreparedIntentStore.WalkLiveIntents);
+            walkLiveIntents: keyValues.DurablePreparedIntentStore.WalkLiveIntents,
+            // A cluster-wide backup under a replication factor asks the nodes that host the partitions this
+            // node does not host for their shares, and captures its own share with the same filter.
+            interNodeCommunication: interNodeCommunication,
+            keyOwnership: partitions =>
+            {
+                RangeMap map = keyValues.RangeMapStore.Current;
+                int hashPoolSize = raft.Configuration.InitialPartitions;
+                return key => partitions.Contains(PartitionDataEnumerator.OwnerOfKey(map, key, hashPoolSize));
+            },
+            partScratchRoot: configuration.BackupScratchDir);
 
         // Periodic backup GC: sweeps crash-orphaned/leftover artifacts (always) and enforces
         // retention (when configured), including a startup sweep on its first tick. Disabled when
@@ -336,6 +377,15 @@ internal sealed class BackupFacade : IDisposable
         catch (Exception ex) when (ShouldMap(ex)) { throw MapAndLog(svc, ex); }
     }
 
+    /// <summary>
+    /// This node's share of a cluster-wide backup another node composes. A node with no backup directory
+    /// refuses, so the composing node can name it; every other refusal comes from the service.
+    /// </summary>
+    internal Task<BackupPartResult> CaptureBackupPartAsync(BackupPartRequest request, IBackupPartSink sink, CancellationToken ct = default) =>
+        service is null
+            ? Task.FromResult(BackupPartResult.Refused(BackupPartOutcome.NotConfigured, "backup is not configured on that node"))
+            : service.CaptureBackupPartAsync(request, sink, ct);
+
     internal async Task<IReadOnlyList<KahunaBackupInfo>> ListAsync(CancellationToken ct = default)
     {
         BackupService svc = RequireBackupService();
@@ -474,6 +524,9 @@ internal sealed class BackupFacade : IDisposable
         // and the caller needs them to know which partitions the chain is missing.
         BackupDriverException d when d.RestrictedCoverage =>
             new(KahunaBackupOutcome.RestrictedCoverage, d.Message),
+        // Passes through for the same reason: it names only partition ids and the node's endpoint.
+        BackupDriverException d when d.PartitionCaptureFailed =>
+            new(KahunaBackupOutcome.PartitionCaptureFailed, d.Message),
         BackupInsecureRootException =>
             new(KahunaBackupOutcome.InsecureRoot,
                 "The configured backup or restore directory is unsafe (a symlink, or group/world-writable). " +

@@ -9,6 +9,7 @@ using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.KeyValues.Writes;
 using Kahuna.Server.Locks;
 using Kahuna.Server.Locks.Data;
+using Kahuna.Server.Persistence.Pitr;
 using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
@@ -621,6 +622,13 @@ public interface IKahuna
     /// capped at that T.  All partitions present a state as of the same HLC.
     /// </summary>
     public Task<KahunaBackupInfo> TakeCoordinatedBackupAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Captures this node's share of a cluster-wide backup (the partitions in <paramref name="request"/>) and
+    /// streams its artifacts into <paramref name="sink"/>. Called by the node composing the backup, through the
+    /// inter-node transport. A refusal is returned, not thrown.
+    /// </summary>
+    public Task<BackupPartResult> CaptureBackupPartAsync(BackupPartRequest request, IBackupPartSink sink, CancellationToken ct = default);
 
     /// <summary>
     /// Lists all backup manifests in the local catalog, marking structurally invalid or unsupported

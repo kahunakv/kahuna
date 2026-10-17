@@ -836,6 +836,8 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// </summary>
     private const string DurabilityFloorKeyPrefix = " durability_floor_";
 
+    private static ReadOnlySpan<byte> DurabilityFloorKeyPrefixUtf8 => " durability_floor_"u8;
+
     public bool StoreDurabilityFloors(IReadOnlyList<(int PartitionId, long Floor)> floors)
     {
         EnterDbFence();
@@ -4031,10 +4033,21 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// </summary>
     public CheckpointResult CreateCheckpointAsOf(
         string destinationPath, long appliedIndex, HLCTimestamp cut, CancellationToken ct = default)
-        => CreateCheckpointCore(destinationPath, appliedIndex, cut, cut: cut, ct: ct);
+        => CreateCheckpointCore(destinationPath, appliedIndex, cut, cut: cut, retainKey: null, ct: ct);
+
+    /// <summary>
+    /// The exact as-of image restricted to the keys <paramref name="retainKey"/> accepts: the trim pass that
+    /// rolls each key back to the cut also deletes every row of a refused key, and every durability floor.
+    /// </summary>
+    public CheckpointResult CreateCheckpointAsOf(
+        string destinationPath, long appliedIndex, HLCTimestamp cut, Func<string, bool> retainKey, CancellationToken ct = default)
+        => CreateCheckpointCore(destinationPath, appliedIndex, cut, cut: cut, retainKey: retainKey, ct: ct);
+
+    public bool SupportsFilteredCheckpoint => true;
 
     private CheckpointResult CreateCheckpointCore(
-        string destinationPath, long appliedIndex, HLCTimestamp appliedTime, HLCTimestamp? cut, CancellationToken ct = default)
+        string destinationPath, long appliedIndex, HLCTimestamp appliedTime, HLCTimestamp? cut,
+        Func<string, bool>? retainKey = null, CancellationToken ct = default)
     {
         // The whole checkpoint runs under the swap fence: a recovery swap must never dispose the
         // native handle while a checkpoint save is walking it. A long as-of trim delays a pending
@@ -4042,7 +4055,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         EnterDbFence();
         try
         {
-            return CreateCheckpointFenced(destinationPath, appliedIndex, appliedTime, cut, ct);
+            return CreateCheckpointFenced(destinationPath, appliedIndex, appliedTime, cut, retainKey, ct);
         }
         finally
         {
@@ -4051,7 +4064,8 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     }
 
     private CheckpointResult CreateCheckpointFenced(
-        string destinationPath, long appliedIndex, HLCTimestamp appliedTime, HLCTimestamp? cut, CancellationToken ct)
+        string destinationPath, long appliedIndex, HLCTimestamp appliedTime, HLCTimestamp? cut,
+        Func<string, bool>? retainKey, CancellationToken ct)
     {
         // rocksdb_checkpoint_create requires the leaf to NOT exist — it creates the directory
         // itself. Use a temp sibling so a failure before the rename can never leave a partial
@@ -4068,7 +4082,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 cp.Save(tmpPath, logSizeForFlush: 0); // RocksDB creates tmpPath
 
             if (cut.HasValue)
-                TrimCheckpointAsOf(tmpPath, cut.Value, ct);
+                TrimCheckpointAsOf(tmpPath, cut.Value, retainKey, ct);
 
             CheckpointManifest manifest = CheckpointManifest.From(appliedIndex, appliedTime);
             manifest.WriteTo(tmpPath);
@@ -4114,8 +4128,12 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// full compaction physically rewrites the SSTs so no post-cut payload remains in the artifact.
     /// <para>Streams one logical key's rows at a time (they are contiguous in sorted order) and flushes
     /// bounded write batches, so peak memory and batch size are independent of the store size.</para>
+    /// <para>With <paramref name="retainKey"/>, every row of a logical key it refuses is deleted before any
+    /// boundary check runs for that key, and the per-partition durability floors are deleted too. Internal
+    /// '\0' rows (the pruned-history floor, the tilde-key registry) stay: they describe the image, and a
+    /// registry row for a key that left only suppresses a scan optimization.</para>
     /// </summary>
-    private static void TrimCheckpointAsOf(string checkpointPath, HLCTimestamp cut, CancellationToken ct)
+    private static void TrimCheckpointAsOf(string checkpointPath, HLCTimestamp cut, Func<string, bool>? retainKey, CancellationToken ct)
     {
         DbOptions options = new DbOptions()
             .SetCreateIfMissing(false)
@@ -4147,11 +4165,12 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         try
         {
             string? currentLogical = null;
+            bool currentRefused = false;
             KeyTrimState st = new();
 
             void FlushGroup()
             {
-                if (currentLogical is null)
+                if (currentLogical is null || currentRefused)
                     return;
 
                 // Drop the internal provenance marker from the as-of image.
@@ -4203,7 +4222,18 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
 
                     ReadOnlySpan<byte> rawKey = it.GetKeySpan();
                     int lastTilde = rawKey.LastIndexOf((byte)'~');
-                    if (lastTilde < 0) { it.Next(); continue; }
+                    if (lastTilde < 0)
+                    {
+                        if (retainKey is not null && rawKey.StartsWith(DurabilityFloorKeyPrefixUtf8))
+                        {
+                            batch.Delete(rawKey.ToArray(), cf: kv);
+                            batchOps++;
+                            FlushIfLarge();
+                        }
+
+                        it.Next();
+                        continue;
+                    }
 
                     ReadOnlySpan<byte> suffix = rawKey[(lastTilde + 1)..];
                     string logicalKey = Encoding.UTF8.GetString(rawKey[..lastTilde]);
@@ -4215,7 +4245,17 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                         FlushGroup();
                         FlushIfLarge();
                         currentLogical = logicalKey;
+                        currentRefused = retainKey is not null && rawKey[0] != 0 && !retainKey(logicalKey);
                         st = new KeyTrimState();
+                    }
+
+                    if (currentRefused)
+                    {
+                        batch.Delete(rawKey.ToArray(), cf: kv);
+                        batchOps++;
+                        FlushIfLarge();
+                        it.Next();
+                        continue;
                     }
 
                     // The provenance marker's value is a packed HLC span, not a protobuf message —
@@ -4286,6 +4326,115 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         copy.CompactRange((byte[]?)null, (byte[]?)null, kv);
         copy.CompactRange((byte[]?)null, (byte[]?)null, locksCf);
     }
+
+    /// <summary>
+    /// Copies every key-value row of the checkpoint at <paramref name="sourcePath"/> into the checkpoint at
+    /// <paramref name="targetPath"/>, both of them key-filtered as-of images whose key sets do not overlap
+    /// (each holds the partitions one node captured for the same cut). The rows are copied raw, so each key
+    /// keeps its revision history exactly as its own image holds it.
+    /// <para>Internal rows are combined rather than copied. The pruned-history floor becomes the higher of
+    /// the two (history below either may be gone, so a later cut must clear both). The tilde-key registry
+    /// rows are a union; the registry sentinel survives only when the source has one too or holds no user
+    /// row, because a source store that never registered its tilde keys would otherwise make the merged
+    /// registry claim an authority it does not have. Durability floors are not copied.</para>
+    /// <para>A final compaction rewrites the target's SSTs so the merged image is self-contained.</para>
+    /// </summary>
+    internal static void MergeCheckpointInto(string targetPath, string sourcePath, CancellationToken ct)
+    {
+        DbOptions options = new DbOptions()
+            .SetCreateIfMissing(false)
+            .SetCreateMissingColumnFamilies(false);
+
+        ColumnFamilies TrimFamilies() => new()
+        {
+            { "kv", new ColumnFamilyOptions() },
+            { "locks", new ColumnFamilyOptions() }
+        };
+
+        using RocksDb target = RocksDb.Open(options, targetPath, TrimFamilies());
+        using RocksDb source = RocksDb.Open(options, sourcePath, TrimFamilies());
+        ColumnFamilyHandle targetKv = target.GetColumnFamily("kv");
+        ColumnFamilyHandle sourceKv = source.GetColumnFamily("kv");
+
+        HLCTimestamp prunedFloor = HigherPrunedFloor(ReadPrunedFloor(target, targetKv), ReadPrunedFloor(source, sourceKv));
+
+        bool sourceHasSentinel = false;
+        bool sourceHasUserRows = false;
+
+        WriteBatch batch = new();
+        int batchOps = 0;
+
+        try
+        {
+            using (Iterator it = source.NewIterator(readOptions: MaintenanceScanReadOptions, cf: sourceKv))
+            {
+                it.SeekToFirst();
+                while (it.Valid())
+                {
+                    ct.ThrowIfCancellationRequested();
+
+                    ReadOnlySpan<byte> rawKey = it.GetKeySpan();
+
+                    if (rawKey.SequenceEqual(TildeRegistrySentinelKeyUtf8))
+                        sourceHasSentinel = true;
+                    else if (rawKey.SequenceEqual(PrunedFloorKeyUtf8) || rawKey.SequenceEqual(LegacyPrunedFloorKeyUtf8)
+                             || rawKey.StartsWith(DurabilityFloorKeyPrefixUtf8))
+                    {
+                        // Combined (the floor) or dropped (durability floors) below.
+                    }
+                    else
+                    {
+                        if (rawKey.Length == 0 || rawKey[0] != 0)
+                            sourceHasUserRows = true;
+
+                        batch.Put(rawKey.ToArray(), it.GetValueSpan().ToArray(), cf: targetKv);
+                        batchOps++;
+
+                        if (batchOps >= TrimBatchFlushThreshold)
+                        {
+                            target.Write(batch);
+                            batch.Dispose();
+                            batch = new WriteBatch();
+                            batchOps = 0;
+                        }
+                    }
+
+                    it.Next();
+                }
+            }
+
+            if (prunedFloor != HLCTimestamp.Zero)
+                batch.Put(PrunedFloorKeyUtf8.ToArray(), PackPrunedFloor(prunedFloor), cf: targetKv);
+
+            if (!sourceHasSentinel && sourceHasUserRows)
+                batch.Delete(TildeRegistrySentinelKeyUtf8.ToArray(), cf: targetKv);
+
+            target.Write(batch);
+        }
+        finally
+        {
+            batch.Dispose();
+        }
+
+        target.CompactRange((byte[]?)null, (byte[]?)null, targetKv);
+    }
+
+    // The pruned-history floor an image declares: the current key, else the legacy key. A value of the wrong
+    // size refuses the merge, as it refuses every cut on a live store.
+    private static HLCTimestamp ReadPrunedFloor(RocksDb db, ColumnFamilyHandle kv)
+    {
+        byte[]? data = db.Get(PrunedFloorKeyUtf8.ToArray(), cf: kv) ?? db.Get(LegacyPrunedFloorKeyUtf8.ToArray(), cf: kv);
+        if (data is null)
+            return HLCTimestamp.Zero;
+
+        if (data.Length != PrunedFloorSize)
+            throw new ExactCheckpointUnavailableException(
+                "A checkpoint being merged has an unreadable pruned-history floor; the merged image cannot prove its cut.");
+
+        return UnpackPrunedFloor(data);
+    }
+
+    private static HLCTimestamp HigherPrunedFloor(HLCTimestamp a, HLCTimestamp b) => a.CompareTo(b) >= 0 ? a : b;
 
     private static byte[] BuildCurrentKey(string logicalKey)
     {

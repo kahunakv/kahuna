@@ -88,4 +88,11 @@ public enum KahunaBackupOutcome
     /// would need. Nothing was published; retry.
     /// </summary>
     CutUnverified = 17,
+
+    /// <summary>
+    /// A cluster-wide backup could not capture one node's share of the partitions: the node refused or failed
+    /// the capture, or could not be reached. Nothing was published. The message names the partitions and the
+    /// node; retry once the node is healthy.
+    /// </summary>
+    PartitionCaptureFailed = 18,
 }
