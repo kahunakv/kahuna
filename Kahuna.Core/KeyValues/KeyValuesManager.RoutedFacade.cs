@@ -371,6 +371,20 @@ internal sealed partial class KeyValuesManager
     public Task<KeyValueGetByRangeResult> LocateAndGetByRange(HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default, bool snapshotAtLeader = false) =>
         routedScans.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken, coordinatorKey, operationId, snapshotAtLeader);
 
+    public Task<KeyValueProbeRangeResult[]> LocateAndTryProbeManyRanges(
+        HLCTimestamp transactionId,
+        HLCTimestamp readTimestamp,
+        string prefix,
+        IReadOnlyList<KeyValueProbeRange> seeks,
+        KeyValueProbeLock lockMode,
+        int expiresMs,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
+    ) =>
+        routedScans.LocateAndTryProbeManyRanges(transactionId, readTimestamp, prefix, seeks, lockMode, expiresMs, durability, cancellationToken, coordinatorKey, operationId);
+
     public IAsyncEnumerable<(string Key, ReadOnlyKeyValueEntry Entry)> LocateAndScanRange(
         HLCTimestamp txId,
         string prefix,

@@ -59,6 +59,22 @@ to the scan inspection budget, and the rest of the scan takes the read pool, whe
 between pages. The meters `kahuna.scan.pages_read_on_actor_total` and
 `kahuna.scan.pages_read_on_scheduler_total` count the two paths.
 
+### Batched range probes
+
+A batched range probe (`IKahuna.LocateAndTryProbeManyRanges`) asks one actor for many bounded seeks of
+one key space. On the RocksDB and SQLite backends, the actor reads the first page of every seek in one
+read-pool operation, and merges all the pages in one resume turn. A seek that needs a further page
+(its rows were dead, or were dropped by the snapshot) goes into the next round with the other such
+seeks. A single range page takes one read-pool operation and one resume turn for each seek.
+
+The read pool runs the reads of one partition one at a time, so the probe does not read the pages
+faster than single pages do. It removes the hand-offs: 64 seeks cost about 4 thread-pool work items
+instead of about 180.
+
+On the `memory` backend the probe reads its seeks inline, as a single page does. All the seeks of one
+probe share one inspection budget, so a probe of many seeks dense with dead rows holds the mailbox no
+longer than one such page. A seek that runs out of the shared budget takes the read pool.
+
 ### Writer keying
 
 The writer pool is a separate instance, so background writes no longer collide with meta-partition

@@ -160,4 +160,15 @@ public sealed class KeyValueResponse
     /// <summary>The answer of a batched probe that reached its keys: one result per key, in request order.</summary>
     public static KeyValueResponse ForProbe(KeyValueProbeResult[] results) =>
         new(KeyValueResponseType.Get) { ProbeResults = results };
+
+    /// <summary>
+    /// The per-seek answers of a batched range probe, in request order. Null on every other response, and on a range
+    /// probe that was answered as a whole (refused, or expired before its disk pages returned): <see cref="Type"/> is
+    /// then the answer for every seek.
+    /// </summary>
+    public KeyValueProbeRangeResult[]? ProbeRangeResults { get; private set; }
+
+    /// <summary>The answer of a batched range probe that reached its seeks: one result per seek, in request order.</summary>
+    public static KeyValueResponse ForProbeRanges(KeyValueProbeRangeResult[] results) =>
+        new(KeyValueResponseType.Get) { ProbeRangeResults = results };
 }

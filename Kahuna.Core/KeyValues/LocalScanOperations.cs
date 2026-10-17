@@ -389,6 +389,203 @@ internal sealed class LocalScanOperations
     }
 
     /// <summary>
+    /// How long a batched range probe waits out a transient refusal of one of its Shared locks (an in-flight
+    /// replication intent, or a durable intent whose decision is not known here) before it answers that seek
+    /// <c>MustRetry</c>. The same bound a batched point probe applies to its locks.
+    /// </summary>
+    private const int ProbeLockWaitMs = 3_000;
+
+    /// <summary>
+    /// Reads many bounded seeks under <paramref name="prefix"/>, owned by this node, with one actor message per attempt
+    /// (see <see cref="Handlers.TryProbeManyRangesHandler"/>). Returns one result per seek, in input order.
+    ///
+    /// <para>Retries are handled per seek with the rules of a single range page (<see cref="GetByRange"/>): a seek
+    /// that answers <c>WaitingForReplication</c> is asked again, alone with the other waiting seeks, at most
+    /// <see cref="MaxRetries"/> times in all; and a persistent seek that answers <c>MustRetry</c> because of foreign
+    /// intents whose decisions live on other partitions has those decisions routed once, for all such seeks
+    /// together, and is asked again with them. A Shared-lock wait stops the batch at that seek, so it and every seek
+    /// after it are asked again, for at most <see cref="ProbeLockWaitMs"/>. What still waits then answers
+    /// <c>MustRetry</c>.</para>
+    ///
+    /// <para>A seek's <see cref="KeyValueProbeRangeResult.Locked"/> stays set once any attempt reported it: the lock
+    /// is session-owned until the transaction finalizes, and reporting it is what lets the caller release it.</para>
+    /// </summary>
+    public async Task<KeyValueProbeRangeResult[]> TryProbeManyRanges(
+        HLCTimestamp transactionId,
+        HLCTimestamp readTimestamp,
+        string prefix,
+        IReadOnlyList<KeyValueProbeRange> seeks,
+        KeyValueProbeLock lockMode,
+        int expiresMs,
+        KeyValueDurability durability
+    )
+    {
+        KeyValueProbeRangeResult[] results = new KeyValueProbeRangeResult[seeks.Count];
+
+        if (seeks.Count == 0)
+            return results;
+
+        KeyValueActorRing router = durability == KeyValueDurability.Ephemeral ? ephemeralKeyValuesRouter : persistentKeyValuesRouter;
+
+        long start = Environment.TickCount64;
+        int backoffMs = 1;
+        int readAttempts = 0;
+        bool routedAttempted = durability == KeyValueDurability.Ephemeral;
+
+        IReadOnlyDictionary<(HLCTimestamp TransactionId, long Epoch), TransactionDecision>? routed = null;
+
+        // Indexes (into seeks) still to ask, in input order. Null means every seek.
+        List<int>? pending = null;
+
+        while (true)
+        {
+            int count = pending?.Count ?? seeks.Count;
+            KeyValueProbeRange[] batch = new KeyValueProbeRange[count];
+
+            for (int j = 0; j < count; j++)
+                batch[j] = seeks[pending is null ? j : pending[j]];
+
+            KeyValueResponse? response = await AskProbeRanges(router, transactionId, readTimestamp, prefix, batch, routed, lockMode, expiresMs, durability);
+
+            if (response?.ProbeRangeResults is not { } answers || answers.Length != count)
+            {
+                // Answered as a whole (refused, or no answer at all): every seek still pending takes that answer and
+                // keeps the lock an earlier attempt reported.
+                KeyValueResponseType whole = response is null
+                    ? KeyValueResponseType.Errored
+                    : response.ProbeRangeResults is null ? response.Type : KeyValueResponseType.Errored;
+
+                for (int j = 0; j < count; j++)
+                {
+                    int index = pending is null ? j : pending[j];
+                    results[index] = KeyValueProbeRangeResult.MustRetry with { Type = whole, Locked = results[index].Locked };
+                }
+
+                return results;
+            }
+
+            readAttempts++;
+
+            List<int>? waiting = null;
+            List<int>? undecided = null;
+            bool lockWait = false;
+
+            for (int j = 0; j < count; j++)
+            {
+                int index = pending is null ? j : pending[j];
+                KeyValueProbeRangeResult answer = answers[j];
+                results[index] = answer with { Locked = answer.Locked || results[index].Locked };
+
+                if (answer.Type == KeyValueResponseType.WaitingForReplication)
+                {
+                    (waiting ??= []).Add(index);
+
+                    // A lock wait stopped the batch here: the seeks after it were not asked and go round again too.
+                    if (lockMode == KeyValueProbeLock.Shared && !answer.Locked)
+                    {
+                        lockWait = true;
+                        for (int k = j + 1; k < count; k++)
+                            waiting.Add(pending is null ? k : pending[k]);
+
+                        break;
+                    }
+
+                    continue;
+                }
+
+                // A read that met undecided foreign intents. A seek after a lock refusal also answers MustRetry, but it
+                // holds no lock in a locking probe, and the refusal stands for it.
+                if (!routedAttempted && answer.Type == KeyValueResponseType.MustRetry
+                    && (lockMode == KeyValueProbeLock.None || answer.Locked))
+                    (undecided ??= []).Add(index);
+            }
+
+            bool retryNow = false;
+
+            if (undecided is not null)
+            {
+                routedAttempted = true;
+
+                List<PreparedIntent> windowIntents = [];
+                foreach (int index in undecided)
+                {
+                    KeyValueProbeRange seek = seeks[index];
+                    (string rStart, bool rStartIncl, string? rEnd, bool rEndIncl) =
+                        Handlers.TryGetByRangeHandler.ComputeBounds(prefix, seek.StartKey, seek.StartInclusive, seek.EndKey, seek.EndInclusive);
+
+                    windowIntents.AddRange(preparedIntentStore.SnapshotScanWindow(rStart, rStartIncl, rEnd, rEndIncl));
+                }
+
+                routed = await TryRouteForeignScanDecisions(windowIntents, transactionId, CancellationToken.None);
+
+                if (routed is not null)
+                {
+                    (waiting ??= []).AddRange(undecided);
+                    retryNow = true;
+                }
+            }
+
+            if (waiting is null)
+                return results;
+
+            bool outOfBudget = lockWait
+                ? Environment.TickCount64 - start >= ProbeLockWaitMs
+                : readAttempts >= MaxRetries && !retryNow;
+
+            if (outOfBudget)
+            {
+                // The seeks still waiting answer MustRetry, as a single page or acquire does when it gives up.
+                foreach (int index in waiting)
+                    results[index] = KeyValueProbeRangeResult.MustRetry with { Locked = results[index].Locked };
+
+                return results;
+            }
+
+            // Ask again in input order, which is also the order the seeks take their locks in.
+            waiting.Sort();
+            pending = waiting;
+
+            if (retryNow)
+                continue;
+
+            Transactions.DurableTransactionMetrics.AddKvRetryWait("TryProbeManyRanges");
+            await Task.Delay(backoffMs);
+            backoffMs = Math.Min(backoffMs * 2, 1000);
+        }
+    }
+
+    private static async Task<KeyValueResponse?> AskProbeRanges(
+        KeyValueActorRing router,
+        HLCTimestamp transactionId,
+        HLCTimestamp readTimestamp,
+        string prefix,
+        KeyValueProbeRange[] seeks,
+        IReadOnlyDictionary<(HLCTimestamp TransactionId, long Epoch), TransactionDecision>? routed,
+        KeyValueProbeLock lockMode,
+        int expiresMs,
+        KeyValueDurability durability)
+    {
+        // The prefix routes the request: it hashes to the actor that owns its key space.
+        KeyValueRequest request = KeyValueRequestPool.Rent(
+            KeyValueRequestType.TryProbeManyRanges, transactionId, HLCTimestamp.Zero, prefix, null, null, -1,
+            KeyValueFlags.None, expiresMs, HLCTimestamp.Zero, durability, 0, 0, default);
+
+        request.ReadTimestamp = readTimestamp;
+        request.ProbeRanges = seeks;
+        request.ProbeLock = lockMode;
+        request.ForeignScanDecisions = routed;
+
+        try
+        {
+            return await AskKeyValueActor(router, request);
+        }
+        finally
+        {
+            KeyValueRequestPool.Return(request);
+        }
+    }
+
+    /// <summary>
     /// Adds a retried attempt's cost to <paramref name="sum"/>. An attempt that carries no observation (it was
     /// refused before a handler walked anything) adds nothing.
     /// </summary>

@@ -59,6 +59,12 @@ public interface IInterNodeCommunication
     /// </summary>
     public Task<KeyValueProbeResult[]> TryProbeMany(string node, HLCTimestamp transactionId, HLCTimestamp readTimestamp, string[] keys, KeyValueProbeLock lockMode, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Forwards a batched range probe to the node that leads its seeks' partitions, which routes the seeks again on
+    /// arrival. Returns one result per seek, in order. A transport failure answers <c>MustRetry</c> for every seek.
+    /// </summary>
+    public Task<KeyValueProbeRangeResult[]> TryProbeManyRanges(string node, HLCTimestamp transactionId, HLCTimestamp readTimestamp, string prefix, KeyValueProbeRange[] seeks, KeyValueProbeLock lockMode, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken);
+
     public Task TryExistsManyNodeValues(string node, HLCTimestamp transactionId, HLCTimestamp readTimestamp, List<(string key, long revision, KeyValueDurability durability)> keys, Lock lockSync, List<(KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> responses, CancellationToken cancellationToken);
 
     public Task<KeyValueResponseType> TryCheckWriteIntentValue(string node, HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken);

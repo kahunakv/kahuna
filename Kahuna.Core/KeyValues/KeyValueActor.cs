@@ -263,6 +263,8 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
     /// </summary>
     private readonly TryProbeManyHandler tryProbeManyHandler;
 
+    private readonly TryProbeManyRangesHandler tryProbeManyRangesHandler;
+
     /// <summary>
     /// A high-resolution timer used to measure the time elapsed during the handling of requests within the actor.
     /// The stopwatch is utilized to record and log the duration of operations, aiding in performance monitoring
@@ -428,6 +430,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
         dropLeaderStateHandler = new(context);
         recordReadPinHandler = new(context);
         tryProbeManyHandler = new(context, tryGetHandler, tryAcquireExclusiveRangeLockHandler);
+        tryProbeManyRangesHandler = new(context, tryGetByRangeHandler, tryAcquireExclusiveRangeLockHandler);
     }
 
     /// <summary>
@@ -456,6 +459,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
             KeyValueRequestType.TryDelete => await TryDelete(message),
             KeyValueRequestType.TryGet => await TryGet(message),
             KeyValueRequestType.TryProbeMany => await tryProbeManyHandler.Execute(message),
+            KeyValueRequestType.TryProbeManyRanges => await tryProbeManyRangesHandler.Execute(message),
             KeyValueRequestType.TryExists => await TryExists(message),
             KeyValueRequestType.TryCheckWriteIntent => await TryCheckWriteIntent(message),
             KeyValueRequestType.TryAcquireExclusiveLock => await TryAcquireExclusiveLock(message),
@@ -524,6 +528,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
             or KeyValueRequestType.TryExists
             or KeyValueRequestType.GetByBucket
             or KeyValueRequestType.GetByRange
+            or KeyValueRequestType.TryProbeManyRanges
             or KeyValueRequestType.ScanByPrefix
             or KeyValueRequestType.ScanByPrefixFromDisk;
 

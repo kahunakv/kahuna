@@ -712,6 +712,37 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         return ProbeManyWire.FromItems(remoteResponse.Items, keys.Length);
     }
 
+    public async Task<KeyValueProbeRangeResult[]> TryProbeManyRanges(
+        string node,
+        HLCTimestamp transactionId,
+        HLCTimestamp readTimestamp,
+        string prefix,
+        KeyValueProbeRange[] seeks,
+        KeyValueProbeLock lockMode,
+        int expiresMs,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+
+        GrpcTryProbeManyRangesRequest request = ProbeManyRangesWire.ToRequest(transactionId, readTimestamp, prefix, seeks, lockMode, expiresMs, durability);
+
+        GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryProbeManyRanges", node).ConfigureAwait(false);
+        if (!response.IsAnswered)
+        {
+            KeyValueProbeRangeResult[] refused = new KeyValueProbeRangeResult[seeks.Length];
+            for (int i = 0; i < refused.Length; i++)
+                refused[i] = KeyValueProbeRangeResult.MustRetry;
+            return refused;
+        }
+
+        GrpcTryProbeManyRangesResponse remoteResponse = response.TryProbeManyRanges!;
+        RecordLockGrantTerms(remoteResponse.GrantTerms);
+
+        return ProbeManyRangesWire.FromItems(remoteResponse.Items, seeks.Length);
+    }
+
     public async Task TryExistsManyNodeValues(
         string node,
         HLCTimestamp transactionId,

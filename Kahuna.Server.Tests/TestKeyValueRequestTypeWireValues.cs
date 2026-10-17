@@ -51,6 +51,7 @@ public sealed class TestKeyValueRequestTypeWireValues
         (KeyValueRequestType.RunActorTurn, 32),
         (KeyValueRequestType.RecordReadPin, 33),
         (KeyValueRequestType.TryProbeMany, 34),
+        (KeyValueRequestType.TryProbeManyRanges, 35),
     ];
 
     [Fact]

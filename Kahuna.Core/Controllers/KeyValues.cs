@@ -376,6 +376,22 @@ public sealed partial class KahunaManager
         return keyValues.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken, coordinatorKey, operationId, snapshotAtLeader);
     }
 
+    public Task<KeyValueProbeRangeResult[]> LocateAndTryProbeManyRanges(
+        HLCTimestamp transactionId,
+        HLCTimestamp readTimestamp,
+        string prefix,
+        IReadOnlyList<KeyValueProbeRange> seeks,
+        KeyValueProbeLock lockMode,
+        int expiresMs,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
+    )
+    {
+        return keyValues.LocateAndTryProbeManyRanges(transactionId, readTimestamp, prefix, seeks, lockMode, expiresMs, durability, cancellationToken, coordinatorKey, operationId);
+    }
+
     public IAsyncEnumerable<(string Key, ReadOnlyKeyValueEntry Entry)> LocateAndScanRange(
         HLCTimestamp txId,
         string prefix,

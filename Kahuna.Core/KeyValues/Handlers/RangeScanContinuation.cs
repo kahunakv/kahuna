@@ -203,11 +203,25 @@ internal sealed class RangeScanContinuation : ReadContinuation
         long inspectionBudgetRaw = (long)limit + 1 + KeyValueScanLimits.MaxScanInspectionSlack;
         long inspectionBudget = inspectionBudgetRaw > int.MaxValue ? int.MaxValue : inspectionBudgetRaw;
 
+        KeyValueResponse? response = RunInlinePages(context, inspectionBudget);
+
+        if (response is null)
+            DispatchNextPage(context);
+
+        return response;
+    }
+
+    /// <summary>
+    /// Reads and merges pages on the actor thread, as <see cref="RunInline"/> does, until the scan is complete or
+    /// it has inspected <paramref name="inspectionBudget"/> entries. Returns the response, or null when the budget
+    /// stopped the walk: <see cref="diskCursor"/> then points at the next page, and the caller reads it off the
+    /// actor thread. A batched range probe shares one budget among its seeks this way.
+    /// </summary>
+    internal KeyValueResponse? RunInlinePages(KeyValueContext context, long inspectionBudget)
+    {
         while (true)
         {
-            RangeScanPage = TryGetByRangeHandler.ReadDiskPage(
-                context.PersistenceBackend, prefix, diskCursor, cursorRowExcluded, endKey, endInclusive, limit,
-                isSnapshotRead, snapshotTs, currentTime, shouldAbort: null);
+            RangeScanPage = ReadPage(context.PersistenceBackend, shouldAbort: null);
             KeyValueScanMetrics.PagesReadOnActor.Add(1);
 
             KeyValueResponse? response = MergePage(context);
@@ -216,12 +230,22 @@ internal sealed class RangeScanContinuation : ReadContinuation
                 return response;
 
             if (tally.EntriesInspected >= inspectionBudget)
-            {
-                DispatchNextPage(context);
                 return null;
-            }
         }
     }
+
+    /// <summary>The entries this scan inspected so far, over every page it merged (actor thread only).</summary>
+    internal long EntriesInspected => tally.EntriesInspected;
+
+    /// <summary>
+    /// Stage 2: reads the page at <see cref="diskCursor"/> up to the scan's end bound and snapshot-projects it. Reads
+    /// only the immutable scan identity and the cursor fields the last merge left, so it may run on a scheduler
+    /// thread while the actor is free, as long as no merge of this scan runs at the same time.
+    /// </summary>
+    internal RangeDiskPage ReadPage(Persistence.Backend.IPersistenceBackend backend, Func<bool>? shouldAbort) =>
+        TryGetByRangeHandler.ReadDiskPage(
+            backend, prefix, diskCursor, cursorRowExcluded, endKey, endInclusive, limit,
+            isSnapshotRead, snapshotTs, currentTime, shouldAbort);
 
     /// <summary>
     /// Merges <see cref="RangeScanPage"/> into the accumulated result (actor thread). Returns the page's
@@ -229,7 +253,7 @@ internal sealed class RangeScanContinuation : ReadContinuation
     /// behind it before the result filled: <see cref="diskCursor"/> then points at the next page and the
     /// caller reads it, inline or through the scheduler.
     /// </summary>
-    private KeyValueResponse? MergePage(KeyValueContext context)
+    internal KeyValueResponse? MergePage(KeyValueContext context)
     {
         if (Faulted)
             return KeyValueStaticResponses.MustRetryResponse;
@@ -496,14 +520,6 @@ internal sealed class RangeScanContinuation : ReadContinuation
         Task<RangeDiskPage> nextTask;
         try
         {
-            string capturedCursor = diskCursor;
-            bool capturedCursorRowExcluded = cursorRowExcluded;
-            string? capturedEndKey = endKey;
-            bool capturedEndInclusive = endInclusive;
-            bool capturedSnapshotRead = isSnapshotRead;
-            HLCTimestamp capturedSnapshotTs = snapshotTs;
-            HLCTimestamp capturedCurrentTime = currentTime;
-            int capturedLimit = limit;
             nextTask = context.BackendReadScheduler.EnqueueTask(
                 partitionId,
                 () =>
@@ -518,9 +534,7 @@ internal sealed class RangeScanContinuation : ReadContinuation
                     }
 
                     KeyValueScanMetrics.PagesReadOnScheduler.Add(1);
-                    return TryGetByRangeHandler.ReadDiskPage(
-                        context.PersistenceBackend, prefix, capturedCursor, capturedCursorRowExcluded, capturedEndKey, capturedEndInclusive, capturedLimit,
-                        capturedSnapshotRead, capturedSnapshotTs, capturedCurrentTime, () => Cancelled);
+                    return ReadPage(context.PersistenceBackend, () => Cancelled);
                 });
         }
         catch (Exception ex)

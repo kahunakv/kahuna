@@ -32,13 +32,20 @@ internal sealed class TryGetByRangeHandler : BaseHandler
 
     // ── Ephemeral (in-memory only) ────────────────────────────────────────────
 
-    private async ValueTask<KeyValueResponse> GetByRangeEphemeral(KeyValueRequest message)
+    private ValueTask<KeyValueResponse> GetByRangeEphemeral(KeyValueRequest message) =>
+        // currentTime: always fresh — used for expiry / intent checks.
+        GetByRangeEphemeral(message, context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId()));
+
+    /// <summary>
+    /// One ephemeral range page read at <paramref name="currentTime"/>, which may inspect at most
+    /// <paramref name="inspectionSlack"/> dead entries beyond the live ones it needs. A batched range probe reads every
+    /// seek at the probe's one instant this way, with what is left of one slack it shares among its seeks.
+    /// </summary>
+    internal async ValueTask<KeyValueResponse> GetByRangeEphemeral(
+        KeyValueRequest message, HLCTimestamp currentTime, int inspectionSlack = KeyValueScanLimits.MaxScanInspectionSlack)
     {
         string prefix = message.Key;
         int limit = message.Limit;
-
-        // currentTime: always fresh — used for expiry / intent checks.
-        HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
 
         // snapshotTs: captured once at page 0 and carried unchanged through the cursor.
         // Zero ⟹ "latest" (legacy / non-paged behaviour, no snapshot filtering).
@@ -59,7 +66,7 @@ internal sealed class TryGetByRangeHandler : BaseHandler
         // Compute in long and clamp: an unbounded scan arrives as limit == int.MaxValue, and
         // limit + 1 + slack would overflow to a negative int — making the "inspected >= budget"
         // guard fire on the very first key and truncate the page to a single item.
-        long inspectionBudgetRaw = (long)limit + 1 + KeyValueScanLimits.MaxScanInspectionSlack;
+        long inspectionBudgetRaw = (long)limit + 1 + inspectionSlack;
         int inspectionBudget = inspectionBudgetRaw > int.MaxValue ? int.MaxValue : (int)inspectionBudgetRaw;
         int inspected = 0;
         KeyValueScanTally tally = default;
@@ -159,29 +166,7 @@ internal sealed class TryGetByRangeHandler : BaseHandler
 
     private KeyValueResponse GetByRangePersistentStage1(KeyValueRequest message)
     {
-        string prefix = message.Key;
-        int limit = message.Limit;
-
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
-        HLCTimestamp snapshotTs = message.ReadTimestamp.IsNull() ? currentTime : message.ReadTimestamp;
-
-        (string memStart, bool memStartIncl, string? memEnd, bool memEndIncl) = ComputeBounds(message);
-
-        // Stage 1: snapshot a bounded batch of the matching in-memory entries (actor thread,
-        // synchronous). Materialising the BTree range as a list before dispatching stage 2 avoids
-        // holding a live iterator across actor messages: concurrent writes between pages would
-        // cause BTree structural changes that could invalidate a deferred iterator. The copy is
-        // capped at MemoryScanBatchSize (or limit+1 if larger) so a large resident range does not
-        // turn this pre-check into O(resident-count) work; if the merge consumes the whole batch,
-        // the continuation re-queries the next batch on the actor thread.
-        int memBatch = Math.Max(limit + 1, MemoryScanBatchSize);
-        List<(string, KeyValueEntry)> memItems = [];
-        foreach (KeyValuePair<string, KeyValueEntry> kv in
-            context.Store.GetByRange(memStart, memStartIncl, memEnd, memEndIncl, memBatch))
-            memItems.Add((kv.Key, kv.Value));
-
-        // Full batch ⟹ there may be more resident keys past the last one copied.
-        bool memMaybeMore = memItems.Count == memBatch;
 
         IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext = context.ActorContext;
 
@@ -190,25 +175,7 @@ internal sealed class TryGetByRangeHandler : BaseHandler
 
         KeyValueReplyRef promise = KeyValueReplyRef.From(actorContext.Reply.Value);
 
-        string diskCursor = message.StartKey ?? prefix;
-
-        // Route every disk page to the FairReadScheduler partition that owns this range, not
-        // message.PartitionId (which the manager leaves at 0 for scans). Enqueuing scans under
-        // partition 0 would collapse per-partition fairness/back-pressure and read-after-write
-        // FIFO ordering onto one queue. The continuation reuses this for subsequent pages.
-        int scanPartition = ResolvePartition(prefix);
-
-        // The continuation carries the request's own end bound (not the prefix upper bound ComputeBounds
-        // substitutes for the BTree) to the backend: the backend already stops at the prefix, and a null
-        // bound means just that.
-        RangeScanContinuation cont = new(
-            prefix, limit, message.Durability, scanPartition,
-            message.StartInclusive, message.StartKey,
-            message.EndKey, message.EndInclusive,
-            message.TransactionId, snapshotTs, currentTime,
-            isSnapshotRead: !message.ReadTimestamp.IsNull(),
-            memItems, memEnd, memEndIncl, memBatch, memMaybeMore, diskCursor,
-            promise, message.ForeignScanDecisions);
+        RangeScanContinuation cont = CreatePersistentScan(message, currentTime, promise);
 
         if (context.PersistenceBackend is { ServesReadsFromMemory: true })
         {
@@ -227,6 +194,60 @@ internal sealed class TryGetByRangeHandler : BaseHandler
 
         actorContext.ByPassReply = true;
         return KeyValueStaticResponses.WaitingForReplicationResponse;
+    }
+
+    /// <summary>
+    /// Stage 1 of a persistent range page read at <paramref name="currentTime"/>: snapshots the first bounded batch of
+    /// the resident entries in range and returns the continuation that merges them with the disk pages. Reads no disk
+    /// page; the caller reads the first one, inline or through the scheduler. A batched range probe builds one per seek
+    /// this way, with every seek at the probe's one instant, and passes a smaller <paramref name="memoryBatch"/> so the
+    /// copies of all its seeks together stay within its bound on entries; the merge refills a batch it consumes.
+    /// </summary>
+    internal RangeScanContinuation CreatePersistentScan(
+        KeyValueRequest message, HLCTimestamp currentTime, KeyValueReplyRef promise, int memoryBatch = MemoryScanBatchSize)
+    {
+        string prefix = message.Key;
+        int limit = message.Limit;
+
+        HLCTimestamp snapshotTs = message.ReadTimestamp.IsNull() ? currentTime : message.ReadTimestamp;
+
+        (string memStart, bool memStartIncl, string? memEnd, bool memEndIncl) = ComputeBounds(message);
+
+        // Stage 1: snapshot a bounded batch of the matching in-memory entries (actor thread,
+        // synchronous). Materialising the BTree range as a list before dispatching stage 2 avoids
+        // holding a live iterator across actor messages: concurrent writes between pages would
+        // cause BTree structural changes that could invalidate a deferred iterator. The copy is
+        // capped at MemoryScanBatchSize (or limit+1 if larger) so a large resident range does not
+        // turn this pre-check into O(resident-count) work; if the merge consumes the whole batch,
+        // the continuation re-queries the next batch on the actor thread.
+        int memBatch = Math.Max(limit + 1, memoryBatch);
+        List<(string, KeyValueEntry)> memItems = [];
+        foreach (KeyValuePair<string, KeyValueEntry> kv in
+            context.Store.GetByRange(memStart, memStartIncl, memEnd, memEndIncl, memBatch))
+            memItems.Add((kv.Key, kv.Value));
+
+        // Full batch ⟹ there may be more resident keys past the last one copied.
+        bool memMaybeMore = memItems.Count == memBatch;
+
+        string diskCursor = message.StartKey ?? prefix;
+
+        // Route every disk page to the FairReadScheduler partition that owns this range, not
+        // message.PartitionId (which the manager leaves at 0 for scans). Enqueuing scans under
+        // partition 0 would collapse per-partition fairness/back-pressure and read-after-write
+        // FIFO ordering onto one queue. The continuation reuses this for subsequent pages.
+        int scanPartition = ResolvePartition(prefix);
+
+        // The continuation carries the request's own end bound (not the prefix upper bound ComputeBounds
+        // substitutes for the BTree) to the backend: the backend already stops at the prefix, and a null
+        // bound means just that.
+        return new(
+            prefix, limit, message.Durability, scanPartition,
+            message.StartInclusive, message.StartKey,
+            message.EndKey, message.EndInclusive,
+            message.TransactionId, snapshotTs, currentTime,
+            isSnapshotRead: !message.ReadTimestamp.IsNull(),
+            memItems, memEnd, memEndIncl, memBatch, memMaybeMore, diskCursor,
+            promise, message.ForeignScanDecisions);
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -352,13 +373,18 @@ internal sealed class TryGetByRangeHandler : BaseHandler
     }
 
     /// <summary>Computes the effective BTree bounds, substituting the prefix upper bound when EndKey is null.</summary>
-    internal static (string start, bool startIncl, string? end, bool endIncl) ComputeBounds(KeyValueRequest message)
-    {
-        string start = message.StartKey ?? message.Key;
-        bool startIncl = message.StartKey is null || message.StartInclusive;
+    internal static (string start, bool startIncl, string? end, bool endIncl) ComputeBounds(KeyValueRequest message) =>
+        ComputeBounds(message.Key, message.StartKey, message.StartInclusive, message.EndKey, message.EndInclusive);
 
-        string? end = message.EndKey ?? GetPrefixUpperBound(message.Key);
-        bool endIncl = message.EndKey is not null && message.EndInclusive;
+    /// <summary>The effective BTree bounds of a page over <paramref name="prefix"/> between the given bounds.</summary>
+    internal static (string start, bool startIncl, string? end, bool endIncl) ComputeBounds(
+        string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive)
+    {
+        string start = startKey ?? prefix;
+        bool startIncl = startKey is null || startInclusive;
+
+        string? end = endKey ?? GetPrefixUpperBound(prefix);
+        bool endIncl = endKey is not null && endInclusive;
 
         return (start, startIncl, end, endIncl);
     }

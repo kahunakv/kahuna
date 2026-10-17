@@ -679,6 +679,32 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return response;
     }
 
+    /// <summary>
+    /// Inter-node batched range probe: the sender grouped the seeks by the leader it believes in. That belief is not
+    /// proof, so the seeks are routed again on arrival, and the leaderships the probe's locks were granted under travel
+    /// back with the answers.
+    /// </summary>
+    private async Task<GrpcTryProbeManyRangesResponse> TryProbeManyRangesCore(GrpcTryProbeManyRangesRequest request, ServerCallContext context)
+    {
+        using LockGrantScope.Scope grantScope = LockGrantScope.Begin(out LockGrantCapture grants);
+
+        KeyValueProbeRangeResult[] results = await keyValues.LocateAndTryProbeManyRanges(
+            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
+            new(request.ReadTimestampNode, request.ReadTimestampPhysical, request.ReadTimestampCounter),
+            request.Prefix,
+            ProbeManyRangesWire.FromRequest(request),
+            (KeyValueProbeLock)request.LockMode,
+            request.ExpiresMs,
+            (KeyValueDurability)request.Durability,
+            context.CancellationToken
+        );
+
+        GrpcTryProbeManyRangesResponse response = new();
+        ProbeManyRangesWire.AddItems(response.Items, results);
+        AddLockGrantTerms(response.GrantTerms, grants);
+        return response;
+    }
+
     private async Task<GrpcTryGetManyValuesResponse> TryGetManyValuesCore(GrpcTryGetManyValuesRequest request, ServerCallContext context)
     {
         List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses = await keyValues.LocateAndTryGetManyValues(
@@ -2998,6 +3024,9 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
 
     internal Task<GrpcTryProbeManyResponse> TryProbeManyInternal(GrpcTryProbeManyRequest request, ServerCallContext context)
         => Guard(request, context, static (s, r, c) => s.TryProbeManyCore(r, c), static r => ProbeManyWire.MustRetry(r));
+
+    internal Task<GrpcTryProbeManyRangesResponse> TryProbeManyRangesInternal(GrpcTryProbeManyRangesRequest request, ServerCallContext context)
+        => Guard(request, context, static (s, r, c) => s.TryProbeManyRangesCore(r, c), static r => ProbeManyRangesWire.MustRetry(r));
 
     internal Task<GrpcTryExistsKeyValueResponse> TryExistsKeyValueInternal(GrpcTryExistsKeyValueRequest request, ServerCallContext context)
         => Guard(request, context, static (s, r, c) => s.TryExistsKeyValueCore(r, c), static _ => KeyValueMustRetry.TryExistsKeyValue());

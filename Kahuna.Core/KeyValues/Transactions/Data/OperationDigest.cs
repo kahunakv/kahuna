@@ -271,6 +271,31 @@ internal static class OperationDigest
         return hash.GetHashAndReset();
     }
 
+    /// <summary>
+    /// Digest for a batched range probe (<see cref="OperationKind.ProbeManyRanges"/>): the whole batch is one
+    /// registered operation, so the digest binds the prefix, every seek's bounds and limit in submission order, the
+    /// snapshot, the lock mode, the lock lease and the durability. A same-operation-id retry must resend the identical
+    /// request.
+    /// </summary>
+    internal static byte[] ForProbeManyRanges(
+        string prefix, IReadOnlyList<KeyValueProbeRange> seeks, HLCTimestamp readTimestamp, KeyValueProbeLock lockMode,
+        int expiresMs, KeyValueDurability durability)
+    {
+        XxHash128 hash = AcquireHash();
+        AppendTag(hash, OperationKind.ProbeManyRanges);
+        AppendInt(hash, seeks.Count);
+        foreach (KeyValueProbeRange seek in seeks)
+        {
+            AppendBounds(hash, prefix, seek.StartKey, seek.StartInclusive, seek.EndKey, seek.EndInclusive);
+            AppendInt(hash, seek.Limit);
+        }
+        AppendHlc(hash, readTimestamp);
+        AppendInt(hash, (int)lockMode);
+        AppendInt(hash, expiresMs);
+        AppendInt(hash, (int)durability);
+        return hash.GetHashAndReset();
+    }
+
     internal static byte[] ForGetMany(IReadOnlyList<(string key, long revision, KeyValueDurability durability)> keys, HLCTimestamp readTimestamp) =>
         ForManyRead(OperationKind.GetMany, keys, readTimestamp);
 

@@ -327,7 +327,7 @@ message GrpcTryProbeManyRequest {
 enum GrpcProbeLockMode {
   GRPC_PROBE_LOCK_NONE = 0;
   GRPC_PROBE_LOCK_SHARED = 1;
-  // Replay of a probe whose locks a completed operation recorded: renew a held [k,k] lock, never take one.
+  // Replay of a probe whose locks a completed operation recorded: renew a held lock over the same bounds, never take one.
   GRPC_PROBE_LOCK_SHARED_REENTRY_ONLY = 2;
 }
 
@@ -360,6 +360,53 @@ message GrpcTryProbeManyResponseItem {
   uint32 HolderTransactionIdCounter = 17;
   // True when the key holds the transaction's Shared [k,k] lock after the probe.
   bool Locked = 18;
+}
+
+// A batched range probe forwarded to the node that leads the seeks' partitions: many bounded seeks
+// under one prefix, each read as a single range page over its bounds and limit would be, optionally
+// under a Shared range lock over its bounds taken in the same actor turn. The receiver routes the
+// seeks again on arrival.
+message GrpcTryProbeManyRangesRequest {
+  int32 TransactionIdNode = 1;
+  int64 TransactionIdPhysical = 2;
+  uint32 TransactionIdCounter = 3;
+  int32 ReadTimestampNode = 4;
+  int64 ReadTimestampPhysical = 5;
+  uint32 ReadTimestampCounter = 6;
+  string Prefix = 7;
+  repeated GrpcProbeRange Seeks = 8;
+  GrpcKeyValueDurability Durability = 9;
+  GrpcProbeLockMode LockMode = 10;
+  int32 ExpiresMs = 11;
+}
+
+message GrpcProbeRange {
+  optional string StartKey = 1;
+  bool StartInclusive = 2;
+  optional string EndKey = 3;
+  bool EndInclusive = 4;
+  int32 Limit = 5;
+}
+
+message GrpcTryProbeManyRangesResponse {
+  optional string ServedFrom = 1;
+  // One item per requested seek, in request order.
+  repeated GrpcTryProbeManyRangesResponseItem Items = 2;
+  // The leaderships the probe's locks were granted under, one entry per partition and term.
+  repeated GrpcLockGrantTerm GrantTerms = 3;
+}
+
+message GrpcTryProbeManyRangesResponseItem {
+  GrpcKeyValueResponseType Type = 1;
+  repeated GrpcKeyValueByPrefixItemResponse Entries = 2;
+  bool HasMore = 3;
+  // The key the seek's remaining entries start after; set only when HasMore is.
+  optional string ResumeKey = 4;
+  int32 HolderTransactionIdNode = 5;
+  int64 HolderTransactionIdPhysical = 6;
+  uint32 HolderTransactionIdCounter = 7;
+  // True when the seek's bounds hold the transaction's Shared range lock after the probe.
+  bool Locked = 8;
 }
 
 message GrpcTryGetManyValuesResponseItem {
@@ -1054,6 +1101,7 @@ enum GrpcOperationKind {
   GRPC_OP_KIND_GET_MANY = 12;
   GRPC_OP_KIND_EXISTS_MANY = 13;
   GRPC_OP_KIND_PROBE_MANY = 14;
+  GRPC_OP_KIND_PROBE_MANY_RANGES = 15;
 }
 
 enum GrpcOperationRegistrationOutcome {
@@ -1320,6 +1368,7 @@ message GrpcBatchServerKeyValueRequest {
     GrpcDurableDecisionRequest DurableDecision = 56;
     GrpcDurableOnePhaseRequest DurableOnePhase = 57;
     GrpcTryProbeManyRequest TryProbeMany = 59;
+    GrpcTryProbeManyRangesRequest TryProbeManyRanges = 60;
   }
   // Set only when Type is SERVER_COALESCED: independent single-operation envelopes that share
   // this one stream message. Each inner envelope carries its own RequestId, Type, ForwardHops
@@ -1387,6 +1436,7 @@ message GrpcBatchServerKeyValueResponse
     GrpcDurableDecisionResponse DurableDecision = 55;
     GrpcDurableOnePhaseResponse DurableOnePhase = 56;
     GrpcTryProbeManyResponse TryProbeMany = 58;
+    GrpcTryProbeManyRangesResponse TryProbeManyRanges = 59;
   }
   // Set only when Type is SERVER_COALESCED: independent single-operation responses that share
   // this one stream message.
@@ -1786,6 +1836,7 @@ enum GrpcServerBatchType {
   // (or responses).
   SERVER_COALESCED = 56;
   SERVER_TRY_PROBE_MANY = 57;
+  SERVER_TRY_PROBE_MANY_RANGES = 58;
 }
 
 enum GrpcRangeLockMode {

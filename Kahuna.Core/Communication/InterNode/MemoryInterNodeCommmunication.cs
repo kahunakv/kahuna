@@ -765,6 +765,41 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// </summary>
     public Action<string, string[]>? ProbeManyForwarded { get; set; }
 
+    public async Task<KeyValueProbeRangeResult[]> TryProbeManyRanges(
+        string node,
+        HLCTimestamp transactionId,
+        HLCTimestamp readTimestamp,
+        string prefix,
+        KeyValueProbeRange[] seeks,
+        KeyValueProbeLock lockMode,
+        int expiresMs,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        if (TryGetNode(node, out IKahuna? kahunaNode))
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            KeyValueProbeRangeResult[] results = await kahunaNode.LocateAndTryProbeManyRanges(
+                transactionId, readTimestamp, prefix, seeks, lockMode, expiresMs, durability, cancellationToken);
+
+            // Test seam: count the forwarded range probes, so a test can prove a remote group travelled as one message.
+            if (ProbeManyRangesForwarded is { } observe)
+                observe(node, seeks);
+
+            return results;
+        }
+
+        throw Unreachable(node);
+    }
+
+    /// <summary>
+    /// Test seam: when set, invoked once per batched range probe this transport forwarded, with the target node and
+    /// the seeks it carried.
+    /// </summary>
+    public Action<string, KeyValueProbeRange[]>? ProbeManyRangesForwarded { get; set; }
+
     /// <summary>
     /// Test seam: when set, invoked per-key after the remote batch read completes. Returns true to replace
     /// that key's result with <c>MustRetry</c>, simulating a per-key routing transient in a batch read.

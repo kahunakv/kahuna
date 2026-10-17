@@ -107,4 +107,12 @@ public enum KeyValueRequestType
     /// batch and answered in one resume turn. Local to a node; never replicated.
     /// </summary>
     TryProbeMany = 34,
+
+    /// <summary>
+    /// Reads many bounded seeks of one key space in one actor turn, each answered as a single range page over its
+    /// bounds and limit, optionally under a Shared range lock over its bounds taken just before the read. Disk pages
+    /// of the seeks are read as one scheduler operation and merged in one resume turn. Local to a node; never
+    /// replicated.
+    /// </summary>
+    TryProbeManyRanges = 35,
 }

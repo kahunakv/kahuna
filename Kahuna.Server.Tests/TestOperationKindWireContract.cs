@@ -22,6 +22,8 @@ public sealed class TestOperationKindWireContract
     [InlineData(OperationKind.PointLock, GrpcOperationKind.GrpcOpKindPointLock)]
     [InlineData(OperationKind.PrefixLock, GrpcOperationKind.GrpcOpKindPrefixLock)]
     [InlineData(OperationKind.RangeLock, GrpcOperationKind.GrpcOpKindRangeLock)]
+    [InlineData(OperationKind.ProbeMany, GrpcOperationKind.GrpcOpKindProbeMany)]
+    [InlineData(OperationKind.ProbeManyRanges, GrpcOperationKind.GrpcOpKindProbeManyRanges)]
     public void OperationKind_MatchesGrpcWireValue_AndRoundTrips(OperationKind kind, GrpcOperationKind wire)
     {
         Assert.Equal((int)kind, (int)wire);

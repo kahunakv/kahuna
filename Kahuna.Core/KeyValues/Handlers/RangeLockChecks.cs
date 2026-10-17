@@ -134,6 +134,41 @@ internal static class RangeLockChecks
     }
 
     /// <summary>
+    /// Renews the lease of <paramref name="transactionId"/>'s own live range lock with exactly these bounds in
+    /// <paramref name="keySpace"/> and returns true, or returns false when the transaction holds no such live lock.
+    /// Takes no lock. Bounds match as a same-transaction re-acquire matches them.
+    /// </summary>
+    internal static bool TryRenewOwnLock(
+        KeyValueContext context,
+        string keySpace,
+        HLCTimestamp transactionId,
+        string? startKey, bool startInclusive,
+        string? endKey, bool endInclusive,
+        int expiresMs,
+        HLCTimestamp currentTime)
+    {
+        if (!context.LocksByRange.TryGetValue(keySpace, out List<KeyValueRangeLock>? locks))
+            return false;
+
+        foreach (KeyValueRangeLock held in locks)
+        {
+            if (held.TransactionId != transactionId
+                || held.StartInclusive != startInclusive || held.EndInclusive != endInclusive
+                || !string.Equals(held.StartKey, startKey, StringComparison.Ordinal)
+                || !string.Equals(held.EndKey, endKey, StringComparison.Ordinal))
+                continue;
+
+            if (!IsLive(context, held, currentTime))
+                return false;
+
+            StartLease(held, currentTime, expiresMs);
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
     /// Takes a lock that arrived with a hybrid-logical-clock deadline into an actor: the time the deadline
     /// leaves against <paramref name="currentTime"/> becomes its lease on the node's monotonic clock. The
     /// caller has already refused a lock whose deadline passed. A lock that already has a monotonic deadline

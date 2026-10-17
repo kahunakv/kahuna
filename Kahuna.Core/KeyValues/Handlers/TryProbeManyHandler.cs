@@ -201,30 +201,9 @@ internal sealed class TryProbeManyHandler : BaseHandler
     /// Renews this transaction's own live <c>[k,k]</c> range lock on <paramref name="key"/> and returns true, or
     /// returns false when it holds none. Takes no lock.
     /// </summary>
-    private bool TryRenewOwnPointLock(KeyValueRequest message, string key, HLCTimestamp currentTime)
-    {
-        string keySpace = KeyValueKeySpace.OfKey(key) ?? key;
-
-        if (!context.LocksByRange.TryGetValue(keySpace, out List<KeyValueRangeLock>? locks))
-            return false;
-
-        foreach (KeyValueRangeLock held in locks)
-        {
-            if (held.TransactionId != message.TransactionId
-                || !held.StartInclusive || !held.EndInclusive
-                || !string.Equals(held.StartKey, key, StringComparison.Ordinal)
-                || !string.Equals(held.EndKey, key, StringComparison.Ordinal))
-                continue;
-
-            if (!RangeLockChecks.IsLive(context, held, currentTime))
-                return false;
-
-            RangeLockChecks.StartLease(held, currentTime, message.ExpiresMs);
-            return true;
-        }
-
-        return false;
-    }
+    private bool TryRenewOwnPointLock(KeyValueRequest message, string key, HLCTimestamp currentTime) =>
+        RangeLockChecks.TryRenewOwnLock(
+            context, KeyValueKeySpace.OfKey(key) ?? key, message.TransactionId, key, true, key, true, message.ExpiresMs, currentTime);
 
     /// <summary>
     /// For a transactional latest read of persistent keys, loads every head that is not resident with one batched

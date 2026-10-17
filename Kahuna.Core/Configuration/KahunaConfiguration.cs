@@ -307,6 +307,13 @@ public sealed class KahunaConfiguration
     public int MaxProbeBatchSize { get; set; } = 512;
 
     /// <summary>
+    /// Most entries one batched range probe may ask for: the sum of its seeks' limits. With
+    /// <see cref="MaxProbeBatchSize"/> it bounds the actor turn and the response of a range probe; a probe that asks
+    /// for more is refused with <c>InvalidInput</c>. Callers split their batches to fit.
+    /// </summary>
+    public int MaxProbeRangeEntries { get; set; } = 65_536;
+
+    /// <summary>
     /// Maximum number of <em>ordinary</em> (user-request) messages that may be queued in a single
     /// key-value actor's inbox before further ordinary messages are rejected with a retryable
     /// <c>MustRetry</c> (mapped from Nixie's <c>ActorBusyException</c>). This backpressures a hot-key

@@ -343,6 +343,15 @@ internal sealed partial class KeyValuesManager
         KeyValueDurability durability) =>
         localScans.GetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability);
 
+    public Task<KeyValueProbeRangeResult[]> TryProbeManyRanges(
+        HLCTimestamp transactionId,
+        HLCTimestamp readTimestamp,
+        string prefix,
+        IReadOnlyList<KeyValueProbeRange> seeks,
+        KeyValueProbeLock lockMode,
+        int expiresMs,
+        KeyValueDurability durability) =>
+        localScans.TryProbeManyRanges(transactionId, readTimestamp, prefix, seeks, lockMode, expiresMs, durability);
 
 
     public Task<(KeyValueResponseType, TransactionHandle)> LocateAndStartTransaction(KeyValueTransactionOptions options, CancellationToken cancellationToken) =>

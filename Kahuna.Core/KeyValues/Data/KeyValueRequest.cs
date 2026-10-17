@@ -154,10 +154,18 @@ public sealed class KeyValueRequest : IConsistentHashable
     internal Transactions.Data.ForeignDecisionHint[]? ProbeHints { get; set; }
 
     /// <summary>
-    /// How a <see cref="KeyValueRequestType.TryProbeMany"/> request locks each key before it reads it. Unused by
+    /// How a <see cref="KeyValueRequestType.TryProbeMany"/> request locks each key, or a
+    /// <see cref="KeyValueRequestType.TryProbeManyRanges"/> request each seek's bounds, before it reads it. Unused by
     /// every other request type.
     /// </summary>
     internal KeyValueProbeLock ProbeLock { get; set; }
+
+    /// <summary>
+    /// The seeks of a <see cref="KeyValueRequestType.TryProbeManyRanges"/> request, all under the prefix in
+    /// <see cref="Key"/>, answered in this order. <see cref="ProbeLock"/> says how each seek's bounds are locked.
+    /// Null on every other type.
+    /// </summary>
+    internal KeyValueProbeRange[]? ProbeRanges { get; set; }
 
     /// <summary>
     ///
@@ -318,6 +326,7 @@ public sealed class KeyValueRequest : IConsistentHashable
         ProbeKeys = null;
         ProbeHints = null;
         ProbeLock = KeyValueProbeLock.None;
+        ProbeRanges = null;
         ReturnToPoolOnReceive = false;
     }
 
@@ -325,6 +334,7 @@ public sealed class KeyValueRequest : IConsistentHashable
     {
         if (Type is KeyValueRequestType.GetByBucket
             or KeyValueRequestType.GetByRange
+            or KeyValueRequestType.TryProbeManyRanges
             or KeyValueRequestType.ScanByPrefix
             or KeyValueRequestType.TryAcquireExclusivePrefixLock
             or KeyValueRequestType.TryReleaseExclusivePrefixLock

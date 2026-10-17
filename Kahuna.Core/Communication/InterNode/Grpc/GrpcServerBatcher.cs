@@ -252,6 +252,15 @@ internal sealed class GrpcServerBatcher
 
         return TryProcessQueue(grpcBatcherItem, promise);
     }
+
+    public Task<GrpcServerBatcherResponse> Enqueue(GrpcTryProbeManyRangesRequest message)
+    {
+        TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        GrpcServerBatcherItem grpcBatcherItem = new(GrpcServerBatcherItemType.KeyValues, Interlocked.Increment(ref requestId), new(message), promise);
+
+        return TryProcessQueue(grpcBatcherItem, promise);
+    }
     
     public Task<GrpcServerBatcherResponse> Enqueue(GrpcTryDeleteKeyValueRequest message)
     {
@@ -1266,6 +1275,11 @@ internal sealed class GrpcServerBatcher
             batchRequest.Type = GrpcServerBatchType.ServerTryProbeMany;
             batchRequest.TryProbeMany = itemRequest.TryProbeMany;
         }
+        else if (itemRequest.TryProbeManyRanges is not null)
+        {
+            batchRequest.Type = GrpcServerBatchType.ServerTryProbeManyRanges;
+            batchRequest.TryProbeManyRanges = itemRequest.TryProbeManyRanges;
+        }
         else if (itemRequest.TryDeleteKeyValue is not null)
         {
             batchRequest.Type = GrpcServerBatchType.ServerTryDeleteKeyValue;
@@ -1661,6 +1675,10 @@ internal sealed class GrpcServerBatcher
 
             case GrpcServerBatchType.ServerTryProbeMany:
                 item.Promise.TrySetResult(new(response.TryProbeMany));
+                break;
+
+            case GrpcServerBatchType.ServerTryProbeManyRanges:
+                item.Promise.TrySetResult(new(response.TryProbeManyRanges));
                 break;
 
             case GrpcServerBatchType.ServerTryDeleteKeyValue:

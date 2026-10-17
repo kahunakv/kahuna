@@ -99,6 +99,20 @@ public interface IKahuna
     /// <see cref="KeyValueScanObservation"/> and retry count to it; read it after the enumeration ends.
     /// Null costs nothing.</para>
     /// </summary>
+    /// <summary>
+    /// Batched range probe: reads many bounded seeks under <paramref name="prefix"/>, each answered exactly as a single
+    /// <see cref="LocateAndGetByRange"/> page over its bounds and limit at <paramref name="readTimestamp"/> is, with one
+    /// actor turn per key space and partition instead of one per seek, and the seeks' disk pages read as one scheduler
+    /// operation. A latest probe reads every seek at one snapshot. With <see cref="KeyValueProbeLock.Shared"/> each
+    /// seek's bounds are first locked with a Shared range lock (lease <paramref name="expiresMs"/>) in the same actor
+    /// turn as its read; within a partition the first refusal stops the batch, the refused seek answers the refusal
+    /// and its holder, and the seeks after it answer <c>MustRetry</c> unlocked. Returns one result per seek, in input
+    /// order; a seek with <see cref="KeyValueProbeRangeResult.HasMore"/> is finished with
+    /// <see cref="LocateAndScanRange"/> from its <see cref="KeyValueProbeRangeResult.ResumeKey"/>, exclusive. A probe of
+    /// more than the configured maximum seeks or entries is refused as a whole with <c>InvalidInput</c>.
+    /// </summary>
+    public Task<KeyValueProbeRangeResult[]> LocateAndTryProbeManyRanges(HLCTimestamp transactionId, HLCTimestamp readTimestamp, string prefix, IReadOnlyList<KeyValueProbeRange> seeks, KeyValueProbeLock lockMode, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default);
+
     public IAsyncEnumerable<(string Key, ReadOnlyKeyValueEntry Entry)> LocateAndScanRange(
         HLCTimestamp txId,
         string prefix,
