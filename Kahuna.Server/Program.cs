@@ -13,6 +13,7 @@ using Kahuna.Communication.External.Rest;
 using Kahuna.Shared.Communication.Rest;
 using Kahuna.Server.Communication;
 using Kahuna.Server.Communication.Internode;
+using Kahuna.Server.Communication.External.GenHttp;
 using Kahuna.Server.Diagnostics;
 using Kahuna.Server.Persistence.Pitr;
 
@@ -376,13 +377,19 @@ if (standalone)
     // until shutdown and dispose the node so its actor system drains cleanly.
     await app.StartAsync();
     await app.Services.GetRequiredService<EmbeddedKahunaNode>().StartAsync();
+    GenHTTP.Api.Infrastructure.IServerHost? genHttpHost = await GenHttpRestHost.StartAsync(app, opts);
     await app.WaitForShutdownAsync();
+    if (genHttpHost is not null)
+        await genHttpHost.StopAsync();
     await app.Services.GetRequiredService<EmbeddedKahunaNode>().DisposeAsync();
 }
 else
 {
     await app.StartAsync();
+    GenHTTP.Api.Infrastructure.IServerHost? genHttpHost = await GenHttpRestHost.StartAsync(app, opts);
     await app.WaitForShutdownAsync();
+    if (genHttpHost is not null)
+        await genHttpHost.StopAsync();
 
     // Ordered teardown mirroring EmbeddedKahunaNode: drain the key/value write aggregator and the actor
     // system while Raft and the actors are still alive, THEN dispose KahunaManager (which stops the backend

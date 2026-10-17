@@ -24,39 +24,7 @@ public static class KeyValuesHandlers
 {
     public static void MapKeyValueRoutes(WebApplication app)
     {
-        app.MapPost("/v1/kv/try-set", async (KahunaSetKeyValueRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
-        {
-            // A null value is a payload the caller left absent, not a malformed request: it sets the key
-            // to no value, which the store keeps apart from a key that holds zero bytes. The gRPC service
-            // accepts the same call through the presence flag of its optional field, so rejecting it here
-            // would make one transport unable to write a value the other one writes and reads back.
-            if (string.IsNullOrEmpty(request.Key) || request.ExpiresMs < 0)
-                return new() { Type = KeyValueResponseType.InvalidInput };
-
-            using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
-
-            (KeyValueResponseType response, long revision, HLCTimestamp lastModified) = await keyValues.LocateAndTrySetKeyValue(
-                request.TransactionId,
-                request.Key,
-                request.Value,
-                request.CompareValue,
-                request.CompareRevision,
-                request.Flags,
-                request.ExpiresMs,
-                request.Durability,
-                cancellationToken,
-                coordinatorKey: request.CoordinatorKey ?? "",
-                operationId: new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
-            );
-
-            return new KahunaSetKeyValueResponse
-            {
-                Type = response,
-                Revision = revision,
-                LastModified = lastModified,
-                Route = RouteHintWriter.Rest(capture, KahunaRoutingDomain.KeyValue, request.Key)
-            };
-        });
+        app.MapPost("/v1/kv/try-set", TrySet);
 
         app.MapPost("/v1/kv/try-extend", async (KahunaExtendKeyValueRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
         {
@@ -308,98 +276,9 @@ public static class KeyValuesHandlers
             };
         });
 
-        app.MapPost("/v1/kv/try-get", async (KahunaGetKeyValueRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
-        {
-            if (string.IsNullOrEmpty(request.Key) || string.IsNullOrEmpty(request.Key))
-                return new()
-                {
-                    Type = KeyValueResponseType.InvalidInput
-                };
-
-            using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
-
-            (KeyValueResponseType type, ReadOnlyKeyValueEntry? keyValueContext) = await keyValues.LocateAndTryGetValue(
-                request.TransactionId,
-                request.Key,
-                request.Revision,
-                request.ReadTimestamp,
-                request.Durability,
-                cancellationToken,
-                request.CoordinatorKey ?? "",
-                new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
-            );
-
-            KahunaRouteHint? getRoute = RouteHintWriter.Rest(capture, KahunaRoutingDomain.KeyValue, request.Key);
-
-            if (keyValueContext is not null)
-            {
-                KahunaGetKeyValueResponse response = new()
-                {
-                    ServedFrom = "",
-                    Type = type,
-                    Value = keyValueContext.Value,
-                    Revision = keyValueContext.Revision,
-                    Expires = keyValueContext.Expires,
-                    LastModified = keyValueContext.LastModified,
-                    Route = getRoute
-                };
-                
-                return response;
-            }
-
-            // A missing key is a terminal answer about a key whose owner was resolved, so it carries
-            // the hint too: a read-mostly workload over absent keys would otherwise learn no routes.
-            return new()
-            {
-                Type = type,
-                Route = getRoute
-            };
-        });
+        app.MapPost("/v1/kv/try-get", TryGet);
         
-        app.MapPost("/v1/kv/try-exists", async (KahunaExistsKeyValueRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
-        {
-            if (string.IsNullOrEmpty(request.Key) || string.IsNullOrEmpty(request.Key))
-                return new()
-                {
-                    Type = KeyValueResponseType.InvalidInput
-                };
-
-            using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
-
-            (KeyValueResponseType type, ReadOnlyKeyValueEntry? keyValueContext) = await keyValues.LocateAndTryExistsValue(
-                request.TransactionId,
-                request.Key,
-                request.Revision,
-                request.ReadTimestamp,
-                request.Durability,
-                cancellationToken,
-                request.CoordinatorKey ?? "",
-                new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
-            );
-
-            KahunaRouteHint? existsRoute = RouteHintWriter.Rest(capture, KahunaRoutingDomain.KeyValue, request.Key);
-
-            if (keyValueContext is not null)
-            {
-                KahunaExistsKeyValueResponse response = new()
-                {
-                    ServedFrom = "",
-                    Type = type,
-                    Revision = keyValueContext.Revision,
-                    Expires = keyValueContext.Expires,
-                    LastModified = keyValueContext.LastModified,
-                    Route = existsRoute
-                };
-                
-                return response;
-            }
-
-            return new()
-            {
-                Type = type,
-                Route = existsRoute
-            };
-        });
+        app.MapPost("/v1/kv/try-exists", TryExists);
         
         app.MapPost("/v1/kv/try-execute-tx-script", async (KahunaTxKeyValueRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
         {
@@ -781,6 +660,133 @@ public static class KeyValuesHandlers
             (KeyValueResponseType type, HLCTimestamp floor, int liveHolds) = await keyValues.GetSnapshotFloor(cancellationToken);
             return new KahunaGetSnapshotFloorResponse { Type = type, EffectiveFloor = floor, LiveHolds = liveHolds };
         });
+    }
+
+    public static async Task<KahunaSetKeyValueResponse> TrySet(KahunaSetKeyValueRequest request, IKahuna keyValues, CancellationToken cancellationToken)
+    {
+        // A null value is a payload the caller left absent, not a malformed request: it sets the key
+        // to no value, which the store keeps apart from a key that holds zero bytes. The gRPC service
+        // accepts the same call through the presence flag of its optional field, so rejecting it here
+        // would make one transport unable to write a value the other one writes and reads back.
+        if (string.IsNullOrEmpty(request.Key) || request.ExpiresMs < 0)
+            return new() { Type = KeyValueResponseType.InvalidInput };
+
+        using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
+
+        (KeyValueResponseType response, long revision, HLCTimestamp lastModified) = await keyValues.LocateAndTrySetKeyValue(
+            request.TransactionId,
+            request.Key,
+            request.Value,
+            request.CompareValue,
+            request.CompareRevision,
+            request.Flags,
+            request.ExpiresMs,
+            request.Durability,
+            cancellationToken,
+            coordinatorKey: request.CoordinatorKey ?? "",
+            operationId: new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
+        );
+
+        return new KahunaSetKeyValueResponse
+        {
+            Type = response,
+            Revision = revision,
+            LastModified = lastModified,
+            Route = RouteHintWriter.Rest(capture, KahunaRoutingDomain.KeyValue, request.Key)
+        };
+    }
+
+    public static async Task<KahunaGetKeyValueResponse> TryGet(KahunaGetKeyValueRequest request, IKahuna keyValues, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrEmpty(request.Key) || string.IsNullOrEmpty(request.Key))
+            return new()
+            {
+                Type = KeyValueResponseType.InvalidInput
+            };
+
+        using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
+
+        (KeyValueResponseType type, ReadOnlyKeyValueEntry? keyValueContext) = await keyValues.LocateAndTryGetValue(
+            request.TransactionId,
+            request.Key,
+            request.Revision,
+            request.ReadTimestamp,
+            request.Durability,
+            cancellationToken,
+            request.CoordinatorKey ?? "",
+            new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
+        );
+
+        KahunaRouteHint? getRoute = RouteHintWriter.Rest(capture, KahunaRoutingDomain.KeyValue, request.Key);
+
+        if (keyValueContext is not null)
+        {
+            KahunaGetKeyValueResponse response = new()
+            {
+                ServedFrom = "",
+                Type = type,
+                Value = keyValueContext.Value,
+                Revision = keyValueContext.Revision,
+                Expires = keyValueContext.Expires,
+                LastModified = keyValueContext.LastModified,
+                Route = getRoute
+            };
+            
+            return response;
+        }
+
+        // A missing key is a terminal answer about a key whose owner was resolved, so it carries
+        // the hint too: a read-mostly workload over absent keys would otherwise learn no routes.
+        return new()
+        {
+            Type = type,
+            Route = getRoute
+        };
+    }
+
+    public static async Task<KahunaExistsKeyValueResponse> TryExists(KahunaExistsKeyValueRequest request, IKahuna keyValues, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrEmpty(request.Key) || string.IsNullOrEmpty(request.Key))
+            return new()
+            {
+                Type = KeyValueResponseType.InvalidInput
+            };
+
+        using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
+
+        (KeyValueResponseType type, ReadOnlyKeyValueEntry? keyValueContext) = await keyValues.LocateAndTryExistsValue(
+            request.TransactionId,
+            request.Key,
+            request.Revision,
+            request.ReadTimestamp,
+            request.Durability,
+            cancellationToken,
+            request.CoordinatorKey ?? "",
+            new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
+        );
+
+        KahunaRouteHint? existsRoute = RouteHintWriter.Rest(capture, KahunaRoutingDomain.KeyValue, request.Key);
+
+        if (keyValueContext is not null)
+        {
+            KahunaExistsKeyValueResponse response = new()
+            {
+                ServedFrom = "",
+                Type = type,
+                Revision = keyValueContext.Revision,
+                Expires = keyValueContext.Expires,
+                LastModified = keyValueContext.LastModified,
+                Route = existsRoute
+            };
+            
+            return response;
+        }
+
+        return new()
+        {
+            Type = type,
+            Route = existsRoute
+        };
     }
 
     /// <summary>

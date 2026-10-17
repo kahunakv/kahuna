@@ -18,6 +18,9 @@ public static class MapRoutesExtensions
         // root has always given when it is not.
         DashboardHandlers.MapDashboardRoutes(app, opts);
 
+        // Smallest possible request, to compare HTTP server overhead apart from any engine work.
+        app.MapGet("/v1/ping", () => "pong");
+
         LocksHandlers.MapLocksRoutes(app);
         KeyValuesHandlers.MapKeyValueRoutes(app);
         SequencesHandlers.MapSequenceRoutes(app);

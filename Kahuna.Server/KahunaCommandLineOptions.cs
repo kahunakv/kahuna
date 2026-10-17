@@ -21,7 +21,13 @@ public sealed class KahunaCommandLineOptions
 
     [Option("grpc-cleartext-ports", Required = false, HelpText = "Ports to bind cleartext HTTP/2 (h2c) connections to. gRPC-only: these listeners speak HTTP/2 without TLS and reject HTTP/1.1, so REST clients must use the http/https ports instead. A standalone node defaults to 8083; a node joining a cluster binds nothing unless this option is given. Not bound when an HTTPs certificate is configured, unless --allow-plaintext-listener is given")]
     public IEnumerable<string>? GrpcCleartextPorts { get; set; }
-    
+
+    [Option("genhttp-port", Required = false, HelpText = "Experimental. Port for a second, cleartext HTTP/1.1 listener served by the GenHTTP engine instead of Kestrel. It answers /v1/ping and the /v1/kv try-set, try-get and try-exists routes only, so the two HTTP servers can be compared under the same load. 0 leaves it off", Default = 0)]
+    public int GenHttpPort { get; set; }
+
+    [Option("genhttp-engine", Required = false, HelpText = "Experimental. Engine behind --genhttp-port: internal (managed sockets, any platform) or ioxide (io_uring, Linux only)", Default = "internal")]
+    public string GenHttpEngine { get; set; } = "internal";
+
     [Option("https-certificate", Required = false, HelpText = "Path to the HTTPs certificate")]
     public string HttpsCertificate { get; set; } = "";
 
