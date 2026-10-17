@@ -149,4 +149,15 @@ public sealed class KeyValueResponse
 
     public static KeyValueResponse ForRangeLocks(List<KeyValueRangeLock> locks) =>
         new(KeyValueResponseType.RangeLocks) { RangeLockList = locks };
+
+    /// <summary>
+    /// The per-key answers of a batched probe, in request order. Null on every other response, and on a probe
+    /// that was answered as a whole (refused, or expired before its backend read returned): <see cref="Type"/>
+    /// is then the answer for every key.
+    /// </summary>
+    public KeyValueProbeResult[]? ProbeResults { get; private set; }
+
+    /// <summary>The answer of a batched probe that reached its keys: one result per key, in request order.</summary>
+    public static KeyValueResponse ForProbe(KeyValueProbeResult[] results) =>
+        new(KeyValueResponseType.Get) { ProbeResults = results };
 }

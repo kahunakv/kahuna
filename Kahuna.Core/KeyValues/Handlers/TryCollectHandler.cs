@@ -423,7 +423,7 @@ internal sealed class TryCollectHandler : BaseHandler
     private void SweepExpiredReads(HLCTimestamp currentTime)
     {
         if (context.PendingReads.Count == 0 && context.PendingSnapshotPrefixScans.Count == 0
-            && context.PendingSnapshotReads.Count == 0)
+            && context.PendingSnapshotReads.Count == 0 && context.PendingProbeBatches.Count == 0)
             return;
 
         List<ReadContinuation>? expired = null;
@@ -443,6 +443,12 @@ internal sealed class TryCollectHandler : BaseHandler
         {
             if (kv.Value.IsExpired(currentTime))
                 (expired ??= []).Add(kv.Value);
+        }
+
+        foreach (ReadContinuation batch in context.PendingProbeBatches)
+        {
+            if (batch.IsExpired(currentTime))
+                (expired ??= []).Add(batch);
         }
 
         if (expired is null)

@@ -715,12 +715,21 @@ internal class TransactionContext
             RangeLocksAcquired[rangeLock.Range] = rangeLock.Mode;
         }
 
+        if (payload.AcquiredRangeLocks is { } batchRangeLocks)
+        {
+            // A batch grants Shared re-entries too: a range this transaction already holds keeps the mode it holds
+            // (the actor keeps an Exclusive lock on a Shared re-entry), so the fold never records a downgrade.
+            RangeLocksAcquired ??= new();
+            foreach ((RangeLockKey range, RangeLockMode mode) in batchRangeLocks)
+                RangeLocksAcquired.TryAdd(range, mode);
+        }
+
         if (payload.ReleasedRangeLock is { } removedRangeLock)
             RangeLocksAcquired?.Remove(removedRangeLock);
 
         // A lock grant folds the committed base it protects as an observation too; only a point read
         // promises to answer the transaction's own staging, so only a read is held to it.
-        bool fromRead = kind is OperationKind.Get or OperationKind.Exists or OperationKind.GetMany;
+        bool fromRead = kind is OperationKind.Get or OperationKind.Exists or OperationKind.GetMany or OperationKind.ProbeMany;
 
         if (payload.Read is { } read)
             FoldReadObservationLocked(read, fromRead);

@@ -45,6 +45,20 @@ Both pools share one back-pressure knob:
 |---|---|---|
 | `BackendReadQueueDepth` | Per-partition pending-queue depth before an enqueue is rejected with back-pressure. | 4096 |
 
+### Range scan pages on the in-memory backend
+
+One read skips the read pool: a persistent range scan page on the `memory` storage backend. The
+backend reports that it serves every read from process memory (`IPersistenceBackend.ServesReadsFromMemory`),
+so the scan handler reads the page on the key-value actor's own thread, in the turn that received the
+request, and merges it at once. The page costs no scheduler hand-off, no thread-pool continuation and
+no resume message, which were several times the cost of the read itself. The RocksDB and SQLite
+backends answer false and keep every page on the read pool.
+
+The inline walk is bounded like the ephemeral scan: a range dense with dead rows is read inline up
+to the scan inspection budget, and the rest of the scan takes the read pool, where the mailbox is free
+between pages. The meters `kahuna.scan.pages_read_on_actor_total` and
+`kahuna.scan.pages_read_on_scheduler_total` count the two paths.
+
 ### Writer keying
 
 The writer pool is a separate instance, so background writes no longer collide with meta-partition

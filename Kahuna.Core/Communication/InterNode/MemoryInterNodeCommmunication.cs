@@ -731,6 +731,40 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         throw Unreachable(node);
     }
 
+    public async Task<KeyValueProbeResult[]> TryProbeMany(
+        string node,
+        HLCTimestamp transactionId,
+        HLCTimestamp readTimestamp,
+        string[] keys,
+        KeyValueProbeLock lockMode,
+        int expiresMs,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        if (TryGetNode(node, out IKahuna? kahunaNode))
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            KeyValueProbeResult[] results = await kahunaNode.LocateAndTryProbeMany(
+                transactionId, readTimestamp, keys, lockMode, expiresMs, durability, cancellationToken);
+
+            // Test seam: count the forwarded probes, so a test can prove a remote group travelled as one message.
+            if (ProbeManyForwarded is { } observe)
+                observe(node, keys);
+
+            return results;
+        }
+
+        throw Unreachable(node);
+    }
+
+    /// <summary>
+    /// Test seam: when set, invoked once per batched probe this transport forwarded, with the target node and the
+    /// keys it carried.
+    /// </summary>
+    public Action<string, string[]>? ProbeManyForwarded { get; set; }
+
     /// <summary>
     /// Test seam: when set, invoked per-key after the remote batch read completes. Returns true to replace
     /// that key's result with <c>MustRetry</c>, simulating a per-key routing transient in a batch read.

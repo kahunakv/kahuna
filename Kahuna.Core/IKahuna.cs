@@ -52,6 +52,18 @@ public interface IKahuna
 
     public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryGetManyValues(HLCTimestamp transactionId, HLCTimestamp readTimestamp, List<(string key, long revision, KeyValueDurability durability)> keys, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default);
 
+    /// <summary>
+    /// Batched probe: reads many keys of one key space, each answered exactly as a single
+    /// <see cref="LocateAndTryGetValue"/> of it at <paramref name="readTimestamp"/> is, with one actor turn per key
+    /// space and partition instead of one per key. With <see cref="KeyValueProbeLock.Shared"/> each key is first
+    /// locked with a Shared <c>[k,k]</c> range lock (lease <paramref name="expiresMs"/>) in the same actor turn as its
+    /// read; within a partition the first refusal stops the batch, the refused key answers the refusal and its holder,
+    /// and the keys after it answer <c>MustRetry</c> unlocked. Returns one result per key, in input order; a key's
+    /// <see cref="KeyValueProbeResult.Locked"/> says whether it holds the lock. A request of more than the configured
+    /// maximum keys, or of keys of several key spaces, is refused as a whole with <c>InvalidInput</c>.
+    /// </summary>
+    public Task<KeyValueProbeResult[]> LocateAndTryProbeMany(HLCTimestamp transactionId, HLCTimestamp readTimestamp, IReadOnlyList<string> keys, KeyValueProbeLock lockMode, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default);
+
     public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryExistsManyValues(HLCTimestamp transactionId, HLCTimestamp readTimestamp, List<(string key, long revision, KeyValueDurability durability)> keys, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default);
 
     public Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTryDeleteKeyValue(HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default);

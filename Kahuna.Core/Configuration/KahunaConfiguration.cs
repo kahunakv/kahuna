@@ -300,6 +300,13 @@ public sealed class KahunaConfiguration
     public int ReadContinuationTimeout { get; set; } = 30_000;
 
     /// <summary>
+    /// Most keys one batched probe may carry. The whole batch is answered in one actor turn, so the bound is what
+    /// keeps a single request from holding the key space's actor for an unbounded time; a larger batch is refused
+    /// with <c>InvalidInput</c>. Callers split their batches to fit.
+    /// </summary>
+    public int MaxProbeBatchSize { get; set; } = 512;
+
+    /// <summary>
     /// Maximum number of <em>ordinary</em> (user-request) messages that may be queued in a single
     /// key-value actor's inbox before further ordinary messages are rejected with a retryable
     /// <c>MustRetry</c> (mapped from Nixie's <c>ActorBusyException</c>). This backpressures a hot-key

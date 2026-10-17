@@ -34,5 +34,7 @@ internal static class KeyValueStaticResponses
 
     internal static readonly KeyValueResponse NotSetResponse = new(KeyValueResponseType.NotSet);
 
+    internal static readonly KeyValueResponse InvalidInputResponse = new(KeyValueResponseType.InvalidInput);
+
     internal static readonly KeyValueResponse DoesNotExistContextResponse = new(KeyValueResponseType.DoesNotExist, new ReadOnlyKeyValueEntry(null, 0, HLCTimestamp.Zero, HLCTimestamp.Zero, HLCTimestamp.Zero, KeyValueState.Undefined));
 }

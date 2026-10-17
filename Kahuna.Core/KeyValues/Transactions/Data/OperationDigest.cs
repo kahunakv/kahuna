@@ -252,6 +252,25 @@ internal static class OperationDigest
         return hash.GetHashAndReset();
     }
 
+    /// <summary>
+    /// Digest for a batched probe (<see cref="OperationKind.ProbeMany"/>): the whole batch is one registered
+    /// operation, so the digest binds every key in submission order, the snapshot, the lock mode, the lock lease and
+    /// the durability. A same-operation-id retry must resend the identical request.
+    /// </summary>
+    internal static byte[] ForProbeMany(IReadOnlyList<string> keys, HLCTimestamp readTimestamp, KeyValueProbeLock lockMode, int expiresMs, KeyValueDurability durability)
+    {
+        XxHash128 hash = AcquireHash();
+        AppendTag(hash, OperationKind.ProbeMany);
+        AppendInt(hash, keys.Count);
+        foreach (string key in keys)
+            AppendString(hash, key);
+        AppendHlc(hash, readTimestamp);
+        AppendInt(hash, (int)lockMode);
+        AppendInt(hash, expiresMs);
+        AppendInt(hash, (int)durability);
+        return hash.GetHashAndReset();
+    }
+
     internal static byte[] ForGetMany(IReadOnlyList<(string key, long revision, KeyValueDurability durability)> keys, HLCTimestamp readTimestamp) =>
         ForManyRead(OperationKind.GetMany, keys, readTimestamp);
 

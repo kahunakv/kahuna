@@ -67,6 +67,17 @@ internal interface IPersistenceBackend
     /// </summary>
     public bool TryRecoverFromStorageFailure() => false;
 
+    /// <summary>
+    /// True when every read this backend serves comes from process memory and never waits for storage
+    /// I/O. A read then costs microseconds, so a scan page may be read on the key-value actor's own
+    /// thread instead of a backend read scheduler worker: the scheduler hand-off, the thread-pool
+    /// continuation and the resume message it needs cost more than the read itself. A read on such a
+    /// backend may still wait briefly on the backend's own lock while a flush batch lands; it never waits
+    /// on a disk. The default is false, which keeps every read on the scheduler; only the in-memory
+    /// backend (and an overlay over it) answers true.
+    /// </summary>
+    public bool ServesReadsFromMemory => false;
+
     public LockEntry? GetLock(string resource);
 
     public KeyValueEntry? GetKeyValue(string keyName);

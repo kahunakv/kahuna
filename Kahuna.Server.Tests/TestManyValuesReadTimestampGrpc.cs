@@ -151,6 +151,8 @@ public class TestManyValuesReadTimestampGrpc
 
         // The inter-node handlers route the keys again on arrival, so the timestamp reaches the locating entry
         // points; the non-locating ones below are unreachable from the handlers under test.
+        public Task<KeyValueProbeResult[]> LocateAndTryProbeMany(HLCTimestamp transactionId, HLCTimestamp readTimestamp, IReadOnlyList<string> keys, KeyValueProbeLock lockMode, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default) => throw new NotImplementedException();
+
         public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryGetManyValues(HLCTimestamp transactionId, HLCTimestamp readTimestamp, List<(string key, long revision, KeyValueDurability durability)> keys, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
         {
             GetReadTimestamp = readTimestamp;

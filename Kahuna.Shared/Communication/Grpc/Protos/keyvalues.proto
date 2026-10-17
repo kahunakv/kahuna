@@ -308,6 +308,60 @@ message GrpcTryGetManyValuesResponse {
   repeated GrpcRouteHint Routes = 3;
 }
 
+// A batched probe forwarded to the node that leads the keys' partitions: many keys of one key space,
+// each read as a single get of it would be, optionally under a Shared [k,k] range lock taken in the
+// same actor turn. The receiver routes the keys again on arrival.
+message GrpcTryProbeManyRequest {
+  int32 TransactionIdNode = 1;
+  int64 TransactionIdPhysical = 2;
+  uint32 TransactionIdCounter = 3;
+  int32 ReadTimestampNode = 4;
+  int64 ReadTimestampPhysical = 5;
+  uint32 ReadTimestampCounter = 6;
+  repeated string Keys = 7;
+  GrpcKeyValueDurability Durability = 8;
+  GrpcProbeLockMode LockMode = 9;
+  int32 ExpiresMs = 10;
+}
+
+enum GrpcProbeLockMode {
+  GRPC_PROBE_LOCK_NONE = 0;
+  GRPC_PROBE_LOCK_SHARED = 1;
+  // Replay of a probe whose locks a completed operation recorded: renew a held [k,k] lock, never take one.
+  GRPC_PROBE_LOCK_SHARED_REENTRY_ONLY = 2;
+}
+
+message GrpcTryProbeManyResponse {
+  optional string ServedFrom = 1;
+  // One item per requested key, in request order.
+  repeated GrpcTryProbeManyResponseItem Items = 2;
+  // The leaderships the probe's locks were granted under, one entry per partition and term.
+  repeated GrpcLockGrantTerm GrantTerms = 3;
+}
+
+message GrpcTryProbeManyResponseItem {
+  GrpcKeyValueResponseType Type = 1;
+  // True when the answer carried an entry; the fields below are meaningful only then.
+  bool HasEntry = 2;
+  optional bytes Value = 3;
+  int64 Revision = 4;
+  int32 ExpiresNode = 5;
+  int64 ExpiresPhysical = 6;
+  uint32 ExpiresCounter = 7;
+  int32 LastUsedNode = 8;
+  int64 LastUsedPhysical = 9;
+  uint32 LastUsedCounter = 10;
+  int32 LastModifiedNode = 11;
+  int64 LastModifiedPhysical = 12;
+  uint32 LastModifiedCounter = 13;
+  GrpcKeyValueState State = 14;
+  int32 HolderTransactionIdNode = 15;
+  int64 HolderTransactionIdPhysical = 16;
+  uint32 HolderTransactionIdCounter = 17;
+  // True when the key holds the transaction's Shared [k,k] lock after the probe.
+  bool Locked = 18;
+}
+
 message GrpcTryGetManyValuesResponseItem {
   GrpcKeyValueResponseType Type = 1;
   string Key = 2;
@@ -999,6 +1053,7 @@ enum GrpcOperationKind {
   GRPC_OP_KIND_MANY_POINT_LOCK = 11;
   GRPC_OP_KIND_GET_MANY = 12;
   GRPC_OP_KIND_EXISTS_MANY = 13;
+  GRPC_OP_KIND_PROBE_MANY = 14;
 }
 
 enum GrpcOperationRegistrationOutcome {
@@ -1081,6 +1136,8 @@ message GrpcCompleteOperationRequest
   repeated GrpcTransactionModifiedKey AcquiredPointLocks = 24;
   // The leaderships the acquired locks of this operation were granted under.
   repeated GrpcLockGrantTerm LockGrantTerms = 25;
+  // The range locks a batch operation acquired (a batched probe's Shared [k,k] locks).
+  repeated GrpcTransactionRangeLock AcquiredRangeLocks = 26;
   GrpcKeyValueDurability Durability = 16;
   GrpcKeyValueResponseType CachedType = 17;
   int64 CachedRevision = 18;
@@ -1262,6 +1319,7 @@ message GrpcBatchServerKeyValueRequest {
     GrpcDurableBundleRequest DurableBundle = 55;
     GrpcDurableDecisionRequest DurableDecision = 56;
     GrpcDurableOnePhaseRequest DurableOnePhase = 57;
+    GrpcTryProbeManyRequest TryProbeMany = 59;
   }
   // Set only when Type is SERVER_COALESCED: independent single-operation envelopes that share
   // this one stream message. Each inner envelope carries its own RequestId, Type, ForwardHops
@@ -1328,6 +1386,7 @@ message GrpcBatchServerKeyValueResponse
     GrpcDurableBundleResponse DurableBundle = 54;
     GrpcDurableDecisionResponse DurableDecision = 55;
     GrpcDurableOnePhaseResponse DurableOnePhase = 56;
+    GrpcTryProbeManyResponse TryProbeMany = 58;
   }
   // Set only when Type is SERVER_COALESCED: independent single-operation responses that share
   // this one stream message.
@@ -1726,6 +1785,7 @@ enum GrpcServerBatchType {
   // The envelope carries no payload of its own: the Coalesced field holds the real requests
   // (or responses).
   SERVER_COALESCED = 56;
+  SERVER_TRY_PROBE_MANY = 57;
 }
 
 enum GrpcRangeLockMode {

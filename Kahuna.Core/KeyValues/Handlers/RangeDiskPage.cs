@@ -20,19 +20,20 @@ internal sealed class RangeDiskPage
     /// </summary>
     internal readonly List<(string Key, ReadOnlyKeyValueEntry Entry)> Projected;
 
-    /// <summary>True when the raw (unprojected) disk page contained <c>limit + 1</c> rows.</summary>
+    /// <summary>True when the raw (unprojected) disk page was as long as the page size the backend was asked for.</summary>
     internal readonly bool RawHasMore;
 
     /// <summary>
-    /// The key of the <c>(limit+1)</c>-th raw row; the start key for the next disk page.
-    /// Non-null if and only if <see cref="RawHasMore"/> is <c>true</c>.
+    /// The key of the last raw row; the start key for the next disk page, which the merge of this page
+    /// consumed and the next page skips. Non-null if and only if <see cref="RawHasMore"/> is <c>true</c>.
     /// </summary>
     internal readonly string? RawNextCursor;
 
     /// <summary>
     /// What the read cost: the revision rows and seeks of the disk walk, and the rows the as-of projection
-    /// read and dropped. Filled on the scheduler thread and read on the actor thread after the page is handed
-    /// over, never written concurrently.
+    /// read and dropped. Filled by the thread that read the page (a scheduler worker, or the actor thread
+    /// for an in-memory backend) and read on the actor thread after the page is handed over, never written
+    /// concurrently.
     /// </summary>
     internal readonly KeyValueScanTally Tally;
 

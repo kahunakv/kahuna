@@ -13,6 +13,7 @@ using Google.Protobuf;
 using Google.Protobuf.Collections;
 using Grpc.Core;
 using Kahuna.Communication.External.Grpc.KeyValues;
+using Kahuna.Server.Communication.Internode.Grpc;
 using Kahuna.Server.Communication;
 using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.KeyValues;
@@ -650,6 +651,34 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// group from this node's actors on the sender's word alone returned a follower's state as a committed
     /// read, and a read-modify-write computed over it erased the writes the follower had not applied yet.
     /// </summary>
+    /// <summary>
+    /// Inter-node batched probe: the sender grouped the keys by the leader it believes in. That belief is not
+    /// proof, so the keys are routed again on arrival exactly as the batch read above does, and the leaderships the
+    /// probe's locks were granted under travel back with the answers.
+    /// </summary>
+    private async Task<GrpcTryProbeManyResponse> TryProbeManyCore(GrpcTryProbeManyRequest request, ServerCallContext context)
+    {
+        string[] keys = new string[request.Keys.Count];
+        request.Keys.CopyTo(keys, 0);
+
+        using LockGrantScope.Scope grantScope = LockGrantScope.Begin(out LockGrantCapture grants);
+
+        KeyValueProbeResult[] results = await keyValues.LocateAndTryProbeMany(
+            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
+            new(request.ReadTimestampNode, request.ReadTimestampPhysical, request.ReadTimestampCounter),
+            keys,
+            (KeyValueProbeLock)request.LockMode,
+            request.ExpiresMs,
+            (KeyValueDurability)request.Durability,
+            context.CancellationToken
+        );
+
+        GrpcTryProbeManyResponse response = new();
+        ProbeManyWire.AddItems(response.Items, results);
+        AddLockGrantTerms(response.GrantTerms, grants);
+        return response;
+    }
+
     private async Task<GrpcTryGetManyValuesResponse> TryGetManyValuesCore(GrpcTryGetManyValuesRequest request, ServerCallContext context)
     {
         List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses = await keyValues.LocateAndTryGetManyValues(
@@ -2270,6 +2299,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         payload.ReleasedPrefixLock = request.HasReleasedPrefixLock ? request.ReleasedPrefixLock : null;
         payload.AcquiredRangeLock = request.AcquiredRangeLock is null ? null : (ToRangeLockKey(request.AcquiredRangeLock), (RangeLockMode)request.AcquiredRangeLock.Mode);
         payload.ReleasedRangeLock = request.ReleasedRangeLock is null ? null : ToRangeLockKey(request.ReleasedRangeLock);
+        payload.AcquiredRangeLocks = request.AcquiredRangeLocks.Count == 0 ? null : request.AcquiredRangeLocks.Select(r => (ToRangeLockKey(r), (RangeLockMode)r.Mode)).ToList();
         payload.Read = request.Read is null ? null : ToReadKey(request.Read);
         payload.ReadObservations = request.ReadObservations.Count == 0 ? null : request.ReadObservations.Select(ToReadKey).ToList();
         payload.ModifiedKeys = request.ModifiedKeys.Count == 0 ? null : request.ModifiedKeys.Select(m => (m.Key, (KeyValueDurability)m.Durability)).ToList();
@@ -2965,6 +2995,9 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
 
     internal Task<GrpcTryGetManyValuesResponse> TryGetManyValuesInternal(GrpcTryGetManyValuesRequest request, ServerCallContext context)
         => Guard(request, context, static (s, r, c) => s.TryGetManyValuesCore(r, c), static r => KeyValueMustRetry.TryGetManyValues(r));
+
+    internal Task<GrpcTryProbeManyResponse> TryProbeManyInternal(GrpcTryProbeManyRequest request, ServerCallContext context)
+        => Guard(request, context, static (s, r, c) => s.TryProbeManyCore(r, c), static r => ProbeManyWire.MustRetry(r));
 
     internal Task<GrpcTryExistsKeyValueResponse> TryExistsKeyValueInternal(GrpcTryExistsKeyValueRequest request, ServerCallContext context)
         => Guard(request, context, static (s, r, c) => s.TryExistsKeyValueCore(r, c), static _ => KeyValueMustRetry.TryExistsKeyValue());

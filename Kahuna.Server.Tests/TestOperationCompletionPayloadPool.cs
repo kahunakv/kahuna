@@ -23,7 +23,7 @@ public class TestOperationCompletionPayloadPool
     /// is excluded from this count. When a new settable property is added, it must join
     /// <see cref="OperationCompletionPayload.Clear"/> and the population + assertions below, then this count.
     /// </summary>
-    private const int ExpectedPropertyCount = 17;
+    private const int ExpectedPropertyCount = 18;
 
     private static OperationCompletionPayload FullyPopulated()
     {
@@ -39,6 +39,7 @@ public class TestOperationCompletionPayloadPool
             AcquiredPrefixLock = "users:",
             ReleasedPrefixLock = "users:",
             AcquiredRangeLock = (range, RangeLockMode.Exclusive),
+            AcquiredRangeLocks = [(range, RangeLockMode.Shared)],
             ReleasedRangeLock = range,
             Read = new KeyValueTransactionReadKey { Key = "k", Durability = KeyValueDurability.Persistent, Exists = true, Revision = 1 },
             ReadObservations = [new KeyValueTransactionReadKey { Key = "k", Durability = KeyValueDurability.Persistent, Exists = true, Revision = 1 }],
@@ -66,6 +67,7 @@ public class TestOperationCompletionPayloadPool
         Assert.Null(payload.AcquiredPrefixLock);
         Assert.Null(payload.ReleasedPrefixLock);
         Assert.Null(payload.AcquiredRangeLock);
+        Assert.Null(payload.AcquiredRangeLocks);
         Assert.Null(payload.ReleasedRangeLock);
         Assert.Null(payload.Read);
         Assert.Null(payload.ReadObservations);

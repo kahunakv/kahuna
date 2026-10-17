@@ -44,16 +44,20 @@ internal sealed class PointReadContinuation : ReadContinuation
         context.PendingReads.Remove((key, -1L, isExists));
     }
 
-    internal override void Execute(KeyValueContext context)
+    internal override void Execute(KeyValueContext context) => Resolve(Reconcile(context));
+
+    /// <summary>
+    /// Stage 3 as a function of actor state: removes the in-flight registration, reconciles the backend row
+    /// against the resident store, installs it when it wins, and returns the response every waiter receives.
+    /// A batched probe that owns this read calls it directly so it can keep the answer for its own key too.
+    /// </summary>
+    internal KeyValueResponse Reconcile(KeyValueContext context)
     {
         // Remove before resolving so any new miss after this resume starts a fresh read.
         RemovePendingKey(context);
 
         if (Faulted)
-        {
-            Resolve(KeyValueStaticResponses.MustRetryResponse);
-            return;
-        }
+            return KeyValueStaticResponses.MustRetryResponse;
 
         KeyValueEntry? disk = DiskResult;
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock
@@ -66,8 +70,7 @@ internal sealed class PointReadContinuation : ReadContinuation
             if (disk is null || resident.Revision >= disk.Revision)
             {
                 context.TouchEntry(resident, currentTime);
-                Resolve(ToResponse(resident, currentTime));
-                return;
+                return ToResponse(resident, currentTime);
             }
         }
 
@@ -77,23 +80,16 @@ internal sealed class PointReadContinuation : ReadContinuation
         // repair advance the local state before the caller's retry. The resident branch above is
         // deliberately not guarded: a resident entry converges in mailbox order.
         if (BaseHandler.HydratedRowProvablyStale(context, key, disk))
-        {
-            Resolve(KeyValueStaticResponses.MustRetryResponse);
-            return;
-        }
+            return KeyValueStaticResponses.MustRetryResponse;
 
         // Disk entry is newer (or nothing was resident) — populate cache and serve disk value.
-        if (disk is not null)
-        {
-            disk.FlushedRevision = disk.Revision;
-            disk.LastUsed = currentTime;
-            context.InsertStoreEntry(key, disk);
-            Resolve(ToResponse(disk, currentTime));
-        }
-        else
-        {
-            Resolve(KeyValueStaticResponses.DoesNotExistContextResponse);
-        }
+        if (disk is null)
+            return KeyValueStaticResponses.DoesNotExistContextResponse;
+
+        disk.FlushedRevision = disk.Revision;
+        disk.LastUsed = currentTime;
+        context.InsertStoreEntry(key, disk);
+        return ToResponse(disk, currentTime);
     }
 
     private KeyValueResponse ToResponse(KeyValueEntry e, HLCTimestamp currentTime)

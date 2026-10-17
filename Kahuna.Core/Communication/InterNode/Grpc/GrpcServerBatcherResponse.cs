@@ -36,6 +36,8 @@ internal readonly struct GrpcServerBatcherResponse
 
     public GrpcServerBatcherResponse(GrpcTryGetManyValuesResponse tryGetManyValues) => payload = tryGetManyValues;
 
+    public GrpcServerBatcherResponse(GrpcTryProbeManyResponse tryProbeMany) => payload = tryProbeMany;
+
     public GrpcServerBatcherResponse(GrpcTryDeleteKeyValueResponse tryDeleteKeyValue) => payload = tryDeleteKeyValue;
 
     public GrpcServerBatcherResponse(GrpcTryExtendKeyValueResponse tryExtendKeyValue) => payload = tryExtendKeyValue;
@@ -150,6 +152,8 @@ internal readonly struct GrpcServerBatcherResponse
     public GrpcTryGetKeyValueResponse? TryGetKeyValue => payload as GrpcTryGetKeyValueResponse;
 
     public GrpcTryGetManyValuesResponse? TryGetManyValues => payload as GrpcTryGetManyValuesResponse;
+
+    public GrpcTryProbeManyResponse? TryProbeMany => payload as GrpcTryProbeManyResponse;
 
     public GrpcTryDeleteKeyValueResponse? TryDeleteKeyValue => payload as GrpcTryDeleteKeyValueResponse;
 

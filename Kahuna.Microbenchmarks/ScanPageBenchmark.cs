@@ -20,9 +20,13 @@ namespace Kahuna.Microbenchmarks;
 /// the page's candidates during the same enumeration, then a two-way merge. Both run over identical data:
 /// the production overlay and a mirror dictionary populated with the same writes, with an empty inner
 /// backend so every row comes from the overlay (the worst case for the union).</item>
-/// <item><b>Intent window capture.</b> <c>Old</c> = the previous <c>SnapshotScanWindow</c> shape over a mirror
+/// <item><b>Intent window capture.</b> <c>Old</c> = the first <c>SnapshotScanWindow</c> shape over a mirror
 /// dictionary of the same intents: <c>Values</c> copies the whole concurrent dictionary under every bucket lock,
-/// then filters. <c>New</c> = the production <c>SnapshotScanWindow</c>, which enumerates the map lock-free.</item>
+/// then filters. <c>Previous</c> = the shape that replaced it: a lock-free enumeration of the whole map with two
+/// ordinal compares per intent, O(live intents) per page. <c>New</c> = the production <c>SnapshotScanWindow</c>,
+/// which descends an ordered key index to the window and reads only the keys inside it. The <c>Drained</c> pair
+/// runs the same one-key window over a store and a mirror that held <c>N</c> intents and settled every one: the
+/// concurrent map's bucket table never shrinks, so the whole-map walk keeps paying for the empty buckets.</item>
 /// </list>
 ///
 /// Sizes follow the report and the production evidence: the unflushed backlog held 4K–19K items per node
@@ -44,6 +48,9 @@ public class ScanPageBenchmark
 
     private readonly PreparedIntentStore store = new();
     private readonly ConcurrentDictionary<string, PreparedIntent> intentMirror = new(StringComparer.Ordinal);
+
+    private readonly PreparedIntentStore drainedStore = new();
+    private readonly ConcurrentDictionary<string, PreparedIntent> drainedMirror = new(StringComparer.Ordinal);
 
     [GlobalSetup]
     public void Setup()
@@ -68,6 +75,14 @@ public class ScanPageBenchmark
 
         store.ImportIntents(intentMirror.Values);
         backend = new UnflushedOverlayPersistenceBackend(new MemoryPersistenceBackend(), overlay, new UnflushedLockWritesIndex());
+
+        // Held N intents, then settled every one, key by key: the map is empty, its bucket table is not.
+        drainedStore.ImportIntents(intentMirror.Values);
+        foreach (KeyValuePair<string, PreparedIntent> kv in intentMirror)
+            drainedMirror[kv.Key] = kv.Value;
+        drainedStore.PurgeWhere(static _ => true);
+        foreach (string key in intentMirror.Keys)
+            drainedMirror.TryRemove(key, out _);
     }
 
     // ── overlay range read, limit 100, every row in the overlay ────────────────
@@ -112,7 +127,39 @@ public class ScanPageBenchmark
     }
 
     [Benchmark]
+    public int IntentWindow_Previous() => WalkWholeMap(intentMirror, "k/00000000", true, "k/00000000", true);
+
+    [Benchmark]
     public int IntentWindow_New() => store.SnapshotScanWindow("k/00000000", true, "k/00000000", true).Count;
+
+    [Benchmark]
+    public int IntentWindowDrained_Previous() => WalkWholeMap(drainedMirror, "k/00000000", true, "k/00000000", true);
+
+    [Benchmark]
+    public int IntentWindowDrained_New() => drainedStore.SnapshotScanWindow("k/00000000", true, "k/00000000", true).Count;
+
+    /// <summary>The whole-map walk the scan window used before the ordered key index: every live intent, two compares each.</summary>
+    private static int WalkWholeMap(ConcurrentDictionary<string, PreparedIntent> map, string startKey, bool startInclusive, string endKey, bool endInclusive)
+    {
+        List<PreparedIntent> result = [];
+
+        foreach (KeyValuePair<string, PreparedIntent> kv in map)
+        {
+            PreparedIntent intent = kv.Value;
+
+            int cmpStart = string.CompareOrdinal(intent.Key, startKey);
+            if (cmpStart < 0 || (!startInclusive && cmpStart == 0))
+                continue;
+
+            int cmpEnd = string.CompareOrdinal(intent.Key, endKey);
+            if (cmpEnd > 0 || (!endInclusive && cmpEnd == 0))
+                continue;
+
+            result.Add(intent);
+        }
+
+        return result.Count;
+    }
 
     private static List<(string, ReadOnlyKeyValueEntry)> OldMergeScan(
         List<(string, ReadOnlyKeyValueEntry)> diskItems,

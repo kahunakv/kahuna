@@ -95,6 +95,16 @@ internal sealed partial class KeyValuesManager
     ) =>
         localKeyValueReads.TryGetManyValues(transactionId, readTimestamp, keys);
 
+    public Task<KeyValueProbeResult[]> TryProbeMany(
+        HLCTimestamp transactionId,
+        HLCTimestamp readTimestamp,
+        IReadOnlyList<string> keys,
+        KeyValueProbeLock lockMode,
+        int expiresMs,
+        KeyValueDurability durability
+    ) =>
+        localKeyValueReads.TryProbeMany(transactionId, readTimestamp, keys, lockMode, expiresMs, durability);
+
     public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryExistsManyValues(
         HLCTimestamp transactionId,
         HLCTimestamp readTimestamp,

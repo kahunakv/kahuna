@@ -22,5 +22,6 @@ public enum OperationKind
     SetMany = 10,
     ManyPointLock = 11,
     GetMany = 12,
-    ExistsMany = 13
+    ExistsMany = 13,
+    ProbeMany = 14
 }

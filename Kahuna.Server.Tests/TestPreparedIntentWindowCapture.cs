@@ -16,7 +16,7 @@ public sealed class TestPreparedIntentWindowCapture
 {
     private static HLCTimestamp Ts(long l) => new(0, l, 0);
 
-    private static PreparedIntent Intent(string key, string bucket, long txn) =>
+    private static PreparedIntent Intent(string key, string bucket, long txn, PreparedIntentResolution resolution = PreparedIntentResolution.Committed) =>
         new(
             TransactionId: Ts(txn),
             Epoch: 1,
@@ -33,7 +33,7 @@ public sealed class TestPreparedIntentWindowCapture
             BaseRevision: 0,
             BaseState: KeyValueState.Set,
             RecoveryDeadline: Ts(txn + 5000),
-            Resolution: PreparedIntentResolution.Committed);
+            Resolution: resolution);
 
     private static void AssertExactly(IEnumerable<string> expected, IReadOnlyList<PreparedIntent> captured)
     {
@@ -106,5 +106,164 @@ public sealed class TestPreparedIntentWindowCapture
         PreparedIntentStore store = new();
         Assert.Empty(store.SnapshotScanWindow("a", true, "z", true));
         Assert.Empty(store.SnapshotPrefix("a"));
+    }
+
+    /// <summary>
+    /// The captures come from an ordered key index kept beside the map. Under random prepares, commits, settlements,
+    /// imports and purges, every window and prefix capture must equal the brute-force filter of the full map with
+    /// the window's own boundary semantics, in ordinal key order: the index can never name a key the map lacks nor
+    /// miss a key the map holds.
+    /// </summary>
+    [Fact]
+    public void ScanWindowAndPrefix_MatchTheFullMap_UnderRandomMutations()
+    {
+        PreparedIntentStore store = new();
+        Random random = new(77);
+        long txn = 1;
+
+        // Keys that share prefixes at several depths, so prefix and bound edges fall between related keys.
+        List<string> keys = [];
+        for (int i = 0; i < 300; i++)
+        {
+            keys.Add($"k/{i:D4}");
+            if (i % 7 == 0)
+                keys.Add($"k/{i:D4}/x");
+        }
+
+        string RandomBound() => random.Next(6) switch
+        {
+            0 => "a",
+            1 => "z",
+            2 => $"k/{random.Next(300):D4}/",
+            3 => $"k/{random.Next(30):D2}",
+            _ => keys[random.Next(keys.Count)]
+        };
+
+        for (int round = 0; round < 200; round++)
+        {
+            for (int m = 0; m < 25; m++)
+            {
+                string key = keys[random.Next(keys.Count)];
+                PreparedIntent? current = store.Get(key);
+
+                switch (random.Next(5))
+                {
+                    case 0:
+                        store.Apply(new PrepareIntentCommand(Intent(key, "k", ++txn, PreparedIntentResolution.Pending)));
+                        break;
+                    case 1:
+                        if (current is not null)
+                            store.Apply(new ResolveIntentCommand(current.TransactionId, current.Epoch, key, random.Next(4) != 0));
+                        break;
+                    case 2:
+                        if (current is not null)
+                            store.Apply(new RemoveIntentCommand(current.TransactionId, current.Epoch, key));
+                        break;
+                    case 3:
+                        if (current is null)
+                            store.ImportIntents([Intent(key, "k", ++txn)]);
+                        break;
+                    default:
+                        if (current is not null)
+                            store.Apply(new PrepareIntentCommand(Intent(key, "k", ++txn, PreparedIntentResolution.Pending)));
+                        break;
+                }
+            }
+
+            if (round % 40 == 39)
+            {
+                int bucket = random.Next(4);
+                store.PurgeWhere(k => (k.Length + k[^1]) % 4 == bucket);
+            }
+
+            List<PreparedIntent> all = store.Snapshot().OrderBy(static i => i.Key, StringComparer.Ordinal).ToList();
+            Assert.Equal(all.Count, store.LiveIntentCount);
+
+            AssertSameSequence(all, store.SnapshotScanWindow(null, true, null, true));
+
+            for (int q = 0; q < 8; q++)
+            {
+                string? start = random.Next(5) == 0 ? null : RandomBound();
+                string? end = random.Next(5) == 0 ? null : RandomBound();
+                bool startInclusive = random.Next(2) == 0;
+                bool endInclusive = random.Next(2) == 0;
+
+                List<PreparedIntent> expected = all.Where(i =>
+                    (start is null || string.CompareOrdinal(i.Key, start) > 0 || (startInclusive && string.CompareOrdinal(i.Key, start) == 0))
+                    && (end is null || string.CompareOrdinal(i.Key, end) < 0 || (endInclusive && string.CompareOrdinal(i.Key, end) == 0))).ToList();
+
+                AssertSameSequence(expected, store.SnapshotScanWindow(start, startInclusive, end, endInclusive));
+            }
+
+            string prefix = random.Next(4) switch { 0 => "k/", 1 => "", 2 => $"k/{random.Next(30):D2}", _ => keys[random.Next(keys.Count)] };
+            AssertSameSequence(all.Where(i => i.Key.StartsWith(prefix, StringComparison.Ordinal)).ToList(), store.SnapshotPrefix(prefix));
+        }
+
+        Assert.True(store.LiveIntentCount > 0, "the random walk should leave some intents live");
+    }
+
+    private static void AssertSameSequence(List<PreparedIntent> expected, IReadOnlyList<PreparedIntent> actual)
+    {
+        Assert.Equal(expected.Select(static i => i.Key).ToList(), actual.Select(static i => i.Key).ToList());
+        for (int i = 0; i < expected.Count; i++)
+            Assert.Same(expected[i], actual[i]);
+    }
+
+    /// <summary>Bounds outside the keys, reversed bounds and exclusive bounds on present keys answer the window
+    /// without an exception; the prefix capture takes the empty prefix, a prefix past every key and a full key.</summary>
+    [Fact]
+    public void ScanWindowAndPrefix_EdgeBounds_AnswerWithoutThrowing()
+    {
+        PreparedIntentStore store = new();
+        foreach (string key in new[] { "m/1", "m/2", "m/3" })
+            Assert.Equal(TransactionApplyOutcome.Applied, store.Apply(new PrepareIntentCommand(Intent(key, "m", 10))).Outcome);
+
+        static List<string> Keys(IReadOnlyList<PreparedIntent> intents) => intents.Select(static i => i.Key).ToList();
+
+        Assert.Empty(store.SnapshotScanWindow("z", true, null, true));
+        Assert.Empty(store.SnapshotScanWindow(null, true, "a", true));
+        Assert.Empty(store.SnapshotScanWindow("m/2", true, "m/1", true));
+        Assert.Empty(store.SnapshotScanWindow("m/3", false, "m/3", true));
+        Assert.Empty(store.SnapshotScanWindow("m/2", false, "m/3", false));
+        Assert.Equal(["m/3"], Keys(store.SnapshotScanWindow("m/3", true, "m/3", true)));
+        Assert.Equal(["m/1"], Keys(store.SnapshotScanWindow(null, true, "m/2", false)));
+        Assert.Equal(["m/2", "m/3"], Keys(store.SnapshotScanWindow("m/1", false, null, true)));
+        Assert.Equal(["m/1", "m/2", "m/3"], Keys(store.SnapshotScanWindow("a", false, "z", false)));
+
+        Assert.Equal(["m/1", "m/2", "m/3"], Keys(store.SnapshotPrefix("")));
+        Assert.Equal(["m/1", "m/2", "m/3"], Keys(store.SnapshotPrefix("m/")));
+        Assert.Equal(["m/2"], Keys(store.SnapshotPrefix("m/2")));
+        Assert.Empty(store.SnapshotPrefix("m/4"));
+        Assert.Empty(store.SnapshotPrefix("n"));
+    }
+
+    /// <summary>
+    /// A store that held a bulk load's intents and settled every one of them: the map is empty, and the captures
+    /// answer empty from the index count. The map's bucket table never shrinks, so the old whole-map walk kept
+    /// visiting every empty bucket per page; the index does not visit the map at all.
+    /// </summary>
+    [Fact]
+    public void ScanWindow_AfterThousandsOfIntentsSettled_IsEmpty()
+    {
+        PreparedIntentStore store = new();
+        const int count = 20_000;
+
+        for (int i = 0; i < count; i++)
+            Assert.Equal(TransactionApplyOutcome.Applied, store.Apply(new PrepareIntentCommand(Intent($"k/{i:D6}", "k", 100 + i, PreparedIntentResolution.Pending))).Outcome);
+
+        Assert.Equal(count, store.LiveIntentCount);
+        Assert.Equal(count, store.SnapshotScanWindow(null, true, null, true).Count);
+
+        for (int i = 0; i < count; i++)
+        {
+            Assert.Equal(TransactionApplyOutcome.Applied, store.Apply(new ResolveIntentCommand(Ts(100 + i), 1, $"k/{i:D6}", true)).Outcome);
+            Assert.Equal(TransactionApplyOutcome.Applied, store.Apply(new RemoveIntentCommand(Ts(100 + i), 1, $"k/{i:D6}")).Outcome);
+        }
+
+        Assert.Equal(0, store.LiveIntentCount);
+        Assert.Empty(store.Snapshot());
+        Assert.Empty(store.SnapshotScanWindow(null, true, null, true));
+        Assert.Empty(store.SnapshotScanWindow("k/000000", true, "k/999999", true));
+        Assert.Empty(store.SnapshotPrefix("k/"));
     }
 }

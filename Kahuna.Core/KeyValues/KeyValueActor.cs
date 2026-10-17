@@ -258,6 +258,12 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
     private readonly RecordReadPinHandler recordReadPinHandler;
 
     /// <summary>
+    /// Handles batched probes: many point keys of one key space read in one turn, optionally each under a Shared
+    /// range lock taken in the same turn.
+    /// </summary>
+    private readonly TryProbeManyHandler tryProbeManyHandler;
+
+    /// <summary>
     /// A high-resolution timer used to measure the time elapsed during the handling of requests within the actor.
     /// The stopwatch is utilized to record and log the duration of operations, aiding in performance monitoring
     /// and diagnostics for the KeyValueActor.
@@ -421,6 +427,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
         evictPartitionHandler = new(context);
         dropLeaderStateHandler = new(context);
         recordReadPinHandler = new(context);
+        tryProbeManyHandler = new(context, tryGetHandler, tryAcquireExclusiveRangeLockHandler);
     }
 
     /// <summary>
@@ -448,6 +455,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
             KeyValueRequestType.TryExtend => await TryExtend(message),
             KeyValueRequestType.TryDelete => await TryDelete(message),
             KeyValueRequestType.TryGet => await TryGet(message),
+            KeyValueRequestType.TryProbeMany => await tryProbeManyHandler.Execute(message),
             KeyValueRequestType.TryExists => await TryExists(message),
             KeyValueRequestType.TryCheckWriteIntent => await TryCheckWriteIntent(message),
             KeyValueRequestType.TryAcquireExclusiveLock => await TryAcquireExclusiveLock(message),
@@ -512,6 +520,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
     /// </summary>
     private static bool IsSnapshotRead(KeyValueRequestType type) =>
         type is KeyValueRequestType.TryGet
+            or KeyValueRequestType.TryProbeMany
             or KeyValueRequestType.TryExists
             or KeyValueRequestType.GetByBucket
             or KeyValueRequestType.GetByRange

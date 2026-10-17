@@ -180,6 +180,10 @@ internal sealed class KeyValueServerBatcher
                 _ = TryGetManyValuesDelayed(responseWriter, request, context, drain);
                 break;
 
+            case GrpcServerBatchType.ServerTryProbeMany:
+                _ = TryProbeManyDelayed(responseWriter, request, context, drain);
+                break;
+
             case GrpcServerBatchType.ServerTryDeleteKeyValue:
                 _ = TryDeleteKeyValueServerDelayed(responseWriter, request, context, drain);
                 break;
@@ -548,6 +552,36 @@ internal sealed class KeyValueServerBatcher
                 Type = GrpcServerBatchType.ServerTryGetManyValues,
                 RequestId = request.RequestId,
                 TryGetManyValues = tryGetManyResponse
+            };
+
+            await responseWriter.WriteAsync(response);
+        }
+        catch (Exception ex)
+        {
+            await ObserveFault(responseWriter, request, context, ex);
+        }
+        finally
+        {
+            drain.Exit();
+        }
+    }
+
+    private async Task TryProbeManyDelayed(
+        CoalescingResponseWriter responseWriter,
+        GrpcBatchServerKeyValueRequest request,
+        ServerCallContext context,
+        StreamDrain drain
+    )
+    {
+        try
+        {
+            GrpcTryProbeManyResponse probeResponse = await service.TryProbeManyInternal(request.TryProbeMany, context);
+
+            GrpcBatchServerKeyValueResponse response = new()
+            {
+                Type = GrpcServerBatchType.ServerTryProbeMany,
+                RequestId = request.RequestId,
+                TryProbeMany = probeResponse
             };
 
             await responseWriter.WriteAsync(response);

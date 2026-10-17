@@ -141,6 +141,25 @@ public sealed class KeyValueRequest : IConsistentHashable
     internal PublishedHead? ReadPin { get; set; }
 
     /// <summary>
+    /// The keys of a <see cref="KeyValueRequestType.TryProbeMany"/> request, all of one key space, answered in this
+    /// order. <see cref="Key"/> carries the first of them so the request hashes to the actor that owns the key
+    /// space. Null on every other type.
+    /// </summary>
+    internal string[]? ProbeKeys { get; set; }
+
+    /// <summary>
+    /// Per-key foreign decision hints of a <see cref="KeyValueRequestType.TryProbeMany"/> request, parallel to
+    /// <see cref="ProbeKeys"/>: what <see cref="ForeignDecisionHint"/> is to a single read. Null means no hints.
+    /// </summary>
+    internal Transactions.Data.ForeignDecisionHint[]? ProbeHints { get; set; }
+
+    /// <summary>
+    /// How a <see cref="KeyValueRequestType.TryProbeMany"/> request locks each key before it reads it. Unused by
+    /// every other request type.
+    /// </summary>
+    internal KeyValueProbeLock ProbeLock { get; set; }
+
+    /// <summary>
     ///
     /// </summary>
     public KeyValueReplyRef Promise { get; private set; }
@@ -296,6 +315,9 @@ public sealed class KeyValueRequest : IConsistentHashable
         Inline = null;
         Turn = null;
         ReadPin = null;
+        ProbeKeys = null;
+        ProbeHints = null;
+        ProbeLock = KeyValueProbeLock.None;
         ReturnToPoolOnReceive = false;
     }
 

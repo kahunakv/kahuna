@@ -166,6 +166,16 @@ internal sealed class KeyValueContext
     /// </summary>
     internal Dictionary<(string Key, HLCTimestamp ReadTimestamp, bool IsExists), Handlers.ReadContinuation> PendingSnapshotReads { get; } = new();
 
+    /// <summary>
+    /// Per-actor set of batched probes waiting for their backend reads. A probe's own per-key reads are
+    /// registered in <see cref="PendingReads"/> and <see cref="PendingSnapshotReads"/> so single reads of the same
+    /// keys join them; this set puts the batch itself in reach of the deadline sweep, so a backend read that never
+    /// returns cannot strand the batch's caller.
+    /// Stage 1 registers; stage 3 (or the sweep) removes.
+    /// Mutated only on the actor thread — no synchronisation required.
+    /// </summary>
+    internal HashSet<Handlers.ReadContinuation> PendingProbeBatches { get; } = new();
+
     public KahunaConfiguration Configuration  { get; }
 
     /// <summary>
@@ -349,6 +359,10 @@ internal sealed class KeyValueContext
         // on this entry before InsertStoreEntry, or CachedBytes would be non-zero and skip init.
         if (entry.CachedBytes == 0)
             entry.CachedBytes = KeyValueStoreAccounting.EstimateEntryBytes(key, entry) - (key.Length * sizeof(char));
+
+        // A head loaded from the backend arrives without its bucket, and the write path finds the prefix and range
+        // locks that guard a key by that bucket: a resident entry without it lets a write past a foreign lock.
+        entry.Bucket ??= KeyValueKeySpace.OfKey(key);
 
         entry.StoreKey = key;
         Store.Insert(key, entry);

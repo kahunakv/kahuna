@@ -58,6 +58,10 @@ internal static class BatchRefusalResponses
                 response.TryExistsManyValues = KeyValueMustRetry.TryExistsManyValues(request.TryExistsManyValues);
                 break;
 
+            case GrpcServerBatchType.ServerTryProbeMany:
+                response.TryProbeMany = Kahuna.Server.Communication.Internode.Grpc.ProbeManyWire.MustRetry(request.TryProbeMany);
+                break;
+
             case GrpcServerBatchType.ServerTryDeleteKeyValue:
                 response.TryDeleteKeyValue = KeyValueMustRetry.TryDeleteKeyValue();
                 break;

@@ -198,6 +198,9 @@ internal sealed class TryGetByRangeHandler : BaseHandler
         // FIFO ordering onto one queue. The continuation reuses this for subsequent pages.
         int scanPartition = ResolvePartition(prefix);
 
+        // The continuation carries the request's own end bound (not the prefix upper bound ComputeBounds
+        // substitutes for the BTree) to the backend: the backend already stops at the prefix, and a null
+        // bound means just that.
         RangeScanContinuation cont = new(
             prefix, limit, message.Durability, scanPartition,
             message.StartInclusive, message.StartKey,
@@ -207,59 +210,20 @@ internal sealed class TryGetByRangeHandler : BaseHandler
             memItems, memEnd, memEndIncl, memBatch, memMaybeMore, diskCursor,
             promise, message.ForeignScanDecisions);
 
-        bool capturedSnapshotRead = !message.ReadTimestamp.IsNull();
-        HLCTimestamp capturedSnapshotTs = snapshotTs;
-        HLCTimestamp capturedCurrentTime = currentTime;
-        // The request's own end bound (not the prefix upper bound ComputeBounds substitutes for the
-        // BTree): the backend already stops at the prefix, and a null bound means just that.
-        string? capturedEndKey = message.EndKey;
-        bool capturedEndInclusive = message.EndInclusive;
-
-        Task<RangeDiskPage> readTask;
-        try
+        if (context.PersistenceBackend is { ServesReadsFromMemory: true })
         {
-            readTask = context.BackendReadScheduler.EnqueueTask(
-                scanPartition,
-                () =>
-                {
-                    // The scheduler can run this long after the deadline sweep expired the
-                    // continuation; skip the disk work then — the stage-3 late-completion guard
-                    // drops the result anyway.
-                    if (cont.Cancelled)
-                    {
-                        KeyValueScanMetrics.ScansAbandonedCancelled.Add(1);
-                        return new RangeDiskPage([], false, null);
-                    }
+            // Every backend read is a memory lookup: read and merge the page in this turn, and reply
+            // synchronously. The hand-off through the scheduler worker, the thread-pool continuation
+            // and the resume message costs several times the read itself, and the mailbox is held for
+            // microseconds either way. Null means the inline walk reached its inspection budget and
+            // handed the rest to the scheduler path, which replies through the promise.
+            KeyValueResponse? response = cont.RunInline(context);
 
-                    return ReadDiskPage(
-                        context.PersistenceBackend, prefix, diskCursor, capturedEndKey, capturedEndInclusive, limit,
-                        capturedSnapshotRead, capturedSnapshotTs, capturedCurrentTime, () => cont.Cancelled);
-                });
+            if (response is not null)
+                return response;
         }
-        catch (Exception ex)
-        {
-            context.Logger.LogWarning(
-                "KeyValueActor/RangeScan: read scheduler rejected enqueue for prefix {Prefix}: {Ex}",
-                prefix, ex.Message);
-            cont.Resolve(KeyValueStaticResponses.MustRetryResponse);
-            actorContext.ByPassReply = true;
-            return KeyValueStaticResponses.MustRetryResponse;
-        }
-
-        _ = readTask.ContinueWith(t =>
-        {
-            if (!t.IsCompletedSuccessfully)
-            {
-                // Surface the fault: SetFaulted resolves the caller with a retryable MustRetry, and a
-                // silently swallowed exception here turns a deterministic bug into an undiagnosable
-                // retry-exhaustion at the client.
-                context.Logger.LogWarning(t.Exception?.GetBaseException(), "KeyValueActor/RangeScan: disk page read faulted for prefix {Prefix}", prefix);
-                cont.SetFaulted();
-            }
-            else cont.RangeScanPage = t.Result;
-            actorContext.Self.Send(
-                new KeyValueRequest(KeyValueRequestType.ResumeRead) { Continuation = cont });
-        }, TaskScheduler.Default);
+        else
+            cont.DispatchNextPage(context);
 
         actorContext.ByPassReply = true;
         return KeyValueStaticResponses.WaitingForReplicationResponse;
@@ -273,13 +237,20 @@ internal sealed class TryGetByRangeHandler : BaseHandler
     /// the bound, so a short bounded seek reads and projects only the entries inside it rather than a full
     /// page; a raw page shorter than the sentinel size because the bound ended it carries no next cursor.
     /// The page carries what the read cost — the revision rows and seeks of the walk and the as-of lookups
-    /// of the projection — so stage 3 can add it to the scan's observation. Must run on the off-actor
-    /// scheduler thread.
+    /// of the projection — so stage 3 can add it to the scan's observation.
+    /// <para>
+    /// The page holds <c>limit + 1</c> rows, the sentinel that tells the merge more rows exist, plus one more
+    /// when <paramref name="cursorRowExcluded"/> says the row at the cursor adds nothing (an exclusive start
+    /// key, or the previous page's sentinel): the seek is inclusive, so that row takes a slot, and without
+    /// the extra row a cursor page carried exactly <c>limit</c> new rows and cost a second backend read.
+    /// </para>
+    /// Runs on a scheduler thread, or on the actor thread for a backend that serves reads from memory.
     /// </summary>
     internal static RangeDiskPage ReadDiskPage(
         IPersistenceBackend backend,
         string prefix,
         string diskCursor,
+        bool cursorRowExcluded,
         string? endKey,
         bool endInclusive,
         int limit,
@@ -290,35 +261,37 @@ internal sealed class TryGetByRangeHandler : BaseHandler
     {
         KeyValueScanTally tally = default;
 
-        // An unbounded scan arrives as limit == int.MaxValue; a naive limit + 1 overflows negative,
-        // which the backends treat as "no rows" — silently emptying every disk page of the scan.
-        List<(string, ReadOnlyKeyValueEntry)> rawPage =
-            backend.GetKeyValueByRange(prefix, diskCursor, endKey, endInclusive, SaturatingPageSize(limit), ref tally);
+        int pageSize = SaturatingPageSize(limit, cursorRowExcluded ? 1 : 0);
 
-        return ProjectSnapshotPage(rawPage, limit, isSnapshotRead, snapshotTs, currentTime, backend, shouldAbort, tally);
+        List<(string, ReadOnlyKeyValueEntry)> rawPage =
+            backend.GetKeyValueByRange(prefix, diskCursor, endKey, endInclusive, pageSize, ref tally);
+
+        return ProjectSnapshotPage(rawPage, pageSize, isSnapshotRead, snapshotTs, currentTime, backend, shouldAbort, tally);
     }
 
     /// <summary>
     /// Builds a <see cref="RangeDiskPage"/> from a raw disk page: extracts raw pagination
     /// facts (has-more flag and next-cursor key) from the unfiltered <paramref name="rawPage"/>,
-    /// then snapshot-projects every row, the <c>limit + 1</c> sentinel included.
+    /// then snapshot-projects every row, the sentinel included. The raw page has more behind it
+    /// exactly when it is as long as the <paramref name="pageSize"/> the backend was asked for; the
+    /// next page then starts at its last row.
     ///
-    /// Separating pagination from projection fixes a silent correctness bug: when all
-    /// <c>limit + 1</c> raw rows are post-snapshot and dropped by projection, the caller must
-    /// still know the raw page was full (RawHasMore=true) and fetch the next page rather than
-    /// concluding the disk is exhausted.
+    /// Separating pagination from projection fixes a silent correctness bug: when every raw row
+    /// is post-snapshot and dropped by projection, the caller must still know the raw page was
+    /// full (RawHasMore=true) and fetch the next page rather than concluding the disk is exhausted.
     ///
     /// The sentinel row is a real row of the range, so it takes part in the stage-3 merge like any
     /// other: a page whose merge ends on it needs no second disk read to learn that more rows exist,
     /// where a page without it had to fetch the next page to find one more row. The next page starts
     /// at the sentinel key, and the continuation skips the rows it already merged.
     ///
-    /// Must run on the off-actor scheduler thread — per-key GetKeyValueRevisionAtOrBefore
-    /// calls do disk I/O and must not block the actor mailbox.
+    /// Runs on a scheduler thread: the per-key GetKeyValueRevisionAtOrBefore calls do disk I/O and
+    /// must not block the actor mailbox. The one exception is a backend that serves reads from
+    /// memory, whose lookups cost microseconds; the scan then runs this on the actor thread.
     /// </summary>
     internal static RangeDiskPage ProjectSnapshotPage(
         List<(string, ReadOnlyKeyValueEntry)> rawPage,
-        int limit,
+        int pageSize,
         bool isSnapshotRead,
         HLCTimestamp snapshotTs,
         HLCTimestamp currentTime,
@@ -327,8 +300,8 @@ internal sealed class TryGetByRangeHandler : BaseHandler
         KeyValueScanTally tally = default)
     {
         // Derive raw pagination facts before any projection filtering.
-        bool rawHasMore = rawPage.Count > limit;
-        string? rawNextCursor = rawHasMore ? rawPage[limit].Item1 : null;
+        bool rawHasMore = rawPage.Count >= pageSize;
+        string? rawNextCursor = rawHasMore ? rawPage[^1].Item1 : null;
 
         if (!isSnapshotRead)
             return new RangeDiskPage(rawPage, rawHasMore, rawNextCursor, tally);
@@ -368,10 +341,15 @@ internal sealed class TryGetByRangeHandler : BaseHandler
     }
 
     /// <summary>
-    /// The limit+1 pagination sentinel, saturated so an unbounded scan (limit == int.MaxValue) does not
-    /// overflow negative — backends treat a negative limit as "no rows", silently emptying the disk page.
+    /// The limit+1 pagination sentinel plus <paramref name="extraRows"/>, saturated so an unbounded scan
+    /// (limit == int.MaxValue) does not overflow negative — backends treat a negative limit as "no rows",
+    /// silently emptying the disk page.
     /// </summary>
-    internal static int SaturatingPageSize(int limit) => limit == int.MaxValue ? int.MaxValue : limit + 1;
+    internal static int SaturatingPageSize(int limit, int extraRows = 0)
+    {
+        long pageSize = (long)limit + 1 + extraRows;
+        return pageSize > int.MaxValue ? int.MaxValue : (int)pageSize;
+    }
 
     /// <summary>Computes the effective BTree bounds, substituting the prefix upper bound when EndKey is null.</summary>
     internal static (string start, bool startIncl, string? end, bool endIncl) ComputeBounds(KeyValueRequest message)

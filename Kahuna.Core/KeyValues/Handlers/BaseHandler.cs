@@ -893,6 +893,16 @@ internal abstract class BaseHandler
             key,
             context.PointReadExecutor);
 
+        return InstallHydratedHead(key, diskEntry, currentTime, coveredThrough);
+    }
+
+    /// <summary>
+    /// The actor-thread half of <see cref="HydratePersistentHead"/>: refuses a provably stale row, otherwise makes
+    /// the loaded head resident. <paramref name="diskEntry"/> is the backend's current row for a key that is not
+    /// resident, or null when there is none.
+    /// </summary>
+    protected (KeyValueEntry? Entry, bool Stale) InstallHydratedHead(string key, KeyValueEntry? diskEntry, HLCTimestamp currentTime, long coveredThrough)
+    {
         if (HydratedRowProvablyStale(key, diskEntry, coveredThrough))
             return (null, true);
 

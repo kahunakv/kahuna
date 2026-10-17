@@ -100,4 +100,11 @@ public enum KeyValueRequestType
     /// revision it read. Local to a node; never replicated, never sent between nodes.
     /// </summary>
     RecordReadPin = 33,
+
+    /// <summary>
+    /// Reads many point keys of one key space in one actor turn, optionally taking a Shared <c>[k,k]</c> range
+    /// lock on each key just before reading it. Keys that are not resident are loaded from the backend as one
+    /// batch and answered in one resume turn. Local to a node; never replicated.
+    /// </summary>
+    TryProbeMany = 34,
 }

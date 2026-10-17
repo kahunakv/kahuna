@@ -59,6 +59,11 @@ public sealed class TestCompleteOperationGrpcWire
             ReleasedPrefixLock = "prefix-released",
             AcquiredRangeLock = (new RangeLockKey("pfx", "start", true, "end", false, KeyValueDurability.Persistent), RangeLockMode.Shared),
             ReleasedRangeLock = new RangeLockKey("pfx2", null, false, null, true, KeyValueDurability.Ephemeral),
+            AcquiredRangeLocks =
+            [
+                (new RangeLockKey("space", "space/a", true, "space/a", true, KeyValueDurability.Persistent), RangeLockMode.Shared),
+                (new RangeLockKey("space", "space/b", true, "space/b", true, KeyValueDurability.Persistent), RangeLockMode.Shared)
+            ],
             Read = new() { Key = "read-key", Durability = KeyValueDurability.Persistent, Exists = true, Revision = 11 },
             ReadObservations =
             [
@@ -89,6 +94,7 @@ public sealed class TestCompleteOperationGrpcWire
         Assert.Equal(payload.AcquiredRangeLock!.Value.Range, restored.AcquiredRangeLock!.Value.Range);
         Assert.Equal(payload.AcquiredRangeLock!.Value.Mode, restored.AcquiredRangeLock!.Value.Mode);
         Assert.Equal(payload.ReleasedRangeLock, restored.ReleasedRangeLock);
+        Assert.Equal(payload.AcquiredRangeLocks, restored.AcquiredRangeLocks);
         Assert.NotNull(restored.Read);
         Assert.Equal(payload.Read!.Key, restored.Read!.Key);
         Assert.Equal(payload.Read.Revision, restored.Read.Revision);
@@ -143,6 +149,7 @@ public sealed class TestCompleteOperationGrpcWire
         Assert.Null(restored.AcquiredPrefixLock);
         Assert.Null(restored.ReleasedPrefixLock);
         Assert.Null(restored.AcquiredRangeLock);
+        Assert.Null(restored.AcquiredRangeLocks);
         Assert.Null(restored.ReleasedRangeLock);
         Assert.Null(restored.Read);
         Assert.Null(restored.ReadObservations);

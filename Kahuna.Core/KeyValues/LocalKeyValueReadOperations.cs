@@ -357,6 +357,221 @@ internal sealed class LocalKeyValueReadOperations
     }
 
     /// <summary>
+    /// How long a batched probe waits out a transient refusal of one of its Shared locks (an in-flight replication
+    /// intent, or a durable intent whose decision is not known here) before it answers that key <c>MustRetry</c>.
+    /// The same bound as a single range-lock acquire.
+    /// </summary>
+    private const int ProbeLockWaitMs = 3_000;
+
+    /// <summary>
+    /// How long a batched probe waits out a read that answers <c>WaitingForReplication</c> before it answers that
+    /// key <c>MustRetry</c>. The same bound as a single read (<see cref="TryGetValueFromActor"/>).
+    /// </summary>
+    private const int ProbeReadWaitMs = 16_500;
+
+    /// <summary>
+    /// Reads many keys of one key space, owned by this node, with one actor message per attempt (see
+    /// <see cref="Handlers.TryProbeManyHandler"/>). Returns one result per key, in input order.
+    ///
+    /// <para>Waits are handled per key with the loop a single read or a single range-lock acquire uses: a key that
+    /// answers <c>WaitingForReplication</c> is asked again, alone with the other waiting keys, with exponential
+    /// back-off, and a wait caused by a foreign prepared intent whose decision lives on another partition routes
+    /// that decision once and re-asks with it at once. A Shared-lock wait stops the batch at that key, so it and
+    /// every key after it are asked again. A read wait gives up after <see cref="ProbeReadWaitMs"/> and a lock wait
+    /// after <see cref="ProbeLockWaitMs"/>, as <c>MustRetry</c>.</para>
+    ///
+    /// <para>A key's <see cref="KeyValueProbeResult.Locked"/> stays set once any attempt reported it: the lock is
+    /// session-owned until the transaction finalizes, and reporting it is what lets the caller release it.</para>
+    /// </summary>
+    public async Task<KeyValueProbeResult[]> TryProbeMany(
+        HLCTimestamp transactionId,
+        HLCTimestamp readTimestamp,
+        IReadOnlyList<string> keys,
+        KeyValueProbeLock lockMode,
+        int expiresMs,
+        KeyValueDurability durability
+    )
+    {
+        KeyValueProbeResult[] results = new KeyValueProbeResult[keys.Count];
+
+        if (keys.Count == 0)
+            return results;
+
+        for (int i = 0; i < keys.Count; i++)
+        {
+            if (!IsGatedKey(keys[i]))
+                continue;
+
+            Array.Fill(results, KeyValueProbeResult.MustRetry);
+            return results;
+        }
+
+        KeyValueActorRing router = durability == KeyValueDurability.Ephemeral ? ephemeralKeyValuesRouter : persistentKeyValuesRouter;
+
+        long start = Environment.TickCount64;
+        int backoffMs = 1;
+
+        // Indexes (into keys) still to ask, in input order. Null means every key.
+        List<int>? pending = null;
+        Transactions.Data.ForeignDecisionHint[]? hints = null;
+        bool[]? routed = null;
+
+        KeyValueRequest? scratch = null;
+
+        try
+        {
+            while (true)
+            {
+                int count = pending?.Count ?? keys.Count;
+                string[] batchKeys = new string[count];
+                Transactions.Data.ForeignDecisionHint[]? batchHints = hints is null ? null : new Transactions.Data.ForeignDecisionHint[count];
+
+                for (int j = 0; j < count; j++)
+                {
+                    int index = pending is null ? j : pending[j];
+                    batchKeys[j] = keys[index];
+                    if (batchHints is not null)
+                        batchHints[j] = hints![index];
+                }
+
+                KeyValueResponse? response = await AskProbe(router, transactionId, readTimestamp, batchKeys, batchHints, lockMode, expiresMs, durability);
+
+                if (response?.ProbeResults is not { } answers || answers.Length != count)
+                {
+                    // Answered as a whole (refused, or no answer at all): every key still pending takes that answer
+                    // and keeps the lock an earlier attempt reported.
+                    KeyValueResponseType whole = response is null
+                        ? KeyValueResponseType.Errored
+                        : response.ProbeResults is null ? response.Type : KeyValueResponseType.Errored;
+
+                    for (int j = 0; j < count; j++)
+                    {
+                        int index = pending is null ? j : pending[j];
+                        results[index] = new(whole, null, HLCTimestamp.Zero, results[index].Locked);
+                    }
+
+                    return results;
+                }
+
+                List<int>? waiting = null;
+                bool lockWait = false;
+                bool retryNow = false;
+
+                for (int j = 0; j < count; j++)
+                {
+                    int index = pending is null ? j : pending[j];
+                    KeyValueProbeResult answer = answers[j];
+                    results[index] = answer with { Locked = answer.Locked || results[index].Locked };
+
+                    if (answer.Type != KeyValueResponseType.WaitingForReplication)
+                        continue;
+
+                    // A lock wait stopped the batch here: the keys after it were not asked and go round again too.
+                    bool stoppedHere = lockMode == KeyValueProbeLock.Shared && !answer.Locked;
+
+                    waiting ??= [];
+                    waiting.Add(index);
+
+                    if (await TryRouteProbeDecision(index, keys[index], transactionId, durability))
+                        retryNow = true;
+
+                    if (!stoppedHere)
+                        continue;
+
+                    lockWait = true;
+                    for (int k = j + 1; k < count; k++)
+                        waiting.Add(pending is null ? k : pending[k]);
+
+                    break;
+                }
+
+                if (waiting is null)
+                    return results;
+
+                long elapsed = Environment.TickCount64 - start;
+                if (elapsed >= (lockWait ? ProbeLockWaitMs : ProbeReadWaitMs))
+                {
+                    // Out of budget: the keys still waiting answer MustRetry, as a single read or acquire does.
+                    foreach (int index in waiting)
+                        results[index] = KeyValueProbeResult.MustRetry with { Locked = results[index].Locked };
+
+                    return results;
+                }
+
+                pending = waiting;
+
+                if (retryNow)
+                    continue; // a decision was resolved: ask again at once
+
+                Transactions.DurableTransactionMetrics.AddKvRetryWait("TryProbeMany");
+                await Task.Delay(backoffMs);
+                backoffMs = Math.Min(backoffMs * 2, 1000);
+            }
+        }
+        finally
+        {
+            if (scratch is not null)
+                KeyValueRequestPool.Return(scratch);
+        }
+
+        // Routes the foreign decision behind a waiting key once per key, and keeps the hint for the next ask.
+        async Task<bool> TryRouteProbeDecision(int index, string key, HLCTimestamp txId, KeyValueDurability keyDurability)
+        {
+            routed ??= new bool[keys.Count];
+            if (routed[index])
+                return false;
+
+            scratch ??= KeyValueRequestPool.Rent(
+                KeyValueRequestType.TryGet, txId, HLCTimestamp.Zero, key, null, null, -1,
+                KeyValueFlags.None, 0, HLCTimestamp.Zero, keyDurability, 0, 0, default);
+
+            scratch.ForeignDecisionHint = default;
+
+            if (!await TryRouteForeignDecision(scratch, key, txId, keyDurability, alreadyAttempted: false))
+                return false;
+
+            routed[index] = true;
+
+            if (scratch.ForeignDecisionHint.TransactionId == HLCTimestamp.Zero)
+                return false;
+
+            hints ??= new Transactions.Data.ForeignDecisionHint[keys.Count];
+            hints[index] = scratch.ForeignDecisionHint;
+            return true;
+        }
+    }
+
+    private static async Task<KeyValueResponse?> AskProbe(
+        KeyValueActorRing router,
+        HLCTimestamp transactionId,
+        HLCTimestamp readTimestamp,
+        string[] keys,
+        Transactions.Data.ForeignDecisionHint[]? hints,
+        KeyValueProbeLock lockMode,
+        int expiresMs,
+        KeyValueDurability durability)
+    {
+        // The first key routes the request: every key of a key space hashes to the same actor.
+        KeyValueRequest request = KeyValueRequestPool.Rent(
+            KeyValueRequestType.TryProbeMany, transactionId, HLCTimestamp.Zero, keys[0], null, null, -1,
+            KeyValueFlags.None, expiresMs, HLCTimestamp.Zero, durability, 0, 0, default);
+
+        request.ReadTimestamp = readTimestamp;
+        request.ProbeKeys = keys;
+        request.ProbeHints = hints;
+        request.ProbeLock = lockMode;
+
+        try
+        {
+            return await AskKeyValueActor(router, request);
+        }
+        finally
+        {
+            KeyValueRequestPool.Return(request);
+        }
+    }
+
+    /// <summary>
     /// Probes several locally owned keys for concurrent write intents, returning one result per requested key.
     /// The keys are dispatched to their owning actors independently, as the many-key reads do: the grouping that
     /// pays is by node, upstream in the locator, not by actor here.

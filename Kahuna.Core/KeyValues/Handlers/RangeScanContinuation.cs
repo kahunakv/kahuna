@@ -21,6 +21,12 @@ namespace Kahuna.Server.KeyValues.Handlers;
 ///            needed, dispatch the next page (stage 2) and defer resolution again, leaving
 ///            the actor mailbox free until the next ResumeRead message arrives.
 ///
+/// A backend that serves reads from memory (<see cref="Persistence.Backend.IPersistenceBackend.ServesReadsFromMemory"/>)
+/// takes a shorter path (<see cref="RunInline"/>): stage 2 runs on the actor thread inside the
+/// stage-1 turn, and the merge follows at once, so the common page costs no scheduler hand-off,
+/// no thread-pool continuation and no resume message. The merge is the same code either way; only
+/// where the page is read differs.
+///
 /// The same continuation object is reused across all pages: it carries the full merge state
 /// (memory snapshot cursor, accumulated results, disk cursor) from one Execute call to the
 /// next, so no cross-page object graph is needed.
@@ -84,6 +90,15 @@ internal sealed class RangeScanContinuation : ReadContinuation
     private string diskCursor;
 
     /// <summary>
+    /// True when the row at <see cref="diskCursor"/>, if the backend holds one, adds nothing to the merge:
+    /// the exclusive start key of the request on the first page, or the previous page's sentinel row (already
+    /// merged, or dropped by the as-of projection) on every later page. The backend seek is inclusive, so
+    /// such a page is read one row longer to still carry <c>limit + 1</c> new rows; without that extra row a
+    /// cursor page held exactly <c>limit</c> new rows and needed a second backend read to learn that more exist.
+    /// </summary>
+    private bool cursorRowExcluded;
+
+    /// <summary>
     /// The largest disk key the merge consumed so far. A disk page carries its limit+1 sentinel row, and the
     /// next page starts at that row's key (an inclusive seek), so the rows at or below this key at the head
     /// of a new page were merged already and are skipped.
@@ -92,8 +107,8 @@ internal sealed class RangeScanContinuation : ReadContinuation
 
     /// <summary>
     /// The combined stage-2 result: snapshot-projected entries plus raw pagination facts.
-    /// Set by the stage-2 callback (off-actor) before the ResumeRead message is dispatched;
-    /// consumed and cleared by Execute (actor thread, stage 3).
+    /// Set by the stage-2 callback (off-actor) before the ResumeRead message is dispatched, or by
+    /// <see cref="RunInline"/> on the actor thread; consumed and cleared by the merge (actor thread, stage 3).
     /// </summary>
     internal RangeDiskPage? RangeScanPage { get; set; }
 
@@ -150,15 +165,74 @@ internal sealed class RangeScanContinuation : ReadContinuation
         this.diskCursor = diskCursor;
         this.routedDecisions = routedDecisions;
         this.accumulated = [];
+
+        // The first page seeks at the request's start key; when that start is exclusive, the row at the
+        // seek position is skipped by the merge and counts for nothing.
+        cursorRowExcluded = startKey is not null && !startInclusive;
     }
 
+    /// <summary>
+    /// Stage 3 on the scheduler path: merges the page the stage-2 callback stored in <see cref="RangeScanPage"/>,
+    /// then either resolves every waiter or dispatches the next page and returns with the reply still deferred.
+    /// </summary>
     internal override void Execute(KeyValueContext context)
     {
-        if (Faulted)
+        KeyValueResponse? response = MergePage(context);
+
+        if (response is null)
+            DispatchNextPage(context);
+        else
+            Resolve(response);
+    }
+
+    /// <summary>
+    /// The whole scan on the actor thread, for a backend that serves reads from memory: reads each page with
+    /// <see cref="TryGetByRangeHandler.ReadDiskPage"/> on the calling thread and merges it at once, so the
+    /// common page costs no scheduler hand-off, no thread-pool continuation and no resume message. Returns the
+    /// response to reply with synchronously, or null when the scan was handed to the scheduler path (the
+    /// reply is then deferred to the promise, exactly as on that path).
+    /// <para>
+    /// A page needs a further page only when its rows were dead, as-of dropped or already merged, so the common
+    /// scan is one read. A range dense with dead rows could otherwise keep the mailbox for the whole walk, so
+    /// the inline walk stops at the same inspection budget as the ephemeral scan and hands the rest to the
+    /// scheduler, where the mailbox is free between pages.
+    /// </para>
+    /// </summary>
+    internal KeyValueResponse? RunInline(KeyValueContext context)
+    {
+        long inspectionBudgetRaw = (long)limit + 1 + KeyValueScanLimits.MaxScanInspectionSlack;
+        long inspectionBudget = inspectionBudgetRaw > int.MaxValue ? int.MaxValue : inspectionBudgetRaw;
+
+        while (true)
         {
-            Resolve(KeyValueStaticResponses.MustRetryResponse);
-            return;
+            RangeScanPage = TryGetByRangeHandler.ReadDiskPage(
+                context.PersistenceBackend, prefix, diskCursor, cursorRowExcluded, endKey, endInclusive, limit,
+                isSnapshotRead, snapshotTs, currentTime, shouldAbort: null);
+            KeyValueScanMetrics.PagesReadOnActor.Add(1);
+
+            KeyValueResponse? response = MergePage(context);
+
+            if (response is not null)
+                return response;
+
+            if (tally.EntriesInspected >= inspectionBudget)
+            {
+                DispatchNextPage(context);
+                return null;
+            }
         }
+    }
+
+    /// <summary>
+    /// Merges <see cref="RangeScanPage"/> into the accumulated result (actor thread). Returns the page's
+    /// response when the scan is complete or must stop, or null when the disk page ran out with more rows
+    /// behind it before the result filled: <see cref="diskCursor"/> then points at the next page and the
+    /// caller reads it, inline or through the scheduler.
+    /// </summary>
+    private KeyValueResponse? MergePage(KeyValueContext context)
+    {
+        if (Faulted)
+            return KeyValueStaticResponses.MustRetryResponse;
 
         if (RangeScanPage is { } arrived)
             tally.Add(arrived.Tally);
@@ -352,74 +426,23 @@ internal sealed class RangeScanContinuation : ReadContinuation
             {
                 // Scan-aborting response (WaitingForReplication, Aborted, etc.). It still carries what the
                 // attempt cost, so a page retried from the same cursor can report the sum over its attempts.
-                Resolve(new(response.Type, new KeyValueGetByRangeResult(response.Type, [], null, false, Observation)));
-                return;
+                return new(response.Type, new KeyValueGetByRangeResult(response.Type, [], null, false, Observation));
             }
 
             accumulated.Add((keyToProcess, response.Entry));
         }
 
         Done:
-        // If the current disk page ran out but more pages remain, and the result cap has not
-        // been reached, dispatch the next disk page and defer resolution to the next Execute.
+        // The current disk page ran out with more rows behind it before the result filled: the next page
+        // starts at the last raw row, which this merge consumed (or the projection dropped), so that row
+        // is excluded from the next page's count. The caller reads the page, inline or on the scheduler.
         if (diskIdx >= diskAvailable && diskHasMore && accumulated.Count <= limit)
         {
-            // RawNextCursor is the (limit+1)-th key of the raw page; guaranteed non-null when RawHasMore.
+            // RawNextCursor is the last raw row of the page; guaranteed non-null when RawHasMore.
             diskCursor = RangeScanPage!.RawNextCursor!;
+            cursorRowExcluded = true;
             RangeScanPage = null;
-
-            Task<RangeDiskPage> nextTask;
-            try
-            {
-                string capturedCursor = diskCursor;
-                string? capturedEndKey = endKey;
-                bool capturedEndInclusive = endInclusive;
-                bool capturedSnapshotRead = isSnapshotRead;
-                HLCTimestamp capturedSnapshotTs = snapshotTs;
-                HLCTimestamp capturedCurrentTime = currentTime;
-                int capturedLimit = limit;
-                nextTask = context.BackendReadScheduler.EnqueueTask(
-                    partitionId,
-                    () =>
-                    {
-                        // The scheduler can run this long after the deadline sweep expired this
-                        // continuation; skip the disk work then — the stage-3 late-completion
-                        // guard drops the result anyway.
-                        if (Cancelled)
-                        {
-                            KeyValueScanMetrics.ScansAbandonedCancelled.Add(1);
-                            return new RangeDiskPage([], false, null);
-                        }
-
-                        return TryGetByRangeHandler.ReadDiskPage(
-                            context.PersistenceBackend, prefix, capturedCursor, capturedEndKey, capturedEndInclusive, capturedLimit,
-                            capturedSnapshotRead, capturedSnapshotTs, capturedCurrentTime, () => Cancelled);
-                    });
-            }
-            catch (Exception ex)
-            {
-                context.Logger.LogWarning(
-                    "KeyValueActor/RangeScan: read scheduler rejected next-page enqueue for prefix {Prefix} cursor {Cursor}: {Ex}",
-                    prefix, diskCursor, ex.Message);
-                Resolve(KeyValueStaticResponses.MustRetryResponse);
-                return;
-            }
-
-            IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> self = context.ActorContext.Self;
-            _ = nextTask.ContinueWith(t =>
-            {
-                if (!t.IsCompletedSuccessfully)
-                {
-                    // Surface the fault — a swallowed exception here becomes an undiagnosable
-                    // retry-exhaustion at the client.
-                    context.Logger.LogWarning(t.Exception?.GetBaseException(), "KeyValueActor/RangeScan: next disk page read faulted for prefix {Prefix}", prefix);
-                    SetFaulted();
-                }
-                else RangeScanPage = t.Result;
-                self.Send(new KeyValueRequest(KeyValueRequestType.ResumeRead) { Continuation = this });
-            }, TaskScheduler.Default);
-
-            return; // mailbox is free until the next ResumeRead arrives
+            return null;
         }
 
         // Durable-intent scan visibility: overlay prepared intents covering this page's window onto the accumulated
@@ -450,19 +473,78 @@ internal sealed class RangeScanContinuation : ReadContinuation
                     k => DurableSnapshotSource.ReaderHasOwnVersion(context, k, transactionId),
                     i => DurableSnapshotSource.HeadSupersedesIntent(context, i, excludedHeads, isSnapshotRead ? snapshotTs : HLCTimestamp.Zero));
                 if (merge.MustRetry)
-                {
-                    Resolve(new(KeyValueResponseType.MustRetry,
-                        new KeyValueGetByRangeResult(KeyValueResponseType.MustRetry, [], null, false, Observation)));
-                    return;
-                }
+                    return new(KeyValueResponseType.MustRetry,
+                        new KeyValueGetByRangeResult(KeyValueResponseType.MustRetry, [], null, false, Observation));
 
                 tally.IntentsMerged += merge.IntentsMerged;
-                Resolve(TryGetByRangeHandler.BuildMergedResponse(prefix, durability, merge, snapshotTs, Observation));
-                return;
+                return TryGetByRangeHandler.BuildMergedResponse(prefix, durability, merge, snapshotTs, Observation);
             }
         }
 
-        Resolve(BuildResponse(accumulated, limit, snapshotTs, prefix, durability, Observation));
+        return BuildResponse(accumulated, limit, snapshotTs, prefix, durability, Observation);
+    }
+
+    /// <summary>
+    /// Stage 2 on the scheduler path: enqueues the read of the page at <see cref="diskCursor"/> on the backend
+    /// read scheduler under the scan's data partition, and arranges for the result to come back to the actor
+    /// as a <c>ResumeRead</c> message carrying this continuation. The reply stays deferred to the promise; a
+    /// rejected enqueue (back-pressure, a stopping scheduler) resolves every waiter with a retryable result
+    /// instead of leaving the scan half-assembled.
+    /// </summary>
+    internal void DispatchNextPage(KeyValueContext context)
+    {
+        Task<RangeDiskPage> nextTask;
+        try
+        {
+            string capturedCursor = diskCursor;
+            bool capturedCursorRowExcluded = cursorRowExcluded;
+            string? capturedEndKey = endKey;
+            bool capturedEndInclusive = endInclusive;
+            bool capturedSnapshotRead = isSnapshotRead;
+            HLCTimestamp capturedSnapshotTs = snapshotTs;
+            HLCTimestamp capturedCurrentTime = currentTime;
+            int capturedLimit = limit;
+            nextTask = context.BackendReadScheduler.EnqueueTask(
+                partitionId,
+                () =>
+                {
+                    // The scheduler can run this long after the deadline sweep expired this
+                    // continuation; skip the disk work then — the stage-3 late-completion
+                    // guard drops the result anyway.
+                    if (Cancelled)
+                    {
+                        KeyValueScanMetrics.ScansAbandonedCancelled.Add(1);
+                        return new RangeDiskPage([], false, null);
+                    }
+
+                    KeyValueScanMetrics.PagesReadOnScheduler.Add(1);
+                    return TryGetByRangeHandler.ReadDiskPage(
+                        context.PersistenceBackend, prefix, capturedCursor, capturedCursorRowExcluded, capturedEndKey, capturedEndInclusive, capturedLimit,
+                        capturedSnapshotRead, capturedSnapshotTs, capturedCurrentTime, () => Cancelled);
+                });
+        }
+        catch (Exception ex)
+        {
+            context.Logger.LogWarning(
+                "KeyValueActor/RangeScan: read scheduler rejected page enqueue for prefix {Prefix} cursor {Cursor}: {Ex}",
+                prefix, diskCursor, ex.Message);
+            Resolve(KeyValueStaticResponses.MustRetryResponse);
+            return;
+        }
+
+        IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> self = context.ActorContext.Self;
+        _ = nextTask.ContinueWith(t =>
+        {
+            if (!t.IsCompletedSuccessfully)
+            {
+                // Surface the fault — a swallowed exception here becomes an undiagnosable
+                // retry-exhaustion at the client.
+                context.Logger.LogWarning(t.Exception?.GetBaseException(), "KeyValueActor/RangeScan: disk page read faulted for prefix {Prefix}", prefix);
+                SetFaulted();
+            }
+            else RangeScanPage = t.Result;
+            self.Send(new KeyValueRequest(KeyValueRequestType.ResumeRead) { Continuation = this });
+        }, TaskScheduler.Default);
     }
 
     // ── Per-key evaluation (sync; mirrors TryGetByRangeHandler.Get without disk I/O) ──────

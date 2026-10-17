@@ -65,6 +65,13 @@ public sealed class OperationCompletionPayload
     /// <summary>A range lock (bounds + mode) the operation acquired, upgraded, or renewed.</summary>
     public (RangeLockKey Range, RangeLockMode Mode)? AcquiredRangeLock { get; set; }
 
+    /// <summary>
+    /// The range locks a batch operation acquired (a batched probe's Shared <c>[k,k]</c> locks), each with its own
+    /// bounds, durability and mode. The coordinator folds every one into the held range-lock set, exactly as it
+    /// folds <see cref="AcquiredRangeLock"/>, so commit and rollback release them all.
+    /// </summary>
+    public IReadOnlyList<(RangeLockKey Range, RangeLockMode Mode)>? AcquiredRangeLocks { get; set; }
+
     /// <summary>A range lock the operation released.</summary>
     public RangeLockKey? ReleasedRangeLock { get; set; }
 
@@ -106,6 +113,7 @@ public sealed class OperationCompletionPayload
         !string.IsNullOrEmpty(AcquiredPointLock) || !string.IsNullOrEmpty(ReleasedPointLock) ||
         !string.IsNullOrEmpty(AcquiredPrefixLock) || !string.IsNullOrEmpty(ReleasedPrefixLock) ||
         AcquiredRangeLock is not null || ReleasedRangeLock is not null ||
+        AcquiredRangeLocks is { Count: > 0 } ||
         Read is not null ||
         ReadObservations is { Count: > 0 } ||
         StagedMutations is { Count: > 0 };
@@ -133,6 +141,7 @@ public sealed class OperationCompletionPayload
         AcquiredPrefixLock = null;
         ReleasedPrefixLock = null;
         AcquiredRangeLock = null;
+        AcquiredRangeLocks = null;
         ReleasedRangeLock = null;
         Read = null;
         ReadObservations = null;

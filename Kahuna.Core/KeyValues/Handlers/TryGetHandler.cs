@@ -22,11 +22,36 @@ internal sealed class TryGetHandler : BaseHandler
         if (message.CompareRevision > -1)
             return ExecuteByRevision(message);
 
-        // ── Stage 1: in-memory pre-checks (actor thread, synchronous) ────────────────────
-        bool inCache = context.Store.TryGetValue(message.Key, out KeyValueEntry? entry);
-
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock
             .TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
+
+        PointReadStep step = await ResolvePointRead(message, currentTime, preloadedHeads: null);
+
+        return step.Detach switch
+        {
+            PointReadDetach.None => step.Response!,
+            PointReadDetach.LatestMiss => DispatchLatestMiss(message, currentTime),
+            PointReadDetach.SnapshotHydrate => await DispatchSnapshotRead(message, KeyValueResponseType.Get, currentTime, hydrate: true, asOfCeiling: -1),
+            _ => await DispatchSnapshotRead(message, KeyValueResponseType.Get, currentTime, hydrate: false, asOfCeiling: step.AsOfCeiling),
+        };
+    }
+
+    /// <summary>
+    /// Stage 1 of a latest or snapshot point read (not by revision): every in-memory rule that decides the answer
+    /// for <c>message.Key</c> on this actor, run on the actor thread. It either answers, or says which backend
+    /// read the key needs (see <see cref="PointReadDetach"/>) and leaves the dispatch of that read to the caller, so
+    /// a single read and a batched probe apply exactly the same rules to a key. It never defers a reply itself.
+    /// <para>A transactional latest read, and a read that the durable-intent overlay answers, load a non-resident
+    /// head inline. <paramref name="preloadedHeads"/> holds heads the caller already loaded from the backend for
+    /// that purpose; a head is taken from it at most once.</para>
+    /// </summary>
+    internal async ValueTask<PointReadStep> ResolvePointRead(
+        KeyValueRequest message,
+        HLCTimestamp currentTime,
+        Dictionary<string, KeyValueEntry?>? preloadedHeads)
+    {
+        // ── Stage 1: in-memory pre-checks (actor thread, synchronous) ────────────────────
+        bool inCache = context.Store.TryGetValue(message.Key, out KeyValueEntry? entry);
 
         // Converge a head that was parked behind an in-flight operation before serving anything:
         // this read is gated by a quorum-confirmed leadership check, so a resident entry behind
@@ -67,7 +92,7 @@ internal sealed class TryGetHandler : BaseHandler
             if (action == ReadVisibilityAction.UseIntentValue
                 && !inCache && message.Durability == KeyValueDurability.Persistent)
             {
-                (KeyValueEntry? hydrated, bool stale) = await HydratePersistentHead(message.Key, currentTime, candidateIntent.Revision);
+                (KeyValueEntry? hydrated, bool stale) = await HydrateForRead(message.Key, currentTime, candidateIntent.Revision, preloadedHeads);
                 if (stale)
                     return KeyValueStaticResponses.MustRetryResponse;
 
@@ -104,7 +129,7 @@ internal sealed class TryGetHandler : BaseHandler
                     return foreignIntent.State == KeyValueState.Deleted
                            || PreparedIntentVisibility.IsExpired(foreignIntent, currentTime)
                         ? KeyValueStaticResponses.DoesNotExistContextResponse
-                        : new(KeyValueResponseType.Get, new ReadOnlyKeyValueEntry(
+                        : new KeyValueResponse(KeyValueResponseType.Get, new ReadOnlyKeyValueEntry(
                             foreignIntent.Value, foreignIntent.Revision, foreignIntent.Expires,
                             currentTime, foreignIntent.CommitTimestamp, foreignIntent.State));
 
@@ -156,7 +181,7 @@ internal sealed class TryGetHandler : BaseHandler
                 if (intent.TransactionId != message.TransactionId)
                 {
                     if (KeyValueWriteIntentLease.IsLive(context, bucket, intent, currentTime))
-                        return new(KeyValueResponseType.MustRetry, 0);
+                        return new KeyValueResponse(KeyValueResponseType.MustRetry, 0);
 
                     context.LocksByPrefix.Remove(bucket);
                 }
@@ -171,9 +196,10 @@ internal sealed class TryGetHandler : BaseHandler
             {
                 // Transactional reads must never detach: load synchronously so the MVCC
                 // snapshot always reflects the committed state of the key.
-                (KeyValueEntry? hydrated, bool stale) = await HydratePersistentHead(
+                (KeyValueEntry? hydrated, bool stale) = await HydrateForRead(
                     message.Key, currentTime,
-                    CommittedForeignIntentRevision(message.Key, message.TransactionId, message.ForeignDecisionHint));
+                    CommittedForeignIntentRevision(message.Key, message.TransactionId, message.ForeignDecisionHint),
+                    preloadedHeads);
 
                 // A hydrated row below this node's committed-head memory must not become a
                 // transaction's MVCC base: the missing committed writes would be silently
@@ -232,7 +258,7 @@ internal sealed class TryGetHandler : BaseHandler
                 || (mvccEntry.Expires != HLCTimestamp.Zero && mvccEntry.Expires - currentTime < TimeSpan.Zero))
                 return KeyValueStaticResponses.DoesNotExistContextResponse;
 
-            return new(KeyValueResponseType.Get, new ReadOnlyKeyValueEntry(
+            return new KeyValueResponse(KeyValueResponseType.Get, new ReadOnlyKeyValueEntry(
                 mvccEntry.Value, mvccEntry.Revision, mvccEntry.Expires,
                 mvccEntry.LastUsed, mvccEntry.LastModified, mvccEntry.State));
         }
@@ -245,7 +271,7 @@ internal sealed class TryGetHandler : BaseHandler
         if (!message.ReadTimestamp.IsNull())
         {
             if (!inCache && message.Durability == KeyValueDurability.Persistent)
-                return await DispatchSnapshotRead(message, KeyValueResponseType.Get, currentTime, hydrate: true, asOfCeiling: -1);
+                return PointReadStep.Detached(PointReadDetach.SnapshotHydrate, -1);
 
             if (entry is not null && entry.LastModified > message.ReadTimestamp)
             {
@@ -268,7 +294,7 @@ internal sealed class TryGetHandler : BaseHandler
                     // In-memory archive trimmed the as-of revision; the persisted revision history
                     // answers. Correct because trimming drops the lowest revision numbers, so an
                     // in-memory miss means the true as-of answer (if any) is older and only on disk.
-                    return await DispatchSnapshotRead(message, KeyValueResponseType.Get, currentTime, hydrate: false, asOfCeiling: entry.Revision - 1);
+                    return PointReadStep.Detached(PointReadDetach.SnapshotHistory, entry.Revision - 1);
                 }
 
                 if (snapshot.State is KeyValueState.Deleted or KeyValueState.Undefined
@@ -276,87 +302,15 @@ internal sealed class TryGetHandler : BaseHandler
                         && snapshot.Expires - currentTime < TimeSpan.Zero))
                     return KeyValueStaticResponses.DoesNotExistContextResponse;
 
-                return new(KeyValueResponseType.Get, new ReadOnlyKeyValueEntry(
+                return new KeyValueResponse(KeyValueResponseType.Get, new ReadOnlyKeyValueEntry(
                     snapshot.Value, snapRevision, snapshot.Expires,
                     currentTime, snapshot.LastModified, snapshot.State));
             }
         }
 
-        // ── Non-transactional persistent cache miss → detach or coalesce ────────────────────
-        // If a backend read for this key is already in flight, attach the caller's Promise to
-        // the existing continuation (single-flight coalescing) instead of issuing a second
-        // identical read. The first caller's ContinueWith will drive ResumeRead for everyone.
+        // ── Non-transactional persistent cache miss → the caller reads the backend ──────────
         if (entry is null && message.Durability == KeyValueDurability.Persistent)
-        {
-            IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext =
-                context.ActorContext;
-
-            if (!actorContext.Reply.HasValue)
-                return KeyValueStaticResponses.ErroredResponse;
-
-            KeyValueReplyRef promise = KeyValueReplyRef.From(actorContext.Reply.Value);
-
-            // Coalesce: attach to the in-flight read if one exists for this key.
-            // (key, -1, false) = latest-point TryGet; by-revision or TryExists reads use
-            // a different key and will not coalesce onto this continuation.
-            (string, long, bool) pointKey = (message.Key, -1L, false);
-            if (context.PendingReads.TryGetValue(pointKey, out ReadContinuation? inflight))
-            {
-                if (!inflight.AddWaiter(promise))
-                    return KeyValueStaticResponses.MustRetryResponse;
-                actorContext.ByPassReply = true;
-                return KeyValueStaticResponses.WaitingForReplicationResponse;
-            }
-
-            // No read in flight — register and dispatch a new one.
-            PointReadContinuation cont = new(message.Key, KeyValueResponseType.Get, promise);
-            ArmReadDeadline(cont, currentTime);
-            context.PendingReads[pointKey] = cont;
-            int partitionId = ResolvePartition(message.Key);
-
-            Task<KeyValueEntry?> readTask;
-            try
-            {
-                readTask = context.BackendReadScheduler.EnqueueBatchableTask(
-                    partitionId,
-                    message.Key,
-                    context.PointReadExecutor);
-            }
-            catch (Exception ex)
-            {
-                // Backpressure or scheduler rejection: clean up the registration, resolve all
-                // waiters (just the primary here since no coalescing can have happened yet) with
-                // MustRetry, and bypass Nixie's auto-reply.
-                context.PendingReads.Remove(pointKey);
-                context.Logger.LogWarning(
-                    "KeyValueActor/TryGet: read scheduler rejected enqueue for key {Key}: {Ex}",
-                    message.Key, ex.Message);
-                cont.Resolve(KeyValueStaticResponses.MustRetryResponse);
-                actorContext.ByPassReply = true;
-                return KeyValueStaticResponses.MustRetryResponse;
-            }
-
-            _ = readTask.ContinueWith(t =>
-            {
-                if (!t.IsCompletedSuccessfully)
-                {
-                    // Mark as faulted so Execute (stage 3) resolves all waiters with MustRetry.
-                    // We deliberately still route through ResumeRead rather than calling
-                    // Resolve / PendingReads.Remove here: this callback runs on a thread-pool
-                    // thread and PendingReads is actor-owned state (no lock).
-                    cont.SetFaulted();
-                }
-                else
-                {
-                    cont.DiskResult = t.Result;
-                }
-                actorContext.Self.Send(
-                    new KeyValueRequest(KeyValueRequestType.ResumeRead) { Continuation = cont });
-            }, TaskScheduler.Default);
-
-            actorContext.ByPassReply = true;
-            return KeyValueStaticResponses.WaitingForReplicationResponse;
-        }
+            return PointReadStep.Detached(PointReadDetach.LatestMiss, -1);
 
         // ── In-memory result: state/expiry check then reply ───────────────────────────────
         if (entry is null
@@ -373,9 +327,102 @@ internal sealed class TryGetHandler : BaseHandler
         if (entry.Published is null)
             context.QueueHeadPublication(entry);
 
-        return new(KeyValueResponseType.Get, new ReadOnlyKeyValueEntry(
+        return new KeyValueResponse(KeyValueResponseType.Get, new ReadOnlyKeyValueEntry(
             entry.Value, entry.Revision, entry.Expires,
             entry.LastUsed, entry.LastModified, entry.State));
+    }
+
+    /// <summary>
+    /// Loads a non-resident persistent head for a read that must compare against it before answering: from
+    /// <paramref name="preloadedHeads"/> when the caller already read it from the backend, otherwise from the
+    /// backend now. Either way the stale-hydration rule and the install are those of <see cref="BaseHandler.HydratePersistentHead"/>.
+    /// </summary>
+    private ValueTask<(KeyValueEntry? Entry, bool Stale)> HydrateForRead(
+        string key, HLCTimestamp currentTime, long coveredThrough, Dictionary<string, KeyValueEntry?>? preloadedHeads)
+    {
+        if (preloadedHeads is not null && preloadedHeads.Remove(key, out KeyValueEntry? preloaded))
+            return new(InstallHydratedHead(key, preloaded, currentTime, coveredThrough));
+
+        return HydratePersistentHead(key, currentTime, coveredThrough);
+    }
+
+    /// <summary>
+    /// Stage 2 dispatch of a non-transactional latest read whose key is not resident. Attaches the caller to a
+    /// backend read already in flight for the key, or registers a new one, and defers the reply.
+    /// </summary>
+    private KeyValueResponse DispatchLatestMiss(KeyValueRequest message, HLCTimestamp currentTime)
+    {
+        // If a backend read for this key is already in flight, attach the caller's Promise to
+        // the existing continuation (single-flight coalescing) instead of issuing a second
+        // identical read. The first caller's ContinueWith will drive ResumeRead for everyone.
+        IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext =
+            context.ActorContext;
+
+        if (!actorContext.Reply.HasValue)
+            return KeyValueStaticResponses.ErroredResponse;
+
+        KeyValueReplyRef promise = KeyValueReplyRef.From(actorContext.Reply.Value);
+
+        // Coalesce: attach to the in-flight read if one exists for this key.
+        // (key, -1, false) = latest-point TryGet; by-revision or TryExists reads use
+        // a different key and will not coalesce onto this continuation.
+        (string, long, bool) pointKey = (message.Key, -1L, false);
+        if (context.PendingReads.TryGetValue(pointKey, out ReadContinuation? inflight))
+        {
+            if (!inflight.AddWaiter(promise))
+                return KeyValueStaticResponses.MustRetryResponse;
+            actorContext.ByPassReply = true;
+            return KeyValueStaticResponses.WaitingForReplicationResponse;
+        }
+
+        // No read in flight — register and dispatch a new one.
+        PointReadContinuation cont = new(message.Key, KeyValueResponseType.Get, promise);
+        ArmReadDeadline(cont, currentTime);
+        context.PendingReads[pointKey] = cont;
+        int partitionId = ResolvePartition(message.Key);
+
+        Task<KeyValueEntry?> readTask;
+        try
+        {
+            readTask = context.BackendReadScheduler.EnqueueBatchableTask(
+                partitionId,
+                message.Key,
+                context.PointReadExecutor);
+        }
+        catch (Exception ex)
+        {
+            // Backpressure or scheduler rejection: clean up the registration, resolve all
+            // waiters (just the primary here since no coalescing can have happened yet) with
+            // MustRetry, and bypass Nixie's auto-reply.
+            context.PendingReads.Remove(pointKey);
+            context.Logger.LogWarning(
+                "KeyValueActor/TryGet: read scheduler rejected enqueue for key {Key}: {Ex}",
+                message.Key, ex.Message);
+            cont.Resolve(KeyValueStaticResponses.MustRetryResponse);
+            actorContext.ByPassReply = true;
+            return KeyValueStaticResponses.MustRetryResponse;
+        }
+
+        _ = readTask.ContinueWith(t =>
+        {
+            if (!t.IsCompletedSuccessfully)
+            {
+                // Mark as faulted so Execute (stage 3) resolves all waiters with MustRetry.
+                // We deliberately still route through ResumeRead rather than calling
+                // Resolve / PendingReads.Remove here: this callback runs on a thread-pool
+                // thread and PendingReads is actor-owned state (no lock).
+                cont.SetFaulted();
+            }
+            else
+            {
+                cont.DiskResult = t.Result;
+            }
+            actorContext.Self.Send(
+                new KeyValueRequest(KeyValueRequestType.ResumeRead) { Continuation = cont });
+        }, TaskScheduler.Default);
+
+        actorContext.ByPassReply = true;
+        return KeyValueStaticResponses.WaitingForReplicationResponse;
     }
 
     private KeyValueResponse ExecuteByRevision(KeyValueRequest message)

@@ -61,6 +61,11 @@ internal sealed class UnflushedOverlayPersistenceBackend : IPersistenceBackend, 
     // answer "no reset performed" without ever reaching the real engine.
     public bool TryRecoverFromStorageFailure() => inner.TryRecoverFromStorageFailure();
 
+    // The overlay side is always in memory, so the inner backend decides whether a read may run on
+    // the actor thread. Explicit forwarding: the interface default would keep every read on the
+    // scheduler even over the in-memory backend.
+    public bool ServesReadsFromMemory => inner.ServesReadsFromMemory;
+
     public bool StoreLocks(List<PersistenceRequestItem> items)
     {
         bool stored = inner.StoreLocks(items);

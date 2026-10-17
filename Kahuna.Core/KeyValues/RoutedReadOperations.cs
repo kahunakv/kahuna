@@ -3,6 +3,7 @@ using System.Diagnostics;
 using Kommander;
 using Kommander.Time;
 
+using Kahuna.Server.KeyValues.Logging;
 using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
@@ -316,6 +317,174 @@ internal sealed class RoutedReadOperations
             return Task.FromResult(BuildManyReadRejection(keys, KeyValueResponseType.InvalidInput));
 
         return RegisterAndTryReadManyValues(OperationKind.GetMany, transactionId, coordinatorKey, operationId, readTimestamp, keys, cancellationToken);
+    }
+
+    /// <summary>
+    /// Locates and runs a batched probe: many keys of one key space, each answered as a single get of it is, and
+    /// with <see cref="KeyValueProbeLock.Shared"/> each under a Shared <c>[k,k]</c> range lock taken in the same actor
+    /// turn as its read (see <see cref="Handlers.TryProbeManyHandler"/>). Returns one result per key, in input order.
+    /// A transaction-scoped probe registers as one coordinator operation; see <see cref="RegisterAndTryProbeMany"/>.
+    /// </summary>
+    public Task<KeyValueProbeResult[]> LocateAndTryProbeMany(
+        HLCTimestamp transactionId,
+        HLCTimestamp readTimestamp,
+        IReadOnlyList<string> keys,
+        KeyValueProbeLock lockMode,
+        int expiresMs,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
+    )
+    {
+        RegistrationRouting routing = ClassifyRegistration(transactionId, coordinatorKey, operationId);
+        if (routing is RegistrationRouting.Legacy)
+            return locator.LocateAndTryProbeMany(transactionId, readTimestamp, keys, lockMode, expiresMs, durability, cancellationToken);
+
+        // The re-entry-only mode is the replay a registered probe derives for itself; a caller never asks for it.
+        if (routing is RegistrationRouting.Malformed || lockMode == KeyValueProbeLock.SharedReentryOnly)
+            return Task.FromResult(BuildProbeRejection(keys.Count, KeyValueResponseType.InvalidInput));
+
+        return RegisterAndTryProbeMany(transactionId, coordinatorKey, operationId, readTimestamp, keys, lockMode, expiresMs, durability, cancellationToken);
+    }
+
+    private static KeyValueProbeResult[] BuildProbeRejection(int count, KeyValueResponseType type)
+    {
+        KeyValueProbeResult[] rejected = new KeyValueProbeResult[count];
+        Array.Fill(rejected, KeyValueProbeResult.MustRetry with { Type = type });
+        return rejected;
+    }
+
+    /// <summary>
+    /// Registers a batched probe as one coordinator operation. On completion it folds the latest reads' confirmed
+    /// observations into the read set, exactly as a batch get does, and every Shared <c>[k,k]</c> lock it took into
+    /// the held range-lock set with the leaderships they were granted under, so commit validates the reads and
+    /// finalize releases the locks.
+    ///
+    /// <para>A same-id replay re-reads without folding again, as every read replay does. A replay that locks never
+    /// takes a lock: the completed operation recorded the locks it took, so the replay only renews the ones this
+    /// transaction still holds and reads those keys, and answers <c>MustRetry</c> for the others (see
+    /// <see cref="KeyValueProbeLock.SharedReentryOnly"/>). A lock taken by a replay would be held by the actor but
+    /// unknown to the coordinator, so no finalize would release it.</para>
+    ///
+    /// <para>A completion that does not land answers <c>MustRetry</c> for every key, keeping each key's lock flag so
+    /// the caller can still release what it holds, and the same-id retry recovers the completion before it re-reads.
+    /// A completion with no confirmed observation and no lock cancels the registration, so a same-id retry registers
+    /// anew.</para>
+    /// </summary>
+    private async Task<KeyValueProbeResult[]> RegisterAndTryProbeMany(
+        HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId,
+        HLCTimestamp readTimestamp, IReadOnlyList<string> keys, KeyValueProbeLock lockMode, int expiresMs,
+        KeyValueDurability durability, CancellationToken cancellationToken)
+    {
+        byte[] digest = OperationDigest.ForProbeMany(keys, readTimestamp, lockMode, expiresMs, durability);
+
+        (OperationRegistrationOutcome outcome, _, _, _, _, TransactionConflictPolicy sessionPolicy) =
+            await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.ProbeMany, digest, cancellationToken);
+
+        if (outcome == OperationRegistrationOutcome.AlreadyPending)
+        {
+            if (!await TryRecoverRegisteredRead(coordinatorKey, transactionId, operationId))
+                return BuildProbeRejection(keys.Count, KeyValueResponseType.MustRetry);
+
+            outcome = OperationRegistrationOutcome.AlreadyCompleted;
+        }
+
+        switch (outcome)
+        {
+            case OperationRegistrationOutcome.RejectedCapacity:
+                return BuildProbeRejection(keys.Count, KeyValueResponseType.MustRetry);
+            case OperationRegistrationOutcome.RejectedSessionBudget:
+                return BuildProbeRejection(keys.Count, KeyValueResponseType.Aborted);
+            case OperationRegistrationOutcome.RejectedSessionClosed:
+                return BuildProbeRejection(keys.Count, KeyValueResponseType.Aborted);
+            case OperationRegistrationOutcome.RejectedDuplicate:
+                return BuildProbeRejection(keys.Count, KeyValueResponseType.Errored);
+        }
+
+        bool locking = lockMode == KeyValueProbeLock.Shared;
+
+        // A yielding transaction may not hold a range lock: the rule a single range-lock acquire applies.
+        if (locking && outcome == OperationRegistrationOutcome.New && sessionPolicy == TransactionConflictPolicy.Yield)
+        {
+            OperationCompletionPayload rejectPayload = OperationCompletionPayloadPool.Rent();
+            rejectPayload.CachedType = KeyValueResponseType.Errored;
+            await CompleteRegisteredOperation(coordinatorKey, transactionId, operationId, KeyValueResponseType.Errored, rejectPayload);
+            logger.LogYieldingPredicateLockRejected("range", KeyValueKeySpace.OfKey(keys[0]) ?? keys[0], transactionId);
+            return BuildProbeRejection(keys.Count, KeyValueResponseType.Errored);
+        }
+
+        KeyValueProbeLock effectiveLock = locking && outcome != OperationRegistrationOutcome.New
+            ? KeyValueProbeLock.SharedReentryOnly
+            : lockMode;
+
+        KeyValueProbeResult[] results;
+        LockGrantCapture grants;
+
+        // This frame is the registration's only completer, so a throw from the work must release it.
+        try
+        {
+            using (LockGrantScope.Begin(out grants))
+                results = await locator.LocateAndTryProbeMany(transactionId, readTimestamp, keys, effectiveLock, expiresMs, durability, cancellationToken);
+        }
+        catch
+        {
+            if (outcome == OperationRegistrationOutcome.New)
+                await AbandonRegisteredOperation(coordinatorKey, transactionId, operationId);
+            throw;
+        }
+
+        // A replay re-executes without re-folding: the first-recorded observations and locks are authoritative.
+        if (outcome != OperationRegistrationOutcome.New)
+            return results;
+
+        List<KeyValueTransactionReadKey>? observations = null;
+        List<(RangeLockKey Range, RangeLockMode Mode)>? acquired = null;
+        string keySpace = KeyValueKeySpace.OfKey(keys[0]) ?? keys[0];
+
+        for (int i = 0; i < results.Length; i++)
+        {
+            KeyValueProbeResult result = results[i];
+
+            if (result.Locked)
+                (acquired ??= []).Add((new RangeLockKey(keySpace, keys[i], true, keys[i], true, durability), RangeLockMode.Shared));
+
+            // A snapshot read owns no live transactional MVCC entry, so it records no observation. Only confirmed
+            // answers fold, by the allow-list a batch get uses: any other type means the key's state is unknown.
+            if (!readTimestamp.IsNull() || result.Type is not (KeyValueResponseType.Get or KeyValueResponseType.DoesNotExist))
+                continue;
+
+            bool exists = result.Entry is not null && result.Type == KeyValueResponseType.Get;
+            (observations ??= new(results.Length)).Add(new KeyValueTransactionReadKey
+            {
+                Key = keys[i],
+                Durability = durability,
+                Exists = exists,
+                Revision = exists ? result.Entry!.Revision : -1
+            });
+        }
+
+        // A latest probe that neither confirmed a read nor took a lock has no effect: cancel the registration so a
+        // same-id retry registers as new (the transient-cancel path of a batch get). A lock is an effect even when
+        // every read on it waited, so it always completes.
+        KeyValueResponseType cachedType = readTimestamp.IsNull() && observations is null && acquired is null
+            ? KeyValueResponseType.MustRetry
+            : KeyValueResponseType.Get;
+
+        OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
+        payload.ReadObservations = observations;
+        payload.AcquiredRangeLocks = acquired;
+        payload.LockGrantTerms = acquired is null ? null : grants.Take();
+        payload.Durability = durability;
+        payload.CachedType = cachedType;
+
+        if (!await CompleteRegisteredOperation(coordinatorKey, transactionId, operationId, cachedType, payload))
+        {
+            for (int i = 0; i < results.Length; i++)
+                results[i] = KeyValueProbeResult.MustRetry with { Locked = results[i].Locked };
+        }
+
+        return results;
     }
 
     /// <summary>

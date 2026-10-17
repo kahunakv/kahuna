@@ -119,6 +119,19 @@ internal sealed partial class KeyValuesManager
     ) =>
         routedReads.LocateAndTryExistsManyValuesUnconfirmed(transactionId, readTimestamp, keys, cancellationToken);
 
+    public Task<KeyValueProbeResult[]> LocateAndTryProbeMany(
+        HLCTimestamp transactionId,
+        HLCTimestamp readTimestamp,
+        IReadOnlyList<string> keys,
+        KeyValueProbeLock lockMode,
+        int expiresMs,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken,
+        string coordinatorKey = "",
+        TransactionOperationId operationId = default
+    ) =>
+        routedReads.LocateAndTryProbeMany(transactionId, readTimestamp, keys, lockMode, expiresMs, durability, cancellationToken, coordinatorKey, operationId);
+
     public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryGetManyValues(
         HLCTimestamp transactionId,
         HLCTimestamp readTimestamp,

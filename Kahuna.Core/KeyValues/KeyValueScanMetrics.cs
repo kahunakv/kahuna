@@ -51,6 +51,28 @@ internal static class KeyValueScanMetrics
             description: "Backend scans skipped or stopped early because their continuation had expired.");
 
     /// <summary>
+    /// Backend pages of persistent range scans read on the key-value actor thread, in the turn that
+    /// received the request, because the backend serves every read from process memory. Such a page
+    /// costs no scheduler hand-off, no thread-pool continuation and no resume message. Compare with
+    /// <see cref="PagesReadOnScheduler"/>: on an in-memory backend nearly every page should land
+    /// here, and a growing scheduler share means scans are meeting ranges dense with dead rows.
+    /// </summary>
+    internal static readonly Counter<long> PagesReadOnActor =
+        Meter.CreateCounter<long>(
+            "kahuna.scan.pages_read_on_actor_total",
+            description: "Range scan backend pages read on the actor thread (in-memory backend, no scheduler hand-off).");
+
+    /// <summary>
+    /// Backend pages of persistent range scans read on a backend read scheduler worker, each costing one
+    /// hand-off to the worker and one resume message back to the actor. The whole count on a disk
+    /// backend; on an in-memory backend only the pages past the inline inspection budget.
+    /// </summary>
+    internal static readonly Counter<long> PagesReadOnScheduler =
+        Meter.CreateCounter<long>(
+            "kahuna.scan.pages_read_on_scheduler_total",
+            description: "Range scan backend pages read on a backend read scheduler worker (one hand-off and one resume each).");
+
+    /// <summary>
     /// Seeks a disk scan issued to jump over the remaining revision rows of one logical key's
     /// block instead of stepping them one by one. A healthy version-heavy store shows roughly
     /// one seek per deep logical key per scan; a rate near zero on such a store means the

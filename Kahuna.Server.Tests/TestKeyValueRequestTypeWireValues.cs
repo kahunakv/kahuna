@@ -50,6 +50,7 @@ public sealed class TestKeyValueRequestTypeWireValues
         (KeyValueRequestType.TryFinalizeMutation, 31),
         (KeyValueRequestType.RunActorTurn, 32),
         (KeyValueRequestType.RecordReadPin, 33),
+        (KeyValueRequestType.TryProbeMany, 34),
     ];
 
     [Fact]

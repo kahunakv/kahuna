@@ -24,7 +24,46 @@ namespace Kahuna.Server.KeyValues.Transactions;
 /// </summary>
 internal sealed class PreparedIntentStore
 {
+    /// <summary>The live intents by key. Written only through <see cref="InstallLive"/> and <see cref="RemoveLive"/>,
+    /// which keep <see cref="orderedKeys"/> in step; point lookups read it lock-free.</summary>
     private readonly ConcurrentDictionary<string, PreparedIntent> intents = new();
+
+    /// <summary>
+    /// The live intents' keys in ordinal order, beside the map, so a scan window
+    /// (<see cref="SnapshotScanWindow"/>, <see cref="SnapshotPrefix"/>) is a descent to the window's first key plus
+    /// the keys inside it, instead of a walk of every live intent. The walk cost every scan page O(live intents)
+    /// for a window that is almost always empty, and a concurrent map never shrinks its bucket table, so a store
+    /// that once held a bulk load's intents walked all of its empty buckets per page long after they settled.
+    /// Guarded by <see cref="orderedKeysGate"/>: a window read holds it for the descent and the window, a mutation
+    /// for one tree update. Count is the live intent count without the map's per-bucket lock sweep.
+    /// </summary>
+    private readonly SortedSet<string> orderedKeys = new(StringComparer.Ordinal);
+
+    private readonly object orderedKeysGate = new();
+
+    /// <summary>Installs or replaces the live intent at <paramref name="key"/>: the map first, so a key the index
+    /// names has its intent, then the index. Safe under concurrent writers (the apply gate serializes most, the
+    /// snapshot import runs outside it); a reader between the two steps misses an intent whose apply has not
+    /// completed, which is the state before the apply.</summary>
+    private void InstallLive(string key, PreparedIntent intent)
+    {
+        intents[key] = intent;
+
+        lock (orderedKeysGate)
+            orderedKeys.Add(key);
+    }
+
+    /// <summary>Removes the live intent at <paramref name="key"/> from the map and the index; false when the map held
+    /// none. A reader between the two steps finds the key in the index and no intent in the map, and skips it.</summary>
+    private bool RemoveLive(string key, out PreparedIntent? removed)
+    {
+        bool found = intents.TryRemove(key, out removed);
+
+        lock (orderedKeysGate)
+            orderedKeys.Remove(key);
+
+        return found;
+    }
 
     /// <summary>One key's last committed durable-transaction write, as remembered by the committed-head ledger:
     /// the revision/state the committed head reached when that commit's settlement applied, and the commit
@@ -859,13 +898,13 @@ internal sealed class PreparedIntentStore
             {
                 if (result.Intent is null)
                 {
-                    intents.TryRemove(key, out _);
+                    RemoveLive(key, out _);
                     if (existing is not null)
                         Interlocked.Add(ref totalBytes, -IntentBytes(existing));
                 }
                 else
                 {
-                    intents[key] = result.Intent;
+                    InstallLive(key, result.Intent);
                     ObserveInstalled(result.Intent);
                     Interlocked.Add(ref totalBytes, IntentBytes(result.Intent) - (existing is null ? 0 : IntentBytes(existing)));
                 }
@@ -3277,7 +3316,7 @@ internal sealed class PreparedIntentStore
     {
         if (!intents.TryGetValue(incoming.Key, out PreparedIntent? existing))
         {
-            intents[incoming.Key] = incoming;
+            InstallLive(incoming.Key, incoming);
             ObserveInstalled(incoming);
             Interlocked.Add(ref totalBytes, IntentBytes(incoming));
             StampDirty(incoming.Key);
@@ -3293,7 +3332,7 @@ internal sealed class PreparedIntentStore
 
         if (existing.IsPending && incoming.IsResolved)
         {
-            intents[incoming.Key] = incoming;
+            InstallLive(incoming.Key, incoming);
             ObserveInstalled(incoming);
             Interlocked.Add(ref totalBytes, IntentBytes(incoming) - IntentBytes(existing));
             StampDirty(incoming.Key);
@@ -3306,8 +3345,8 @@ internal sealed class PreparedIntentStore
     /// split/merge hands to the destination partition. Deliberately a consistent cut (<c>Values</c> copies the map
     /// under every bucket lock): the moved keys' log entries stay on the source partition, so the destination has
     /// no replay tail to converge a torn capture with. The whole-partition export does have that tail and streams
-    /// its slice lock-free instead (<see cref="WritePartitionSection"/>); the scan captures are lock-free too — see
-    /// <see cref="SnapshotScanWindow"/>.</summary>
+    /// its slice lock-free instead (<see cref="WritePartitionSection"/>); the scan captures read the ordered key
+    /// index per key instead — see <see cref="SnapshotScanWindow"/>.</summary>
     public IReadOnlyList<PreparedIntent> SnapshotRange(string? startKey, string? endKey)
     {
         List<PreparedIntent> result = [];
@@ -3393,16 +3432,31 @@ internal sealed class PreparedIntentStore
     /// included/overridden/excluded in a bucket scan exactly as it would be in the equivalent range scan.</summary>
     public IReadOnlyList<PreparedIntent> SnapshotPrefix(string prefix)
     {
-        List<PreparedIntent> result = [];
+        List<PreparedIntent>? result = null;
 
-        // Lock-free per-key capture; the argument is the one on SnapshotScanWindow.
-        foreach (KeyValuePair<string, PreparedIntent> kv in intents)
+        lock (orderedKeysGate)
         {
-            if (kv.Key.StartsWith(prefix, StringComparison.Ordinal))
-                result.Add(kv.Value);
+            if (orderedKeys.Count == 0)
+                return [];
+
+            // Every key with the prefix sorts at or after the prefix and before any key without it that sorts
+            // after the prefix, so the keys with the prefix are one run at the head of this view.
+            string last = orderedKeys.Max!;
+            if (string.CompareOrdinal(prefix, last) > 0)
+                return [];
+
+            foreach (string key in orderedKeys.GetViewBetween(prefix, last))
+            {
+                if (!key.StartsWith(prefix, StringComparison.Ordinal))
+                    break;
+
+                // Per-key capture of the live state; the argument is the one on SnapshotScanWindow.
+                if (intents.TryGetValue(key, out PreparedIntent? intent))
+                    (result ??= []).Add(intent);
+            }
         }
 
-        return result;
+        return result ?? [];
     }
 
     /// <summary>Intents covering a scan page's window with the scan's own boundary semantics: start-exclusivity for a
@@ -3410,45 +3464,54 @@ internal sealed class PreparedIntentStore
     /// which the prior page already emitted) and end-inclusivity (<paramref name="endInclusive"/> true keeps an intent
     /// exactly at <paramref name="endKey"/>). This is distinct from <see cref="SnapshotRange"/>'s fixed half-open
     /// <c>[start, end)</c> so the overlaid intent set matches exactly the window the scan's KV rows were drawn from —
-    /// without it a boundary intent is re-emitted across pages or an inclusive-end intent is missed.
+    /// without it a boundary intent is re-emitted across pages or an inclusive-end intent is missed. The intents come
+    /// back in ordinal key order.
     ///
-    /// <para>The map is enumerated directly rather than through <c>Values</c>. <c>Values</c> takes every bucket lock
-    /// and copies the whole map, so each scan page stalled every concurrent prepare and settle apply for the copy
-    /// and allocated in proportion to the node-wide intent population instead of the window. The direct enumerator
-    /// is lock-free and allocation-free but is not a consistent cut: an intent present for the whole enumeration is
-    /// always seen exactly once, while one added, replaced or removed during it may be seen in either state. That
-    /// is sufficient here because the merge judges each key independently — a key's outcome depends only on its
-    /// own intent, so any state the enumerator observes for a key is a state that key really had at some instant
-    /// after the KV rows were read, exactly as a copy taken at that instant would show it. The only cross-key
-    /// effect, a pending intent making the whole page retry, is monotone-safe: observing a stale pending node
-    /// causes a retry, never a wrong row. State-transfer captures need a true cut and keep <c>Values</c>.</para>
+    /// <para>The window's keys come from the ordered key index (<see cref="orderedKeys"/>): a descent to the first
+    /// key at or after the start, then the keys up to the end, under the index gate. Each key's intent is then read
+    /// from the map lock-free. The cost is the window, not the live intent population, and an empty store answers
+    /// from the index count alone. Before, every page enumerated the whole map: O(live intents) per page, and a map
+    /// that had grown for a bulk load kept walking its empty buckets after the load settled.</para>
+    ///
+    /// <para>This is not a consistent cut across keys: an intent present for the whole call is always returned
+    /// exactly once, while one installed, replaced or removed during it may be seen in either state (a key the index
+    /// names whose intent is already gone is skipped; a key installed after the descent is missed). That is
+    /// sufficient here because the merge judges each key independently — a key's outcome depends only on its own
+    /// intent, so any state read for a key is a state that key really had at some instant after the KV rows were
+    /// read, exactly as a copy taken at that instant would show it. The only cross-key effect, a pending intent
+    /// making the whole page retry, is monotone-safe: observing a stale pending node causes a retry, never a wrong
+    /// row. State-transfer captures need a true cut and keep <c>Values</c>.</para>
     /// </summary>
     public IReadOnlyList<PreparedIntent> SnapshotScanWindow(string? startKey, bool startInclusive, string? endKey, bool endInclusive)
     {
-        List<PreparedIntent> result = [];
+        List<PreparedIntent>? result = null;
 
-        foreach (KeyValuePair<string, PreparedIntent> kv in intents)
+        lock (orderedKeysGate)
         {
-            PreparedIntent intent = kv.Value;
+            if (orderedKeys.Count == 0)
+                return [];
 
-            if (startKey is not null)
+            // The view is inclusive at both ends; the exclusive bounds skip the one key that can equal them.
+            string lower = startKey ?? orderedKeys.Min!;
+            string upper = endKey ?? orderedKeys.Max!;
+
+            if (string.CompareOrdinal(lower, upper) > 0)
+                return [];
+
+            foreach (string key in orderedKeys.GetViewBetween(lower, upper))
             {
-                int cmpStart = string.CompareOrdinal(intent.Key, startKey);
-                if (cmpStart < 0 || (!startInclusive && cmpStart == 0))
+                if (!startInclusive && startKey is not null && string.CompareOrdinal(key, startKey) == 0)
                     continue;
-            }
 
-            if (endKey is not null)
-            {
-                int cmpEnd = string.CompareOrdinal(intent.Key, endKey);
-                if (cmpEnd > 0 || (!endInclusive && cmpEnd == 0))
-                    continue;
-            }
+                if (!endInclusive && endKey is not null && string.CompareOrdinal(key, endKey) == 0)
+                    break;
 
-            result.Add(intent);
+                if (intents.TryGetValue(key, out PreparedIntent? intent))
+                    (result ??= []).Add(intent);
+            }
         }
 
-        return result;
+        return result ?? [];
     }
 
     /// <summary>
@@ -3485,8 +3548,8 @@ internal sealed class PreparedIntentStore
 
             foreach (string key in toRemove)
             {
-                if (intents.TryRemove(key, out PreparedIntent? removed))
-                    Interlocked.Add(ref totalBytes, -IntentBytes(removed));
+                if (RemoveLive(key, out PreparedIntent? removed))
+                    Interlocked.Add(ref totalBytes, -IntentBytes(removed!));
             }
 
             StampAllDirty();
@@ -3667,10 +3730,10 @@ internal sealed class PreparedIntentStore
             {
                 foreach (string key in owned)
                 {
-                    if (!intents.TryRemove(key, out PreparedIntent? removed))
+                    if (!RemoveLive(key, out PreparedIntent? removed))
                         continue;
 
-                    Interlocked.Add(ref totalBytes, -IntentBytes(removed));
+                    Interlocked.Add(ref totalBytes, -IntentBytes(removed!));
                     fenceRefusalStreaks.TryRemove(key, out _);
                     purged++;
                 }

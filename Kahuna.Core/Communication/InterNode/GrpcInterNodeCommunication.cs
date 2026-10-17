@@ -683,6 +683,35 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         }
     }
 
+    public async Task<KeyValueProbeResult[]> TryProbeMany(
+        string node,
+        HLCTimestamp transactionId,
+        HLCTimestamp readTimestamp,
+        string[] keys,
+        KeyValueProbeLock lockMode,
+        int expiresMs,
+        KeyValueDurability durability,
+        CancellationToken cancellationToken
+    )
+    {
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+
+        GrpcTryProbeManyRequest request = ProbeManyWire.ToRequest(transactionId, readTimestamp, keys, lockMode, expiresMs, durability);
+
+        GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryProbeMany", node).ConfigureAwait(false);
+        if (!response.IsAnswered)
+        {
+            KeyValueProbeResult[] refused = new KeyValueProbeResult[keys.Length];
+            Array.Fill(refused, KeyValueProbeResult.MustRetry);
+            return refused;
+        }
+
+        GrpcTryProbeManyResponse remoteResponse = response.TryProbeMany!;
+        RecordLockGrantTerms(remoteResponse.GrantTerms);
+
+        return ProbeManyWire.FromItems(remoteResponse.Items, keys.Length);
+    }
+
     public async Task TryExistsManyNodeValues(
         string node,
         HLCTimestamp transactionId,
@@ -1831,6 +1860,12 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         if (payload.ReleasedPrefixLock is not null) request.ReleasedPrefixLock = payload.ReleasedPrefixLock;
         if (payload.AcquiredRangeLock is { } acquiredRange) request.AcquiredRangeLock = ToGrpcRangeLock(acquiredRange.Range, acquiredRange.Mode);
         if (payload.ReleasedRangeLock is { } releasedRange) request.ReleasedRangeLock = ToGrpcRangeLock(releasedRange, RangeLockMode.Exclusive);
+        if (payload.AcquiredRangeLocks is not null)
+        {
+            ReserveItemCapacity(request.AcquiredRangeLocks, payload.AcquiredRangeLocks.Count);
+            foreach ((RangeLockKey Range, RangeLockMode Mode) acquired in payload.AcquiredRangeLocks)
+                request.AcquiredRangeLocks.Add(ToGrpcRangeLock(acquired.Range, acquired.Mode));
+        }
         if (payload.Read is not null) request.Read = ToGrpcReadKey(payload.Read);
         if (payload.ReadObservations is not null)
         {

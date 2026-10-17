@@ -460,6 +460,240 @@ public sealed class TestTryGetByRangeHandler : RaftTrackingTest
         finally { scheduler.Stop(); }
     }
 
+    // ── In-memory backend: the page is read and merged in the actor turn, with no scheduler hand-off ──
+
+    /// <summary>
+    /// A backend that serves reads from memory answers a page inside the turn that received the request:
+    /// the backend read runs on the actor thread, the merge follows at once, and the reply is synchronous.
+    /// Nothing is enqueued on the backend read scheduler, and the resident keys still merge with the page.
+    /// </summary>
+    [Fact]
+    public async Task PersistentRangeScan_InMemoryBackend_PageReadAndMergedInTheActorTurn_NoSchedulerHandOff()
+    {
+        (RaftManager raft, FairReadScheduler scheduler, KahunaConfiguration config,
+            ILogger<IKahuna> logger) = CreateRaftAndConfig("range-inline-page");
+
+        scheduler.Start();
+        try
+        {
+            RangeBackend backend = new(["doc/a", "doc/b", "doc/c"], servesReadsFromMemory: true);
+
+            // No inner scheduler: an enqueue would still run (off the caller's thread) and be recorded.
+            RecordingReadScheduler recording = new();
+
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
+            IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
+                actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
+                    "range-inline-page-actor", null!, null!, backend, raft,
+                    recording, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+
+            await actorRef.Ask(MakeSet("doc/bb", Encoding.UTF8.GetBytes("bb-val")), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+            KeyValueResponse? resp = await actorRef.Ask(
+                MakeRangeScan("doc/", limit: 10), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+            Assert.NotNull(resp);
+            Assert.Equal(KeyValueResponseType.Get, resp!.Type);
+            Assert.Equal(["doc/a", "doc/b", "doc/bb", "doc/c"], resp.RangeResult!.Items.Select(static i => i.Item1).ToList());
+            Assert.False(resp.RangeResult.HasMore);
+            Assert.True(resp.RangeResult.Observation!.Value.DiskFallback);
+
+            Assert.Empty(recording.EnqueuedPartitions);
+            PageRead read = Assert.Single(backend.Reads);
+            Assert.Equal(11, read.Limit);
+        }
+        finally { scheduler.Stop(); }
+    }
+
+    /// <summary>
+    /// A page continued from a cursor starts at the last returned key, excluded, and the backend seek is inclusive,
+    /// so the cursor row takes one slot of the page. The page is read one row longer for it and closes on one
+    /// backend read; before, every cursor page read a second page to find its sentinel. Holds on both page paths:
+    /// on the scheduler, where each page is exactly one hand-off, and on the actor thread, where it is none.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PersistentRangeScan_CursorPages_OneBackendReadPerPage(bool servesReadsFromMemory)
+    {
+        (RaftManager raft, FairReadScheduler scheduler, KahunaConfiguration config,
+            ILogger<IKahuna> logger) = CreateRaftAndConfig("range-cursor-pages-" + servesReadsFromMemory);
+
+        scheduler.Start();
+        try
+        {
+            string[] diskKeys = HundredDocKeys();
+            string[] residentKeys = ["doc/005a", "doc/050a", "doc/099a"];
+
+            RangeBackend backend = new(diskKeys, servesReadsFromMemory: servesReadsFromMemory);
+            RecordingReadScheduler recording = new(inner: scheduler);
+
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
+            IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
+                actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
+                    "range-cursor-pages-actor", null!, null!, backend, raft,
+                    recording, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+
+            foreach (string key in residentKeys)
+                await actorRef.Ask(MakeSet(key, Encoding.UTF8.GetBytes(key + "-mem")), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+            const int limit = 7;
+            (List<string> keys, int pages) = await WalkByCursor(actorRef, "doc/", limit);
+
+            List<string> union = diskKeys.Concat(residentKeys).OrderBy(static k => k, StringComparer.Ordinal).ToList();
+            Assert.Equal(union, keys);
+            Assert.Equal((union.Count + limit - 1) / limit, pages);
+
+            List<PageRead> reads = backend.Reads;
+            Assert.Equal(pages, reads.Count);
+            Assert.Equal(limit + 1, reads[0].Limit);
+            Assert.All(reads.Skip(1), static r => Assert.Equal(limit + 2, r.Limit));
+
+            Assert.Equal(servesReadsFromMemory ? 0 : pages, recording.EnqueuedPartitions.Count);
+        }
+        finally { scheduler.Stop(); }
+    }
+
+    /// <summary>
+    /// The inline walk is bounded like the ephemeral scan: a range dense with dead rows is read on the actor
+    /// thread up to the inspection budget, and the rest of the scan takes the scheduler path, where the mailbox
+    /// is free between pages. The result is the same either way.
+    /// </summary>
+    [Fact]
+    public async Task PersistentRangeScan_InMemoryBackend_DeadRowsPastTheInspectionBudget_HandTheRestToTheScheduler()
+    {
+        (RaftManager raft, FairReadScheduler scheduler, KahunaConfiguration config,
+            ILogger<IKahuna> logger) = CreateRaftAndConfig("range-inline-budget");
+
+        scheduler.Start();
+        try
+        {
+            const int deadRows = 9_000;
+            const int limit = 100;
+
+            List<string> keys = Enumerable.Range(0, deadRows).Select(static i => $"doc/d{i:D5}").ToList();
+            keys.Add("doc/live1");
+            keys.Add("doc/live2");
+
+            RangeBackend backend = new(keys, k => k.StartsWith("doc/d", StringComparison.Ordinal) ? KeyValueState.Deleted : KeyValueState.Set, servesReadsFromMemory: true);
+            RecordingReadScheduler recording = new(inner: scheduler);
+
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
+            IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
+                actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
+                    "range-inline-budget-actor", null!, null!, backend, raft,
+                    recording, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+
+            KeyValueResponse? resp = await actorRef.Ask(
+                MakeRangeScan("doc/", limit), TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+
+            Assert.NotNull(resp);
+            Assert.Equal(KeyValueResponseType.Get, resp!.Type);
+            Assert.Equal(["doc/live1", "doc/live2"], resp.RangeResult!.Items.Select(static i => i.Item1).ToList());
+            Assert.False(resp.RangeResult.HasMore);
+            Assert.Equal(deadRows + 2, resp.RangeResult.Observation!.Value.EntriesInspected);
+
+            // Each page merges limit + 1 new rows; the walk stays inline until the inspected count reaches
+            // the budget, then every further page is one scheduler hand-off.
+            int inlinePages = (limit + 1 + KeyValueScanLimits.MaxScanInspectionSlack + limit) / (limit + 1);
+            int scheduledPages = recording.EnqueuedPartitions.Count;
+            Assert.True(scheduledPages >= 1, "the walk past the budget must take the scheduler path");
+            Assert.Equal(inlinePages + scheduledPages, backend.Reads.Count);
+        }
+        finally { scheduler.Stop(); }
+    }
+
+    /// <summary>
+    /// The production backend is the unflushed-writes overlay over the in-memory backend. The overlay forwards
+    /// the in-memory answer, so the page is read on the actor thread, and a committed write that is still
+    /// queued for the background writer is visible in that page: read-after-write holds without any hand-off.
+    /// </summary>
+    [Fact]
+    public async Task PersistentRangeScan_OverlayOverInMemoryBackend_UnflushedWriteVisibleInTheActorTurn()
+    {
+        (RaftManager raft, FairReadScheduler scheduler, KahunaConfiguration config,
+            ILogger<IKahuna> logger) = CreateRaftAndConfig("range-inline-overlay");
+
+        scheduler.Start();
+        try
+        {
+            MemoryPersistenceBackend memory = new();
+            memory.StoreKeyValues(
+            [
+                FlushedRow("doc/a", "a-disk"),
+                FlushedRow("doc/c", "c-disk")
+            ]);
+
+            UnflushedKeyValueWritesIndex unflushed = new();
+            unflushed.Record("doc/b", Encoding.UTF8.GetBytes("b-unflushed"), 1, HLCTimestamp.Zero, HLCTimestamp.Zero, new HLCTimestamp(0, 2000, 0), KeyValueState.Set, false);
+
+            UnflushedOverlayPersistenceBackend overlay = new(memory, unflushed, new UnflushedLockWritesIndex());
+            Assert.True(overlay.ServesReadsFromMemory);
+
+            RecordingReadScheduler recording = new();
+
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
+            IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
+                actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
+                    "range-inline-overlay-actor", null!, null!, overlay, raft,
+                    recording, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+
+            await actorRef.Ask(MakeSet("doc/d", Encoding.UTF8.GetBytes("d-mem")), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+            KeyValueResponse? resp = await actorRef.Ask(
+                MakeRangeScan("doc/", limit: 10), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+            Assert.NotNull(resp);
+            Assert.Equal(KeyValueResponseType.Get, resp!.Type);
+            Assert.Equal(["doc/a", "doc/b", "doc/c", "doc/d"], resp.RangeResult!.Items.Select(static i => i.Item1).ToList());
+            Assert.Equal("b-unflushed", Encoding.UTF8.GetString(resp.RangeResult.Items[1].Item2.Value!));
+            Assert.False(resp.RangeResult.HasMore);
+            Assert.Empty(recording.EnqueuedPartitions);
+        }
+        finally { scheduler.Stop(); }
+    }
+
+    private static PersistenceRequestItem FlushedRow(string key, string value) =>
+        new(
+            key: key,
+            value: Encoding.UTF8.GetBytes(value),
+            revision: 1,
+            expiresNode: 0, expiresPhysical: 0, expiresCounter: 0,
+            lastUsedNode: 0, lastUsedPhysical: 1000, lastUsedCounter: 0,
+            lastModifiedNode: 0, lastModifiedPhysical: 1000, lastModifiedCounter: 0,
+            state: (int)KeyValueState.Set);
+
+    /// <summary>Walks every page of a scan as the scan loop does: each next page starts after the last returned key.</summary>
+    private static async Task<(List<string> Keys, int Pages)> WalkByCursor(
+        IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef, string prefix, int limit)
+    {
+        List<string> keys = [];
+        int pages = 0;
+        string? cursor = null;
+
+        while (true)
+        {
+            KeyValueRequest request = cursor is null
+                ? MakeRangeScan(prefix, limit)
+                : MakeBoundedRangeScan(prefix, limit, cursor, false, null, false);
+
+            KeyValueResponse? resp = await actorRef.Ask(request, TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+
+            Assert.NotNull(resp);
+            Assert.Equal(KeyValueResponseType.Get, resp!.Type);
+            pages++;
+
+            foreach ((string key, ReadOnlyKeyValueEntry _) in resp.RangeResult!.Items)
+                keys.Add(key);
+
+            if (!resp.RangeResult.HasMore)
+                return (keys, pages);
+
+            Assert.True(KeyValueRangeCursor.TryDecode(resp.RangeResult.NextCursor!, out string lastKey, out _, out _, out _));
+            cursor = lastKey;
+        }
+    }
+
     // ── End bound reaches the backend: a bounded seek reads only the entries inside it ────
 
     private static string[] HundredDocKeys() => Enumerable.Range(0, 100).Select(static i => $"doc/{i:D3}").ToArray();
@@ -580,13 +814,16 @@ public sealed class TestTryGetByRangeHandler : RaftTrackingTest
     /// <summary>
     /// Differential check of the bounded path over resident and disk keys: for random start and end bounds,
     /// inclusive flags and limits, the page must equal the ordinal union of both sources trimmed to the bounds
-    /// and cut at the limit, with HasMore exactly when more keys remain inside the bounds.
+    /// and cut at the limit, with HasMore exactly when more keys remain inside the bounds. Both page paths:
+    /// read on the scheduler, and read on the actor thread as for an in-memory backend.
     /// </summary>
-    [Fact]
-    public async Task PersistentRangeScan_WithEndKey_MatchesTheOrderedUnionTrimmedAtTheBounds()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PersistentRangeScan_WithEndKey_MatchesTheOrderedUnionTrimmedAtTheBounds(bool servesReadsFromMemory)
     {
         (RaftManager raft, FairReadScheduler scheduler, KahunaConfiguration config,
-            ILogger<IKahuna> logger) = CreateRaftAndConfig("range-bound-differential");
+            ILogger<IKahuna> logger) = CreateRaftAndConfig("range-bound-differential-" + servesReadsFromMemory);
 
         scheduler.Start();
         try
@@ -596,7 +833,7 @@ public sealed class TestTryGetByRangeHandler : RaftTrackingTest
             List<string> diskKeys = universe.Where(_ => random.Next(2) == 0).ToList();
             List<string> residentKeys = universe.Where(_ => random.Next(3) == 0).ToList();
 
-            RangeBackend backend = new(diskKeys);
+            RangeBackend backend = new(diskKeys, servesReadsFromMemory: servesReadsFromMemory);
 
             using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
@@ -739,8 +976,15 @@ public sealed class TestTryGetByRangeHandler : RaftTrackingTest
             get { lock (reads) return [.. reads]; }
         }
 
-        internal RangeBackend(IEnumerable<string> keys, Func<string, KeyValueState>? stateOf = null)
+        /// <summary>
+        /// Whether the handler may read pages on the actor thread. False (the interface default) keeps every page
+        /// on the scheduler path; true takes the path of the in-memory backend, over the same recorded reads.
+        /// </summary>
+        public bool ServesReadsFromMemory { get; }
+
+        internal RangeBackend(IEnumerable<string> keys, Func<string, KeyValueState>? stateOf = null, bool servesReadsFromMemory = false)
         {
+            ServesReadsFromMemory = servesReadsFromMemory;
             allEntries = keys
                 .OrderBy(k => k, StringComparer.Ordinal)
                 .Select(k => (k, new ReadOnlyKeyValueEntry(
@@ -902,12 +1146,15 @@ public sealed class TestTryGetByRangeHandler : RaftTrackingTest
     /// The first raw disk page contains exactly limit+1 entries that are all post-snapshot
     /// (dropped by projection). The scan must dispatch a second page and return the key that
     /// was visible at the snapshot timestamp but sorts after all the post-snapshot keys.
+    /// Both page paths: read on the scheduler, and read on the actor thread as for an in-memory backend.
     /// </summary>
-    [Fact]
-    public async Task SnapshotRangeScan_FirstPageAllPostSnapshot_VisibleKeyOnLaterPage_Returned()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SnapshotRangeScan_FirstPageAllPostSnapshot_VisibleKeyOnLaterPage_Returned(bool servesReadsFromMemory)
     {
         (RaftManager raft, FairReadScheduler scheduler, KahunaConfiguration config,
-            ILogger<IKahuna> logger) = CreateRaftAndConfig("snap-pagination");
+            ILogger<IKahuna> logger) = CreateRaftAndConfig("snap-pagination-" + servesReadsFromMemory);
 
         scheduler.Start();
         try
@@ -917,7 +1164,7 @@ public sealed class TestTryGetByRangeHandler : RaftTrackingTest
 
             // snap/001..snap/011 — current revision committed after snapshot; no history.
             // snap/012 — LastModified == snapshotTs; visible at the snapshot.
-            PostSnapshotPaginationBackend backend = new(snapshotTs, afterTs);
+            PostSnapshotPaginationBackend backend = new(snapshotTs, afterTs, servesReadsFromMemory);
 
             using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
             IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
@@ -1257,8 +1504,11 @@ public sealed class TestTryGetByRangeHandler : RaftTrackingTest
     {
         private readonly List<(string Key, ReadOnlyKeyValueEntry Entry)> allEntries;
 
-        internal PostSnapshotPaginationBackend(HLCTimestamp snapshotTs, HLCTimestamp afterTs)
+        public bool ServesReadsFromMemory { get; }
+
+        internal PostSnapshotPaginationBackend(HLCTimestamp snapshotTs, HLCTimestamp afterTs, bool servesReadsFromMemory = false)
         {
+            ServesReadsFromMemory = servesReadsFromMemory;
             List<(string, ReadOnlyKeyValueEntry)> entries = new();
             for (int i = 1; i <= 11; i++)
             {
