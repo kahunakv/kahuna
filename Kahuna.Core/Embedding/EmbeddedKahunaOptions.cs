@@ -842,6 +842,9 @@ public sealed class EmbeddedKahunaOptions
     /// <summary>Throughput budget (bytes/sec) for a restore's checkpoint copy; 0 = unlimited.</summary>
     public long BackupRestoreThrottleBytesPerSec { get; set; }
 
+    /// <summary>Throughput budget (bytes/sec) for a backup capture's disk work (image compaction, hash and verify reads, staged-image copy); 0 = unlimited.</summary>
+    public long BackupCaptureThrottleBytesPerSec { get; set; }
+
     // ── Range-split knobs ────────────────────────────────────────────────────
 
     /// <summary>

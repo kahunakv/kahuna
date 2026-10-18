@@ -139,9 +139,12 @@ Two settings control this:
 > (not "forever") is the deliberate trade that keeps the cost a predictable, plannable number.
 
 A practical consequence: the floor lives in memory and is re-established shortly after a node
-restarts. There is a brief window right after a restart where, if cleanup runs before the floor is
-re-asserted, the recoverable history on that node can be slightly shorter. In normal operation the
-floor is refreshed far more often than cleanup runs, so this is a minor edge, not a routine concern.
+restarts. The floor is recomputed once per `BaseSnapshotInterval` but re-asserted on every flush
+tick (200 ms on the server at the defaults), and a partition that appears on a node — at start, after a
+restart, or after a replica move — gets its floor on the first tick that sees it. There is a brief
+window, one flush tick wide, right after a partition appears where, if cleanup runs before the floor
+is asserted, the recoverable history on that node can be slightly shorter. In normal operation the
+floor is asserted far more often than cleanup runs, so this is a minor edge, not a routine concern.
 
 ---
 
@@ -170,10 +173,11 @@ The next two sections are just these two shapes in detail.
 
 A full backup has two parts written together, and a third one when durable transactions are in flight:
 
-1. **A base image** — a consistent, crash-safe snapshot of the storage engine. RocksDB produces this
-   almost instantly (it hard-links its files); SQLite copies the database; the in-memory engine
-   serializes its state. The snapshot is taken into a temporary location and atomically moved into
-   place, so an interrupted backup never leaves a half-written image that looks valid.
+1. **A base image** — a consistent, crash-safe snapshot of the storage engine. RocksDB hard-links its
+   live files and then trims the copy to the cut (see "What a RocksDB capture costs" below); SQLite
+   copies the database; the in-memory engine serializes its state. The snapshot is taken into a
+   temporary location and atomically moved into place, so an interrupted backup never leaves a
+   half-written image that looks valid.
 2. **A manifest** — a small JSON record describing the backup: its identity, the per-partition range
    of log positions it covers, checksums, and (for coordinated backups, see §8) the cluster
    timestamp.
@@ -245,6 +249,48 @@ image is a snapshot of the disk. So the order matters:
 > backup **fails closed** with the retryable outcome `CutUnverified` and publishes nothing. A backup
 > written before the frontier existed restores as before; a reader that predates the frontier refuses a
 > full that carries one instead of misreading it.
+
+### What a RocksDB capture costs
+
+The hard link makes the first step free, but the base image is an *as-of* image, so the capture does
+more than link files. In order:
+
+1. **Checkpoint.** RocksDB hard-links every live SST file into the staging directory and copies the
+   live WAL (it does not flush the live memtables first, so the live store gets no extra SST and no
+   compaction from the backup).
+2. **Trim.** The backup opens the copy, replays that WAL, scans every row, deletes the rows newer than
+   the cut, and compacts the whole copy so that no byte of post-cut data stays in the image. This is a
+   full read and a full write of the image.
+3. **Hash** every file of the image, then **publish** it, then **verify** the published files against
+   the manifest: two more full reads.
+
+All of this runs on the disk where the Raft WAL and the store fsync every commit, so commit latency
+follows it. Two settings bound it:
+
+- **Keep the backup directory on the store's filesystem when you can.** A hard link cannot cross a
+  filesystem. When `--pitr-backup-dir` is on another filesystem than `--storage-path` (for example a
+  separate Kubernetes volume for backups), the node probes for this and stages the checkpoint on the
+  store's filesystem instead, under `<--storage-path>/backup-staging`. The trim runs there, and only
+  the finished image is copied into the backup directory. Staging needs
+  free space on that filesystem for about the size of the live store plus 256 MB; without it, the
+  checkpoint is written in place and RocksDB copies every live SST file across, unthrottled.
+- **Set a capture budget**, `--backup-capture-throttle-mbps`. It rate-limits the trim (a RocksDB rate
+  limiter on the copy covers its reads, the compaction writes and the WAL replay), paces the hash and
+  verify reads, and paces the copy of a staged image into the backup directory. A budget makes the
+  backup take longer in exchange for a smaller latency spike. With no budget, nothing paces a capture.
+
+On Kubernetes, put the backup directory on the same volume as the data (a subdirectory of the data
+volume, copied out by a sidecar or a later job), or accept the staged copy and set a capture budget.
+A `hostPath` or network volume for backups is a different filesystem from the pod's data volume.
+
+Take plain full backups on a node that leads few or no partitions when you can. A partition's commit
+waits for its leader's fsync, but only for a quorum of the followers' fsyncs, so a capture on a node
+that only follows a partition slows that partition's commits less. A coordinated backup (§8) captures
+on every node that hosts a share, so the budget is the tool there.
+
+The flush before the checkpoint (step 3 of the flow above) drains the queued writes only; the
+revision cleanup that the background writer runs after an ordinary flush waits for its next periodic
+turn, so the capture starts sooner.
 
 > **Decision — a flush that cannot durably persist must fault, not report success.** The background
 > writer's drain now reports whether it actually persisted everything. If it can't (a backend I/O
@@ -553,6 +599,7 @@ fails the start.
 | `BackupRetentionMaxBytes` (`--backup-retention-max-bytes`) | 0 (off) | Keep the most-recent chains whose combined artifact bytes stay within this budget; the single newest chain is always kept. 0 = unbounded. |
 | `BackupGcInterval` (`--backup-gc-interval`, seconds) | 1 hour | Cadence of the background GC pass (orphan sweep + retention), and a startup sweep on its first tick. 0 disables the periodic pass (GC then runs only inline after each backup). |
 | `BackupRestoreThrottleBytesPerSec` (`--backup-restore-throttle-mbps`, MB/s) | 0 (unlimited) | Throughput budget for a restore's bulk checkpoint copy, so a restore does not saturate the disk and starve foreground traffic. 0 = unlimited. |
+| `BackupCaptureThrottleBytesPerSec` (`--backup-capture-throttle-mbps`, MB/s) | 0 (unlimited) | Throughput budget for a backup capture's disk work: the RocksDB trim and compaction of the as-of image, the hash and verify reads, and the copy of an image staged on the store's filesystem (§5, "What a RocksDB capture costs"). Trades a longer backup for a smaller commit-latency spike. 0 = unlimited. |
 
 Rules of thumb:
 
@@ -840,8 +887,9 @@ taking the node offline:
 > invisible to client latency. Taking the base image consumes real I/O and cache bandwidth on the
 > backup volume, and for the **SQLite** backend the `VACUUM INTO` that copies a shard holds that
 > shard's writer lock for the whole copy, so writes to that shard stall until it finishes (reads and
-> other shards are unaffected). RocksDB's checkpoint is a near-instant hard-link and does not hold a
-> writer lock, but still competes for disk bandwidth. Restore replays segments with memory bounded to
+> other shards are unaffected). RocksDB's checkpoint does not hold a writer lock, but the as-of trim,
+> compaction, hash and verify of the image read and write it several times on the disk that the commits
+> fsync on (§5, "What a RocksDB capture costs"). Restore replays segments with memory bounded to
 > one write batch (segments stream one record at a time), but it too consumes I/O. Prefer taking
 > backups off-peak, or against a follower, on latency-sensitive SQLite deployments; benchmark the
 > impact for your workload before advertising backups as latency-transparent.
@@ -849,12 +897,19 @@ taking the node offline:
 > A repeatable backend-level benchmark ships in the test suite
 > (`BenchmarkOnlineBackupImpact`, env-gated so CI skips it — run it with
 > `KAHUNA_BENCH=1 dotnet test --filter FullyQualifiedName~BenchmarkOnlineBackupImpact`). It measures
-> foreground write p50/p95/p99 while a checkpoint runs under concurrent load. Indicative shape on a
-> dev laptop (40k×1 KB seed, 4 writers — measure on your own hardware): **SQLite** — aggregate
-> percentiles barely move, but a write landing on the shard being vacuumed stalls for that shard's
-> `VACUUM INTO` (hundreds of milliseconds worst-case), so the impact is a tail-latency spike, not a
-> throughput loss; **RocksDB** — the hard-link checkpoint finishes in well under a second and inflates
-> p95/p99 only modestly (≈1.5–2×) from I/O contention, with no multi-hundred-millisecond stall.
+> foreground write p50/p95/p99 under concurrent load, once while a plain checkpoint runs and once
+> while the whole RocksDB capture runs (checkpoint, trim, hash, publish, verify).
+> `KAHUNA_BENCH_SEED_KEYS` sets the store size, and `KAHUNA_BENCH_BACKUP_DIR` points the backup
+> directory at another filesystem for the cross-filesystem cases. **SQLite** — aggregate percentiles
+> barely move, but a write landing on the shard being vacuumed stalls for that shard's `VACUUM INTO`
+> (hundreds of milliseconds, up to seconds, worst-case), so the impact is a tail-latency spike, not a
+> throughput loss. **RocksDB** — one run on a dev laptop (Apple NVMe, 400k × 1 KB incompressible seed,
+> 4 writers with synced writes, the second filesystem an APFS disk image on the same SSD): the
+> unthrottled capture took 8–13 s and raised write p99 1.3–3.2×; with a 50 MB/s budget it took
+> 58–72 s and raised p99 1.2–2.1×. The runs are noisy and the plain checkpoint alone is a much smaller
+> cost than the capture, so measure on your own hardware, with your own store size, before you call
+> backups latency-transparent. On a slower or shared disk, or a network or virtualized filesystem for
+> the backup volume, expect far more; one Kubernetes run on such a layout showed p99 at 20–50×.
 
 The following is an **offline operation** (runs via the REST/gRPC/client/CLI surface but writes to
 the local filesystem of the node receiving the request):

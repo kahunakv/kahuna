@@ -400,10 +400,17 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     private DateTime lastFullSweepUtc = DateTime.UtcNow;
 
     /// <summary>
-    /// Wall-clock timestamp of the last PITR horizon tick. Initialised to MinValue so the
-    /// first tick fires immediately on startup (re-asserting the floor after a restart).
+    /// The PITR WAL-retention floor last computed for each partition this node hosts, with the
+    /// wall-clock instant it was computed at. <see cref="UpdatePitrHorizon"/> re-asserts the stored
+    /// index on every flush tick and recomputes it once per
+    /// <see cref="KahunaConfiguration.BaseSnapshotInterval"/>; a hosted partition with no entry here
+    /// is computed on the tick that first sees it. <see cref="ForgetUnhostedPartitions"/> drops the
+    /// entry of a range this node stopped hosting.
     /// </summary>
-    private DateTime lastPitrTickUtc = DateTime.MinValue;
+    private readonly Dictionary<int, PitrHorizonFloor> pitrHorizonFloors = [];
+
+    /// <summary>A computed PITR floor and the instant it was computed at.</summary>
+    private readonly record struct PitrHorizonFloor(long ProtectedIndex, DateTime ComputedAtUtc);
 
     /// <summary>
     /// Called on the scheduler thread immediately before the prune floor is sampled
@@ -598,6 +605,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 break;
 
             case BackgroundWriteType.FlushAndNotify:
+            case BackgroundWriteType.FlushBeforeCapture:
                 // Explicit pre-backup/pre-close flush: drain fully (ignore the time budget) so the
                 // completion signal means every queued write has landed in storage. The completion
                 // source MUST be completed on every path — success, partial persistence failure, or
@@ -619,7 +627,8 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                     }
 
                     await AdvanceDurabilityFloors(forceSnapshotCapture: true);
-                    await RunTargetedRevisionCleanup();
+                    if (message.Type == BackgroundWriteType.FlushAndNotify)
+                        await RunTargetedRevisionCleanup();
                     if (locksFlushed && keyValuesFlushed)
                         message.CompletionSource?.TrySetResult(true);
                     else
@@ -667,6 +676,10 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             if (!raft.HostsPartition(partitionId))
                 (toForget ??= []).Add(partitionId);
 
+        foreach (int partitionId in pitrHorizonFloors.Keys)
+            if (!raft.HostsPartition(partitionId))
+                (toForget ??= []).Add(partitionId);
+
         if (durabilityTracker is not null)
         {
             foreach (int partitionId in durabilityTracker.ObservedPartitions)
@@ -682,6 +695,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             partitionDirtySince.Remove(partitionId);
             maxEnqueuedHlc.TryRemove(partitionId, out _);
             lastPersistedFloors.Remove(partitionId);
+            pitrHorizonFloors.Remove(partitionId);
             durabilityTracker?.Forget(partitionId);
 
             logger.LogDroppedUnhostedPartitionBookkeeping(partitionId);
@@ -692,14 +706,15 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     }
 
     /// <summary>
-    /// Whether any per-partition bookkeeping (checkpoint tracking, enqueued-HLC watermark, or
-    /// persisted-floor cache) is currently retained for <paramref name="partitionId"/>.
-    /// Test/observability only.
+    /// Whether any per-partition bookkeeping (checkpoint tracking, enqueued-HLC watermark,
+    /// persisted-floor cache, or stored PITR floor) is currently retained for
+    /// <paramref name="partitionId"/>. Test/observability only.
     /// </summary>
     internal bool HasPartitionBookkeeping(int partitionId) =>
         partitionDirtySince.ContainsKey(partitionId)
         || maxEnqueuedHlc.ContainsKey(partitionId)
-        || lastPersistedFloors.ContainsKey(partitionId);
+        || lastPersistedFloors.ContainsKey(partitionId)
+        || pitrHorizonFloors.ContainsKey(partitionId);
 
     /// <summary>
     /// Checkpoints the partitions whose checkpoint interval has elapsed since they went dirty, which
@@ -1814,23 +1829,36 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     }
 
     /// <summary>
-    /// Advances the PITR WAL-retention floor on every partition once per flush interval.
+    /// Asserts the PITR WAL-retention floor on every partition this node hosts, on every flush tick.
     /// <para>
     /// The protected boundary is <c>now − PitrWindow − BaseSnapshotInterval</c>: WAL entries
     /// committed before that point are covered by at least one base snapshot and can be
-    /// compacted. The floor is asserted on every tick, as a positive index: when the retained log
-    /// is entirely newer than the boundary its first retained index is protected (all of it is
-    /// inside the window), and an empty log is protected from its first index so entries landing
-    /// before the next tick are covered. A non-positive value would make Kommander drop this floor
-    /// altogether, not leave it unchanged.
+    /// compacted. The floor is always a positive index: when the retained log is entirely newer
+    /// than the boundary its first retained index is protected (all of it is inside the window),
+    /// and an empty log is protected from its first index so entries landing before the next tick
+    /// are covered. A non-positive value would make Kommander drop this floor altogether, not
+    /// leave it unchanged.
     /// </para>
     /// <para>
-    /// Initialised to <see cref="DateTime.MinValue"/> so the first call fires immediately on
-    /// startup — this re-asserts the in-memory floor after a process restart.
-    /// Note: a compaction that fires between process start and this first tick sees no floor
-    /// and may truncate up to the last checkpoint, shortening the recoverable window by up to
-    /// one flush cadence. This is inherent to the in-memory-floor design; flush cadence is
-    /// normally far shorter than compaction cadence so the gap is small in practice.
+    /// The index is computed per partition, once per <see cref="KahunaConfiguration.BaseSnapshotInterval"/>
+    /// (the computation pages the WAL), and the stored value is re-asserted on every tick (one
+    /// volatile write per partition). A hosted partition with no stored value is computed on the
+    /// tick that first sees it. This is what keeps the floor in force from the moment a partition
+    /// exists on this node: the writer starts before the node joins its cluster, so the first tick
+    /// after start sees no hosted partition at all. A single node-wide cadence anchored on that
+    /// tick asserted nothing until the next one, half an hour later at the defaults, and compaction
+    /// ran to the checkpoint for the whole interval; under load a backup's parent range was gone
+    /// within a minute and every incremental fell back to a full. The same gap opened after every
+    /// restart, and whenever a replica move re-materialized a partition, because Kommander's floor
+    /// is in memory and belongs to the materialized partition.
+    /// </para>
+    /// <para>
+    /// Re-asserting a stored value is safe: the boundary only moves forward, so a value computed
+    /// earlier is never above the index the current boundary would protect, and a lower floor
+    /// only retains more. A compaction pass that runs between a partition's materialization and
+    /// the next flush tick still sees no floor and may truncate up to the last checkpoint; that
+    /// window is one flush cadence (200 ms on the server, one second embedded, at the defaults)
+    /// and is inherent to the in-memory-floor design.
     /// </para>
     /// </summary>
     private void UpdatePitrHorizon()
@@ -1839,14 +1867,9 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             return;
 
         DateTime now = DateTime.UtcNow;
-        TimeSpan tickInterval = configuration.BaseSnapshotInterval > TimeSpan.Zero
+        TimeSpan recomputeInterval = configuration.BaseSnapshotInterval > TimeSpan.Zero
             ? configuration.BaseSnapshotInterval
             : configuration.PitrWindow;
-
-        if ((now - lastPitrTickUtc) < tickInterval)
-            return;
-
-        lastPitrTickUtc = now;
 
         IReadOnlyList<RaftPartitionRange> partitions = raft.GetPartitionMap();
         foreach (RaftPartitionRange partition in partitions)
@@ -1856,24 +1879,32 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             // The committed map covers the whole cluster; the WAL adapter and the retention floor
             // are local, so only partitions materialized on this node get a horizon here (a range
             // hosted elsewhere has no local WAL to protect, and Kommander reclaims the WAL of a
-            // range this node stopped hosting on its own).
+            // range this node stopped hosting on its own). ForgetUnhostedPartitions drops the stored
+            // floor of a range this node stopped hosting, so a later re-host computes it afresh.
             if (!raft.HostsPartition(partitionId))
                 continue;
 
-            long protectedIndex = PitrHorizon.ComputeProtectedIndex(
-                raft.WalAdapter, partitionId, now,
-                configuration.PitrWindow, configuration.BaseSnapshotInterval);
+            if (!pitrHorizonFloors.TryGetValue(partitionId, out PitrHorizonFloor floor)
+                || now - floor.ComputedAtUtc >= recomputeInterval)
+            {
+                long protectedIndex = PitrHorizon.ComputeProtectedIndex(
+                    raft.WalAdapter, partitionId, now,
+                    configuration.PitrWindow, configuration.BaseSnapshotInterval);
+
+                floor = new PitrHorizonFloor(protectedIndex, now);
+                pitrHorizonFloors[partitionId] = floor;
+
+                // Recomputes the boundary for the log line; ComputeProtectedIndex derives it
+                // internally but does not expose it in order to keep the return type simple.
+                long logBoundaryMs = (long)((now - configuration.PitrWindow - configuration.BaseSnapshotInterval) - DateTime.UnixEpoch).TotalMilliseconds;
+                logger.LogPitrHorizonUpdated(partitionId, protectedIndex, logBoundaryMs);
+            }
 
             // Always a positive index (see PitrHorizon.ComputeProtectedIndex). This is the single-value
             // floor; Kommander composes it with any concurrent backup retention holds via minimum
             // (IRaft.AcquireRetentionHold), so a backup capturing a WAL prefix is never clobbered by a
-            // horizon advance.
-            raft.SetMinRetainIndex(partitionId, protectedIndex);
-
-            // Recomputes the boundary for the log line; ComputeProtectedIndex derives it
-            // internally but does not expose it in order to keep the return type simple.
-            long logBoundaryMs = (long)((now - configuration.PitrWindow - configuration.BaseSnapshotInterval) - DateTime.UnixEpoch).TotalMilliseconds;
-            logger.LogPitrHorizonUpdated(partitionId, protectedIndex, logBoundaryMs);
+            // horizon advance. Re-asserting an unchanged value is idempotent.
+            raft.SetMinRetainIndex(partitionId, floor.ProtectedIndex);
         }
     }
 }

@@ -1,4 +1,5 @@
 
+using System.Buffers;
 using System.Security.Cryptography;
 using System.Text.Json;
 using Kommander.Time;
@@ -41,6 +42,33 @@ internal static class BackupArtifactVerifier
     }
 
     /// <summary>
+    /// <see cref="HashDirectory"/> with the reads paced to <paramref name="throttleBytesPerSec"/> over the whole
+    /// directory, so hashing a large image does not load the disk the live store shares. 0 = unlimited.
+    /// </summary>
+    internal static async Task<(Dictionary<string, string> checksums, Dictionary<string, long> sizes)>
+        HashDirectoryAsync(string directory, string keyPrefix, long throttleBytesPerSec, CancellationToken ct = default)
+    {
+        if (throttleBytesPerSec <= 0)
+            return HashDirectory(directory, keyPrefix, ct);
+
+        Dictionary<string, string> checksums = [];
+        Dictionary<string, long> sizes = [];
+        ThroughputPacer pacer = new(throttleBytesPerSec);
+
+        foreach (string file in EnumerateRegularFiles(directory))
+        {
+            ct.ThrowIfCancellationRequested();
+            string full = Path.Combine(directory, file.Replace('/', Path.DirectorySeparatorChar));
+            string key = keyPrefix + file;
+            await using (FileStream stream = new(full, FileMode.Open, FileAccess.Read, FileShare.Read, PacedHashChunkSize, useAsync: true))
+                checksums[key] = await ComputeSha256Async(stream, pacer, ct).ConfigureAwait(false);
+            sizes[key] = new FileInfo(full).Length;
+        }
+
+        return (checksums, sizes);
+    }
+
+    /// <summary>
     /// Verifies that <paramref name="store"/> holds exactly the artifacts recorded in
     /// <paramref name="manifest"/>, each with the recorded length and digest — no missing, extra,
     /// altered, or unsafe-path artifact. A manifest below
@@ -55,9 +83,19 @@ internal static class BackupArtifactVerifier
     /// </summary>
     /// <exception cref="BackupUnsupportedFormatException">Legacy/unsupported manifest format.</exception>
     /// <exception cref="BackupArtifactException">On any integrity discrepancy.</exception>
+    internal static Task VerifyAsync(
+        BackupManifest manifest, IBackupArtifactStore store, CancellationToken ct = default) =>
+        VerifyAsync(manifest, store, throttleBytesPerSec: 0, ct);
+
+    /// <summary>
+    /// <see cref="VerifyAsync(BackupManifest, IBackupArtifactStore, CancellationToken)"/> with the digest reads
+    /// paced to <paramref name="throttleBytesPerSec"/> over the whole backup; 0 = unlimited.
+    /// </summary>
     internal static async Task VerifyAsync(
-        BackupManifest manifest, IBackupArtifactStore store, CancellationToken ct = default)
+        BackupManifest manifest, IBackupArtifactStore store, long throttleBytesPerSec, CancellationToken ct = default)
     {
+        ThroughputPacer pacer = new(throttleBytesPerSec);
+
         EnsureSupportedVersion(manifest);
 
         // Manifest-level schema: type/parent/base-cut consistency, no duplicate partition ranges,
@@ -129,7 +167,7 @@ internal static class BackupArtifactVerifier
                 throw new BackupArtifactException(
                     $"Backup {manifest.BackupId:N}: artifact '{key}' has size {actualSize}, expected {expectedSize}.");
 
-            string actualDigest = await ComputeSha256Async(store, manifest.BackupId, key, ct).ConfigureAwait(false);
+            string actualDigest = await ComputeSha256Async(store, manifest.BackupId, key, pacer, ct).ConfigureAwait(false);
             if (!string.Equals(actualDigest, expectedDigest, StringComparison.OrdinalIgnoreCase))
                 throw new BackupArtifactException(
                     $"Backup {manifest.BackupId:N}: artifact '{key}' failed digest verification.");
@@ -534,10 +572,38 @@ internal static class BackupArtifactVerifier
     /// resident and the bytes hashed are the bytes the store would serve to a reader.
     /// </summary>
     private static async Task<string> ComputeSha256Async(
-        IBackupArtifactStore store, Guid backupId, string relativePath, CancellationToken ct)
+        IBackupArtifactStore store, Guid backupId, string relativePath, ThroughputPacer pacer, CancellationToken ct)
     {
         await using Stream stream = await store.OpenReadAsync(backupId, relativePath, ct: ct).ConfigureAwait(false);
-        byte[] hash = await SHA256.HashDataAsync(stream, ct).ConfigureAwait(false);
-        return Convert.ToHexString(hash).ToLowerInvariant();
+        if (pacer.IsUnlimited)
+        {
+            byte[] hash = await SHA256.HashDataAsync(stream, ct).ConfigureAwait(false);
+            return Convert.ToHexString(hash).ToLowerInvariant();
+        }
+
+        return await ComputeSha256Async(stream, pacer, ct).ConfigureAwait(false);
+    }
+
+    private const int PacedHashChunkSize = 1 << 20;
+
+    private static async Task<string> ComputeSha256Async(Stream stream, ThroughputPacer pacer, CancellationToken ct)
+    {
+        using IncrementalHash sha256 = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(PacedHashChunkSize);
+        try
+        {
+            int read;
+            while ((read = await stream.ReadAsync(buffer.AsMemory(0, PacedHashChunkSize), ct).ConfigureAwait(false)) > 0)
+            {
+                sha256.AppendData(buffer, 0, read);
+                await pacer.PaceAsync(read, ct).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+
+        return Convert.ToHexString(sha256.GetHashAndReset()).ToLowerInvariant();
     }
 }

@@ -737,6 +737,9 @@ public sealed class KahunaCommandLineOptions
     [Option("backup-restore-throttle-mbps", Required = false, HelpText = "Throughput budget in MB/s for a restore's checkpoint copy, so a restore does not saturate the disk and starve foreground traffic. 0 = unlimited.", Default = 0)]
     public int BackupRestoreThrottleMbps { get; set; }
 
+    [Option("backup-capture-throttle-mbps", Required = false, HelpText = "Throughput budget in MB/s for a backup capture's disk work (the compaction of the as-of image, the hash and verify reads, and the copy of an image staged on the store's filesystem), so a backup does not starve the commit fsyncs on the same disk. 0 = unlimited.", Default = 0)]
+    public int BackupCaptureThrottleMbps { get; set; }
+
     [Option("pitr-restore-root", Required = false, HelpText = "Server-owned root directory that restore destinations must be contained within. Setting this enables remote (REST/gRPC) restore, confining all targets under this path.", Default = "")]
     public string PitrRestoreRoot { get; set; } = "";
 

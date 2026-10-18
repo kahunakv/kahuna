@@ -78,6 +78,17 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// </remarks>
     private static readonly WriteOptions DefaultWriteOptions = new WriteOptions().SetSync(true);
 
+    private const ulong KvWriteBufferSize = 64 * 1024 * 1024;
+
+    /// <summary>
+    /// WAL size below which a checkpoint copies the live WAL instead of flushing the memtables first. A
+    /// flush on every checkpoint writes an SST and adds an L0 file to the live store, which can start a
+    /// compaction there while the backup already loads the disk. Every write here goes through the WAL
+    /// (none disables it), so the copied WAL holds every unflushed row and opening the checkpoint replays
+    /// it. Above the threshold RocksDB flushes as before, which bounds the WAL bytes a checkpoint copies.
+    /// </summary>
+    private const ulong CheckpointLogSizeForFlush = KvWriteBufferSize;
+
     /// <summary>
     /// Read options for background maintenance scans (revision pruning / backend-wide sweeps). These walk
     /// large, mostly-cold slices of the keyspace once, so they must not fill the block cache — under direct
@@ -128,6 +139,12 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     private readonly bool directReads;
 
     private readonly bool enableStatistics;
+
+    /// <summary>
+    /// I/O budget, in bytes per second, for the trim of a checkpoint copy: the scan, the deletes and the full
+    /// compactions. The copy shares the disk with the live store and the Raft WAL. 0 = unlimited.
+    /// </summary>
+    private readonly long checkpointTrimBytesPerSec;
 
     /// <summary>
     /// Swap fence for the close-and-reopen recovery path. Every operation that touches the native
@@ -399,8 +416,9 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// never dispose it — the composition root disposes it after both databases are closed. When null,
     /// behavior is byte-for-byte identical to the prior default (static 256 MB cache, no WBM).
     /// </param>
-    public RocksDbPersistenceBackend(string path = ".", string dbRevision = "v1", RocksDbSharedResources? sharedResources = null, bool directReads = true, bool enableStatistics = false, ILogger? logger = null)
+    public RocksDbPersistenceBackend(string path = ".", string dbRevision = "v1", RocksDbSharedResources? sharedResources = null, bool directReads = true, bool enableStatistics = false, ILogger? logger = null, long checkpointTrimBytesPerSec = 0)
     {
+        this.checkpointTrimBytesPerSec = Math.Max(0, checkpointTrimBytesPerSec);
         this.path = path;
         this.dbRevision = dbRevision;
         this.sharedResources = sharedResources;
@@ -574,7 +592,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         // fresh memtable while two earlier ones await flush.
         ColumnFamilyOptions kvOptions = new ColumnFamilyOptions()
             .SetBlockBasedTableFactory(tableOptions)
-            .SetWriteBufferSize(64 * 1024 * 1024)
+            .SetWriteBufferSize(KvWriteBufferSize)
             .SetMaxWriteBufferNumber(3)
             .SetMinWriteBufferNumberToMerge(1);
         
@@ -4079,10 +4097,10 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         try
         {
             using (Checkpoint cp = db.Checkpoint())
-                cp.Save(tmpPath, logSizeForFlush: 0); // RocksDB creates tmpPath
+                cp.Save(tmpPath, logSizeForFlush: CheckpointLogSizeForFlush); // RocksDB creates tmpPath
 
             if (cut.HasValue)
-                TrimCheckpointAsOf(tmpPath, cut.Value, retainKey, ct);
+                TrimCheckpointAsOf(tmpPath, cut.Value, retainKey, checkpointTrimBytesPerSec, ct);
 
             CheckpointManifest manifest = CheckpointManifest.From(appliedIndex, appliedTime);
             manifest.WriteTo(tmpPath);
@@ -4133,12 +4151,65 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// '\0' rows (the pruned-history floor, the tilde-key registry) stay: they describe the image, and a
     /// registry row for a key that left only suppresses a scan optimization.</para>
     /// </summary>
-    private static void TrimCheckpointAsOf(string checkpointPath, HLCTimestamp cut, Func<string, bool>? retainKey, CancellationToken ct)
+    private static void TrimCheckpointAsOf(
+        string checkpointPath, HLCTimestamp cut, Func<string, bool>? retainKey, long bytesPerSec, CancellationToken ct)
     {
         DbOptions options = new DbOptions()
             .SetCreateIfMissing(false)
             .SetCreateMissingColumnFamilies(false);
 
+        if (bytesPerSec <= 0)
+        {
+            TrimCheckpointAsOf(options, MaintenanceScanReadOptions, checkpointPath, cut, retainKey, ct);
+            return;
+        }
+
+        // One budget for all of the copy's I/O: kAllIo charges the compaction reads as well as the flush and
+        // compaction writes, and the scan's reads are charged through their read priority. One background job
+        // keeps the copy's flush and compaction from running beside each other.
+        IntPtr rateLimiter = Native.Instance.rocksdb_ratelimiter_create_with_mode(
+            bytesPerSec, RateLimiterRefillPeriodMicros, RateLimiterFairness, RateLimiterModeAllIo, auto_tuned: 0);
+        try
+        {
+            Native.Instance.rocksdb_options_set_ratelimiter(options.Handle, rateLimiter);
+            Native.Instance.rocksdb_options_set_max_background_jobs(options.Handle, 1);
+            TrimCheckpointAsOf(options, RateLimitedMaintenanceScanReadOptions, checkpointPath, cut, retainKey, ct);
+        }
+        finally
+        {
+            // The options keep their own reference to the limiter; this releases the handle's.
+            Native.Instance.rocksdb_ratelimiter_destroy(rateLimiter);
+        }
+    }
+
+    // RocksDB's defaults for a generic rate limiter (100 ms refill period, fairness 10).
+    private const long RateLimiterRefillPeriodMicros = 100_000;
+
+    private const int RateLimiterFairness = 10;
+
+    // RateLimiter::Mode::kAllIo.
+    private const int RateLimiterModeAllIo = 2;
+
+    // Env::IO_USER: a read with this priority is charged to the database's rate limiter.
+    private const int RateLimiterPriorityUser = 3;
+
+    /// <summary>
+    /// <see cref="MaintenanceScanReadOptions"/> for a database with a rate limiter: the reads are charged to the
+    /// limiter, and async I/O is off because its prefetch would read ahead of the budget.
+    /// </summary>
+    private static readonly ReadOptions RateLimitedMaintenanceScanReadOptions = CreateRateLimitedScanReadOptions();
+
+    private static ReadOptions CreateRateLimitedScanReadOptions()
+    {
+        ReadOptions readOptions = new ReadOptions().SetFillCache(false);
+        Native.Instance.rocksdb_readoptions_set_rate_limiter_priority(readOptions.Handle, RateLimiterPriorityUser);
+        return readOptions;
+    }
+
+    private static void TrimCheckpointAsOf(
+        DbOptions options, ReadOptions scanReadOptions, string checkpointPath, HLCTimestamp cut,
+        Func<string, bool>? retainKey, CancellationToken ct)
+    {
         ColumnFamilies columnFamilies = new()
         {
             { "kv", new ColumnFamilyOptions() },
@@ -4213,7 +4284,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 foreach (byte[] futureRev in st.FutureRevisionKeys) { batch.Delete(futureRev, cf: kv); batchOps++; }
             }
 
-            using (Iterator it = copy.NewIterator(readOptions: MaintenanceScanReadOptions, cf: kv))
+            using (Iterator it = copy.NewIterator(readOptions: scanReadOptions, cf: kv))
             {
                 it.SeekToFirst();
                 while (it.Valid())
@@ -4300,7 +4371,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             FlushGroup();
 
             // Exclude locks from the as-of image — volatile lease state re-established at runtime.
-            using (Iterator lockIt = copy.NewIterator(readOptions: MaintenanceScanReadOptions, cf: locksCf))
+            using (Iterator lockIt = copy.NewIterator(readOptions: scanReadOptions, cf: locksCf))
             {
                 lockIt.SeekToFirst();
                 while (lockIt.Valid())

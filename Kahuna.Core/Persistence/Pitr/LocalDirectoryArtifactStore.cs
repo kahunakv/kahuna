@@ -29,8 +29,18 @@ public sealed class LocalDirectoryArtifactStore : IBackupArtifactStore
 
     private readonly string _root;
 
-    public LocalDirectoryArtifactStore(string root)
+    private readonly LiveCheckpointStaging? _liveStaging;
+
+    public LocalDirectoryArtifactStore(string root) : this(root, liveStaging: null)
     {
+    }
+
+    /// <param name="root">The backup directory.</param>
+    /// <param name="liveStaging">Where a checkpoint of the live store is staged when the backup directory is
+    /// not on the store's filesystem; null always checkpoints in place.</param>
+    internal LocalDirectoryArtifactStore(string root, LiveCheckpointStaging? liveStaging)
+    {
+        _liveStaging = liveStaging;
         // Refuse an unsafe root before creating or touching anything. This check belongs here, not in a
         // caller: creating the directory tightens its mode to 0700, so a component that created the root
         // first would silently repair a world-writable directory instead of refusing to use it — and an
@@ -163,15 +173,20 @@ public sealed class LocalDirectoryArtifactStore : IBackupArtifactStore
                     file, Path.GetFileName(file), "interrupted temporary file", IsDirectory: false));
         }
 
+        // A checkpoint staged on the store's filesystem lives outside the root until its commit copies it in.
+        if (_liveStaging is not null)
+            leftovers.AddRange(_liveStaging.ListLeftovers(ct));
+
         return Task.FromResult<IReadOnlyList<BackupArtifactLeftover>>(leftovers);
     }
 
     public Task DeleteLeftoverAsync(BackupArtifactLeftover leftover, CancellationToken ct = default)
     {
         string path = leftover.Handle;
-        // Confine the delete to this store's root: a handle is opaque to callers, but it arrived from a
-        // listing and must not be trusted to address anything outside the tree we own.
-        EnsureUnderRoot(path);
+        // Confine the delete to this store's root or its staging roots: a handle is opaque to callers, but it
+        // arrived from a listing and must not be trusted to address anything outside the trees we own.
+        if (_liveStaging is null || !_liveStaging.OwnsLeftover(path))
+            EnsureUnderRoot(path);
 
         if (Directory.Exists(path))
             RemoveDirectory(path);
@@ -201,6 +216,17 @@ public sealed class LocalDirectoryArtifactStore : IBackupArtifactStore
         return Task.FromResult<IBackupCheckpointStagingArea>(new InPlaceStagingArea(checkpointPath));
     }
 
+    public Task<IBackupCheckpointStagingArea> BeginLiveCheckpointAsync(Guid backupId, CancellationToken ct = default)
+    {
+        string? stagingDirectory = _liveStaging?.Reserve(backupId, _root);
+        if (stagingDirectory is null)
+            return BeginCheckpointAsync(backupId, ct);
+
+        BackupFilePermissions.CreateDirectory(BackupPath(backupId));
+        return Task.FromResult<IBackupCheckpointStagingArea>(new CopiedStagingArea(
+            _liveStaging!, stagingDirectory, Path.Combine(BackupPath(backupId), CheckpointDirectoryName)));
+    }
+
     public async Task MaterializeAsync(
         Guid backupId,
         string relativePrefix,
@@ -216,7 +242,7 @@ public sealed class LocalDirectoryArtifactStore : IBackupArtifactStore
             throw new BackupArtifactException(
                 $"Backup {backupId:N}: artifacts under '{relativePrefix}' are missing.");
 
-        await CopyDirectoryAsync(source, destinationDirectory, throttleBytesPerSec, ct).ConfigureAwait(false);
+        await CopyDirectoryAsync(source, destinationDirectory, throttleBytesPerSec, flushToDisk: false, ct).ConfigureAwait(false);
     }
 
     internal const string CheckpointDirectoryName = "checkpoint";
@@ -310,7 +336,7 @@ public sealed class LocalDirectoryArtifactStore : IBackupArtifactStore
     }
 
     private static async Task CopyDirectoryAsync(
-        string source, string destination, long throttleBytesPerSec, CancellationToken ct)
+        string source, string destination, long throttleBytesPerSec, bool flushToDisk, CancellationToken ct)
     {
         Directory.CreateDirectory(destination);
 
@@ -323,7 +349,7 @@ public sealed class LocalDirectoryArtifactStore : IBackupArtifactStore
                 throw new BackupArtifactException($"Backup artifact contains a symlink/reparse point: '{file}'.");
 
             await CopyFileAsync(file, Path.Combine(destination, Path.GetFileName(file)),
-                throttleBytesPerSec, ct).ConfigureAwait(false);
+                throttleBytesPerSec, flushToDisk, ct).ConfigureAwait(false);
         }
 
         foreach (string subDir in Directory.GetDirectories(source))
@@ -332,12 +358,12 @@ public sealed class LocalDirectoryArtifactStore : IBackupArtifactStore
                 throw new BackupArtifactException($"Backup artifact contains a symlinked directory: '{subDir}'.");
 
             await CopyDirectoryAsync(subDir, Path.Combine(destination, Path.GetFileName(subDir)),
-                throttleBytesPerSec, ct).ConfigureAwait(false);
+                throttleBytesPerSec, flushToDisk, ct).ConfigureAwait(false);
         }
     }
 
     private static async Task CopyFileAsync(
-        string source, string destination, long throttleBytesPerSec, CancellationToken ct)
+        string source, string destination, long throttleBytesPerSec, bool flushToDisk, CancellationToken ct)
     {
         await using FileStream src = new(
             source, FileMode.Open, FileAccess.Read, FileShare.Read, CopyBufferSize, useAsync: true);
@@ -345,11 +371,16 @@ public sealed class LocalDirectoryArtifactStore : IBackupArtifactStore
             destination, FileMode.Create, FileAccess.Write, FileShare.None, CopyBufferSize, useAsync: true);
 
         if (throttleBytesPerSec <= 0)
-        {
             await src.CopyToAsync(dst, CopyBufferSize, ct).ConfigureAwait(false);
-            return;
-        }
+        else
+            await CopyThrottledAsync(src, dst, throttleBytesPerSec, ct).ConfigureAwait(false);
 
+        if (flushToDisk)
+            dst.Flush(flushToDisk: true);
+    }
+
+    private static async Task CopyThrottledAsync(FileStream src, FileStream dst, long throttleBytesPerSec, CancellationToken ct)
+    {
         byte[] buffer = ArrayPool<byte>.Shared.Rent(CopyBufferSize);
         try
         {
@@ -380,6 +411,42 @@ public sealed class LocalDirectoryArtifactStore : IBackupArtifactStore
         public Task CommitAsync(CancellationToken ct = default) => Task.CompletedTask;
 
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    /// <summary>
+    /// A checkpoint staged on the store's filesystem. The commit copies the staged tree into a temporary
+    /// sibling of the final checkpoint directory, with each file synced to disk, restricts it to the owner,
+    /// and renames it into place, so the final path never holds a partial tree. Disposal deletes the staged
+    /// tree whatever the outcome.
+    /// </summary>
+    private sealed class CopiedStagingArea(LiveCheckpointStaging staging, string stagingDirectory, string destination)
+        : IBackupCheckpointStagingArea
+    {
+        public string LocalPath { get; } = Path.Combine(stagingDirectory, CheckpointDirectoryName);
+
+        public async Task CommitAsync(CancellationToken ct = default)
+        {
+            string temp = destination + ".tmp_" + Guid.NewGuid().ToString("N")[..8];
+            try
+            {
+                await CopyDirectoryAsync(LocalPath, temp, staging.CopyThrottleBytesPerSec, flushToDisk: true, ct)
+                    .ConfigureAwait(false);
+                BackupFilePermissions.RestrictTree(temp);
+                Directory.Move(temp, destination);
+            }
+            catch
+            {
+                if (Directory.Exists(temp))
+                    Directory.Delete(temp, recursive: true);
+                throw;
+            }
+        }
+
+        public ValueTask DisposeAsync()
+        {
+            staging.Release(stagingDirectory);
+            return ValueTask.CompletedTask;
+        }
     }
 
     /// <summary>

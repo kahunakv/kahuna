@@ -1101,4 +1101,13 @@ public sealed class KahunaConfiguration
     /// restore does not saturate the disk and starve foreground traffic. Zero or negative = unlimited.
     /// </summary>
     public long BackupRestoreThrottleBytesPerSec { get; set; }
+
+    /// <summary>
+    /// Throughput budget, in bytes per second, for the disk work of a backup capture: the RocksDB compaction of
+    /// the as-of image, the hash and verification reads of the published files, and the copy of an image staged
+    /// on the store's filesystem into the backup directory. The capture shares the disk with the Raft WAL and
+    /// the store, whose fsyncs set commit latency, so a budget trades a longer backup for steadier writes. Zero
+    /// or negative = unlimited.
+    /// </summary>
+    public long BackupCaptureThrottleBytesPerSec { get; set; }
 }

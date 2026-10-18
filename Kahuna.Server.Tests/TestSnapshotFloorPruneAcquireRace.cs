@@ -646,6 +646,49 @@ public sealed class TestSnapshotFloorPruneAcquireRace : RaftTrackingTest
     }
 
     /// <summary>
+    /// The flush a backup waits for persists every queued write but leaves the targeted revision cleanup to a
+    /// later flush, so the writer's turn before the capture stays short. An explicit flush still runs it.
+    /// </summary>
+    [Fact]
+    public async Task BackgroundWriter_FlushBeforeCapture_PersistsWithoutTargetedCleanup()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        // A periodic tick would run the cleanup between the two flushes; keep it out of the window.
+        (RaftManager raft, KahunaManager kahuna, PruningBackend backend) = BuildNode(
+            retentionCount: 1, dirtyObjectsWriterDelay: 60_000);
+
+        try
+        {
+            await raft.JoinCluster(ct);
+            await raft.WaitForLeader(0, ct);
+            await raft.WaitForLeader(1, ct);
+
+            const string key = "prune/before-capture";
+
+            (KeyValueResponseType r1, _, _) = await kahuna.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, key, "v1"u8.ToArray(), null, -1,
+                KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Set, r1);
+
+            (KeyValueResponseType r2, _, _) = await kahuna.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, key, "v2"u8.ToArray(), null, -1,
+                KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Set, r2);
+
+            await kahuna.FlushPersistenceBeforeCaptureAsync();
+            Assert.Equal("v2"u8.ToArray(), backend.GetKeyValue(key)?.Value);
+            Assert.NotNull(backend.GetKeyValueRevision(key, 0));
+
+            await kahuna.FlushPersistenceAsync();
+            Assert.Null(backend.GetKeyValueRevision(key, 0));
+        }
+        finally
+        {
+            await Cleanup(raft, kahuna);
+        }
+    }
+
+    /// <summary>
     /// Same gate for the backend-wide sweep: an unconfirmed node skips the sweep without
     /// consuming the interval, so the sweep runs on the next eligible periodic cycle once
     /// catch-up confirms. The sweep only runs from the periodic flush timer (explicit flushes

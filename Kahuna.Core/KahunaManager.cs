@@ -185,7 +185,7 @@ public sealed partial class KahunaManager : IKahuna, IDisposable
                 persistenceBackend,
                 configuration,
                 keyValues,
-                FlushPersistenceAsync,
+                FlushPersistenceBeforeCaptureAsync,
                 // Applied-index barrier probe: the writer's max-enqueued commit HLC per partition.
                 // The backup blocks on it, so a probe stuck at zero fails the backup closed.
                 partitionId => BackgroundWriterActor?.GetMaxEnqueuedHlc(partitionId) ?? HLCTimestamp.Zero,
@@ -255,6 +255,18 @@ public sealed partial class KahunaManager : IKahuna, IDisposable
     {
         TaskCompletionSource<bool> tcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
         backgroundWriter.Send(new(BackgroundWriteType.FlushAndNotify, tcs));
+        return tcs.Task;
+    }
+
+    /// <summary>
+    /// The flush a backup waits for before its capture: every queued write lands in storage, but the
+    /// writer skips the revision cleanup it runs after <see cref="FlushPersistenceAsync"/>, so the capture
+    /// starts sooner and the cleanup's deletes do not add to the disk load the capture brings.
+    /// </summary>
+    internal Task FlushPersistenceBeforeCaptureAsync()
+    {
+        TaskCompletionSource<bool> tcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        backgroundWriter.Send(new(BackgroundWriteType.FlushBeforeCapture, tcs));
         return tcs.Task;
     }
 

@@ -161,6 +161,15 @@ public interface IBackupArtifactStore
     Task<IBackupCheckpointStagingArea> BeginCheckpointAsync(Guid backupId, CancellationToken ct = default);
 
     /// <summary>
+    /// Begins a checkpoint that this node's persistence backend takes of its live store, as opposed to one
+    /// composed from other images. Where such a checkpoint is cheapest to take can differ from where the
+    /// artifacts go: RocksDB hard-links the live files, which works only on the store's filesystem. The default
+    /// is <see cref="BeginCheckpointAsync"/>.
+    /// </summary>
+    Task<IBackupCheckpointStagingArea> BeginLiveCheckpointAsync(Guid backupId, CancellationToken ct = default) =>
+        BeginCheckpointAsync(backupId, ct);
+
+    /// <summary>
     /// Materialises every artifact under <paramref name="relativePrefix"/> into
     /// <paramref name="destinationDirectory"/> on the local filesystem, preserving relative paths
     /// exactly — a persistence backend opens the result and is layout-sensitive (RocksDB expects

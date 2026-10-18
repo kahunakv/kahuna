@@ -1003,6 +1003,11 @@ public sealed class TestBackupService : IDisposable
         Assert.Equal("Full", inc.ActualKind);
         Assert.Equal("Full", inc.Type);
         Assert.False(string.IsNullOrEmpty(inc.SubstitutionReason));
+        // The reason names the cause and carries the driver's numbers, so the response alone tells the
+        // operator which partition, which start index and which floor refused the incremental.
+        Assert.Contains("compaction floor advanced past", inc.SubstitutionReason, StringComparison.Ordinal);
+        Assert.Contains("Partition 1: incremental would start at WAL index 2 but the compaction floor is 10",
+            inc.SubstitutionReason, StringComparison.Ordinal);
     }
 
     [Fact]

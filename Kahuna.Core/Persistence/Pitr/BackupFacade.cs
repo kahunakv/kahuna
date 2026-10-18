@@ -70,7 +70,7 @@ internal sealed class BackupFacade : IDisposable
         IInterNodeCommunication interNodeCommunication,
         ILogger<IKahuna> logger)
     {
-        BackupStoragePair backupStorage = CreateBackupStorage(configuration, configuration.BackupDir);
+        BackupStoragePair backupStorage = CreateBackupStorage(configuration, configuration.BackupDir, logger);
 
         BackupService service = new(
             raft,
@@ -165,7 +165,9 @@ internal sealed class BackupFacade : IDisposable
                 int hashPoolSize = raft.Configuration.InitialPartitions;
                 return key => partitions.Contains(PartitionDataEnumerator.OwnerOfKey(map, key, hashPoolSize));
             },
-            partScratchRoot: configuration.BackupScratchDir);
+            partScratchRoot: configuration.BackupScratchDir,
+            // Capture I/O budget (bytes/sec; 0 = unlimited): paces the hash and verify reads of a capture.
+            captureThrottleBytesPerSec: configuration.BackupCaptureThrottleBytesPerSec);
 
         // Periodic backup GC: sweeps crash-orphaned/leftover artifacts (always) and enforces
         // retention (when configured), including a startup sweep on its first tick. Disabled when
@@ -317,7 +319,7 @@ internal sealed class BackupFacade : IDisposable
     /// a host that bypassed validation.
     /// </para>
     /// </summary>
-    private static BackupStoragePair CreateBackupStorage(KahunaConfiguration configuration, string backupDir)
+    private static BackupStoragePair CreateBackupStorage(KahunaConfiguration configuration, string backupDir, ILogger? logger = null)
     {
         string target = string.IsNullOrWhiteSpace(configuration.BackupTarget) ? "local" : configuration.BackupTarget;
         string? scratch = string.IsNullOrWhiteSpace(configuration.BackupScratchDir) ? null : configuration.BackupScratchDir;
@@ -353,8 +355,33 @@ internal sealed class BackupFacade : IDisposable
 
         return new BackupStoragePair(
             new LocalDirectoryStorageTarget(backupDir),
-            new LocalDirectoryArtifactStore(backupDir));
+            new LocalDirectoryArtifactStore(backupDir, CreateLiveCheckpointStaging(configuration, logger)));
     }
+
+    /// <summary>
+    /// Staging on the store's filesystem for a local target, used when the backup directory is on another one.
+    /// Only RocksDB benefits: its checkpoint hard-links the live files where the filesystem allows it, while
+    /// SQLite and the memory backend write a full copy wherever the checkpoint goes, so staging them near the
+    /// store would only move that write onto the disk the commits use.
+    /// <para>The staging root is under the storage path, which belongs to this one store. A directory that
+    /// several nodes can share, such as the scratch directory, is not used: each node's leftover sweep would
+    /// see the others' staging trees as debris.</para>
+    /// </summary>
+    private static LiveCheckpointStaging? CreateLiveCheckpointStaging(KahunaConfiguration configuration, ILogger? logger)
+    {
+        if (!string.Equals(configuration.Storage, "rocksdb", StringComparison.Ordinal) ||
+            string.IsNullOrWhiteSpace(configuration.StoragePath))
+            return null;
+
+        return new LiveCheckpointStaging(
+            configuration.StoragePath,
+            Path.Combine(configuration.StoragePath, configuration.StorageRevision),
+            [Path.Combine(configuration.StoragePath, LiveCheckpointStagingDirectoryName)],
+            Math.Max(0, configuration.BackupCaptureThrottleBytesPerSec),
+            logger);
+    }
+
+    internal const string LiveCheckpointStagingDirectoryName = "backup-staging";
 
     internal async Task<KahunaBackupInfo> TakeFullAsync(CancellationToken ct = default)
     {

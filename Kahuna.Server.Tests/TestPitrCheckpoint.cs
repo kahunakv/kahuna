@@ -219,6 +219,44 @@ public sealed class TestPitrCheckpoint : IDisposable
         Assert.Equal(T(20), manifest.AppliedTime);
     }
 
+    // The checkpoint copies the live WAL instead of flushing the memtables, so the live store gets no new
+    // SST (and no L0 file that could start a compaction) and the copy still holds every unflushed row.
+    [Fact]
+    public void RocksDb_Checkpoint_DoesNotFlushLiveMemtables()
+    {
+        string baseDir = Path.Combine(_tempRoot, "rocksdb_noflush");
+        Directory.CreateDirectory(baseDir);
+        string liveDir = Path.Combine(baseDir, "v1");
+        string plainCp = Path.Combine(baseDir, "cp");
+        string asOfCp = Path.Combine(baseDir, "cp_asof");
+
+        using (RocksDbPersistenceBackend backend = new(baseDir, "v1"))
+        {
+            for (int i = 1; i <= 20; i++)
+                backend.StoreKeyValues([Item($"nf/{i:D3}", (byte)i, rev: 1, physicalMs: 50)]);
+            backend.StoreKeyValues([Item("nf/post", 9, rev: 1, physicalMs: 200)]);
+
+            int sstBefore = Directory.GetFiles(liveDir, "*.sst").Length;
+
+            backend.CreateCheckpoint(plainCp, appliedIndex: 21, appliedTime: T(200));
+            backend.CreateCheckpointAsOf(asOfCp, appliedIndex: 21, cut: T(100), ct: TestContext.Current.CancellationToken);
+
+            Assert.Equal(sstBefore, Directory.GetFiles(liveDir, "*.sst").Length);
+        }
+
+        using (RocksDbPersistenceBackend plain = new(baseDir, "cp"))
+        {
+            for (int i = 1; i <= 20; i++)
+                Assert.Equal((byte)i, plain.GetKeyValue($"nf/{i:D3}")!.Value![0]);
+            Assert.NotNull(plain.GetKeyValue("nf/post"));
+        }
+
+        using RocksDbPersistenceBackend asOf = new(baseDir, "cp_asof");
+        for (int i = 1; i <= 20; i++)
+            Assert.Equal((byte)i, asOf.GetKeyValue($"nf/{i:D3}")!.Value![0]);
+        Assert.Null(asOf.GetKeyValue("nf/post"));
+    }
+
     [Fact]
     public void RocksDb_Checkpoint_OriginalWritableAfterCheckpoint()
     {

@@ -135,6 +135,85 @@ public sealed class TestHostedSetBackgroundGating
     }
 
     [Fact]
+    public async Task PitrHorizon_PartitionsHostedAfterTheFirstTick_AreProtectedOnTheNextTick()
+    {
+        // The writer starts before the node joins its cluster, so the first tick sees no hosted
+        // partition. The floor must land on the first tick that sees one, not one recompute interval
+        // later (30 minutes at the defaults): until then compaction runs to the checkpoint and a
+        // backup's parent range is gone within a minute under load.
+        TestBackupService.StubRaft raft = MakeRaft(1, 2);
+        raft.HostsPartitionOverride = static _ => false;
+
+        using WriterHarness harness = new(raft, Config(pitrWindow: TimeSpan.FromHours(1)));
+
+        await harness.Writer.Receive(new(BackgroundWriteType.Flush));
+        Assert.Empty(raft.MinRetainIndexByPartition);
+
+        raft.HostsPartitionOverride = null;
+        await harness.Writer.Receive(new(BackgroundWriteType.Flush));
+
+        Assert.Equal([1, 2], raft.MinRetainIndexByPartition.Keys.Order());
+        Assert.Equal(1, raft.MinRetainIndexByPartition[1]);
+        Assert.Equal(1, raft.MinRetainIndexByPartition[2]);
+    }
+
+    [Fact]
+    public async Task PitrHorizon_FloorIsReassertedOnEveryTick_AndRecomputedOncePerInterval()
+    {
+        TestBackupService.StubRaft raft = MakeRaft(1);
+
+        using WriterHarness harness = new(raft, Config(pitrWindow: TimeSpan.FromHours(1)));
+
+        await harness.Writer.Receive(new(BackgroundWriteType.Flush));
+        Assert.Equal(1, raft.MinRetainIndexByPartition[1]);
+
+        // Entries older than the boundary: a recompute would protect from index 2, the last committed
+        // entry at or before it. Within the recompute interval the stored index is re-asserted as is,
+        // so Kommander's in-memory floor is re-established on every tick without paging the WAL.
+        long oldMs = (long)(DateTime.UtcNow.AddHours(-3) - DateTime.UnixEpoch).TotalMilliseconds;
+        raft.WalAdapter.Write([(1, [
+            new RaftLog { Id = 1, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, oldMs, 0) },
+            new RaftLog { Id = 2, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, oldMs, 0) }])]);
+        raft.MinRetainIndexByPartition.Clear();
+
+        await harness.Writer.Receive(new(BackgroundWriteType.Flush));
+
+        Assert.Equal(1, raft.MinRetainIndexByPartition[1]);
+    }
+
+    [Fact]
+    public async Task PitrHorizon_PartitionHostedAgain_IsComputedAfresh()
+    {
+        TestBackupService.StubRaft raft = MakeRaft(1);
+
+        using WriterHarness harness = new(raft, Config(pitrWindow: TimeSpan.FromHours(1)));
+
+        await harness.Writer.Receive(new(BackgroundWriteType.Flush));
+        Assert.Equal(1, raft.MinRetainIndexByPartition[1]);
+        Assert.True(harness.Writer.HasPartitionBookkeeping(1));
+
+        // The replica moves away: the stored floor is bookkeeping for a range this node no longer
+        // hosts and goes with the rest of it.
+        raft.HostsPartitionOverride = static _ => false;
+        raft.MinRetainIndexByPartition.Clear();
+        await harness.Writer.Receive(new(BackgroundWriteType.Flush));
+
+        Assert.Empty(raft.MinRetainIndexByPartition);
+        Assert.False(harness.Writer.HasPartitionBookkeeping(1));
+
+        // The range comes back with a log that starts elsewhere: its floor is computed from that log
+        // on the first tick that sees it hosted again, not taken from the value stored before.
+        long oldMs = (long)(DateTime.UtcNow.AddHours(-3) - DateTime.UnixEpoch).TotalMilliseconds;
+        raft.WalAdapter.Write([(1, [
+            new RaftLog { Id = 1, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, oldMs, 0) },
+            new RaftLog { Id = 2, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, oldMs, 0) }])]);
+        raft.HostsPartitionOverride = null;
+        await harness.Writer.Receive(new(BackgroundWriteType.Flush));
+
+        Assert.Equal(2, raft.MinRetainIndexByPartition[1]);
+    }
+
+    [Fact]
     public async Task LosingAReplica_DropsItsBookkeeping_AndKeepsTheHostedPartitionsIntact()
     {
         TestBackupService.StubRaft raft = MakeRaft(1, 2);

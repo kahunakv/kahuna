@@ -76,7 +76,8 @@ internal sealed partial class BackupService : IDisposable
         BackupDriver.WalkLiveIntentsDelegate? walkLiveIntents = null,
         IInterNodeCommunication? interNodeCommunication = null,
         Func<IReadOnlySet<int>, Func<string, bool>>? keyOwnership = null,
-        string? partScratchRoot = null)
+        string? partScratchRoot = null,
+        long captureThrottleBytesPerSec = 0)
     {
         // Refuse an unsafe backup root before writing anything: a symlinked or group/world-writable
         // directory would let another user on the host read tenant data or tamper with artifacts and
@@ -94,7 +95,8 @@ internal sealed partial class BackupService : IDisposable
         _acquireRetentionHold = acquireRetentionHold;
         _logger = logger;
         _driver = new BackupDriver(raft, persistenceBackend, flushBeforeCheckpoint,
-            acquireSnapshotHold, releaseSnapshotHold, renewSnapshotHold, snapshotHoldLeaseMs, appliedHlcProbe, walkLiveIntents);
+            acquireSnapshotHold, releaseSnapshotHold, renewSnapshotHold, snapshotHoldLeaseMs, appliedHlcProbe, walkLiveIntents,
+            captureThrottleBytesPerSec);
         _catalog = new BackupCatalog(manifestTarget);
         _artifacts = artifactStore;
         _queryMinInFlight = queryMinInFlight;
@@ -227,10 +229,13 @@ internal sealed partial class BackupService : IDisposable
                     _artifacts, _catalog, snapshotT, BuildOwnerIdentity(), signManifest: ManifestSigner, ct: ct);
                 RecordBackupSuccess(full, start);
                 dto = ToDto(full);
-                // Make the substitution observable: the caller asked for an incremental and got a full.
+                // Make the substitution observable: the caller asked for an incremental and got a full. The
+                // driver's message carries the numbers (partition, the index the incremental needed, the floor
+                // that passed it), so the operator can tell a window too short for the cadence from a node
+                // whose floor never engaged without reading the server log.
                 dto.RequestedKind = BackupType.Incremental.ToString();
                 dto.SubstitutionReason =
-                    $"An incremental could not be produced because {cause}; a full backup was taken instead.";
+                    $"An incremental could not be produced because {cause}; a full backup was taken instead. {ex.Message}";
             }
 
             await TryRunGcLockedAsync(ct).ConfigureAwait(false);

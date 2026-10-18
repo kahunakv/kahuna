@@ -48,6 +48,7 @@ public sealed class TestServerConfigurationSurface
         BackupRetentionMaxBytes = 9_999,
         BackupGcIntervalSeconds = 600,
         BackupRestoreThrottleMbps = 7,
+        BackupCaptureThrottleMbps = 11,
         CheckpointIntervalSeconds = 17,
         DisablePublishedHeadReads = true,
         RaftGrpcScheme = "http://",
@@ -80,6 +81,7 @@ public sealed class TestServerConfigurationSurface
         Assert.Equal(9_999, configuration.BackupRetentionMaxBytes);
         Assert.Equal(TimeSpan.FromSeconds(600), configuration.BackupGcInterval);
         Assert.Equal(7_000_000, configuration.BackupRestoreThrottleBytesPerSec);
+        Assert.Equal(11_000_000, configuration.BackupCaptureThrottleBytesPerSec);
     }
 
     [Fact]

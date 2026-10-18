@@ -86,6 +86,9 @@ internal sealed class BackupDriver
     private readonly ReleaseSnapshotHoldDelegate? _releaseSnapshotHold;
     private readonly int _snapshotHoldLeaseMs;
 
+    // Pace of the hash and verify reads of a capture, in bytes per second; 0 = unlimited.
+    private readonly long _captureThrottleBytesPerSec;
+
     public BackupDriver(IRaft raft, IPersistenceBackend persistenceBackend,
         Func<Task>? flushBeforeCheckpoint = null,
         AcquireSnapshotHoldDelegate? acquireSnapshotHold = null,
@@ -93,9 +96,11 @@ internal sealed class BackupDriver
         RenewSnapshotHoldDelegate? renewSnapshotHold = null,
         int snapshotHoldLeaseMs = DefaultSnapshotHoldLeaseMs,
         Func<int, HLCTimestamp>? appliedHlcProbe = null,
-        WalkLiveIntentsDelegate? walkLiveIntents = null)
+        WalkLiveIntentsDelegate? walkLiveIntents = null,
+        long captureThrottleBytesPerSec = 0)
     {
         _raft = raft;
+        _captureThrottleBytesPerSec = Math.Max(0, captureThrottleBytesPerSec);
         _walkLiveIntents = walkLiveIntents;
         _persistenceBackend = persistenceBackend;
         _flushBeforeCheckpoint = flushBeforeCheckpoint;
@@ -136,7 +141,8 @@ internal sealed class BackupDriver
             identity: identity, topologyGenerationProbe: ComposeTopologyGeneration,
             hostsPartition: _raft.HostsPartition,
             verifyCoordinator: verifyCoordinator, signManifest: signManifest, verifyCut: verifyCut,
-            walkLiveIntents: _walkLiveIntents, capturePartitions: capturePartitions, retainKey: retainKey, ct: ct);
+            walkLiveIntents: _walkLiveIntents, capturePartitions: capturePartitions, retainKey: retainKey,
+            captureThrottleBytesPerSec: _captureThrottleBytesPerSec, ct: ct);
 
     /// <summary>
     /// Reads committed WAL entries since the parent backup's <c>ToIndex</c>, serialises them
@@ -157,7 +163,7 @@ internal sealed class BackupDriver
         CancellationToken ct = default) =>
         RunIncrementalAsync(_raft.WalAdapter, _raft.GetPartitionMap(), parentBackupId, artifacts, catalog, snapshotT,
             acquireRetentionHold, identity, ComposeTopologyGeneration, _raft.HostsPartition, signManifest,
-            capturePartitions, ct);
+            capturePartitions, _captureThrottleBytesPerSec, ct);
 
     /// <summary>This node's live cluster topology generation (see the static overload).</summary>
     internal long CurrentTopologyGeneration() => ComposeTopologyGeneration();
@@ -242,6 +248,7 @@ internal sealed class BackupDriver
         WalkLiveIntentsDelegate? walkLiveIntents = null,
         IReadOnlySet<int>? capturePartitions = null,
         Func<string, bool>? retainKey = null,
+        long captureThrottleBytesPerSec = 0,
         CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
@@ -419,11 +426,12 @@ internal sealed class BackupDriver
 
             // The backend can only write a checkpoint to a local directory, so the store decides where
             // that is: its own artifact directory when it is local, otherwise a scratch area it uploads
-            // from on commit.
+            // from on commit. A local store on another filesystem than the live store stages on the store's
+            // filesystem, so RocksDB links its files instead of copying them.
             Dictionary<string, string> checksums;
             Dictionary<string, long> sizes;
             await using (IBackupCheckpointStagingArea staging =
-                         await artifacts.BeginCheckpointAsync(backupId, workCt).ConfigureAwait(false))
+                         await artifacts.BeginLiveCheckpointAsync(backupId, workCt).ConfigureAwait(false))
             {
                 if (retainKey is null)
                     persistenceBackend.CreateCheckpointAsOf(staging.LocalPath, maxAppliedIndex, cut, workCt);
@@ -444,8 +452,8 @@ internal sealed class BackupDriver
                 // Hash every file the checkpoint produced (data files AND the sidecar), not just the
                 // sidecar, so a truncated or altered checkpoint is caught before replay. Hashing happens
                 // on the staged bytes, which is also the last point they are guaranteed to be local.
-                (checksums, sizes) =
-                    BackupArtifactVerifier.HashDirectory(staging.LocalPath, "checkpoint/", workCt);
+                (checksums, sizes) = await BackupArtifactVerifier.HashDirectoryAsync(
+                    staging.LocalPath, "checkpoint/", captureThrottleBytesPerSec, workCt).ConfigureAwait(false);
 
                 // The backend created the checkpoint files at the process umask; lock the staged tree down
                 // to owner-only (0600 files / 0700 dirs) before it is published. Backup bytes sit on local
@@ -483,7 +491,7 @@ internal sealed class BackupDriver
             // Fail closed: never publish a manifest whose artifacts don't verify. Verification reads back
             // through the store, so it checks what a restore would actually get rather than what was
             // staged locally.
-            await BackupArtifactVerifier.VerifyAsync(manifest, artifacts, workCt).ConfigureAwait(false);
+            await BackupArtifactVerifier.VerifyAsync(manifest, artifacts, captureThrottleBytesPerSec, workCt).ConfigureAwait(false);
 
             // Final gate before publishing: if renewal was lost at any point the hold may have
             // expired and pruning may have reclaimed the as-of history, so the checkpoint we just
@@ -770,6 +778,7 @@ internal sealed class BackupDriver
         Func<int, bool>? hostsPartition = null,
         Action<BackupManifest>? signManifest = null,
         IReadOnlySet<int>? capturePartitions = null,
+        long captureThrottleBytesPerSec = 0,
         CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
@@ -926,7 +935,7 @@ internal sealed class BackupDriver
             // treats a genuinely empty incremental (no ranges, no segments) as valid. Each segment was
             // already restricted to owner-only as the store published it, so there is no separate
             // permission-tightening step here.
-            await BackupArtifactVerifier.VerifyAsync(manifest, artifacts, ct).ConfigureAwait(false);
+            await BackupArtifactVerifier.VerifyAsync(manifest, artifacts, captureThrottleBytesPerSec, ct).ConfigureAwait(false);
 
             // Fail closed if the cluster topology moved while capturing this incremental: the segment set
             // would not correspond to one partition layout. Stamping the current generation also lets the

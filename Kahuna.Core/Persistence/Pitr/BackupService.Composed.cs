@@ -718,7 +718,7 @@ internal sealed partial class BackupService
             dto = ToDto(full);
             dto.RequestedKind = BackupType.Incremental.ToString();
             dto.SubstitutionReason =
-                $"An incremental could not be produced because {cause}; a coordinated full backup was taken instead.";
+                $"An incremental could not be produced because {cause}; a coordinated full backup was taken instead. {ex.Message}";
         }
 
         await TryRunGcLockedAsync(ct).ConfigureAwait(false);
