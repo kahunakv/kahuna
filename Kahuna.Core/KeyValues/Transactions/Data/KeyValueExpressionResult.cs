@@ -47,6 +47,20 @@ internal sealed class KeyValueExpressionResult
 
     public List<KeyValueExpressionResult>? ArrayValue { get; }
 
+    /// <summary>
+    /// For an array, the number of values it holds, counting every value of the arrays nested in it; zero for
+    /// anything else.
+    ///
+    /// <para>Two literals can hold the same array, so a few small literals built in a loop can describe a
+    /// structure whose expanded form grows exponentially: an array of the same array twice, nested twenty
+    /// levels deep, is a million values once written out, while it holds forty references in memory. Every
+    /// consumer that expands an array (the JSON encoder, the result sent to the client, a user function)
+    /// pays the expanded size. The count is fixed when the array is built, from counts its elements already
+    /// carry, so it costs one pass over the elements and no recursion, and a literal can refuse an
+    /// oversized result before anything reads it.</para>
+    /// </summary>
+    public long TotalValueCount { get; }
+
     public long Revision { get; }
 
     public long Expires { get; }
@@ -102,6 +116,21 @@ internal sealed class KeyValueExpressionResult
     {
         Type = KeyValueExpressionType.ArrayType;
         ArrayValue = arrayValue;
+
+        if (arrayValue is null)
+            return;
+
+        long total = arrayValue.Count;
+
+        for (int i = 0; i < arrayValue.Count; i++)
+        {
+            KeyValueExpressionResult item = arrayValue[i];
+
+            if (item.Type == KeyValueExpressionType.ArrayType)
+                total += item.TotalValueCount;
+        }
+
+        TotalValueCount = total;
     }
 
     public override string ToString()
@@ -202,6 +231,10 @@ internal sealed class KeyValueExpressionResult
             KeyValueExpressionType.DoubleType => new() { Value = EncodeDouble(value.DoubleValue), Revision = value.Revision, Expires = new(0, value.Expires, 0) },
             KeyValueExpressionType.StringType => new() { Value = value.StrValue is not null ? Encoding.UTF8.GetBytes(value.StrValue) : null, Revision = value.Revision, Expires = new(0, value.Expires, 0) },
             KeyValueExpressionType.BytesType  => new() { Value = value.BytesValue, Revision = value.Revision, Expires = new(0, value.Expires, 0) },
+
+            // The result is a flat list of values, so an array inside the returned array travels as its JSON
+            // text. This must not throw: a script's result is built on demand, which can be after its commit.
+            KeyValueExpressionType.ArrayType  => new() { Value = ScriptArrayJson.ToUtf8(value.ArrayValue), Revision = -1, Expires = new(0, 0, 0) },
             _ => throw new ArgumentOutOfRangeException()
         };
     }

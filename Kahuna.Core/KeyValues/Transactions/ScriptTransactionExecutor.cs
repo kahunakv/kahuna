@@ -193,6 +193,8 @@ internal sealed class ScriptTransactionExecutor
                 case NodeType.Div:
                 case NodeType.Range:
                 case NodeType.ArrayIndex:
+                case NodeType.ArrayLiteral:
+                case NodeType.ArrayElementList:
                 case NodeType.FuncCall:
                 case NodeType.ArgumentList:
                 case NodeType.NotFound:
@@ -860,6 +862,8 @@ internal sealed class ScriptTransactionExecutor
             case NodeType.Div:
             case NodeType.Range:
             case NodeType.ArrayIndex:
+            case NodeType.ArrayLiteral:
+            case NodeType.ArrayElementList:
             case NodeType.FuncCall:
             case NodeType.ArgumentList:
             case NodeType.NotSet:
@@ -1332,6 +1336,8 @@ internal sealed class ScriptTransactionExecutor
                 case NodeType.Div:
                 case NodeType.Range:
                 case NodeType.ArrayIndex:
+                case NodeType.ArrayLiteral:
+                case NodeType.ArrayElementList:
                 case NodeType.FuncCall:
                 case NodeType.ArgumentList:
                 case NodeType.NullType:
@@ -1383,7 +1389,7 @@ internal sealed class ScriptTransactionExecutor
     /// </summary>
     private static NodeAst[] GetStatements(NodeAst list)
     {
-        NodeAst[]? statements = Volatile.Read(ref list.statementsMemo);
+        NodeAst[]? statements = Volatile.Read(ref list.orderedChildrenMemo);
 
         if (statements is not null)
             return statements;
@@ -1418,7 +1424,7 @@ internal sealed class ScriptTransactionExecutor
         if (node is not null)
             statements[--index] = node;
 
-        Volatile.Write(ref list.statementsMemo, statements);
+        Volatile.Write(ref list.orderedChildrenMemo, statements);
 
         return statements;
     }

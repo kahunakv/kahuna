@@ -62,15 +62,18 @@ public sealed class NodeAst
     internal KeyValueExpressionResult? revisionMemo;
 
     /// <summary>
-    /// The statements of this statement list in execution order, once an execution has asked for them.
+    /// The children of a left-leaning list in source order, once an execution has asked for them: the
+    /// statements of a statement list, or the elements of an array literal.
     ///
-    /// <para>A statement list is a left-leaning spine with one node per statement. The executor runs a
-    /// list as a flat loop, and the spine's shape is fixed at parse time, so the flattened form is built
-    /// once per cached tree instead of once per execution. Set only on the root node of a list. The same
-    /// publication rule as <see cref="literalMemo"/> applies: concurrent fills compute the same array,
-    /// and the array is never written after it is stored.</para>
+    /// <para>Both lists are a left-leaning spine with one node per child. The executor runs a statement
+    /// list as a flat loop and the evaluator builds an array literal the same way, and the spine's shape
+    /// is fixed at parse time, so the flattened form is built once per cached tree instead of once per
+    /// execution. Set only on the root node of a statement list or on an array literal node; one node is
+    /// never both, so the two uses cannot meet. The same publication rule as <see cref="literalMemo"/>
+    /// applies: concurrent fills compute the same array, and the array is never written after it is
+    /// stored.</para>
     /// </summary>
-    internal NodeAst[]? statementsMemo;
+    internal NodeAst[]? orderedChildrenMemo;
 
     /// <summary>
     /// Whether the script rooted here has the shape that may run inside one actor turn: 0 not decided yet,

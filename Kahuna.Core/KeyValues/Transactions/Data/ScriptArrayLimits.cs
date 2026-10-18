@@ -11,9 +11,10 @@ internal static class ScriptArrayLimits
     /// because it is one uninterrupted statement. A hundred thousand elements is already far past any
     /// sensible loop inside a transaction.
     ///
-    /// <para>One constant covers the range operator and the string split, because the danger is the same for
-    /// both: the list itself, not where its elements came from. Two constants would let one of the two grow
-    /// past the memory the other proved safe.</para>
+    /// <para>One constant covers the range operator, the string split and the array literal, because the
+    /// danger is the same for all three: the list itself, not where its elements came from. Separate
+    /// constants would let one of them grow past the memory another proved safe. An array literal counts the
+    /// values of the arrays nested in it too, because those are what an encoder writes out.</para>
     /// </summary>
     internal const long MaxElements = 100_000;
 }

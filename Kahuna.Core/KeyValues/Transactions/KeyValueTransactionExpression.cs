@@ -84,6 +84,9 @@ internal static class KeyValueTransactionExpression
             case NodeType.ArrayIndex:
                 return ArrayIndexOperator.Eval(context, ast);
             
+            case NodeType.ArrayLiteral:
+                return ArrayLiteralOperator.Eval(context, ast);
+            
             case NodeType.Range:
                 return RangeOperator.Eval(context, ast);
             
@@ -131,6 +134,7 @@ internal static class KeyValueTransactionExpression
             case NodeType.Commit:
             case NodeType.Return:
             case NodeType.ArgumentList:
+            case NodeType.ArrayElementList:
             case NodeType.Delete:
             case NodeType.Edelete:
             case NodeType.Exists:

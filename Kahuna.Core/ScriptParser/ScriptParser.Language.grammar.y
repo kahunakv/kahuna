@@ -243,6 +243,7 @@ expression : expression TEQUALS expression { $$.n = new(NodeType.Equals, $1.n, $
            | TNOTDELETED { $$.n = new(NodeType.NotDeleted, null, null, null, null, null, null, null, $1.l); }
            | TNOTEXTENDED { $$.n = new(NodeType.NotExtended, null, null, null, null, null, null, null, $1.l); }
            | expression LSQUAREBRACE expression RSQUAREBRACE { $$.n = new(NodeType.ArrayIndex, $1.n, $3.n, null, null, null, null, null, $1.l); }
+           | array_literal { $$.n = $1.n; $$.l = $1.l; }
            | LPAREN expression RPAREN { $$.n = $2.n; $$.l = $2.l; }
            | fcall_expr { $$.n = $1.n; $$.l = $1.l; } 
            | identifier { $$.n = $1.n; $$.l = $1.l; }
@@ -254,6 +255,14 @@ expression : expression TEQUALS expression { $$.n = new(NodeType.Equals, $1.n, $
            | null { $$.n = $1.n; $$.l = $1.l; }
            ;
            
+array_literal : LSQUAREBRACE RSQUAREBRACE { $$.n = new(NodeType.ArrayLiteral, null, null, null, null, null, null, null, $1.l); }
+              | LSQUAREBRACE array_element_list RSQUAREBRACE { $$.n = new(NodeType.ArrayLiteral, $2.n, null, null, null, null, null, null, $1.l); }
+              ;
+
+array_element_list : array_element_list TCOMMA expression { $$.n = new(NodeType.ArrayElementList, $1.n, $3.n, null, null, null, null, null, $1.l); }
+                   | expression { $$.n = $1.n; $$.l = $1.l; }
+                   ;
+
 fcall_expr : identifier LPAREN RPAREN { $$.n = new(NodeType.FuncCall, $1.n, null, null, null, null, null, null, $1.l); }
            | identifier LPAREN fcall_argument_list RPAREN { $$.n = new(NodeType.FuncCall, $1.n, $3.n, null, null, null, null, null, $1.l); }
            ;

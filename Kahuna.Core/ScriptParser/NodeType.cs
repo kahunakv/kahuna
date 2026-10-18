@@ -46,6 +46,8 @@ public enum NodeType
     Div,
     Range,
     ArrayIndex,
+    ArrayLiteral,
+    ArrayElementList,
     FuncCall,
     ArgumentList,
     NotSet,

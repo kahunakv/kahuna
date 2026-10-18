@@ -194,6 +194,8 @@ internal sealed class KeyValueLockHelper : BaseCommand
                 case NodeType.Mult:
                 case NodeType.Div:
                 case NodeType.ArrayIndex:
+                case NodeType.ArrayLiteral:
+                case NodeType.ArrayElementList:
                 case NodeType.FuncCall:
                 case NodeType.ArgumentList:
                 case NodeType.NotFound:

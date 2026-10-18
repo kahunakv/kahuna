@@ -140,7 +140,22 @@ public sealed class TestTrimSafeJson
     }
 
     [Fact]
-    public void ToJsonArray_GeneratedOutputMatchesReflection()
+    public void ToJsonScalars_GeneratedOutputMatchesReflection()
+    {
+        Assert.Equal(JsonSerializer.Serialize(5L, ReflectionDefaults),
+            JsonSerializer.Serialize(5L, ToJsonContext.Default.Int64));
+        Assert.Equal(JsonSerializer.Serialize("s\"q", ReflectionDefaults),
+            JsonSerializer.Serialize("s\"q", ToJsonContext.Default.String));
+        Assert.Equal(JsonSerializer.Serialize(2.5, ReflectionDefaults),
+            JsonSerializer.Serialize(2.5, ToJsonContext.Default.Double));
+    }
+
+    /// <summary>
+    /// An array is written by hand, with no serializer metadata, so it needs nothing kept for a trimmed
+    /// build. Each element is written as its JSON value, never as the fields of the result object.
+    /// </summary>
+    [Fact]
+    public void ToJsonArray_WritesValuesNotResultObjects()
     {
         List<KeyValueExpressionResult> array =
         [
@@ -148,15 +163,15 @@ public sealed class TestTrimSafeJson
             new(2.5),
             new("s\"q"),
             new(true),
-            new([new KeyValueExpressionResult(1L)])
+            KeyValueExpressionResult.Null,
+            new("x"u8.ToArray()),
+            new([new KeyValueExpressionResult(1L)]),
+            new(new List<KeyValueExpressionResult>()),
+            new(double.NaN),
+            new("\uD83D")
         ];
 
-        Assert.Equal(JsonSerializer.Serialize(array, ReflectionDefaults),
-            JsonSerializer.Serialize(array, ToJsonContext.Default.ListKeyValueExpressionResult));
-        Assert.Equal(JsonSerializer.Serialize("s\"q", ReflectionDefaults),
-            JsonSerializer.Serialize("s\"q", ToJsonContext.Default.String));
-        Assert.Equal(JsonSerializer.Serialize(2.5, ReflectionDefaults),
-            JsonSerializer.Serialize(2.5, ToJsonContext.Default.Double));
+        Assert.Equal("[5,2.5,\"s\\u0022q\",true,null,\"x\",[1],[],\"NaN\",\"\\uFFFD\"]", ScriptArrayJson.ToJsonString(array));
     }
 
     [Fact]

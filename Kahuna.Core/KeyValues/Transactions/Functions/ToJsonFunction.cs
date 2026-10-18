@@ -22,7 +22,7 @@ internal static class ToJsonFunction
             KeyValueExpressionType.LongType => new(JsonSerializer.Serialize(arg.LongValue, ToJsonContext.Default.Int64)),
             KeyValueExpressionType.DoubleType => new(JsonSerializer.Serialize(arg.DoubleValue, ToJsonContext.Default.Double)),
             KeyValueExpressionType.StringType => new(JsonSerializer.Serialize(arg.StrValue, ToJsonContext.Default.String)),
-            KeyValueExpressionType.ArrayType => new(JsonSerializer.Serialize(arg.ArrayValue, ToJsonContext.Default.ListKeyValueExpressionResult)),
+            KeyValueExpressionType.ArrayType => new(ScriptArrayJson.ToJsonString(arg.ArrayValue)),
             _ => throw new KahunaScriptException($"Cannot use 'to_json' function on argument {arg.Type}", ast.yyline)
         };
     }
@@ -37,5 +37,4 @@ internal static class ToJsonFunction
 [JsonSerializable(typeof(long))]
 [JsonSerializable(typeof(double))]
 [JsonSerializable(typeof(string))]
-[JsonSerializable(typeof(List<KeyValueExpressionResult>))]
 internal sealed partial class ToJsonContext : JsonSerializerContext;
