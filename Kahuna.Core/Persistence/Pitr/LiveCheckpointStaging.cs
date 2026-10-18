@@ -124,9 +124,12 @@ internal sealed class LiveCheckpointStaging
                 throw;
             }
 
-            _logger?.LogInformation(
-                "Backup {BackupId}: the backup directory is not on the store's filesystem, so the checkpoint is staged under {Root} and only the trimmed image is copied.",
-                backupId, root);
+            if (_logger?.IsEnabled(LogLevel.Information) == true)
+            {
+                _logger.LogInformation(
+                    "Backup {BackupId}: the backup directory is not on the store's filesystem, so the checkpoint is staged under {Root} and only the trimmed image is copied.",
+                    backupId, root);
+            }
             return directory;
         }
 
