@@ -239,7 +239,7 @@ public sealed class TestProbeManyRangesHandler : RaftTrackingTest
         rig.Backend.Hold();
 
         Task<KeyValueResponse> probe = rig.Probe([Group(0, 5), Group(1, 5)], transactionId: tx, lockMode: KeyValueProbeLock.Shared);
-        Assert.True(rig.Backend.Entered.Wait(TimeSpan.FromSeconds(5)), "the probe's disk pages never started");
+        Assert.True(rig.Backend.Entered.Wait(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken), "the probe's disk pages never started");
         await Task.Delay(400, TestContext.Current.CancellationToken);
 
         rig.Actor.Send(new KeyValueRequest(KeyValueRequestType.Collect));

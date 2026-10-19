@@ -117,29 +117,47 @@ public sealed class TestHashPlacement : BaseCluster
     /// <summary>
     /// Placing a key allocates nothing, grouped or not. A transaction places each of its keys once per
     /// phase, so a string built per placement is paid several times per key per transaction.
+    ///
+    /// <para>
+    /// The thread's allocation counter also charges the runtime's own one-off work on this thread, which
+    /// the test cannot fence out while other test classes run in the same process. Every attempt places the
+    /// same keys, so an allocation on the placement path shows in every attempt (tens of thousands of
+    /// objects per attempt); a one-off charge shows in one. The path is clean when any attempt is.
+    /// </para>
     /// </summary>
     [Fact]
     public void PlacingAKey_DoesNotAllocate()
     {
         string[] keys = ["users/1", "t:r|i:pk/abc", "no-separator"];
         const int iterations = 10_000;
+        const int attempts = 5;
 
         // Warm up the JIT before measuring.
         for (int i = 0; i < 100; i++)
             foreach (string key in keys)
                 _ = HashPlacement.BucketOfKey(key, 8) + HashPlacement.BucketOfKeySpace(key, 8);
 
-        long before = GC.GetAllocatedBytesForCurrentThread();
-
+        long[] allocatedPerAttempt = new long[attempts];
         long sink = 0;
-        for (int i = 0; i < iterations; i++)
-            foreach (string key in keys)
-                sink += HashPlacement.BucketOfKey(key, 8) + HashPlacement.BucketOfKeySpace(key, 8);
 
-        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        for (int attempt = 0; attempt < attempts; attempt++)
+        {
+            long before = GC.GetAllocatedBytesForCurrentThread();
+
+            for (int i = 0; i < iterations; i++)
+                foreach (string key in keys)
+                    sink += HashPlacement.BucketOfKey(key, 8) + HashPlacement.BucketOfKeySpace(key, 8);
+
+            allocatedPerAttempt[attempt] = GC.GetAllocatedBytesForCurrentThread() - before;
+
+            if (allocatedPerAttempt[attempt] == 0)
+                break;
+        }
 
         Assert.True(sink >= 0); // keep the loop from being optimized away
-        Assert.True(allocated == 0, $"placement allocated {allocated} bytes over {iterations} rounds; expected 0.");
+        Assert.True(
+            allocatedPerAttempt.Contains(0),
+            $"placement allocated in every attempt of {iterations} rounds; bytes per attempt: {string.Join(", ", allocatedPerAttempt)}; expected 0.");
     }
 
     /// <summary>

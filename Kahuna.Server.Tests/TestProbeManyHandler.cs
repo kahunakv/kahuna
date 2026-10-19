@@ -155,7 +155,7 @@ public sealed class TestProbeManyHandler : RaftTrackingTest
         rig.Backend.Hold();
 
         Task<KeyValueResponse> probe = rig.Probe([Key(0), Key(1)]);
-        Assert.True(rig.Backend.Entered.Wait(TimeSpan.FromSeconds(5)), "the probe's batched read never started");
+        Assert.True(rig.Backend.Entered.Wait(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken), "the probe's batched read never started");
 
         Task<KeyValueResponse?> single = rig.Get(Key(1));
 
@@ -183,7 +183,7 @@ public sealed class TestProbeManyHandler : RaftTrackingTest
         rig.Backend.Hold();
 
         Task<KeyValueResponse?> single = rig.Get(Key(0));
-        Assert.True(rig.Backend.Entered.Wait(TimeSpan.FromSeconds(5)), "the single read never started");
+        Assert.True(rig.Backend.Entered.Wait(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken), "the single read never started");
 
         Task<KeyValueResponse> probe = rig.Probe([Key(0), Key(1)]);
         await Task.Delay(100, TestContext.Current.CancellationToken);
@@ -211,7 +211,7 @@ public sealed class TestProbeManyHandler : RaftTrackingTest
         rig.Backend.Hold();
 
         Task<KeyValueResponse> probe = rig.Probe([Key(0), Key(1)]);
-        Assert.True(rig.Backend.Entered.Wait(TimeSpan.FromSeconds(5)));
+        Assert.True(rig.Backend.Entered.Wait(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
         Task<KeyValueResponse?> single = rig.Get(Key(0));
         await Task.Delay(400, TestContext.Current.CancellationToken);
 

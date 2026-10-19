@@ -71,7 +71,7 @@ public sealed class TestBackupPartWire
         Assert.Equal(AgreedTs, capturing.AgreedCut);
         Assert.True(capturing.Proceeded);
 
-        RecordingSink replayed = new();
+        using RecordingSink replayed = new();
         RecordingControlWriter control = new();
         BackupPartResult result = await BackupPartWire.ReceiveAsync(new ReplayStreamReader(written.Chunks), control, replayed, "node-x", ct);
 
@@ -198,12 +198,14 @@ public sealed class TestBackupPartWire
         }
     }
 
-    private sealed class RecordingSink : IBackupPartSink
+    private sealed class RecordingSink : IBackupPartSink, IDisposable
     {
         private string? current;
         private MemoryStream? buffer;
 
         public Dictionary<string, byte[]> Files { get; } = new(StringComparer.Ordinal);
+
+        public void Dispose() => buffer?.Dispose();
 
         public BackupManifest? Captured { get; private set; }
 
