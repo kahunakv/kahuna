@@ -60,29 +60,35 @@ internal sealed partial class BackupService
     }
 
     /// <summary>
-    /// Assigns each partition to one node that hosts it: this node when it hosts the partition (no transfer),
-    /// else the leader hint when that node is a voter of the partition (it has applied everything committed),
-    /// else the first voter. A node in <paramref name="avoid"/> (one an earlier attempt could not reach) is
-    /// chosen only when no other voter is known. Returns null when this node hosts every partition, so the
-    /// caller captures alone.
+    /// Assigns each partition to one node that can capture it. This node captures a partition itself (no transfer)
+    /// when it is one of the partition's voters and has it materialized (<see cref="CapturesLocally"/>); a partition
+    /// it hosts only as a learner or as a replica marked for removal goes to a voter, like a partition it does not
+    /// host: the leader hint when that node is a voter of the partition (it has applied everything committed), else
+    /// the first voter. A replica in <paramref name="avoid"/> (one an earlier attempt could not reach, or that had
+    /// not applied the partition's committed writes to the cut) is chosen only when no other voter is known. Returns
+    /// null when this node captures every partition itself, so the caller captures alone.
     /// </summary>
-    private List<PartAssignment>? AssignShares(IEnumerable<int> partitions, IReadOnlySet<string>? avoid = null)
+    private List<PartAssignment>? AssignShares(
+        IEnumerable<int> partitions, IReadOnlySet<(string Node, int PartitionId)>? avoid = null)
     {
+        string self = _raft.GetLocalEndpoint();
         List<int> local = [];
         Dictionary<string, List<int>> remote = new(StringComparer.Ordinal);
         List<int> unassignable = [];
 
         foreach (int partitionId in partitions)
         {
-            if (_raft.HostsPartition(partitionId))
-            {
-                local.Add(partitionId);
-                continue;
-            }
+            // A partition this node can capture but should avoid goes to another voter when one is known, and stays
+            // here otherwise (under legacy full replication there is no replica set to choose from).
+            bool capturesLocally = CapturesLocally(partitionId);
+            string? node = capturesLocally && (avoid is null || !avoid.Contains((self, partitionId)))
+                ? self
+                : ChooseHostingNode(partitionId, self, avoid) ?? (capturesLocally ? self : null);
 
-            string? node = ChooseHostingNode(partitionId, avoid);
             if (node is null)
                 unassignable.Add(partitionId);
+            else if (string.Equals(node, self, StringComparison.Ordinal))
+                local.Add(partitionId);
             else if (remote.TryGetValue(node, out List<int>? assigned))
                 assigned.Add(partitionId);
             else
@@ -94,7 +100,7 @@ internal sealed partial class BackupService
 
         List<PartAssignment> shares = new(remote.Count + 2);
         if (local.Count > 0)
-            shares.Add(new PartAssignment(_raft.GetLocalEndpoint(), IsLocal: true, local));
+            shares.Add(new PartAssignment(self, IsLocal: true, local));
         foreach ((string node, List<int> assigned) in remote)
             shares.Add(new PartAssignment(node, IsLocal: false, assigned));
         if (unassignable.Count > 0)
@@ -102,7 +108,40 @@ internal sealed partial class BackupService
         return shares;
     }
 
-    private string? ChooseHostingNode(int partitionId, IReadOnlySet<string>? avoid)
+    /// <summary>
+    /// Whether this node captures <paramref name="partitionId"/> itself: it has the partition materialized and the
+    /// committed replica set lists it as a voter, or the set is empty (legacy full replication, where every hosting
+    /// node is a voter). A learner hosts the partition too, but it starts from nothing and can be hundreds of
+    /// thousands of entries behind for minutes; a replica marked for removal is about to stop hosting it; a hosted
+    /// partition absent from the set is mid-removal. A capture waits for the local apply to reach the cut, so none of
+    /// them is a source it can wait for, while the partition's voters have the committed writes applied now.
+    /// </summary>
+    private bool CapturesLocally(int partitionId)
+    {
+        if (!_raft.HostsPartition(partitionId))
+            return false;
+
+        IReadOnlyList<RaftReplica> replicas = _raft.GetPartitionReplicas(partitionId);
+        if (replicas.Count == 0)
+            return true;
+
+        string self = _raft.GetLocalEndpoint();
+        foreach (RaftReplica replica in replicas)
+        {
+            if (string.Equals(replica.Endpoint, self, StringComparison.Ordinal))
+                return replica.Role == RaftReplicaRole.Voter;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// The node that captures a partition this node does not capture itself: the leader hint when it is a voter of
+    /// the partition, else the first voter, with the replicas in <paramref name="avoid"/> as a last resort. This node
+    /// is a candidate only when it hosts the partition: a voter the committed map lists but that has not materialized
+    /// the partition yet cannot capture it.
+    /// </summary>
+    private string? ChooseHostingNode(int partitionId, string self, IReadOnlySet<(string Node, int PartitionId)>? avoid)
     {
         IReadOnlyList<RaftReplica> replicas = _raft.GetPartitionReplicas(partitionId);
         string? hint = _raft.GetPartitionLeaderHint(partitionId);
@@ -114,7 +153,10 @@ internal sealed partial class BackupService
             if (replica.Role != RaftReplicaRole.Voter || string.IsNullOrEmpty(replica.Endpoint))
                 continue;
 
-            if (avoid is not null && avoid.Contains(replica.Endpoint))
+            if (string.Equals(replica.Endpoint, self, StringComparison.Ordinal) && !_raft.HostsPartition(partitionId))
+                continue;
+
+            if (avoid is not null && avoid.Contains((replica.Endpoint, partitionId)))
             {
                 avoidedVoter ??= replica.Endpoint;
                 continue;
@@ -269,6 +311,11 @@ internal sealed partial class BackupService
         {
             return BackupPartResult.Refused(BackupPartOutcome.NeedsFull, ex.Message);
         }
+        catch (BackupDriverException ex) when (ex.NotCaughtUp)
+        {
+            // The message names only partition ids and timestamps, so the coordinator can return it to its caller.
+            return BackupPartResult.Refused(BackupPartOutcome.NotCaughtUp, ex.Message, ex.LaggingPartitions);
+        }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             // The detail (paths, backend text) stays in this node's log; the coordinator gets the correlation id.
@@ -412,13 +459,17 @@ internal sealed partial class BackupService
 
     /// <summary>
     /// The one failure a set of failed shares amounts to. A cut or topology refusal is retryable with a new
-    /// attempt, so it wins over a plain failure; otherwise every failed share is named.
+    /// attempt, so it wins over a plain failure. A share whose node had not applied its partitions to the cut is
+    /// retryable from another replica; it is reported as such when every failed share is of that kind, and as a
+    /// plain failure otherwise. In every case the failed shares are named, and the replicas a retry should avoid
+    /// (those of the nodes that could not be reached, and of the nodes that had not applied) ride along.
     /// </summary>
     private BackupDriverException ShareFailure(IReadOnlyList<ShareOutcome> failed)
     {
         bool cut = false, topology = false, needsFull = false;
+        int notCaughtUp = 0;
         List<string> named = new(failed.Count);
-        List<string> unreachable = [];
+        List<(string Node, int PartitionId)> replicasToAvoid = [];
 
         foreach (ShareOutcome outcome in failed)
         {
@@ -439,12 +490,22 @@ internal sealed partial class BackupService
                     case BackupPartOutcome.NeedsFull:
                         needsFull = true;
                         break;
+                    case BackupPartOutcome.NotCaughtUp:
+                        notCaughtUp++;
+                        // Only the partitions the node named move; the rest of its share stays with it next time.
+                        if (result.LaggingPartitions.Count > 0)
+                            foreach (int partitionId in result.LaggingPartitions)
+                                replicasToAvoid.Add((node, partitionId));
+                        else
+                            AvoidReplicasOf(replicasToAvoid, outcome.Assignment);
+                        break;
                 }
 
                 reason = result.Outcome switch
                 {
                     BackupPartOutcome.NotConfigured => "backup is not configured on that node",
                     BackupPartOutcome.Failed => result.Message ?? "the capture failed on that node",
+                    BackupPartOutcome.NotCaughtUp => result.Message ?? "the node had not applied every committed write of its partitions to the cut",
                     _ => result.Outcome.ToString()
                 };
             }
@@ -453,8 +514,8 @@ internal sealed partial class BackupService
                 string operationId = Guid.NewGuid().ToString("N")[..12];
                 LogOperationFailure(operationId, outcome.Error!);
                 reason = $"the node could not be reached or its share did not arrive (operation {operationId})";
-                if (!outcome.Assignment.IsLocal && outcome.Assignment.Node is { } lost)
-                    unreachable.Add(lost);
+                if (!outcome.Assignment.IsLocal && outcome.Assignment.Node is not null)
+                    AvoidReplicasOf(replicasToAvoid, outcome.Assignment);
             }
 
             named.Add($"partition(s) {partitions} on node {node}: {reason}");
@@ -464,12 +525,21 @@ internal sealed partial class BackupService
                          string.Join("; ", named) + ".";
 
         if (cut)
-            return new BackupDriverException(message) { CutUnverified = true };
+            return new BackupDriverException(message) { CutUnverified = true, ReplicasToAvoid = replicasToAvoid };
         if (topology)
-            return new BackupDriverException(message) { TopologyChanged = true };
+            return new BackupDriverException(message) { TopologyChanged = true, ReplicasToAvoid = replicasToAvoid };
         if (needsFull)
-            return new BackupDriverException(message) { NeedsFullBackup = true };
-        return new BackupDriverException(message) { PartitionCaptureFailed = true, UnreachableNodes = unreachable };
+            return new BackupDriverException(message) { NeedsFullBackup = true, ReplicasToAvoid = replicasToAvoid };
+        if (notCaughtUp == failed.Count)
+            return new BackupDriverException(message) { NotCaughtUp = true, ReplicasToAvoid = replicasToAvoid };
+        return new BackupDriverException(message) { PartitionCaptureFailed = true, ReplicasToAvoid = replicasToAvoid };
+    }
+
+    /// <summary>Marks every replica of <paramref name="share"/> (its node, each of its partitions) as one a retry avoids.</summary>
+    private static void AvoidReplicasOf(List<(string Node, int PartitionId)> replicasToAvoid, PartAssignment share)
+    {
+        foreach (int partitionId in share.Partitions)
+            replicasToAvoid.Add((share.Node!, partitionId));
     }
 
     /// <summary>

@@ -141,6 +141,7 @@ public static class EmbeddedOptionsFactory
         BackupGcInterval = TimeSpan.FromSeconds(opts.BackupGcIntervalSeconds),
         BackupRestoreThrottleBytesPerSec = (long)opts.BackupRestoreThrottleMbps * 1_000_000,
         BackupCaptureThrottleBytesPerSec = (long)opts.BackupCaptureThrottleMbps * 1_000_000,
+        BackupApplyBarrierTimeout = TimeSpan.FromSeconds(opts.BackupApplyBarrierTimeoutSeconds),
         RangeSplitThreshold = opts.RangeSplitThreshold,
         RangeSplitMinRangeSize = opts.RangeSplitMinRangeSize,
         RangeSplitSettleWindow = TimeSpan.FromSeconds(opts.RangeSplitSettleWindowSeconds),

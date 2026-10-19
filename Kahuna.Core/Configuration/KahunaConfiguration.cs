@@ -1110,4 +1110,12 @@ public sealed class KahunaConfiguration
     /// or negative = unlimited.
     /// </summary>
     public long BackupCaptureThrottleBytesPerSec { get; set; }
+
+    /// <summary>
+    /// How long a full backup waits for the committed writes of the partitions it captures to be applied and queued
+    /// for persistence before it refuses the capture (outcome <c>PartitionCaptureFailed</c>, naming the partitions).
+    /// The wait covers a replica that is a few entries behind; a replica that cannot catch up within it is one the
+    /// coordinator captures the partition from another replica instead. Zero or negative = the default of 30 s.
+    /// </summary>
+    public TimeSpan BackupApplyBarrierTimeout { get; set; } = TimeSpan.FromSeconds(30);
 }

@@ -1,5 +1,6 @@
 
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
@@ -89,6 +90,10 @@ internal sealed class BackupDriver
     // Pace of the hash and verify reads of a capture, in bytes per second; 0 = unlimited.
     private readonly long _captureThrottleBytesPerSec;
 
+    // How long a full backup waits for the captured partitions' committed writes to be applied and enqueued for
+    // persistence before it reports them as not caught up (see WaitForAppliedBarrierAsync).
+    private readonly int _applyBarrierTimeoutMs;
+
     public BackupDriver(IRaft raft, IPersistenceBackend persistenceBackend,
         Func<Task>? flushBeforeCheckpoint = null,
         AcquireSnapshotHoldDelegate? acquireSnapshotHold = null,
@@ -97,10 +102,12 @@ internal sealed class BackupDriver
         int snapshotHoldLeaseMs = DefaultSnapshotHoldLeaseMs,
         Func<int, HLCTimestamp>? appliedHlcProbe = null,
         WalkLiveIntentsDelegate? walkLiveIntents = null,
-        long captureThrottleBytesPerSec = 0)
+        long captureThrottleBytesPerSec = 0,
+        int applyBarrierTimeoutMs = DefaultApplyBarrierTimeoutMs)
     {
         _raft = raft;
         _captureThrottleBytesPerSec = Math.Max(0, captureThrottleBytesPerSec);
+        _applyBarrierTimeoutMs = applyBarrierTimeoutMs > 0 ? applyBarrierTimeoutMs : DefaultApplyBarrierTimeoutMs;
         _walkLiveIntents = walkLiveIntents;
         _persistenceBackend = persistenceBackend;
         _flushBeforeCheckpoint = flushBeforeCheckpoint;
@@ -138,6 +145,7 @@ internal sealed class BackupDriver
         RunFullAsync(_raft.WalAdapter, _raft.GetPartitionMap(), _persistenceBackend,
             artifacts, catalog, _flushBeforeCheckpoint, snapshotT,
             _acquireSnapshotHold, _releaseSnapshotHold, _renewSnapshotHold, _snapshotHoldLeaseMs, _appliedHlcProbe,
+            applyBarrierTimeoutMs: _applyBarrierTimeoutMs,
             identity: identity, topologyGenerationProbe: ComposeTopologyGeneration,
             hostsPartition: _raft.HostsPartition,
             verifyCoordinator: verifyCoordinator, signManifest: signManifest, verifyCut: verifyCut,
@@ -662,6 +670,13 @@ internal sealed class BackupDriver
         Func<int, long> durabilityFloor, int timeoutMs, CancellationToken ct)
     {
         long deadline = Environment.TickCount64 + timeoutMs;
+
+        // Every partition still behind at the deadline is reported, not only the first one found: once the
+        // deadline has passed the remaining partitions are probed once each, so the caller learns the whole set
+        // it must capture elsewhere in one attempt.
+        List<int>? laggingPartitions = null;
+        StringBuilder? detail = null;
+
         foreach (PartitionBackupRange range in ranges)
         {
             long durable = durabilityFloor(range.PartitionId);
@@ -672,20 +687,34 @@ internal sealed class BackupDriver
             if (target == HLCTimestamp.Zero)
                 continue;
 
-            while (appliedHlcProbe(range.PartitionId).CompareTo(target) < 0)
+            HLCTimestamp applied;
+            while ((applied = appliedHlcProbe(range.PartitionId)).CompareTo(target) < 0)
             {
                 ct.ThrowIfCancellationRequested();
                 if (Environment.TickCount64 > deadline)
-                    throw new BackupDriverException(
-                        $"Timed out waiting for partition {range.PartitionId} to apply and enqueue committed " +
-                        $"writes up to commit HLC {target}; the checkpoint would be missing committed data, so " +
-                        "the backup was not taken.")
-                    {
-                        ExactCheckpointUnavailable = true
-                    };
+                {
+                    laggingPartitions ??= [];
+                    laggingPartitions.Add(range.PartitionId);
+                    detail ??= new StringBuilder();
+                    if (detail.Length > 0)
+                        detail.Append(", ");
+                    detail.Append(range.PartitionId).Append(" (applied through commit HLC ").Append(applied)
+                        .Append(", committed through ").Append(target).Append(')');
+                    break;
+                }
                 await Task.Delay(10, ct).ConfigureAwait(false);
             }
         }
+
+        if (laggingPartitions is not null)
+            throw new BackupDriverException(
+                $"Committed writes of partition(s) {detail} were not applied on this node within {timeoutMs} ms; an " +
+                "image taken now would miss them, so nothing was published. Retry once the node has caught up, or " +
+                "capture the partition(s) from a replica that has.")
+            {
+                NotCaughtUp = true,
+                LaggingPartitions = laggingPartitions
+            };
     }
 
     /// <summary>

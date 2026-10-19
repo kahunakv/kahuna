@@ -100,11 +100,16 @@ public sealed class TestPitrAppliedBarrier : IDisposable
         BackupCatalog cat = NewCatalog("lag");
         string art = ArtifactsDir("lag");
 
-        // Apply pipeline stuck below the captured ToHlc (100): the barrier must time out and fail closed.
+        // Apply pipeline stuck below the captured ToHlc (100): the barrier must time out and fail closed. The
+        // condition is the replica's, not the backend's, and it names the partition so the caller can capture it
+        // from another replica.
         BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() =>
             BackupDriver.RunFullAsync(wal, [Part(1)], backend, BackupTestStores.Artifacts(art), cat, flushBeforeCheckpoint: null, snapshotT: null, ct: TestContext.Current.CancellationToken, appliedHlcProbe: _ => T(50), applyBarrierTimeoutMs: 100));
 
-        Assert.True(ex.ExactCheckpointUnavailable);
+        Assert.True(ex.NotCaughtUp);
+        Assert.False(ex.ExactCheckpointUnavailable);
+        Assert.Equal([1], ex.LaggingPartitions);
+        Assert.Contains("partition(s) 1 (applied through commit HLC", ex.Message, StringComparison.Ordinal);
         Assert.Empty(await cat.ListAsync(TestContext.Current.CancellationToken));
         if (Directory.Exists(art)) Assert.Empty(Directory.GetDirectories(art));
     }
@@ -198,11 +203,13 @@ public sealed class TestPitrAppliedBarrier : IDisposable
         BackupCatalog cat = NewCatalog("multi");
         string art = ArtifactsDir("multi");
 
-        // Partition 1 caught up (>=100), partition 2 lagging (<120): the barrier must fail closed.
+        // Partition 1 caught up (>=100), partition 2 lagging (<120): the barrier must fail closed, naming only
+        // the partition that is behind.
         BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() =>
             BackupDriver.RunFullAsync(wal, [Part(1), Part(2)], backend, BackupTestStores.Artifacts(art), cat, flushBeforeCheckpoint: null, snapshotT: null, ct: TestContext.Current.CancellationToken, appliedHlcProbe: p => p == 1 ? T(100) : T(50), applyBarrierTimeoutMs: 100));
 
-        Assert.True(ex.ExactCheckpointUnavailable);
+        Assert.True(ex.NotCaughtUp);
+        Assert.Equal([2], ex.LaggingPartitions);
         Assert.Empty(await cat.ListAsync(TestContext.Current.CancellationToken));
     }
 

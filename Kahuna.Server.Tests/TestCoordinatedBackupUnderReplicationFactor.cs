@@ -1,5 +1,6 @@
 using System.Text;
 using Kahuna.Server.Communication.Internode;
+using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Persistence.Backend;
@@ -8,6 +9,8 @@ using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
 using Kommander;
 using Kommander.Communication.Memory;
+using Kommander.Data;
+using Kommander.System;
 using Kommander.Time;
 using Kommander.WAL;
 using Microsoft.Extensions.Logging;
@@ -59,7 +62,7 @@ public sealed class TestCoordinatedBackupUnderReplicationFactor : BaseCluster, I
     }
 
     private async Task<(IRaft[] Rafts, IKahuna[] Kahunas, MemoryInterNodeCommmunication InterComm)> AssembleAsync(
-        string storage, string backupDir)
+        string storage, string backupDir, Action<KahunaConfiguration>? configure = null)
     {
         int ordinal = 0;
         string storageRoot = NewDir("storage");
@@ -81,6 +84,7 @@ public sealed class TestCoordinatedBackupUnderReplicationFactor : BaseCluster, I
                     // these cases look at exactly what each backup left behind.
                     c.BackupDir = backupDir;
                     c.BackupGcInterval = TimeSpan.Zero;
+                    configure?.Invoke(c);
                 });
 
         return (rafts, kahunas, interComm);
@@ -480,5 +484,102 @@ public sealed class TestCoordinatedBackupUnderReplicationFactor : BaseCluster, I
             foreach (IRaft raft in rafts)
                 await LeaveCluster(raft);
         }
+    }
+
+    /// <summary>
+    /// The coordinator hosts a partition as a follower voter whose applies are held, so its own replica cannot reach
+    /// the cut within the barrier. The first attempt reports that partition as not caught up; the next captures it
+    /// from the partition's leader and keeps the rest here, so the backup covers every partition and holds the rows
+    /// the leader committed while the coordinator's replica could not apply them.
+    /// </summary>
+    [Fact]
+    public async Task CoordinatedBackup_PartitionTheCoordinatorHasNotApplied_IsCapturedFromAnotherReplica()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        string backupDir = Path.Combine(tempRoot, "backups");
+
+        // A short barrier, so the held replica is found behind within the test's patience.
+        (IRaft[] rafts, IKahuna[] kahunas, _) = await AssembleAsync("memory", backupDir,
+            configure: c => c.BackupApplyBarrierTimeout = TimeSpan.FromSeconds(2));
+
+        int leader = -1;
+        int held = 0;
+        try
+        {
+            leader = await MetaLeaderIndex(rafts);
+            held = await FollowerPartitionOf(rafts, leader);
+
+            Dictionary<string, string> expected = [];
+            for (int i = 0; i < 30; i++)
+            {
+                expected[Key(i)] = "v" + i;
+                await WriteAsync(kahunas, Key(i), expected[Key(i)]);
+            }
+
+            Assert.Equal(RaftOperationStatus.Success, await rafts[leader].HoldConsumerAppliesForTesting(held, ct));
+
+            // Rows the held partition commits while the coordinator's replica cannot apply them: only an image taken
+            // from another replica holds them.
+            DataPartitionRouterProbe router = new(rafts[leader]);
+            int written = 0;
+            for (int i = 0; written < 5; i++)
+            {
+                string key = $"held{i}/key";
+                if (router.Locate(key) != held)
+                    continue;
+                expected[key] = "held-" + i;
+                await WriteAsync(kahunas, key, expected[key]);
+                written++;
+            }
+
+            KahunaBackupInfo backup = await RetryRetryable(() => kahunas[leader].TakeCoordinatedBackupAsync(ct));
+
+            BackupManifest manifest = (await new BackupCatalog(new LocalDirectoryStorageTarget(backupDir)).GetAsync(backup.BackupId, ct))!;
+            Assert.Equal(Enumerable.Range(1, Partitions), manifest.CoveredPartitions!.Order());
+
+            MemoryPersistenceBackend image = MemoryPersistenceBackend.OpenCheckpoint(
+                Path.Combine(backupDir, backup.BackupId.ToString("N"), "checkpoint"));
+            AssertRows(image, expected);
+        }
+        finally
+        {
+            if (leader >= 0)
+                await rafts[leader].ResumeConsumerAppliesForTesting(held, ct);
+            foreach (IRaft raft in rafts)
+                await LeaveCluster(raft);
+        }
+    }
+
+    /// <summary>
+    /// A data partition <paramref name="node"/> hosts without leading. When it leads every partition it hosts, the
+    /// leadership of one is handed to another voter first.
+    /// </summary>
+    private static async Task<int> FollowerPartitionOf(IRaft[] rafts, int node)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        IRaft raft = rafts[node];
+        List<int> hosted = [.. Enumerable.Range(1, Partitions).Where(raft.HostsPartition)];
+        Assert.NotEmpty(hosted);
+
+        foreach (int partitionId in hosted)
+        {
+            if (!await raft.AmILeaderQuick(partitionId))
+                return partitionId;
+        }
+
+        int moved = hosted[0];
+        string self = raft.GetLocalEndpoint();
+        string target = raft.GetPartitionReplicas(moved)
+            .First(r => r.Role == RaftReplicaRole.Voter && !string.Equals(r.Endpoint, self, StringComparison.Ordinal)).Endpoint;
+        RaftOperationStatus status = await raft.TransferLeadershipAsync(moved, target, ct);
+        Assert.True(status is RaftOperationStatus.Success or RaftOperationStatus.Pending, status.ToString());
+
+        for (int attempt = 0; await raft.AmILeaderQuick(moved); attempt++)
+        {
+            Assert.True(attempt < 200, $"node {node} still leads partition {moved} after the transfer");
+            await Task.Delay(50, ct);
+        }
+
+        return moved;
     }
 }

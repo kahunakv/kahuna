@@ -1,7 +1,12 @@
 
 using System.Text;
+using Google.Protobuf;
+using Kahuna.Server.KeyValues;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Persistence.Pitr;
+using Kahuna.Server.Replication;
+using Kahuna.Server.Replication.Protos;
+using Kahuna.Shared.KeyValue;
 using Kommander;
 using Kommander.Communication;
 using Kommander.Data;
@@ -65,7 +70,10 @@ public sealed class TestBackupService : IDisposable
         string? restoreRoot = null,
         BackupRetentionPolicy retentionPolicy = default,
         string? clusterId = null,
-        string? macKeyFile = null)
+        string? macKeyFile = null,
+        Func<IReadOnlySet<int>, Func<string, bool>>? keyOwnership = null,
+        Func<int, HLCTimestamp>? appliedHlcProbe = null,
+        int applyBarrierTimeoutMs = BackupDriver.DefaultApplyBarrierTimeoutMs)
     {
         raft ??= MakeRaft(wal, 1);
         return new BackupService(
@@ -82,7 +90,10 @@ public sealed class TestBackupService : IDisposable
             macKeyFile: macKeyFile,
             restoreRoot: restoreRoot,
             acquireRetentionHold: raft.AcquireRetentionHold,
-            retentionPolicy: retentionPolicy);
+            appliedHlcProbe: appliedHlcProbe,
+            retentionPolicy: retentionPolicy,
+            keyOwnership: keyOwnership,
+            applyBarrierTimeoutMs: applyBarrierTimeoutMs);
     }
 
     // Absolute path of the backup directory for a service tag (mirrors BackupDir(tag)).
@@ -515,6 +526,185 @@ public sealed class TestBackupService : IDisposable
         Assert.Equal("cluster-x", m!.ClusterId);
         Assert.Equal("stub", m.CoordinatorNode);
         Assert.NotNull(m.CoordinatorTerm);
+    }
+
+    // ── share assignment under replica placement ─────────────────────────────────────────────
+
+    private const string OtherVoter = "localhost:20002";
+
+    private static RaftReplica Replica(string endpoint, RaftReplicaRole role) => new() { Endpoint = endpoint, Role = role };
+
+    /// <summary>A WAL whose entries carry committed key-value payloads, so the apply barrier has a commit HLC to wait for.</summary>
+    private static InMemoryWAL BuildKeyValueWal(params (int partition, long id, long ticks)[] entries)
+    {
+        InMemoryWAL wal = new(Log);
+        Dictionary<int, List<RaftLog>> byPartition = [];
+        foreach ((int partition, long id, long ticks) in entries)
+        {
+            if (!byPartition.TryGetValue(partition, out List<RaftLog>? list))
+                byPartition[partition] = list = [];
+            list.Add(new RaftLog
+            {
+                Id = id,
+                Type = RaftLogType.Committed,
+                Time = new HLCTimestamp(0, ticks, 0),
+                LogType = ReplicationTypes.KeyValues,
+                LogData = ReplicationSerializer.Serialize(new KeyValueMessage
+                {
+                    Type = (int)KeyValueRequestType.TrySet,
+                    Key = "k" + id,
+                    Value = UnsafeByteOperations.UnsafeWrap(Encoding.UTF8.GetBytes("v")),
+                    Revision = 1,
+                    LastModifiedPhysical = ticks
+                })
+            });
+        }
+        foreach ((int partition, List<RaftLog> logs) in byPartition)
+            wal.Write([(partition, logs)]);
+        return wal;
+    }
+
+    /// <summary>
+    /// The coordinator hosts both partitions and is a voter of partition 1 only; for partition 2 it is a learner, a
+    /// replica marked for removal, or no longer in the committed set. Another node is a voter of both. No inter-node
+    /// transport is wired, so the share assigned to the other node is refused with a message that names it: that
+    /// refusal is the proof that partition 2 was not captured from the local replica, which could be far behind.
+    /// </summary>
+    [Theory]
+    [InlineData(RaftReplicaRole.Learner)]
+    [InlineData(RaftReplicaRole.Removing)]
+    [InlineData(null)]
+    public async Task TakeCoordinated_PartitionHostedButNotAsAVoter_IsCapturedFromAVoter(RaftReplicaRole? localRoleOnPartition2)
+    {
+        InMemoryWAL wal = BuildWal((1, 1, 100), (2, 1, 110));
+        StubRaft raft = MakeRaft(wal, 1, 2);
+        raft.IsLeader = true;
+        string self = raft.GetLocalEndpoint();
+        raft.PartitionReplicasOverride = partitionId =>
+        {
+            if (partitionId == 1)
+                return [Replica(self, RaftReplicaRole.Voter), Replica(OtherVoter, RaftReplicaRole.Voter)];
+            return localRoleOnPartition2 is { } role
+                ? [Replica(self, role), Replica(OtherVoter, RaftReplicaRole.Voter)]
+                : [Replica(OtherVoter, RaftReplicaRole.Voter)];
+        };
+        BackupService svc = MakeService("coord_not_voter", wal, new MemoryPersistenceBackend(), raft: raft,
+            keyOwnership: _ => _ => true);
+
+        BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() =>
+            svc.TakeCoordinatedBackupAsync(TestContext.Current.CancellationToken));
+
+        Assert.True(ex.PartitionCaptureFailed, ex.Message);
+        Assert.Contains($"partition(s) 2 on node {OtherVoter}", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("partition(s) 1", ex.Message, StringComparison.Ordinal);
+        Assert.Empty(await svc.ListBackupsAsync(ct: TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task TakeCoordinated_PartitionsHostedAsAVoter_AreCapturedHere()
+    {
+        InMemoryWAL wal = BuildWal((1, 1, 100), (2, 1, 110));
+        StubRaft raft = MakeRaft(wal, 1, 2);
+        raft.IsLeader = true;
+        string self = raft.GetLocalEndpoint();
+        raft.PartitionReplicasOverride = _ => [Replica(self, RaftReplicaRole.Voter), Replica(OtherVoter, RaftReplicaRole.Voter)];
+        BackupService svc = MakeService("coord_voter", wal, new MemoryPersistenceBackend(), raft: raft);
+
+        Kahuna.Shared.Communication.Rest.KahunaBackupInfo dto =
+            await svc.TakeCoordinatedBackupAsync(TestContext.Current.CancellationToken);
+
+        BackupManifest m = (await ReadManifestAsync("coord_voter", dto.BackupId))!;
+        Assert.Equal([1, 2], m.CoveredPartitions!.Order());
+    }
+
+    /// <summary>
+    /// The committed map lists this node as a voter of partition 2, but the partition is not materialized here yet.
+    /// This node is listed first, so a choice that read the map alone would pick it; the share goes to the other voter.
+    /// </summary>
+    [Fact]
+    public async Task TakeCoordinated_VoterOnTheMapNotMaterializedHere_IsCapturedFromAnotherVoter()
+    {
+        InMemoryWAL wal = BuildWal((1, 1, 100), (2, 1, 110));
+        StubRaft raft = MakeRaft(wal, 1, 2);
+        raft.IsLeader = true;
+        string self = raft.GetLocalEndpoint();
+        // Partition 2 is not materialized here; the meta partition (0) and partition 1 are.
+        raft.HostsPartitionOverride = partitionId => partitionId != 2;
+        raft.PartitionReplicasOverride = _ => [Replica(self, RaftReplicaRole.Voter), Replica(OtherVoter, RaftReplicaRole.Voter)];
+        BackupService svc = MakeService("coord_unmaterialized", wal, new MemoryPersistenceBackend(), raft: raft,
+            keyOwnership: _ => _ => true);
+
+        BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() =>
+            svc.TakeCoordinatedBackupAsync(TestContext.Current.CancellationToken));
+
+        Assert.True(ex.PartitionCaptureFailed, ex.Message);
+        Assert.Contains($"partition(s) 2 on node {OtherVoter}", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain($"on node {self}", ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// This node is a voter of both partitions but has not applied partition 2's committed writes. The first attempt
+    /// captures both here and finds partition 2 behind within the barrier; the next asks the other voter for
+    /// partition 2 alone and keeps partition 1 here. No transport is wired, so that share's refusal names the
+    /// assignment.
+    /// </summary>
+    [Fact]
+    public async Task TakeCoordinated_ThisNodeBehindOnOnePartition_RetriesWithThatPartitionFromAnotherVoter()
+    {
+        InMemoryWAL wal = BuildKeyValueWal((1, 1, 100), (2, 1, 110));
+        StubRaft raft = MakeRaft(wal, 1, 2);
+        raft.IsLeader = true;
+        string self = raft.GetLocalEndpoint();
+        raft.PartitionReplicasOverride = _ => [Replica(self, RaftReplicaRole.Voter), Replica(OtherVoter, RaftReplicaRole.Voter)];
+        BackupService svc = MakeService("coord_behind", wal, new MemoryPersistenceBackend(), raft: raft,
+            keyOwnership: _ => _ => true,
+            appliedHlcProbe: partitionId => partitionId == 1 ? new HLCTimestamp(0, 100, 0) : new HLCTimestamp(0, 50, 0),
+            applyBarrierTimeoutMs: 200);
+
+        BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() =>
+            svc.TakeCoordinatedBackupAsync(TestContext.Current.CancellationToken));
+
+        Assert.True(ex.PartitionCaptureFailed, ex.Message);
+        Assert.False(ex.NotCaughtUp);
+        Assert.Contains($"partition(s) 2 on node {OtherVoter}", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("partition(s) 1", ex.Message, StringComparison.Ordinal);
+        Assert.Empty(await svc.ListBackupsAsync(ct: TestContext.Current.CancellationToken));
+    }
+
+    /// <summary>
+    /// Under legacy full replication there is no other replica to ask, so a partition this node has not applied is
+    /// reported as not caught up, naming it, and not as a refusal of the storage backend.
+    /// </summary>
+    [Fact]
+    public async Task TakeCoordinated_ThisNodeBehindAndNoOtherVoter_ReportsNotCaughtUp_NamingThePartition()
+    {
+        InMemoryWAL wal = BuildKeyValueWal((1, 1, 100), (2, 1, 110));
+        StubRaft raft = MakeRaft(wal, 1, 2);
+        raft.IsLeader = true;
+        BackupService svc = MakeService("coord_behind_alone", wal, new MemoryPersistenceBackend(), raft: raft,
+            appliedHlcProbe: partitionId => partitionId == 1 ? new HLCTimestamp(0, 100, 0) : new HLCTimestamp(0, 50, 0),
+            applyBarrierTimeoutMs: 200);
+
+        BackupDriverException ex = await Assert.ThrowsAsync<BackupDriverException>(() =>
+            svc.TakeCoordinatedBackupAsync(TestContext.Current.CancellationToken));
+
+        Assert.True(ex.NotCaughtUp, ex.Message);
+        Assert.False(ex.ExactCheckpointUnavailable);
+        Assert.Equal([2], ex.LaggingPartitions);
+        Assert.Contains("partition(s) 2", ex.Message, StringComparison.Ordinal);
+        Assert.Empty(await svc.ListBackupsAsync(ct: TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public void Facade_MapsNotCaughtUp_ToPartitionCaptureFailed_WithThePartitionsNamed()
+    {
+        BackupDriverException behind = new("Committed writes of partition(s) 6 were not applied on this node within 30000 ms.")
+            { NotCaughtUp = true, LaggingPartitions = [6] };
+
+        Kahuna.Shared.Communication.Rest.KahunaBackupException mapped = BackupFacade.MapBackupException(behind);
+
+        Assert.Equal(Kahuna.Shared.Communication.Rest.KahunaBackupOutcome.PartitionCaptureFailed, mapped.Outcome);
+        Assert.Equal(behind.Message, mapped.Message);
     }
 
     [Fact]

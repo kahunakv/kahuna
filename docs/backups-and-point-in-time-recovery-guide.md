@@ -224,9 +224,13 @@ image is a snapshot of the disk. So the order matters:
 > it — the same silent-loss bug, one step earlier in the pipeline. So before flushing, the backup
 > waits until each captured partition's applied-and-enqueued progress reaches that partition's
 > covered timestamp. If a partition doesn't catch up within the barrier timeout
-> (`applyBarrierTimeoutMs`, default 30 s), the backup **fails closed** with
-> `ExactCheckpointUnavailable` — no image, no catalog entry — rather than publish a checkpoint that
-> is missing committed writes. The barrier is keyed on **HLC**, not log index, on purpose: the
+> (`BackupApplyBarrierTimeout`, `--backup-apply-barrier-timeout-seconds`, default 30 s), the backup
+> **fails closed** with `PartitionCaptureFailed`, naming the partitions still behind — no image, no
+> catalog entry — rather than publish a checkpoint that is missing committed writes. The outcome is
+> retryable: the replica is catching up (it was added or restarted recently) or its writer is stalled,
+> and a coordinated backup first retries those partitions from another replica that has applied them
+> (§8). `ExactCheckpointUnavailable` is reserved for the backend's own refusals (an engine without
+> as-of checkpoints, pruned history, a lost history hold). The barrier is keyed on **HLC**, not log index, on purpose: the
 > leader's commit-completion path carries only the change's HLC, not a WAL index, so an HLC barrier
 > keeps this a self-contained Kahuna guarantee with no change to the consensus layer.
 >
@@ -484,6 +488,13 @@ so it cannot capture the cut alone. It composes the backup from **shares**:
 - **Each share is an ordinary full capture**, with the same snapshot hold, apply barrier and cut check,
   restricted to its assigned partitions. Its checkpoint drops every row of a key another partition
   owns, so the shares hold disjoint keys and merge into one image without conflicts.
+- **A share goes to a voter of its partitions.** The coordinator captures a partition itself only when
+  it is one of the partition's voters; a partition it hosts as a learner (still catching up, possibly
+  hundreds of thousands of entries behind) or as a replica marked for removal goes to the partition's
+  leader, or to another voter, like a partition it does not host. A replica that still has not applied
+  its partition's committed writes within the apply barrier refuses its share as not caught up, naming
+  the partitions; the next attempt captures exactly those from another replica and keeps the rest where
+  they were. Only when no other replica is known does the backup report `PartitionCaptureFailed`.
 - **The final cut check runs after every share is captured.** A share's own check after its capture
   covers only the transactions decided before that capture. A transaction with a write in another
   share's image was decided before *that* capture, which can be later; its prepare on this share's
@@ -600,6 +611,7 @@ fails the start.
 | `BackupGcInterval` (`--backup-gc-interval`, seconds) | 1 hour | Cadence of the background GC pass (orphan sweep + retention), and a startup sweep on its first tick. 0 disables the periodic pass (GC then runs only inline after each backup). |
 | `BackupRestoreThrottleBytesPerSec` (`--backup-restore-throttle-mbps`, MB/s) | 0 (unlimited) | Throughput budget for a restore's bulk checkpoint copy, so a restore does not saturate the disk and starve foreground traffic. 0 = unlimited. |
 | `BackupCaptureThrottleBytesPerSec` (`--backup-capture-throttle-mbps`, MB/s) | 0 (unlimited) | Throughput budget for a backup capture's disk work: the RocksDB trim and compaction of the as-of image, the hash and verify reads, and the copy of an image staged on the store's filesystem (§5, "What a RocksDB capture costs"). Trades a longer backup for a smaller commit-latency spike. 0 = unlimited. |
+| `BackupApplyBarrierTimeout` (`--backup-apply-barrier-timeout-seconds`, seconds) | 30 s | How long a full backup waits for the committed writes of the partitions it captures to be applied before it refuses the capture as not caught up (`PartitionCaptureFailed`, naming the partitions; §5, the apply barrier). A coordinated backup then captures those partitions from another replica. Raise it on a node whose writer is often seconds behind. 0 = the default. |
 
 Rules of thumb:
 
@@ -739,7 +751,10 @@ when transactions kept overtaking its cut (see §8); nothing is published, so re
 can fail with the same outcome when it cannot record a prepared intent its chain's restore would need
 (see §5); a retry reads new range ends. Under a replication factor a coordinated backup can also fail
 with `PartitionCaptureFailed` (HTTP 503 / gRPC `Unavailable`) when one node's share could not be captured;
-the message names the partitions and the node (see §8). Because leadership can move, **the coordinator changes over time**, so a coordinated
+the message names the partitions and the node (see §8). Any full backup reports the same outcome when the
+node had not applied a partition's committed writes within the apply barrier (§5); the message names the
+partitions, and a coordinated backup only reports it after trying those partitions from another replica.
+Because leadership can move, **the coordinator changes over time**, so a coordinated
 backup is written to whichever node was coordinator at the time.
 
 > **The catalog is whatever is at `BackupDir`.** `ListBackups`, chain resolution, and parent lookup

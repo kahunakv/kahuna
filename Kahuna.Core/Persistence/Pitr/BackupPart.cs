@@ -53,6 +53,13 @@ public enum BackupPartOutcome
 
     /// <summary>Any other failure; the message says why.</summary>
     Failed = 6,
+
+    /// <summary>
+    /// The node had not applied every committed write of one of the requested partitions up to the cut within its
+    /// wait, so its image would miss committed data. The message names the partitions. Another replica of those
+    /// partitions has the writes applied; a new attempt captures them from it.
+    /// </summary>
+    NotCaughtUp = 7,
 }
 
 /// <summary>
@@ -65,8 +72,18 @@ public sealed record BackupPartResult(
     string? Message,
     BackupManifest? Manifest)
 {
+    /// <summary>
+    /// With <see cref="BackupPartOutcome.NotCaughtUp"/>: the requested partitions whose committed writes the node had
+    /// not applied, so the coordinator can capture exactly those from another replica and keep the rest where they
+    /// were. Empty from a node that does not report them; the coordinator then treats the whole share as behind.
+    /// </summary>
+    public IReadOnlyList<int> LaggingPartitions { get; init; } = [];
+
     internal static BackupPartResult Refused(BackupPartOutcome outcome, string message) =>
         new(outcome, message, null);
+
+    internal static BackupPartResult Refused(BackupPartOutcome outcome, string message, IReadOnlyList<int> laggingPartitions) =>
+        new(outcome, message, null) { LaggingPartitions = laggingPartitions };
 }
 
 /// <summary>

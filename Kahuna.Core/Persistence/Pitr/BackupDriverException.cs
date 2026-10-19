@@ -92,10 +92,25 @@ internal sealed class BackupDriverException : Exception
     public bool PartitionCaptureFailed { get; init; }
 
     /// <summary>
-    /// With <see cref="PartitionCaptureFailed"/>: the nodes that could not be reached, so a retry can assign their
-    /// partitions to another replica. Empty when every failed share was refused or failed on a reachable node.
+    /// True when this node had not applied every committed write of a captured partition up to the cut within the
+    /// applied barrier's wait, so an image taken now would miss committed data. The condition is transient: the
+    /// replica is catching up (it was added or restarted recently) or its writer is stalled. Nothing is published;
+    /// the caller retries, and a cluster-wide backup captures the partition from another replica that has the
+    /// writes applied. <see cref="LaggingPartitions"/> names the partitions.
     /// </summary>
-    public IReadOnlyList<string> UnreachableNodes { get; init; } = [];
+    public bool NotCaughtUp { get; init; }
+
+    /// <summary>With <see cref="NotCaughtUp"/>: the partitions whose committed writes this node had not applied.</summary>
+    public IReadOnlyList<int> LaggingPartitions { get; init; } = [];
+
+    /// <summary>
+    /// From a cluster-wide backup, with <see cref="PartitionCaptureFailed"/> or <see cref="NotCaughtUp"/>: the
+    /// replicas (node, partition) a retry should capture from only as a last resort, because the node could not be
+    /// reached or had not applied the partition's committed writes to the cut. A retry assigns each such partition
+    /// to another replica when one is known. Empty when every failed share was refused or failed on a reachable
+    /// node that had applied its partitions.
+    /// </summary>
+    public IReadOnlyList<(string Node, int PartitionId)> ReplicasToAvoid { get; init; } = [];
 
     public BackupDriverException(string message) : base(message) { }
 }

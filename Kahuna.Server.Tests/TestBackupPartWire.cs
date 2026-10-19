@@ -113,6 +113,25 @@ public sealed class TestBackupPartWire
     }
 
     [Fact]
+    public async Task NotCaughtUpRefusal_CarriesThePartitionsStillBehind()
+    {
+        SharingKahuna refusing = new(null, [],
+            BackupPartResult.Refused(BackupPartOutcome.NotCaughtUp, "partition(s) 3, 5 behind", [3, 5]));
+        RecordingStreamWriter written = new();
+
+        await new BackupsService(refusing).CaptureBackupPart(
+            Controls(new BackupPartRequest(BackupPartKind.Full, [1, 3, 5], 7, []), cut: null, proceed: false), written, new StubServerCallContext());
+
+        BackupPartResult result = await BackupPartWire.ReceiveAsync(
+            new ReplayStreamReader(written.Chunks), new RecordingControlWriter(), new RecordingSink(), "node-x", TestContext.Current.CancellationToken);
+
+        // The composing node moves exactly these partitions to another replica, so they must survive the wire.
+        Assert.Equal(BackupPartOutcome.NotCaughtUp, result.Outcome);
+        Assert.Equal([3, 5], result.LaggingPartitions);
+        Assert.Equal("partition(s) 3, 5 behind", result.Message);
+    }
+
+    [Fact]
     public async Task StreamCutOffBeforeItsResult_IsATransportFailure()
     {
         List<GrpcBackupPartChunk> chunks = [new() { BeginFile = "checkpoint/a.sst" }, new() { Data = ByteString.CopyFromUtf8("ab") }];

@@ -45,7 +45,10 @@ public enum KahunaBackupOutcome
 
     /// <summary>
     /// The backend cannot produce an exact as-of checkpoint, so a full backup with a proven base cut
-    /// cannot be taken. Fail closed rather than publish an image that over-includes post-cut state.
+    /// cannot be taken: the storage engine does not support one, the revision history the cut needs was pruned,
+    /// the history hold was lost, or a historyless key was modified after the cut. Fail closed rather than publish
+    /// an image that over-includes post-cut state. A replica that has not applied its committed writes yet is not
+    /// this outcome; see <see cref="PartitionCaptureFailed"/>.
     /// </summary>
     ExactCheckpointUnavailable = 11,
 
@@ -90,9 +93,12 @@ public enum KahunaBackupOutcome
     CutUnverified = 17,
 
     /// <summary>
-    /// A cluster-wide backup could not capture one node's share of the partitions: the node refused or failed
-    /// the capture, or could not be reached. Nothing was published. The message names the partitions and the
-    /// node; retry once the node is healthy.
+    /// A backup could not capture one or more partitions from the node asked for them: in a cluster-wide backup the
+    /// node refused or failed its share or could not be reached; in any full backup the node had not applied every
+    /// committed write of a partition up to the cut within the apply barrier's wait (the replica is catching up or
+    /// its writer is stalled). Nothing was published. The message names the partitions and the node; retry once the
+    /// node is healthy. A coordinated backup retries a partition its own replica had not applied from another
+    /// replica before it reports this.
     /// </summary>
     PartitionCaptureFailed = 18,
 }

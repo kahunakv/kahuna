@@ -306,9 +306,14 @@ partitions it hosts. Each manifest records both the cluster's partition set and 
   backup directory, so in practice point every node at shared storage (§11a-i of the backups guide).
 - **If a share cannot be captured, nothing is published.** The outcome is `PartitionCaptureFailed`
   (HTTP 503 / gRPC `Unavailable`), and the message names the partitions and the node. A node that cannot
-  be reached is replaced by another voter of its partitions on the next attempt. A partition that has
-  just lost its leader cannot confirm its applied state and fails the cut check (`CutUnverified`) until
-  a new leader is elected; retry.
+  be reached is replaced by another voter of its partitions on the next attempt, and so is a node that
+  had not applied a partition's committed writes within the apply barrier (the message names the
+  partitions). A partition that has just lost its leader cannot confirm its applied state and fails the
+  cut check (`CutUnverified`) until a new leader is elected; retry.
+- **A share goes to a voter.** The coordinator captures a partition itself only when it is one of the
+  partition's voters. A partition it hosts as a learner (the rebalancer added it and it is still catching
+  up) or as a replica marked for removal is captured from the partition's leader or another voter, so a
+  learner hundreds of thousands of entries behind never stalls a backup.
 - **Every node must have backups configured** (`--pitr-backup-dir`) and the same storage engine. A node
   without it refuses its share.
 - **A plain `/v1/backups/full` stays per-node.** It covers only the partitions the node hosts, and

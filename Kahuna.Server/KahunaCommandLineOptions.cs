@@ -740,6 +740,9 @@ public sealed class KahunaCommandLineOptions
     [Option("backup-capture-throttle-mbps", Required = false, HelpText = "Throughput budget in MB/s for a backup capture's disk work (the compaction of the as-of image, the hash and verify reads, and the copy of an image staged on the store's filesystem), so a backup does not starve the commit fsyncs on the same disk. 0 = unlimited.", Default = 0)]
     public int BackupCaptureThrottleMbps { get; set; }
 
+    [Option("backup-apply-barrier-timeout-seconds", Required = false, HelpText = "How long a full backup waits for the committed writes of the partitions it captures to be applied before it refuses the capture (outcome PartitionCaptureFailed, naming the partitions). A coordinated backup then captures those partitions from another replica. 0 = the default of 30 s.", Default = 30)]
+    public int BackupApplyBarrierTimeoutSeconds { get; set; } = 30;
+
     [Option("pitr-restore-root", Required = false, HelpText = "Server-owned root directory that restore destinations must be contained within. Setting this enables remote (REST/gRPC) restore, confining all targets under this path.", Default = "")]
     public string PitrRestoreRoot { get; set; } = "";
 

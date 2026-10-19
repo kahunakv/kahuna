@@ -582,6 +582,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             BackupGcInterval = options.BackupGcInterval,
             BackupRestoreThrottleBytesPerSec = options.BackupRestoreThrottleBytesPerSec,
             BackupCaptureThrottleBytesPerSec = options.BackupCaptureThrottleBytesPerSec,
+            BackupApplyBarrierTimeout = options.BackupApplyBarrierTimeout,
             RangeSplitThreshold = options.RangeSplitThreshold,
             RangeSplitMinRangeSize = options.RangeSplitMinRangeSize,
             RangeSplitLoadThreshold = options.RangeSplitLoadThreshold,

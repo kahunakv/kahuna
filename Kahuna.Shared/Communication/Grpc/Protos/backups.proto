@@ -59,6 +59,8 @@ message GrpcBackupPartResult {
   int32  Outcome      = 1;
   string Message      = 2;
   string ManifestJson = 3;
+  // With a NotCaughtUp outcome: the requested partitions whose committed writes the node had not applied.
+  repeated int32 LaggingPartitions = 4;
 }
 
 message GrpcTakeFullBackupRequest {

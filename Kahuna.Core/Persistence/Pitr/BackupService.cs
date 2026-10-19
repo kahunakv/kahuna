@@ -77,7 +77,8 @@ internal sealed partial class BackupService : IDisposable
         IInterNodeCommunication? interNodeCommunication = null,
         Func<IReadOnlySet<int>, Func<string, bool>>? keyOwnership = null,
         string? partScratchRoot = null,
-        long captureThrottleBytesPerSec = 0)
+        long captureThrottleBytesPerSec = 0,
+        int applyBarrierTimeoutMs = BackupDriver.DefaultApplyBarrierTimeoutMs)
     {
         // Refuse an unsafe backup root before writing anything: a symlinked or group/world-writable
         // directory would let another user on the host read tenant data or tamper with artifacts and
@@ -96,7 +97,7 @@ internal sealed partial class BackupService : IDisposable
         _logger = logger;
         _driver = new BackupDriver(raft, persistenceBackend, flushBeforeCheckpoint,
             acquireSnapshotHold, releaseSnapshotHold, renewSnapshotHold, snapshotHoldLeaseMs, appliedHlcProbe, walkLiveIntents,
-            captureThrottleBytesPerSec);
+            captureThrottleBytesPerSec, applyBarrierTimeoutMs);
         _catalog = new BackupCatalog(manifestTarget);
         _artifacts = artifactStore;
         _queryMinInFlight = queryMinInFlight;
@@ -280,8 +281,11 @@ internal sealed partial class BackupService : IDisposable
             await _raft.AmILeaderIfHosted(metaPartition, fenceCt).ConfigureAwait(false)
             && _raft.WalAdapter.GetCurrentTerm(metaPartition) == coordinatorTerm;
 
-        // Nodes an earlier attempt could not reach: their partitions go to another voter replica next time.
-        HashSet<string> unreachable = new(StringComparer.Ordinal);
+        // Replicas (node, partition) an earlier attempt could not capture from: the node could not be reached, or it
+        // had not applied the partition's committed writes to the cut. Their partitions go to another voter next
+        // time, when one is known.
+        HashSet<(string Node, int PartitionId)> avoid = [];
+        string self = _raft.GetLocalEndpoint();
 
         // The cut is chosen from what this node sees in flight, and a durable prepare that applies here after
         // the choice is invisible to it. So each attempt also verifies its cut after the capture, against an
@@ -291,7 +295,7 @@ internal sealed partial class BackupService : IDisposable
         {
             // Under a replication factor smaller than the node count this node does not host every partition;
             // the backup is then composed from one share per hosting node. Otherwise it is captured here alone.
-            List<PartAssignment>? shares = AssignShares(ActivePartitionIds(), unreachable);
+            List<PartAssignment>? shares = AssignShares(ActivePartitionIds(), avoid);
 
             if (shares is null)
             {
@@ -316,6 +320,21 @@ internal sealed partial class BackupService : IDisposable
                         "Coordinated backup attempt {Attempt} discarded its image at cut {Cut}: {Reason} Retrying with a new cut.",
                         attempt, snapshotT, ex.Message);
                 }
+                // This node captured every partition and had not applied some of them to the cut. Their voters have;
+                // the next attempt asks one of them for each such partition and captures the rest here. A partition
+                // avoided already was assigned here again because no other voter is known, so another attempt would
+                // only wait the barrier once more.
+                catch (BackupDriverException ex) when (ex.NotCaughtUp && attempt < MaxCoordinatedCutAttempts
+                                                       && !ex.LaggingPartitions.All(p => avoid.Contains((self, p))))
+                {
+                    foreach (int partitionId in ex.LaggingPartitions)
+                        avoid.Add((self, partitionId));
+
+                    _logger?.LogWarning(
+                        "Coordinated backup attempt {Attempt} found this node behind on partition(s) {Partitions}: {Reason} " +
+                        "Retrying with those partitions captured from another replica.",
+                        attempt, string.Join(", ", ex.LaggingPartitions), ex.Message);
+                }
 
                 continue;
             }
@@ -324,10 +343,9 @@ internal sealed partial class BackupService : IDisposable
             {
                 return await TakeComposedFullAsync(shares, StillCoordinator, ct).ConfigureAwait(false);
             }
-            catch (BackupDriverException ex) when (attempt < MaxCoordinatedCutAttempts
-                                                   && (ex.CutUnverified || ex.TopologyChanged || ex.UnreachableNodes.Count > 0))
+            catch (BackupDriverException ex) when (attempt < MaxCoordinatedCutAttempts && CanRetryComposed(ex, avoid))
             {
-                unreachable.UnionWith(ex.UnreachableNodes);
+                avoid.UnionWith(ex.ReplicasToAvoid);
 
                 // A transaction that overtook the cut is in the next attempt's view: still in flight, its share
                 // proposes below it; settled, its writes are in the images.
@@ -344,6 +362,33 @@ internal sealed partial class BackupService : IDisposable
 
     /// <summary>How many cuts a coordinated backup tries before it reports the cut as unverified.</summary>
     internal const int MaxCoordinatedCutAttempts = 3;
+
+    /// <summary>
+    /// Whether another attempt can do better than the one that failed with <paramref name="ex"/>: a new cut (a
+    /// transaction overtook it), a settled topology, or another replica for a share. A node that could not be reached
+    /// is retried at once: it may be back, or its partitions have another voter. A node that had not applied its
+    /// partitions to the cut is retried only when the attempt adds a replica to <paramref name="avoid"/>: with the same
+    /// assignment the next attempt would wait the whole barrier on that node again.
+    /// </summary>
+    private static bool CanRetryComposed(BackupDriverException ex, HashSet<(string Node, int PartitionId)> avoid)
+    {
+        if (ex.CutUnverified || ex.TopologyChanged)
+            return true;
+
+        if (ex.PartitionCaptureFailed)
+            return ex.ReplicasToAvoid.Count > 0;
+
+        if (ex.NotCaughtUp)
+        {
+            foreach ((string Node, int PartitionId) replica in ex.ReplicasToAvoid)
+            {
+                if (!avoid.Contains(replica))
+                    return true;
+            }
+        }
+
+        return false;
+    }
 
     /// <summary>
     /// Proves, after the capture, that the image holds every durable transaction with a commit timestamp at or

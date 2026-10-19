@@ -167,7 +167,10 @@ internal sealed class BackupFacade : IDisposable
             },
             partScratchRoot: configuration.BackupScratchDir,
             // Capture I/O budget (bytes/sec; 0 = unlimited): paces the hash and verify reads of a capture.
-            captureThrottleBytesPerSec: configuration.BackupCaptureThrottleBytesPerSec);
+            captureThrottleBytesPerSec: configuration.BackupCaptureThrottleBytesPerSec,
+            // How long a capture waits for the committed writes of its partitions to be applied before it reports
+            // them as not caught up; a non-positive value keeps the driver's default.
+            applyBarrierTimeoutMs: (int)Math.Clamp(configuration.BackupApplyBarrierTimeout.TotalMilliseconds, 0, int.MaxValue));
 
         // Periodic backup GC: sweeps crash-orphaned/leftover artifacts (always) and enforces
         // retention (when configured), including a startup sweep on its first tick. Disabled when
@@ -514,7 +517,7 @@ internal sealed class BackupFacade : IDisposable
     /// so callers classify failures by <see cref="KahunaBackupOutcome"/> rather than by internal
     /// exception type or message. Messages intentionally omit absolute paths and raw backend text.
     /// </summary>
-    private static KahunaBackupException MapBackupException(Exception ex) => ex switch
+    internal static KahunaBackupException MapBackupException(Exception ex) => ex switch
     {
         BackupDriverException d when d.NeedsFullBackup =>
             new(KahunaBackupOutcome.NeedsFull,
@@ -538,6 +541,11 @@ internal sealed class BackupFacade : IDisposable
         BackupDriverException d when d.ExactCheckpointUnavailable =>
             new(KahunaBackupOutcome.ExactCheckpointUnavailable,
                 "This node's storage backend cannot produce an exact as-of backup image."),
+        // A replica that has not applied its partitions to the cut is a transient condition, so it shares the retryable
+        // outcome of a share that could not be captured. The message passes through: it names only partition ids,
+        // timestamps and node endpoints, and the caller needs the partitions to tell a stalled node from a slow one.
+        BackupDriverException d when d.NotCaughtUp =>
+            new(KahunaBackupOutcome.PartitionCaptureFailed, d.Message),
         BackupDriverException d when d.TopologyChanged =>
             new(KahunaBackupOutcome.TopologyChanged,
                 "The cluster topology changed during the backup; nothing was published. Retry once stable."),

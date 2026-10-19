@@ -43,17 +43,25 @@ internal static class BackupPartWire
             chain);
     }
 
-    public static GrpcBackupPartResult ToGrpc(BackupPartResult result) => new()
+    public static GrpcBackupPartResult ToGrpc(BackupPartResult result)
     {
-        Outcome = (int)result.Outcome,
-        Message = result.Message ?? "",
-        ManifestJson = result.Manifest is null ? "" : JsonSerializer.Serialize(result.Manifest, PitrIndentedJsonContext.Default.BackupManifest)
-    };
+        GrpcBackupPartResult message = new()
+        {
+            Outcome = (int)result.Outcome,
+            Message = result.Message ?? "",
+            ManifestJson = result.Manifest is null ? "" : JsonSerializer.Serialize(result.Manifest, PitrIndentedJsonContext.Default.BackupManifest)
+        };
+        message.LaggingPartitions.AddRange(result.LaggingPartitions);
+        return message;
+    }
 
     public static BackupPartResult FromGrpc(GrpcBackupPartResult message) => new(
         (BackupPartOutcome)message.Outcome,
         string.IsNullOrEmpty(message.Message) ? null : message.Message,
-        string.IsNullOrEmpty(message.ManifestJson) ? null : DeserializeManifest(message.ManifestJson));
+        string.IsNullOrEmpty(message.ManifestJson) ? null : DeserializeManifest(message.ManifestJson))
+    {
+        LaggingPartitions = [.. message.LaggingPartitions]
+    };
 
     private static GrpcBackupHlc ToGrpc(HLCTimestamp time) => new() { Node = time.N, Physical = time.L, Counter = time.C };
 

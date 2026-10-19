@@ -845,6 +845,9 @@ public sealed class EmbeddedKahunaOptions
     /// <summary>Throughput budget (bytes/sec) for a backup capture's disk work (image compaction, hash and verify reads, staged-image copy); 0 = unlimited.</summary>
     public long BackupCaptureThrottleBytesPerSec { get; set; }
 
+    /// <summary>How long a full backup waits for the captured partitions' committed writes to be applied before it refuses the capture as not caught up; zero or negative = 30 s.</summary>
+    public TimeSpan BackupApplyBarrierTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
     // ── Range-split knobs ────────────────────────────────────────────────────
 
     /// <summary>
