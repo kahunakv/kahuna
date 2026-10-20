@@ -62,6 +62,12 @@ internal sealed class KeyValueProposalRequest : IProposalSubmission
     /// facade at admission; the constructor value is a placeholder.</summary>
     public long EnqueueTicks { get; set; }
 
+    /// <summary>The write's last-modified stamp: the commit timestamp the admission window judges.</summary>
+    public HLCTimestamp CommitTimestamp { get; }
+
+    /// <summary>The lag bound written into the record; zero when the admission window is off.</summary>
+    public long AdmissionLagMs { get; }
+
     public KeyValueProposalRequest(
         string key,
         int partitionId,
@@ -73,7 +79,9 @@ internal sealed class KeyValueProposalRequest : IProposalSubmission
         KeyValueReplyRef promise,
         long enqueueTicks,
         string? logType = null,
-        long expectedTerm = 0
+        long expectedTerm = 0,
+        HLCTimestamp commitTimestamp = default,
+        long admissionLagMs = 0
     )
     {
         Key = key;
@@ -86,6 +94,8 @@ internal sealed class KeyValueProposalRequest : IProposalSubmission
         KeyValueActor = keyValueActor;
         Promise = promise;
         EnqueueTicks = enqueueTicks;
+        CommitTimestamp = commitTimestamp;
+        AdmissionLagMs = admissionLagMs;
         LogType = logType ?? ReplicationTypes.KeyValues;
         // The term fence: the Raft executor refuses the batch with TermMismatch when the partition's
         // term moved since the actor judged this write's preconditions (see IRaft.GetPartitionTerm).
@@ -95,6 +105,13 @@ internal sealed class KeyValueProposalRequest : IProposalSubmission
     /// <summary>Key-range fence: release the write if its descriptor moved/split since admission. Hash spaces are
     /// never stale.</summary>
     public bool IsStale(IWriteRangeFence fence) => fence.IsStale(Key, FenceGeneration, PartitionId);
+
+    /// <summary>The same verdict every replica's apply reaches for this record (see <see cref="CommitAdmission"/>).
+    /// A batch that reports no time cannot be judged here, so a write that carries a bound is released retryably
+    /// rather than completed against an apply that may have refused it.</summary>
+    public bool IsRefusedAt(HLCTimestamp entryTime) =>
+        AdmissionLagMs > 0 &&
+        (entryTime == HLCTimestamp.Zero || CommitAdmission.Judge(entryTime, CommitTimestamp, AdmissionLagMs) != CommitAdmissionVerdict.Admitted);
 
     /// <summary>Batch committed: send <c>CompleteProposal</c> (apply) to the originating key actor — the only
     /// component that mutates the entry and resolves the caller's promise. The pooled request transfers

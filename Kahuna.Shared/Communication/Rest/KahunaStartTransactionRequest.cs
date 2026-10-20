@@ -48,6 +48,10 @@ public sealed class KahunaStartTransactionRequest
     [JsonPropertyName("conflictPolicy")]
     public TransactionConflictPolicy ConflictPolicy { get; set; }
 
+    /// <summary>What produced the transaction's writes; null for an ordinary transaction.</summary>
+    [JsonPropertyName("origin")]
+    public string? Origin { get; set; }
+
     /// <summary>
     /// Transaction-wide snapshot for reads. Zero means latest.
     /// </summary>

@@ -1903,6 +1903,18 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         throw Unreachable(node);
     }
 
+    public async Task<HistoryHoldAnswer> HistoryHold(string node, HistoryHoldRequest request, CancellationToken cancellationToken)
+    {
+        if (TryGetNode(node, out IKahuna? kahunaNode))
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.HistoryHold(request, cancellationToken);
+        }
+
+        throw Unreachable(node);
+    }
+
     public async Task<(KeyValueResponseType Type, KeyValueApplyFingerprint Fingerprint)>
         GetPartitionApplyFingerprint(string node, int partitionId, CancellationToken cancellationToken)
     {

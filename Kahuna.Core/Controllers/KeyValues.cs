@@ -1,6 +1,7 @@
 
 using Kommander.Time;
 using Kahuna.Server.KeyValues;
+using Kahuna.Server.KeyValues.Watch;
 using Kahuna.Shared.KeyValue;
 
 namespace Kahuna;
@@ -605,5 +606,13 @@ public sealed partial class KahunaManager
     public Task<KeyValueGetByBucketResult> ScanAllByPrefix(string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         return keyValues.ScanAllByPrefix(prefixKeyName, readTimestamp, durability, cancellationToken);
+    }
+
+    /// <summary>
+    /// Opens a watch served by this node over a key, a prefix or a key range
+    /// </summary>
+    public Task<KeyValueWatchOpening> WatchKeyValues(KeyValueWatchRequest request, CancellationToken ct)
+    {
+        return keyValues.WatchKeyValues(request, ct);
     }
 }

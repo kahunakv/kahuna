@@ -91,6 +91,8 @@ public static class ReplicationSerializer
         message.ClearRecordAnchorKey();
         message.ClearEmbeddedDecision();
         message.Epoch = 0;
+        message.StateTransferCopy = false;
+        message.AdmissionLagMs = 0;
     }
 
     public static byte[] Serialize(RangeMapMessage message)
@@ -116,6 +118,22 @@ public static class ReplicationSerializer
 
     public static SnapshotFloorDeltaMessage UnserializeSnapshotFloorDeltaMessage(ReadOnlySpan<byte> serializedData) =>
         SnapshotFloorDeltaMessage.Parser.ParseFrom(serializedData);
+
+    public static byte[] Serialize(HistoryHoldStateMessage message)
+    {
+        return Encode(message);
+    }
+
+    public static HistoryHoldStateMessage UnserializeHistoryHoldStateMessage(ReadOnlySpan<byte> serializedData) =>
+        HistoryHoldStateMessage.Parser.ParseFrom(serializedData);
+
+    public static byte[] Serialize(HistoryHoldDeltaMessage message)
+    {
+        return Encode(message);
+    }
+
+    public static HistoryHoldDeltaMessage UnserializeHistoryHoldDeltaMessage(ReadOnlySpan<byte> serializedData) =>
+        HistoryHoldDeltaMessage.Parser.ParseFrom(serializedData);
 
     public static byte[] Serialize(MetaSystemStateMessage message)
     {

@@ -863,7 +863,16 @@ public class KahunaTransactionSession : IAsyncDisposable
     /// <exception cref="KahunaException">
     /// Thrown if the transaction is not in the pending state or if an error occurs during the commit operation.
     /// </exception>
-    public async Task<bool> Commit(CancellationToken cancellationToken = default)
+    public async Task<bool> Commit(CancellationToken cancellationToken = default) =>
+        (await CommitWithTimestamp(cancellationToken).ConfigureAwait(false)).Committed;
+
+    /// <summary>
+    /// Commits the current transaction session like <see cref="Commit"/>, and answers the transaction's commit
+    /// timestamp on a commit: the timestamp every one of its writes carries and its watch events report, so a
+    /// change-feed consumer can align a snapshot with a watch cursor. The timestamp is zero when the commit wrote no
+    /// persistent key through the durable path or the server predates it.
+    /// </summary>
+    public async Task<(bool Committed, HLCTimestamp CommitTimestamp)> CommitWithTimestamp(CancellationToken cancellationToken = default)
     {
         if (Status != KahunaTransactionStatus.Pending)
             throw new KahunaException("Cannot commit a transaction that is not pending.", KeyValueResponseType.Errored);
@@ -883,7 +892,7 @@ public class KahunaTransactionSession : IAsyncDisposable
             {
                 // The server owns the working set and drives 2PC from its own confirmed effects; commit carries
                 // only the handle identity.
-                (bool result, string? recordAnchorKey) = await Client.Communication.CommitTransactionSession(
+                (bool result, string? recordAnchorKey, HLCTimestamp commitTimestamp) = await Client.Communication.CommitTransactionSession(
                     Url,
                     CoordinatorKey,
                     TransactionId,
@@ -904,7 +913,7 @@ public class KahunaTransactionSession : IAsyncDisposable
                     // A transient MustRetry: the same finalize can be retried, so remain retryable.
                     Status = KahunaTransactionStatus.Pending;
 
-                return result;
+                return (result, commitTimestamp);
             }
             catch (KahunaException ex) when (ex.KeyValueErrorCode == KeyValueResponseType.Aborted)
             {

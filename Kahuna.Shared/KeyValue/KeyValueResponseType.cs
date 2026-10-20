@@ -95,4 +95,19 @@ public enum KeyValueResponseType
     /// </para>
     /// </summary>
     AdmissionRefused = 108,
+
+    /// <summary>
+    /// A watch was requested over ephemeral keys. The refusal is permanent: an ephemeral write never reaches
+    /// the replicated log, so no replica has a committed event to report for it, and a retry can never
+    /// succeed. Returned instead of <see cref="InvalidInput"/> so a caller can tell this permanent refusal
+    /// from a malformed request and move the keys it watches to persistent durability deliberately.
+    /// </summary>
+    WatchUnsupportedOnEphemeral = 109,
+
+    /// <summary>
+    /// A history hold was refused because a bound of the registry was reached: the holder already holds the
+    /// maximum number of history holds, or the cluster does. Nothing was registered. Release holds the holder no
+    /// longer needs, or raise the bound.
+    /// </summary>
+    HistoryHoldLimitReached = 110,
 }

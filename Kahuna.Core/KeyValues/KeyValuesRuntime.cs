@@ -7,6 +7,7 @@ using Kahuna.Server.Configuration;
 using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.KeyValues.Transactions;
+using Kahuna.Server.KeyValues.Watch;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 
@@ -79,6 +80,15 @@ internal sealed class KeyValuesRuntime
 
     internal required SnapshotFloorStore SnapshotFloorStore { get; init; }
 
+    /// <summary>The replicated history hold registry, on the meta partition.</summary>
+    internal required HistoryHoldStore HistoryHoldStore { get; init; }
+
+    /// <summary>Pins this node's WAL for the history holds of the partitions it hosts. Assigned in the second wiring
+    /// pass, with the actor that runs its reconcile.</summary>
+    internal HistoryHoldPinner? HistoryHoldPinner { get; set; }
+
+    internal IActorRef<HistoryHoldPinnerActor, HistoryHoldPinnerRequest>? HistoryHoldPinnerActor { get; set; }
+
     internal required CompletionReceiptStore CompletionReceiptStore { get; init; }
 
     internal required TransactionRecordStore TransactionRecordStore { get; init; }
@@ -86,6 +96,18 @@ internal sealed class KeyValuesRuntime
     internal required PreparedIntentStore PreparedIntentStore { get; init; }
 
     internal required Writes.PartitionWriteAggregator WriteAggregator { get; init; }
+
+    /// <summary>The node's open key-value watches. Published to by the replicator and the prepared-intent store
+    /// on the apply path, and ended by the dispatcher and the state transfers when a partition loses
+    /// continuity.</summary>
+    internal KeyValueWatchBroker WatchBroker { get; } = new();
+
+    /// <summary>The per-partition progress watermark of the node's watches. Null while the commit admission window
+    /// is off, in which case watches get no progress frames.</summary>
+    internal KeyValueWatchWatermarks? WatchWatermarks { get; set; }
+
+    /// <summary>The highest index a snapshot installed per partition, which a watch resume must start above.</summary>
+    internal PartitionInstallBoundaries? InstallBoundaries { get; set; }
 
     /// <summary>The transactions whose range lock this node stopped honoring. Written by the key-value actors,
     /// read by the commit-time lock proof.</summary>

@@ -21,7 +21,33 @@ internal enum PrepareRejectionKind
     /// duplicate of a decided transaction, rejected by the intent store's settled-identity memory instead of
     /// re-installed. Final: the outcome is whatever the canonical record holds, so the caller concludes from
     /// the record without retrying or driving an abort. Outranks every other kind.</summary>
-    Settled = 4
+    Settled = 4,
+
+    /// <summary>The prepare would have installed a new pending intent whose commit timestamp falls outside the
+    /// commit admission window of its log entry, so every replica applied it as a no-op. Final for this frozen
+    /// commit timestamp: a re-drive carries the same timestamp. The caller aborts the attempt retryably, and the
+    /// client's retry mints a new commit timestamp. Ranks above a held key and below a stale base (see
+    /// <see cref="PrepareRejectionKindExtensions.Outranks"/>).</summary>
+    AdmissionRefused = 5
+}
+
+internal static class PrepareRejectionKindExtensions
+{
+    /// <summary>Whether <paramref name="kind"/> takes precedence over <paramref name="other"/> when several prepares
+    /// of one attempt were refused for different reasons. The order is None, KeyHeld, AdmissionRefused, StaleBase,
+    /// RangeMoved, Settled: a settled identity means the transaction already decided, so it outranks every refusal
+    /// that would drive an abort.</summary>
+    public static bool Outranks(this PrepareRejectionKind kind, PrepareRejectionKind other) => Rank(kind) > Rank(other);
+
+    private static int Rank(PrepareRejectionKind kind) => kind switch
+    {
+        PrepareRejectionKind.KeyHeld => 10,
+        PrepareRejectionKind.AdmissionRefused => 15,
+        PrepareRejectionKind.StaleBase => 20,
+        PrepareRejectionKind.RangeMoved => 30,
+        PrepareRejectionKind.Settled => 40,
+        _ => 0
+    };
 }
 
 /// <summary>A remote partition leader's answer to a forwarded durable bundle. The two signals stay separate:

@@ -26,6 +26,10 @@ public sealed class KahunaCommitTransactionResponse
     public CommitRefusalClass Refusal { get; set; }
 
     /// <summary>The coordinator's reason for the refusal, when it gave one.</summary>
+    /// <summary>On a commit, the transaction's commit timestamp; zero when none applies.</summary>
+    [JsonPropertyName("commitTimestamp")]
+    public Kommander.Time.HLCTimestamp CommitTimestamp { get; set; }
+
     [JsonPropertyName("reason")]
     public string? Reason { get; set; }
 }

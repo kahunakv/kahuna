@@ -34,6 +34,7 @@ public static class ScriptInputCompleteness
         "reserve-sequence ",
         "update-sequence ",
         "delete-sequence ",
+        "watch ",
         "cluster ",
         "backup ",
         "list ",

@@ -923,6 +923,48 @@ public sealed class KahunaConfiguration
     public bool OnePhaseApplyTimeValidation { get; set; }
 
     /// <summary>
+    /// Milliseconds a new commit's timestamp may trail the time of the log entry that carries it (the lag bound
+    /// of the commit admission window). When positive, every prepare and every write made outside a transaction
+    /// carries this bound in its log entry, and each replica admits the entry only if its commit timestamp falls
+    /// inside <c>(entry time − lag, entry time + 5 s)</c>; an entry outside the window applies as a no-op and its
+    /// writer gets a retryable answer. The window is what lets a watch promise a progress watermark: after an
+    /// entry at time τ applies, no later entry can commit at or below <c>τ − lag</c>. Zero (the default) turns the
+    /// check off and watches send no progress frames.
+    ///
+    /// <para>A transaction whose commit takes longer than this to reach a participant's log, or whose
+    /// coordinator's clock trails the participant's leader by more, is refused and retried with a new commit
+    /// timestamp. A larger value refuses fewer commits and holds the watermark further behind.</para>
+    ///
+    /// <para><b>Turn it on only when every node in the group runs a version that reads the bound</b>, and give
+    /// every node the same value. An old node admits an entry a new node refuses, which forks the state machine.
+    /// The verdict itself follows the bound written in the entry, so nodes with different values do not fork,
+    /// but a watch served by a node whose value is smaller than the proposer's can see an event below a watermark
+    /// it already sent; the watch then ends with a lagged frame.</para>
+    /// </summary>
+    public int CommitAdmissionLagMs { get; set; }
+
+    /// <summary>
+    /// The longest lease, in milliseconds, a history hold may ask for. A hold keeps a partition's WAL retained on every
+    /// replica until it is released or its lease lapses and the reaper purges it, so this bounds how long a holder that
+    /// vanished can pin the WAL. Zero means no bound. Defaults to one day.
+    /// </summary>
+    public int HistoryHoldMaxLeaseMs { get; set; } = 86_400_000;
+
+    /// <summary>The most history holds one holder may register (one per data partition it holds). Zero means no
+    /// bound. Defaults to 4096.</summary>
+    public int HistoryHoldMaxPerHolder { get; set; } = 4_096;
+
+    /// <summary>The most history holds the cluster's registry may hold. Zero means no bound. Defaults to 65536.</summary>
+    public int HistoryHoldMaxTotal { get; set; } = 65_536;
+
+    /// <summary>
+    /// Keeps the origin label a transaction names at start (what produced its writes) and writes it into every
+    /// prepared intent of the transaction, so watch events carry it. Off by default: an older node skips the field,
+    /// so turn it on only when every node in the group reads it. Off, a start that names an origin runs without one.
+    /// </summary>
+    public bool TransactionOriginTags { get; set; }
+
+    /// <summary>
     /// Lets a transaction whose whole write set is one ephemeral key, led by this node, finalize in a single
     /// turn of the actor that owns the key instead of three messages to it (prepare, commit-time range-lock
     /// probe, commit). The single turn runs the same three steps in the same order and answers as they do, so

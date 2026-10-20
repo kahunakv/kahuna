@@ -87,6 +87,36 @@ if (IsSingleCommand(opts))
             return;
         }
 
+        if (!string.IsNullOrEmpty(opts.Watch))
+        {
+            await KeyValueWatchCommand.Execute(connection, opts.Watch, opts.WatchKeysOnly, format, opts.WatchFrom);
+            return;
+        }
+
+        if (!string.IsNullOrEmpty(opts.HistoryHoldAcquire))
+        {
+            await HistoryHoldCommand.Acquire(connection, opts.HistoryHoldAcquire, opts.Partitions ?? "", opts.HistoryFrom, opts.LeaseMs, format);
+            return;
+        }
+
+        if (!string.IsNullOrEmpty(opts.HistoryHoldRenew))
+        {
+            await HistoryHoldCommand.Renew(connection, opts.HistoryHoldRenew, opts.HistoryFrom, opts.LeaseMs, format);
+            return;
+        }
+
+        if (!string.IsNullOrEmpty(opts.HistoryHoldRelease))
+        {
+            await HistoryHoldCommand.Release(connection, opts.HistoryHoldRelease, format);
+            return;
+        }
+
+        if (opts.HistoryHoldList)
+        {
+            await HistoryHoldCommand.List(connection, opts.Holder, format);
+            return;
+        }
+
         if (!string.IsNullOrEmpty(opts.Lock))
         {
             await LockCommand.Execute(connection, opts.Lock, opts.Expires, format);
@@ -382,6 +412,13 @@ static bool IsSingleCommand(KahunaControlOptions kahunaControlOptions)
         return true;
 
     if (!string.IsNullOrEmpty(kahunaControlOptions.ScanByPrefix))
+        return true;
+
+    if (!string.IsNullOrEmpty(kahunaControlOptions.Watch))
+        return true;
+
+    if (!string.IsNullOrEmpty(kahunaControlOptions.HistoryHoldAcquire) || !string.IsNullOrEmpty(kahunaControlOptions.HistoryHoldRenew)
+        || !string.IsNullOrEmpty(kahunaControlOptions.HistoryHoldRelease) || kahunaControlOptions.HistoryHoldList)
         return true;
 
     if (!string.IsNullOrEmpty(kahunaControlOptions.Lock))

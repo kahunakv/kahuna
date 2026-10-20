@@ -1727,6 +1727,9 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             ConflictPolicy = TransactionConflictPolicyWire.ToGrpc(options.ConflictPolicy),
         };
 
+        if (options.Origin is not null)
+            request.Origin = options.Origin;
+
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request), "StartTransaction", node).ConfigureAwait(false);
         if (!response.IsAnswered)
         {
@@ -1779,7 +1782,8 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             (KeyValueResponseType)remoteResponse.Type,
             remoteResponse.HasRecordAnchorKey ? remoteResponse.RecordAnchorKey : null,
             (CommitRefusalClass)remoteResponse.Refusal,
-            remoteResponse.HasReason ? remoteResponse.Reason : null);
+            remoteResponse.HasReason ? remoteResponse.Reason : null,
+            new HLCTimestamp(remoteResponse.CommitTimestampNode, remoteResponse.CommitTimestampPhysical, remoteResponse.CommitTimestampCounter));
     }
 
     public async Task<KeyValueResponseType> RollbackTransaction(string node, TransactionHandle handle, CancellationToken cancellationToken)
@@ -2590,6 +2594,30 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             new HLCTimestamp(r.EffectiveFloorNode, r.EffectiveFloorPhysical, r.EffectiveFloorCounter),
             r.LiveHolds
         );
+    }
+
+    /// <summary>
+    /// Forwards a history hold request to the meta-partition leader as a plain unary call on the shared channel: it is
+    /// rare control traffic with nothing for a batching lane to coalesce.
+    /// </summary>
+    public async Task<HistoryHoldAnswer> HistoryHold(string node, HistoryHoldRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            global::KeyValuer.KeyValuerClient client = new(SharedChannels.GetChannel(ResolveNodeUrl(node), transportSecurity));
+
+            GrpcHistoryHoldResponse response = await client
+                .HistoryHoldAsync(HistoryHoldWire.ToGrpc(request), headers: InterNodeHeaders.ForwardedCall, cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+
+            return HistoryHoldWire.FromGrpc(response);
+        }
+        catch (RpcException ex) when (IsRetryableTransportFailure(ex))
+        {
+            LogForwardingTransportFailure("HistoryHold", node, ex.StatusCode);
+
+            return HistoryHoldAnswer.Refused(KeyValueResponseType.MustRetry);
+        }
     }
 
     /// <summary>

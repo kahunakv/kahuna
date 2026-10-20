@@ -10,6 +10,7 @@ using Kommander.Time;
 using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kahuna.Server.KeyValues.Watch;
 using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Server.KeyValues;
@@ -46,6 +47,16 @@ internal sealed partial class KeyValuesManager
     /// <summary>The effective floor implied by the live holds, and how many there are.</summary>
     public Task<(KeyValueResponseType Type, HLCTimestamp EffectiveFloor, int LiveHolds)> GetSnapshotFloor(CancellationToken ct) =>
         snapshotHolds.GetSnapshotFloor(ct);
+
+    /// <summary>Acquires, renews, releases or lists history holds, at the meta-partition leader.</summary>
+    public Task<HistoryHoldAnswer> HistoryHold(HistoryHoldRequest request, CancellationToken ct) =>
+        (historyHolds ??= new HistoryHoldService(runtime)).Handle(request, ct);
+
+    private HistoryHoldService? historyHolds;
+
+    /// <summary>Purges expired history holds and holds of partitions that no longer exist. Test access; the reaper
+    /// runs it on its period.</summary>
+    internal Task<int> PurgeHistoryHoldsAsync(CancellationToken ct = default) => runtime.HistoryHoldStore.PurgeAsync(ct);
 
 
     /// <summary>
@@ -240,6 +251,15 @@ internal sealed partial class KeyValuesManager
             ? (raft.HostsPartition(partitionId) ? KeyValueResponseType.MustRetry : KeyValueResponseType.DoesNotExist, default)
             : (KeyValueResponseType.Get, fingerprint.Value));
     }
+
+    /// <summary>
+    /// Opens a watch served by this replica (see <see cref="IKahuna.WatchKeyValues"/>).
+    /// </summary>
+    public Task<KeyValueWatchOpening> WatchKeyValues(KeyValueWatchRequest request, CancellationToken ct) =>
+        Task.FromResult(watchService.Watch(request));
+
+    /// <summary>The node's watch broker. Test access.</summary>
+    internal KeyValueWatchBroker WatchBroker => runtime.WatchBroker;
 
     /// <summary>
     /// Compares the apply fingerprint of <paramref name="partitionId"/>'s leader with its other replicas —

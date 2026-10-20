@@ -2,6 +2,7 @@
 using System.Collections.Concurrent;
 using Google.Protobuf;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kahuna.Server.KeyValues.Writes;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
 using Kahuna.Shared.KeyValue;
@@ -44,13 +45,17 @@ internal sealed class PreparedIntentStore
     /// <summary>Installs or replaces the live intent at <paramref name="key"/>: the map first, so a key the index
     /// names has its intent, then the index. Safe under concurrent writers (the apply gate serializes most, the
     /// snapshot import runs outside it); a reader between the two steps misses an intent whose apply has not
-    /// completed, which is the state before the apply.</summary>
-    private void InstallLive(string key, PreparedIntent intent)
+    /// completed, which is the state before the apply. <paramref name="partitionId"/> is the partition whose log
+    /// (or snapshot) installed the intent. Returns true when the install resolved the last pending intent of its
+    /// transaction on that partition (tracked only while the commit admission window is on).</summary>
+    private bool InstallLive(string key, PreparedIntent intent, int partitionId)
     {
         intents[key] = intent;
 
         lock (orderedKeysGate)
             orderedKeys.Add(key);
+
+        return trackPendingCommits && TrackPendingCommit(key, intent, partitionId);
     }
 
     /// <summary>Removes the live intent at <paramref name="key"/> from the map and the index; false when the map held
@@ -61,6 +66,183 @@ internal sealed class PreparedIntentStore
 
         lock (orderedKeysGate)
             orderedKeys.Remove(key);
+
+        if (trackPendingCommits)
+            TrackPendingCommit(key, null, UnattributedPartition);
+
+        return found;
+    }
+
+    // ── pending commit timestamps, per partition ────────────────────────────────────
+    //
+    // The commit admission watermark of a partition is capped by the lowest commit timestamp among the intents still
+    // pending there: such an intent is already in the log, and its event comes when it settles, possibly long after
+    // later entries. Kept only while the commit admission window is on (see ConfigureCommitAdmission), so the intent
+    // apply path pays nothing for it otherwise. Each pending intent is counted under the partition whose log (or
+    // snapshot) installed it, never under a routing guess.
+
+    private sealed class PendingCommitOrder : IComparer<(HLCTimestamp Commit, string Key)>
+    {
+        public static readonly PendingCommitOrder Instance = new();
+
+        public int Compare((HLCTimestamp Commit, string Key) x, (HLCTimestamp Commit, string Key) y)
+        {
+            int byCommit = x.Commit.CompareTo(y.Commit);
+            return byCommit != 0 ? byCommit : string.CompareOrdinal(x.Key, y.Key);
+        }
+    }
+
+    private volatile bool trackPendingCommits;
+
+    private readonly object pendingCommitsGate = new();
+
+    // Guarded by pendingCommitsGate: the partition and commit timestamp each pending key is counted under, and each
+    // partition's pending commit timestamps in order.
+    private readonly Dictionary<string, (int PartitionId, HLCTimestamp Commit)> pendingCommitByKey = new(StringComparer.Ordinal);
+
+    private readonly Dictionary<int, SortedSet<(HLCTimestamp Commit, string Key)>> pendingCommitsByPartition = new();
+
+    // Guarded by pendingCommitsGate: how many intents of each transaction attempt are still pending on each
+    // partition. A commit that takes the count to zero is the transaction's last event on the partition.
+    private readonly Dictionary<(HLCTimestamp TransactionId, long Epoch, int PartitionId), int> pendingCountByTransaction = new();
+
+    // The pending intent each key is counted under, for the per-transaction count.
+    private readonly Dictionary<string, (HLCTimestamp TransactionId, long Epoch)> pendingTransactionByKey = new(StringComparer.Ordinal);
+
+    // The partition of each intent the on-disk snapshots loaded, kept from construction until the commit admission
+    // window is configured, which runs after the load.
+    private Dictionary<string, int>? loadedIntentPartitions;
+
+    // Moves the key's entry in the index from its previous pending intent (if any) to the new one (if pending).
+    // Returns true when that took the previous intent's transaction to zero pending intents on its partition.
+    private bool TrackPendingCommit(string key, PreparedIntent? intent, int partitionId)
+    {
+        lock (pendingCommitsGate)
+        {
+            bool drained = false;
+
+            if (pendingCommitByKey.Remove(key, out (int PartitionId, HLCTimestamp Commit) previous))
+            {
+                if (pendingCommitsByPartition.TryGetValue(previous.PartitionId, out SortedSet<(HLCTimestamp, string)>? previousSet))
+                {
+                    previousSet.Remove((previous.Commit, key));
+                    if (previousSet.Count == 0)
+                        pendingCommitsByPartition.Remove(previous.PartitionId);
+                }
+
+                if (pendingTransactionByKey.Remove(key, out (HLCTimestamp TransactionId, long Epoch) owner))
+                {
+                    (HLCTimestamp, long, int) counted = (owner.TransactionId, owner.Epoch, previous.PartitionId);
+                    if (pendingCountByTransaction.TryGetValue(counted, out int count))
+                    {
+                        if (count <= 1)
+                        {
+                            pendingCountByTransaction.Remove(counted);
+                            drained = true;
+                        }
+                        else
+                            pendingCountByTransaction[counted] = count - 1;
+                    }
+                }
+            }
+
+            if (intent is not { IsPending: true })
+                return drained;
+
+            pendingCommitByKey[key] = (partitionId, intent.CommitTimestamp);
+            pendingTransactionByKey[key] = (intent.TransactionId, intent.Epoch);
+
+            (HLCTimestamp, long, int) transaction = (intent.TransactionId, intent.Epoch, partitionId);
+            pendingCountByTransaction[transaction] = pendingCountByTransaction.GetValueOrDefault(transaction) + 1;
+
+            if (!pendingCommitsByPartition.TryGetValue(partitionId, out SortedSet<(HLCTimestamp, string)>? set))
+            {
+                set = new SortedSet<(HLCTimestamp, string)>(PendingCommitOrder.Instance);
+                pendingCommitsByPartition[partitionId] = set;
+            }
+
+            set.Add((intent.CommitTimestamp, key));
+            return drained;
+        }
+    }
+
+    /// <summary>
+    /// Turns the per-partition index of pending commit timestamps on or off. On, it is rebuilt from the live
+    /// intents: those the on-disk snapshots loaded are counted under the partition of the file they came from, any
+    /// other under the partition the key routes to. Called once at manager construction, before any apply.
+    /// </summary>
+    public void ConfigureCommitAdmission(bool enabled)
+    {
+        lock (applyGate)
+        {
+            Dictionary<string, int>? loaded = loadedIntentPartitions;
+            loadedIntentPartitions = null;
+
+            lock (pendingCommitsGate)
+            {
+                pendingCommitByKey.Clear();
+                pendingCommitsByPartition.Clear();
+                pendingCountByTransaction.Clear();
+                pendingTransactionByKey.Clear();
+            }
+
+            trackPendingCommits = enabled;
+            if (!enabled)
+                return;
+
+            foreach (KeyValuePair<string, PreparedIntent> entry in intents)
+            {
+                if (!entry.Value.IsPending)
+                    continue;
+
+                int partitionId = loaded is not null && loaded.TryGetValue(entry.Key, out int filePartition)
+                    ? filePartition
+                    : resolvePartition is { } resolver && TryResolvePartition(resolver, entry.Key, out int routed) ? routed : UnattributedPartition;
+
+                TrackPendingCommit(entry.Key, entry.Value, partitionId);
+            }
+        }
+    }
+
+    /// <summary>The lowest commit timestamp among the intents pending on <paramref name="partitionId"/>, or false
+    /// when none is pending there or the index is off. Safe from any thread.</summary>
+    public bool TryGetLowestPendingCommit(int partitionId, out HLCTimestamp lowest)
+    {
+        lock (pendingCommitsGate)
+        {
+            if (pendingCommitsByPartition.TryGetValue(partitionId, out SortedSet<(HLCTimestamp Commit, string Key)>? set) && set.Count > 0)
+            {
+                lowest = set.Min.Commit;
+                return true;
+            }
+        }
+
+        lowest = HLCTimestamp.Zero;
+        return false;
+    }
+
+    /// <summary>The lowest commit timestamp among every pending intent on the node, for the oldest-pending-intent
+    /// metric; false when none is pending or the index is off.</summary>
+    public bool TryGetLowestPendingCommit(out HLCTimestamp lowest)
+    {
+        lowest = HLCTimestamp.Zero;
+        bool found = false;
+
+        lock (pendingCommitsGate)
+        {
+            foreach (SortedSet<(HLCTimestamp Commit, string Key)> set in pendingCommitsByPartition.Values)
+            {
+                if (set.Count == 0)
+                    continue;
+
+                HLCTimestamp candidate = set.Min.Commit;
+                if (!found || candidate < lowest)
+                {
+                    lowest = candidate;
+                    found = true;
+                }
+            }
+        }
 
         return found;
     }
@@ -391,6 +573,13 @@ internal sealed class PreparedIntentStore
     /// apply path outside the gate, once per applied commit resolution/removal, and must not re-enter the
     /// store.</summary>
     public void AttachCommittedSettleObserver(Action<PreparedIntent> observer) => onCommittedSettleApplied = observer;
+
+    // The node's open key-value watches. A durable transaction's write is a watch event at exactly one point: the
+    // live apply that takes its intent from pending to committed. Null publishes nothing.
+    private Watch.KeyValueWatchBroker? watchBroker;
+
+    /// <summary>Wires the watch broker (manager construction). Publishing runs on the apply path outside the gate.</summary>
+    public void AttachWatchBroker(Watch.KeyValueWatchBroker broker) => watchBroker = broker;
 
     // ── settled intents awaiting the flush of their materialized row ──────────────────────────────
     //
@@ -824,7 +1013,7 @@ internal sealed class PreparedIntentStore
     /// commit gate later judges bundles of that partition against — so it must be the log's partition, never a
     /// routing guess: routing changes with the range map while the log's partition is fixed.</summary>
     public PreparedIntentApplyResult Apply(PreparedIntentCommand command, int partitionId) =>
-        Apply(command, partitionId, HistoryWindow.Live);
+        Apply(command, partitionId, HistoryWindow.Live, replay: false, HLCTimestamp.Zero, logIndex: 0);
 
     /// <param name="window">Where the entry sits relative to the partition's installed snapshot. The advisory
     /// staged-base fence judges a validated-base prepare only for a <see cref="HistoryWindow.Live"/> entry; for
@@ -832,12 +1021,21 @@ internal sealed class PreparedIntentStore
     /// still applies, but no refusal, veto, wedge streak or metric is produced from a ledger that is ahead of
     /// the entry by construction — and at or below the fully reflected position a prepare that finds no intent
     /// installs nothing at all.</param>
-    private PreparedIntentApplyResult Apply(PreparedIntentCommand command, int partitionId, HistoryWindow window)
+    /// <param name="replay">True on a restart replay of the retained log. The transitions apply as live ones do,
+    /// but nothing is reported to watches: the replayed entries were reported, if at all, before the restart.</param>
+    /// <param name="entryTime">The time Kommander stamped on the log entry that carries the command, for the commit
+    /// admission window; <see cref="HLCTimestamp.Zero"/> for an apply with no log entry behind it, which the window
+    /// cannot judge and admits.</param>
+    /// <param name="logIndex">The log entry that carries the command; zero for an apply with no entry behind it.</param>
+    private PreparedIntentApplyResult Apply(PreparedIntentCommand command, int partitionId, HistoryWindow window, bool replay, HLCTimestamp entryTime, long logIndex)
     {
         string key = KeyOf(command);
         bool judgeFence = window == HistoryWindow.Live;
 
         PreparedIntent? settledCommit = null;
+        PreparedIntent? watchCommit = null;
+        bool transactionDrained = false;
+        bool watchTransactionEnd = false;
         bool wedgeRepairDue = false;
         long wedgeBaseRevision = 0;
         long wedgeHeadRevision = 0;
@@ -892,6 +1090,33 @@ internal sealed class PreparedIntentStore
                 return result;
             }
 
+            // ── Commit admission window, judged before the state machine ──
+            // A prepare that would install a new pending intent creates a new commit, so its commit timestamp must
+            // fall inside the window around its entry's time (see CommitAdmission); one outside it installs nothing
+            // on any replica. A same-identity re-prepare of an intent already here creates no new commit (the intent
+            // is already pending or already decided), so it keeps the state machine's answer; the settled-identity
+            // replay above keeps its own. The verdict reads only the entry, so it is a replicated transition and
+            // applies on every path, history replay included.
+            if (command is PrepareIntentCommand { AdmissionLagMs: > 0 } admissionCandidate
+                && !(existing is not null
+                     && existing.TransactionId == admissionCandidate.Intent.TransactionId
+                     && existing.Epoch == admissionCandidate.Intent.Epoch))
+            {
+                CommitAdmissionVerdict verdict = CommitAdmission.Judge(entryTime, admissionCandidate.Intent.CommitTimestamp, admissionCandidate.AdmissionLagMs);
+                if (verdict != CommitAdmissionVerdict.Admitted)
+                {
+                    if (judgeFence && !replay)
+                        CommitAdmission.CountRefusal(verdict, "prepare");
+
+                    return new PreparedIntentApplyResult(
+                        TransactionApplyOutcome.Rejected, existing,
+                        verdict == CommitAdmissionVerdict.BelowFloor
+                            ? "commit timestamp at or below the commit admission floor of its log entry"
+                            : "commit timestamp too far ahead of the time of its log entry",
+                        AdmissionRefused: true);
+                }
+            }
+
             result = PreparedIntentStateMachine.Apply(existing, command);
 
             if (result.Outcome == TransactionApplyOutcome.Applied)
@@ -904,7 +1129,7 @@ internal sealed class PreparedIntentStore
                 }
                 else
                 {
-                    InstallLive(key, result.Intent);
+                    transactionDrained = InstallLive(key, result.Intent, partitionId);
                     ObserveInstalled(result.Intent);
                     Interlocked.Add(ref totalBytes, IntentBytes(result.Intent) - (existing is null ? 0 : IntentBytes(existing)));
                 }
@@ -925,8 +1150,33 @@ internal sealed class PreparedIntentStore
 
                 if (committedNow || removedCommitted)
                 {
-                    RecordCommittedHead(existing, partitionId);
+                    bool headAdvanced = RecordCommittedHead(existing, partitionId);
                     settledCommit = existing;
+
+                    // The watch event of a durable write: the one transition from pending to committed, applied
+                    // live. Not the idempotent re-resolve of an intent already committed, not the removal that
+                    // follows (both also reach this branch), not a restart replay, and not history an installed
+                    // snapshot already reflects. A re-driven prepare that arrives after the settled-identity window
+                    // installs a pending intent again for a transaction that already settled here; its second
+                    // settlement finds the ledger head already at its revision, so it is not reported twice.
+                    if (committedNow
+                        && headAdvanced
+                        && result.Outcome == TransactionApplyOutcome.Applied
+                        && existing.IsPending
+                        && !replay
+                        && window == HistoryWindow.Live)
+                        watchCommit = existing;
+
+                    // The last pending intent of the transaction on this partition committed live: the consumer now
+                    // holds every event of the transaction on the partition. Independent of the repeat guard above,
+                    // which can suppress this key's event while an earlier key's event was delivered.
+                    if (committedNow
+                        && transactionDrained
+                        && result.Outcome == TransactionApplyOutcome.Applied
+                        && existing.IsPending
+                        && !replay
+                        && window == HistoryWindow.Live)
+                        watchTransactionEnd = true;
                 }
 
                 // The removal of a resolved intent — commit or abort — is the settlement that opens the hole a
@@ -1019,6 +1269,12 @@ internal sealed class PreparedIntentStore
 
         if (settledCommit is not null)
             onCommittedSettleApplied?.Invoke(settledCommit);
+
+        if (watchCommit is not null)
+            PublishCommittedWrite(watchCommit, partitionId, logIndex);
+
+        if (watchTransactionEnd && settledCommit is not null)
+            watchBroker?.PublishTransactionEnd(partitionId, settledCommit.TransactionId, logIndex);
 
         if (wedgeRepairDue)
             onFenceWedgeRepair?.Invoke(key, wedgeBaseRevision, wedgeHeadRevision);
@@ -1700,14 +1956,14 @@ internal sealed class PreparedIntentStore
     /// partition whose log delivered the settlement, and advances that slice's watermark. Monotonic per key:
     /// an older revision never overwrites a newer one, so a replayed settlement is a no-op. Stamps the
     /// partition dirty for the checkpoint guard, because the slice is persisted with the partition's intent
-    /// snapshot. Caller holds <see cref="applyGate"/>.</summary>
-    private void RecordCommittedHead(PreparedIntent intent, int partitionId)
+    /// snapshot. Returns whether the head moved. Caller holds <see cref="applyGate"/>.</summary>
+    private bool RecordCommittedHead(PreparedIntent intent, int partitionId)
     {
         PartitionLedger ledger = ledgers.GetOrAdd(partitionId, static _ => new PartitionLedger());
 
         bool existed = ledger.Heads.TryGetValue(intent.Key, out CommittedHead current);
         if (existed && current.Revision >= intent.Revision)
-            return;
+            return false;
 
         ledger.Heads[intent.Key] = new(intent.Revision, intent.State, intent.CommitTimestamp);
         if (!existed)
@@ -1733,6 +1989,29 @@ internal sealed class PreparedIntentStore
             ledger.PrunedBucket = bucket;
             PruneLedger(ledger);
         }
+
+        return true;
+    }
+
+    /// <summary>Hands a durable transaction's committed write to the watches on the partition whose log settled
+    /// it. The intent carries the value: a by-reference materialization never clears it. No gate is held.</summary>
+    private void PublishCommittedWrite(PreparedIntent intent, int partitionId, long logIndex)
+    {
+        Watch.KeyValueWatchBroker? broker = watchBroker;
+        if (broker is null || !broker.HasSubscribers(partitionId))
+            return;
+
+        broker.Publish(
+            partitionId,
+            intent.State == KeyValueState.Deleted ? KeyValueWatchEventKind.Deleted : KeyValueWatchEventKind.Set,
+            intent.Key,
+            intent.Value,
+            intent.Revision,
+            intent.Expires,
+            intent.CommitTimestamp,
+            intent.TransactionId,
+            logIndex,
+            intent.Origin);
     }
 
     /// <summary>Marks one partition dirty for the checkpoint guard without consulting the routing resolver —
@@ -2298,7 +2577,7 @@ internal sealed class PreparedIntentStore
         {
             if (command is PrepareIntentCommand prepare
                 && TryTakePrepareRejection(prepare.Intent.TransactionId, prepare.Intent.Epoch, prepare.Intent.Key, out Writes.PrepareRejectionKind kind)
-                && kind > dominant)
+                && kind.Outranks(dominant))
                 dominant = kind;
         }
 
@@ -2332,7 +2611,7 @@ internal sealed class PreparedIntentStore
             if (command is ResolveIntentCommand resolve && TryInstallOnResolve(partitionId, log.Id, resolve, replay: false))
                 installed = true;
 
-            PreparedIntentApplyResult result = Apply(command, partitionId, window);
+            PreparedIntentApplyResult result = Apply(command, partitionId, window, replay: false, log.Time, log.Id);
             if (command is PrepareIntentCommand prepare && (result.Outcome == TransactionApplyOutcome.Rejected || result.StaleBase))
             {
                 allPreparesAccepted = false;
@@ -2346,6 +2625,7 @@ internal sealed class PreparedIntentStore
                 RecordPrepareRejection(
                     prepare.Intent.TransactionId, prepare.Intent.Epoch, prepare.Intent.Key,
                     result.SettledReplay ? Writes.PrepareRejectionKind.Settled
+                    : result.AdmissionRefused ? Writes.PrepareRejectionKind.AdmissionRefused
                     : result.StaleBase ? Writes.PrepareRejectionKind.StaleBase
                     : Writes.PrepareRejectionKind.KeyHeld);
             }
@@ -2391,7 +2671,7 @@ internal sealed class PreparedIntentStore
             if (command is ResolveIntentCommand resolve && TryInstallOnResolve(partitionId, log.Id, resolve, replay))
                 installed = true;
 
-            PreparedIntentApplyResult result = Apply(command, partitionId, window);
+            PreparedIntentApplyResult result = Apply(command, partitionId, window, replay, log.Time, log.Id);
 
             if (!replay)
                 continue;
@@ -2635,6 +2915,8 @@ internal sealed class PreparedIntentStore
         int deadlineNode = 0; long deadlinePhysical = 0; uint deadlineCounter = 0;
         int resolution = 0;
         bool materializeOnResolve = false;
+        long admissionLagMs = 0;
+        string? origin = null;
 
         int pos = 0;
         while (pos < data.Length)
@@ -2671,6 +2953,8 @@ internal sealed class PreparedIntentStore
                 case 27 << 3 | Varint: deadlineCounter = (uint)ReadVarint(data, ref pos); break;
                 case 28 << 3 | Varint: resolution = (int)(uint)ReadVarint(data, ref pos); break;
                 case 29 << 3 | Varint: materializeOnResolve = ReadVarint(data, ref pos) != 0; break;
+                case 30 << 3 | Varint: admissionLagMs = (long)ReadVarint(data, ref pos); break;
+                case 31 << 3 | Len: origin = ReadLengthDelimitedString(data, ref pos); break;
                 default: SkipField(data, ref pos, tag); break;
             }
         }
@@ -2700,7 +2984,9 @@ internal sealed class PreparedIntentStore
                     hasHeader
                         ? new HLCTimestamp(header.DeadlineNode, header.DeadlinePhysical, header.DeadlineCounter)
                         : new HLCTimestamp(deadlineNode, deadlinePhysical, deadlineCounter),
-                    (PreparedIntentResolution)resolution));
+                    (PreparedIntentResolution)resolution,
+                    origin),
+                    admissionLagMs);
 
             case PreparedIntentCommandKindMessage.PreparedIntentResolve:
                 // A materializing resolve's commit timestamp is its own, never the header's: the header hoists
@@ -2812,6 +3098,8 @@ internal sealed class PreparedIntentStore
         m.RecoveryDeadlineNode = 0; m.RecoveryDeadlinePhysical = 0; m.RecoveryDeadlineCounter = 0;
         m.Resolution = 0;
         m.MaterializeOnResolve = false;
+        m.AdmissionLagMs = 0;
+        m.ClearOrigin();
     }
 
     /// <summary>
@@ -2906,7 +3194,9 @@ internal sealed class PreparedIntentStore
         switch (command)
         {
             case PrepareIntentCommand prepare:
-                return FillPrepareProto(m, prepare.Intent);
+                FillPrepareProto(m, prepare.Intent);
+                m.AdmissionLagMs = prepare.AdmissionLagMs;
+                return m;
 
             case ResolveIntentCommand resolve:
                 m.Kind = PreparedIntentCommandKindMessage.PreparedIntentResolve;
@@ -2953,7 +3243,7 @@ internal sealed class PreparedIntentStore
         switch (m.Kind)
         {
             case PreparedIntentCommandKindMessage.PreparedIntentPrepare:
-                return new PrepareIntentCommand(IntentOf(m, header));
+                return new PrepareIntentCommand(IntentOf(m, header), m.AdmissionLagMs);
 
             case PreparedIntentCommandKindMessage.PreparedIntentResolve:
                 return new ResolveIntentCommand(
@@ -2995,6 +3285,8 @@ internal sealed class PreparedIntentStore
         m.BaseRevision = i.BaseRevision; m.BaseState = (int)i.BaseState;
         m.RecoveryDeadlineNode = i.RecoveryDeadline.N; m.RecoveryDeadlinePhysical = i.RecoveryDeadline.L; m.RecoveryDeadlineCounter = i.RecoveryDeadline.C;
         m.Resolution = (int)i.Resolution;
+        if (i.Origin is not null)
+            m.Origin = i.Origin;
         return m;
     }
 
@@ -3016,7 +3308,8 @@ internal sealed class PreparedIntentStore
         header is null
             ? new HLCTimestamp(m.RecoveryDeadlineNode, m.RecoveryDeadlinePhysical, m.RecoveryDeadlineCounter)
             : new HLCTimestamp(header.RecoveryDeadlineNode, header.RecoveryDeadlinePhysical, header.RecoveryDeadlineCounter),
-        (PreparedIntentResolution)m.Resolution);
+        (PreparedIntentResolution)m.Resolution,
+        m.HasOrigin ? m.Origin : null);
 
     // ── durable snapshot ──────────────────────────────────────────────────────────
 
@@ -3176,8 +3469,14 @@ internal sealed class PreparedIntentStore
                 throw new IOException($"Failed to read prepared-intent snapshot {path}; refusing to start with a possibly incomplete intent set", ex);
             }
 
+            int filePartition = TryParsePartitionFromSnapshotPath(path, out int parsedPartition) ? parsedPartition : UnattributedPartition;
+
             foreach (PreparedIntentCommandMessage entry in message.Intents)
-                MergeLoad(IntentOf(entry));
+            {
+                PreparedIntent loaded = IntentOf(entry);
+                MergeLoad(loaded, filePartition);
+                (loadedIntentPartitions ??= new(StringComparer.Ordinal))[loaded.Key] = filePartition;
+            }
 
             // Retained settled intents reload into their own set — never into the live set, where a settled
             // intent would hold its key as a phantom. Nothing is queued yet, so no probe applies here; the
@@ -3312,11 +3611,11 @@ internal sealed class PreparedIntentStore
     // Load-time merge across (possibly overlapping) per-partition files: at most one live intent per key. A more
     // resolved intent for the same identity is authoritative; a different transaction on the same key is a
     // conflict that keeps the existing intent and is logged rather than silently overwritten.
-    private void MergeLoad(PreparedIntent incoming)
+    private void MergeLoad(PreparedIntent incoming, int partitionId)
     {
         if (!intents.TryGetValue(incoming.Key, out PreparedIntent? existing))
         {
-            InstallLive(incoming.Key, incoming);
+            InstallLive(incoming.Key, incoming, partitionId);
             ObserveInstalled(incoming);
             Interlocked.Add(ref totalBytes, IntentBytes(incoming));
             StampDirty(incoming.Key);
@@ -3332,7 +3631,7 @@ internal sealed class PreparedIntentStore
 
         if (existing.IsPending && incoming.IsResolved)
         {
-            InstallLive(incoming.Key, incoming);
+            InstallLive(incoming.Key, incoming, partitionId);
             ObserveInstalled(incoming);
             Interlocked.Add(ref totalBytes, IntentBytes(incoming) - IntentBytes(existing));
             StampDirty(incoming.Key);
@@ -3561,10 +3860,14 @@ internal sealed class PreparedIntentStore
     }
 
     /// <summary>Folds transferred intents into this partition's set (idempotent by key + resolution authority).</summary>
-    public void ImportIntents(IEnumerable<PreparedIntent> incoming)
+    public void ImportIntents(IEnumerable<PreparedIntent> incoming) => ImportIntents(incoming, UnattributedPartition);
+
+    /// <summary>Folds transferred intents into <paramref name="partitionId"/>'s set (idempotent by key + resolution
+    /// authority).</summary>
+    public void ImportIntents(IEnumerable<PreparedIntent> incoming, int partitionId)
     {
         foreach (PreparedIntent intent in incoming)
-            MergeLoad(intent);
+            MergeLoad(intent, partitionId);
 
         SignalFenceWaiters();
     }
@@ -3684,7 +3987,7 @@ internal sealed class PreparedIntentStore
         else
             InstallLedger(partitionId, section.Ledger, section.LedgerWatermark, section.ReflectedThroughIndex, section.Settled, section.FullyReflectedThroughIndex);
 
-        ImportIntents(section.Intents);
+        ImportIntents(section.Intents, partitionId);
     }
 
     /// <summary>
@@ -3749,7 +4052,7 @@ internal sealed class PreparedIntentStore
                 InstallLedgerLocked(partitionId, ledger);
 
             foreach (PreparedIntent intent in section.Intents)
-                MergeLoad(intent);
+                MergeLoad(intent, partitionId);
 
             StampAllDirty();
         }

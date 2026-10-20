@@ -1222,6 +1222,263 @@ public class KahunaClient
         }
     }
 
+    // A watch whose opening keeps racing a leader change or a range-map change gives up after this many tries.
+    private const int WatchOpenAttempts = 8;
+
+    // The endpoint policy for the replica endpoints a node names when it does not host part of a watch's scope.
+    private RoutingEndpointPolicy? watchEndpoints;
+
+    /// <summary>
+    /// Opens a watch on the keys of <see cref="KeyValueWatchRequest.Scope"/>: a frame for every committed mutation
+    /// of a key in the scope from now on. When the returned task completes, the watch is registered on every
+    /// partition the scope covers. See <see cref="KahunaWatch"/> for the delivery contract and the endings.
+    ///
+    /// <para>Any replica serves a watch. When the node asked does not host every partition of the scope, the client
+    /// opens the watch on the replicas that node names, one node per group of partitions. A replica endpoint is
+    /// dialled only when it resolves to a configured endpoint, through <see cref="KahunaOptions.RoutingEndpointMap"/>,
+    /// or when <see cref="KahunaOptions.AllowUnlistedRoutingEndpoints"/> is on.</para>
+    ///
+    /// <para>Throws <see cref="KahunaException"/> with <see cref="KeyValueResponseType.WatchUnsupportedOnEphemeral"/>
+    /// for ephemeral keys (permanent: an ephemeral write is never replicated, so no event exists to report), with
+    /// <see cref="KeyValueResponseType.DoesNotExist"/> when no reachable replica hosts part of the scope, and with
+    /// <see cref="KeyValueResponseType.MustRetry"/> when the opening kept failing transiently.</para>
+    /// </summary>
+    public Task<KahunaWatch> WatchKeyValues(KeyValueWatchRequest request, CancellationToken cancellationToken = default) =>
+        WatchKeyValues(request, autoResume: false, cancellationToken);
+
+    /// <summary>
+    /// Opens a watch like <see cref="WatchKeyValues(KeyValueWatchRequest, CancellationToken)"/>. With
+    /// <paramref name="autoResume"/>, a node stream that loses continuity is reopened from the last progress
+    /// watermarks of its partitions, and the node replays what was missed (see <see cref="KahunaWatch"/>). A resume
+    /// needs the commit admission window on the cluster; without it the nodes send no watermark and the watch ends as
+    /// it would with no resume.
+    /// </summary>
+    public async Task<KahunaWatch> WatchKeyValues(KeyValueWatchRequest request, bool autoResume, CancellationToken cancellationToken = default)
+    {
+        if (request.Durability != KeyValueDurability.Persistent)
+            throw new KahunaException("A watch needs persistent keys: ephemeral writes are not replicated.", KeyValueResponseType.WatchUnsupportedOnEphemeral);
+
+        KeyValueResponseType last = KeyValueResponseType.MustRetry;
+
+        for (int attempt = 0; attempt < WatchOpenAttempts; attempt++)
+        {
+            string url = GetRoundRobinUrl();
+            KahunaWatchOpening opening = await communication.OpenWatch(url, request, cancellationToken).ConfigureAwait(false);
+
+            if (opening.Stream is not null)
+                return new(request.Scope, [new KahunaWatchPart(url, opening.Stream, opening.Partitions)], opening.Partitions, [url], ResumerFor(request, autoResume));
+
+            last = opening.Type;
+
+            if (opening.Type == KeyValueResponseType.DoesNotExist && opening.Routes.Count > 0)
+            {
+                KahunaWatch? placed = await OpenOnReplicas(url, request, opening.Routes, autoResume, cancellationToken).ConfigureAwait(false);
+                if (placed is not null)
+                    return placed;
+            }
+            else if (opening.Type is not (KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication))
+            {
+                throw new KahunaException($"The watch on '{request.Scope.Value}' was refused: {opening.Type}.", opening.Type);
+            }
+
+            await Task.Delay(Math.Min(1000, 50 << attempt) + Random.Shared.Next(0, 25), cancellationToken).ConfigureAwait(false);
+        }
+
+        throw new KahunaException($"The watch on '{request.Scope.Value}' could not be opened: {last}.", KeyValueResponseType.MustRetry);
+    }
+
+    /// <summary>
+    /// Opens the watch on the replicas the routes name: the partitions the first node hosts stay on it, and the
+    /// others go to the fewest nodes that host them all, picked greedily. Returns null when a node refused its part
+    /// transiently (the range map or the placement moved), after closing every part already open.
+    /// </summary>
+    private async Task<KahunaWatch?> OpenOnReplicas(string firstUrl, KeyValueWatchRequest request, IReadOnlyList<KeyValueWatchRoute> routes, bool autoResume, CancellationToken cancellationToken)
+    {
+        watchEndpoints ??= new(urls, Options.RoutingEndpointMap, Options.AllowUnlistedRoutingEndpoints);
+
+        Dictionary<string, List<int>> plan = new(StringComparer.Ordinal);
+        List<(int PartitionId, List<string> Candidates)> unplaced = [];
+
+        foreach (KeyValueWatchRoute route in routes)
+        {
+            if (route.HostedHere)
+            {
+                AddToPlan(plan, firstUrl, route.PartitionId);
+                continue;
+            }
+
+            List<string> candidates = [];
+            foreach (string endpoint in route.Endpoints)
+            {
+                if (watchEndpoints.Resolve(endpoint) is { } resolved && !candidates.Contains(resolved))
+                    candidates.Add(resolved);
+            }
+
+            if (candidates.Count == 0)
+                throw new KahunaException($"No reachable replica hosts partition {route.PartitionId} of the watch on '{request.Scope.Value}'.", KeyValueResponseType.DoesNotExist);
+
+            unplaced.Add((route.PartitionId, candidates));
+        }
+
+        while (unplaced.Count > 0)
+        {
+            // The endpoint that hosts the most unplaced partitions; ties go to the one listed first.
+            string best = unplaced[0].Candidates[0];
+            int bestCount = 0;
+
+            foreach ((_, List<string> candidates) in unplaced)
+            {
+                foreach (string candidate in candidates)
+                {
+                    int count = 0;
+                    foreach ((_, List<string> other) in unplaced)
+                    {
+                        if (other.Contains(candidate))
+                            count++;
+                    }
+
+                    if (count > bestCount)
+                    {
+                        best = candidate;
+                        bestCount = count;
+                    }
+                }
+            }
+
+            for (int i = unplaced.Count - 1; i >= 0; i--)
+            {
+                if (unplaced[i].Candidates.Contains(best))
+                {
+                    AddToPlan(plan, best, unplaced[i].PartitionId);
+                    unplaced.RemoveAt(i);
+                }
+            }
+        }
+
+        List<KahunaWatchPart> streams = new(plan.Count);
+        SortedSet<int> partitions = [];
+
+        try
+        {
+            foreach ((string url, List<int> part) in plan)
+            {
+                KahunaWatchOpening opening = await communication.OpenWatch(url, request with { Partitions = part }, cancellationToken).ConfigureAwait(false);
+
+                if (opening.Stream is null)
+                {
+                    if (opening.Type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication or KeyValueResponseType.DoesNotExist)
+                    {
+                        await CloseAll(streams).ConfigureAwait(false);
+                        return null;
+                    }
+
+                    throw new KahunaException($"The watch on '{request.Scope.Value}' was refused by {url}: {opening.Type}.", opening.Type);
+                }
+
+                streams.Add(new KahunaWatchPart(url, opening.Stream, opening.Partitions));
+                partitions.UnionWith(opening.Partitions);
+            }
+        }
+        catch
+        {
+            await CloseAll(streams).ConfigureAwait(false);
+            throw;
+        }
+
+        return new(request.Scope, streams, [.. partitions], [.. plan.Keys], ResumerFor(request, autoResume));
+
+        static void AddToPlan(Dictionary<string, List<int>> plan, string url, int partitionId)
+        {
+            if (!plan.TryGetValue(url, out List<int>? part))
+                plan[url] = part = [];
+
+            part.Add(partitionId);
+        }
+
+        static async Task CloseAll(List<KahunaWatchPart> streams)
+        {
+            foreach (KahunaWatchPart part in streams)
+                await part.Stream.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
+    private KahunaWatchResumer? ResumerFor(KeyValueWatchRequest request, bool autoResume) =>
+        autoResume ? (part, cursors, ct) => ResumeWatchPart(request, part, cursors, ct) : null;
+
+    /// <summary>
+    /// Reopens one node stream of a watch from <paramref name="cursors"/>, limited to its partitions: on its node
+    /// first, then on any node, and on a replica the refusing node names when it does not host them. A permanent
+    /// refusal ends the watch with it; a resume that keeps failing transiently ends the watch with the frame that
+    /// ended the stream.
+    /// </summary>
+    private async Task<(KahunaWatchPart? Part, KeyValueWatchFrame? Failure)> ResumeWatchPart(
+        KeyValueWatchRequest request, KahunaWatchPart part, IReadOnlyDictionary<int, HLCTimestamp> cursors, CancellationToken cancellationToken)
+    {
+        KeyValueWatchRequest resume = request with { Partitions = part.Partitions, ResumeFrom = HLCTimestamp.Zero, ResumePartitions = cursors };
+        string url = part.Url;
+
+        for (int attempt = 0; attempt < WatchOpenAttempts; attempt++)
+        {
+            KahunaWatchOpening opening;
+
+            try
+            {
+                opening = await communication.OpenWatch(url, resume, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception) when (!cancellationToken.IsCancellationRequested)
+            {
+                // The node that served the stream may be the one that went away.
+                opening = KahunaWatchOpening.Refused(KeyValueResponseType.MustRetry);
+            }
+
+            if (opening.Stream is not null)
+                return (new KahunaWatchPart(url, opening.Stream, opening.Partitions), null);
+
+            if (opening.Type == KeyValueResponseType.DoesNotExist && opening.Routes.Count > 0 && ReplicaOfAll(opening.Routes, part.Partitions) is { } replica)
+                url = replica;
+            else if (opening.Type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication or KeyValueResponseType.DoesNotExist)
+                url = GetRoundRobinUrl();
+            else
+                return (null, KeyValueWatchFrame.ForRefused(-1, opening.Type));
+
+            await Task.Delay(Math.Min(1000, 50 << attempt) + Random.Shared.Next(0, 25), cancellationToken).ConfigureAwait(false);
+        }
+
+        return (null, null);
+    }
+
+    // A reachable endpoint the routes name for every one of the partitions, or null.
+    private string? ReplicaOfAll(IReadOnlyList<KeyValueWatchRoute> routes, IReadOnlyList<int> partitions)
+    {
+        watchEndpoints ??= new(urls, Options.RoutingEndpointMap, Options.AllowUnlistedRoutingEndpoints);
+
+        HashSet<string>? common = null;
+
+        foreach (int partitionId in partitions)
+        {
+            HashSet<string> candidates = new(StringComparer.Ordinal);
+
+            foreach (KeyValueWatchRoute route in routes)
+            {
+                if (route.PartitionId != partitionId)
+                    continue;
+
+                foreach (string endpoint in route.Endpoints)
+                {
+                    if (watchEndpoints.Resolve(endpoint) is { } resolved)
+                        candidates.Add(resolved);
+                }
+            }
+
+            if (common is null)
+                common = candidates;
+            else
+                common.IntersectWith(candidates);
+        }
+
+        return common is { Count: > 0 } ? common.First() : null;
+    }
+
     /// <summary>
     /// Registers a key space for range-based sharding: the space becomes key-range routed on the
     /// answering node, and its whole-space descriptor is seeded on the cluster.
@@ -1780,6 +2037,37 @@ public class KahunaClient
     public Task<(HLCTimestamp effectiveFloor, int liveHolds)> GetSnapshotFloor(
         CancellationToken cancellationToken = default) =>
         communication.GetSnapshotFloor(GetRoundRobinUrl(), cancellationToken);
+
+    // ── History holds ────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Holds the history of each of <paramref name="partitions"/> from <paramref name="timestamp"/> for
+    /// <paramref name="holderId"/>: every replica keeps the partition's WAL retained from there, so a watch can resume
+    /// from <paramref name="timestamp"/> on any of them. One hold per partition; an acquire that repeats a partition the
+    /// holder already holds renews that hold and moves it forward. Advance the holds with
+    /// <see cref="RenewHistoryHolds"/> as the consumer commits its progress, so the retained WAL shrinks. A hold makes a
+    /// resume likely, not certain.
+    /// </summary>
+    public Task<HistoryHoldAnswer> AcquireHistoryHolds(
+        string holderId, IReadOnlyList<int> partitions, HLCTimestamp timestamp, int leaseMs, CancellationToken cancellationToken = default) =>
+        communication.HistoryHold(GetRoundRobinUrl(), new HistoryHoldRequest(HistoryHoldOperation.Acquire, holderId, partitions, timestamp, leaseMs), cancellationToken);
+
+    /// <summary>
+    /// Renews the lease of <paramref name="holdIds"/> and, when <paramref name="timestamp"/> is not zero, moves them
+    /// forward to it (never back). <see cref="KeyValueResponseType.DoesNotExist"/> means a hold was released or purged,
+    /// and its history must be presumed reclaimed.
+    /// </summary>
+    public Task<HistoryHoldAnswer> RenewHistoryHolds(
+        IReadOnlyList<string> holdIds, int leaseMs, HLCTimestamp timestamp = default, CancellationToken cancellationToken = default) =>
+        communication.HistoryHold(GetRoundRobinUrl(), new HistoryHoldRequest(HistoryHoldOperation.Renew, Timestamp: timestamp, LeaseMs: leaseMs, HoldIds: holdIds), cancellationToken);
+
+    /// <summary>Releases <paramref name="holdIds"/>.</summary>
+    public Task<HistoryHoldAnswer> ReleaseHistoryHolds(IReadOnlyList<string> holdIds, CancellationToken cancellationToken = default) =>
+        communication.HistoryHold(GetRoundRobinUrl(), new HistoryHoldRequest(HistoryHoldOperation.Release, HoldIds: holdIds), cancellationToken);
+
+    /// <summary>Lists the registered history holds, of <paramref name="holderId"/> when given.</summary>
+    public Task<HistoryHoldAnswer> ListHistoryHolds(string? holderId = null, CancellationToken cancellationToken = default) =>
+        communication.HistoryHold(GetRoundRobinUrl(), new HistoryHoldRequest(HistoryHoldOperation.List, holderId), cancellationToken);
 
     /// <summary>
     /// Chooses the next server in the list of servers in a round-robin fashion

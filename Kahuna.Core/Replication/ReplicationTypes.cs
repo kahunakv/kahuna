@@ -51,4 +51,18 @@ public static class ReplicationTypes
     /// partition. The durable-intent 2PC model's per-key pending-mutation authority.
     /// </summary>
     public const string PreparedIntent = "preparedintent";
+
+    /// <summary>
+    /// An empty entry the leader of an idle data partition proposes while the commit admission window is on, so the
+    /// time of the partition's last entry keeps moving and the watch watermark keeps advancing with no writes. It
+    /// carries nothing and applies as a no-op on every node, an older one included.
+    /// </summary>
+    public const string ProgressTick = "progresstick";
+
+    /// <summary>
+    /// The history hold registry, replicated on the meta partition
+    /// (<see cref="Kahuna.Server.KeyValues.Ranges.RangeMapStore.MetaPartitionId"/>): which data partitions must keep
+    /// their WAL retained from which timestamp, so a watch can resume there on any replica.
+    /// </summary>
+    public const string HistoryHold = "historyhold";
 }

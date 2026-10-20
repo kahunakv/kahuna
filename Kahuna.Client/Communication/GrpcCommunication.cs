@@ -1795,6 +1795,14 @@ public class GrpcCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
         throw new KahunaException("Retries exhausted.", KeyValueResponseType.Errored);
     }
 
+    // A watch is a long-lived stream on the shared channel, not a per-key operation; the batcher's per-item
+    // coalescing model does not apply here.
+    public Task<KahunaWatchOpening> OpenWatch(string url, KeyValueWatchRequest request, CancellationToken cancellationToken)
+    {
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
+        return GrpcKahunaWatchStream.OpenAsync(GetKeyValueClient(channel), request, cancellationToken);
+    }
+
     // Intentionally unary (server-streaming): range scan is a streaming server-push call, not a
     // per-key operation; the batcher's per-item coalescing model does not apply here.
     public async IAsyncEnumerable<KeyValueGetByBucketItem> ScanByRange(
@@ -2044,6 +2052,9 @@ public class GrpcCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             ConflictPolicy = TransactionConflictPolicyWire.ToGrpc(txOptions.ConflictPolicy)
         };
 
+        if (txOptions.Origin is not null)
+            request.Origin = txOptions.Origin;
+
         int retries = 0;
 
         GrpcBatcher batcher = GetSharedBatcher(url);
@@ -2102,7 +2113,7 @@ public class GrpcCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
     /// <exception cref="KahunaException">
     /// Thrown if the transaction commit process encounters an error, fails, or exceeds retry limits.
     /// </exception>
-    public async Task<(bool committed, string? recordAnchorKey)> CommitTransactionSession(
+    public async Task<(bool committed, string? recordAnchorKey, HLCTimestamp commitTimestamp)> CommitTransactionSession(
         string url,
         string uniqueId,
         HLCTimestamp transactionId,
@@ -2143,7 +2154,8 @@ public class GrpcCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
                     throw new KahunaException("Response is null", KeyValueResponseType.Errored);
 
                 if (response.Type == GrpcKeyValueResponseType.TypeCommitted)
-                    return (true, response.HasRecordAnchorKey ? response.RecordAnchorKey : null);
+                    return (true, response.HasRecordAnchorKey ? response.RecordAnchorKey : null,
+                        new HLCTimestamp(response.CommitTimestampNode, response.CommitTimestampPhysical, response.CommitTimestampCounter));
 
                 // The answer names the arm that refused the commit, so the exception carries it beside the outcome
                 // and a caller can tell a conflict from a lost lock or a deadline without reading server logs.
@@ -2466,6 +2478,15 @@ public class GrpcCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
     }
 
     // Snapshot hold operations are intentionally unary: they are infrequent control-plane calls.
+    public async Task<HistoryHoldAnswer> HistoryHold(string url, HistoryHoldRequest request, CancellationToken cancellationToken)
+    {
+        GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
+        KeyValuer.KeyValuerClient client = GetKeyValueClient(channel);
+
+        GrpcHistoryHoldResponse response = await client.HistoryHoldAsync(HistoryHoldWire.ToGrpc(request), cancellationToken: cancellationToken).ConfigureAwait(false);
+        return HistoryHoldWire.FromGrpc(response);
+    }
+
     public async Task<(KeyValueResponseType type, string holdId, HLCTimestamp leaseExpiry)> AcquireSnapshotHold(
         string url, string holderId, HLCTimestamp timestamp, int leaseMs, CancellationToken cancellationToken)
     {

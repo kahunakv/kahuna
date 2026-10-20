@@ -67,6 +67,35 @@ public sealed class TestMetaSystemStateTransfer : BaseCluster, IDisposable
         return new RaftLog { LogType = ReplicationTypes.RangeMap, LogData = ReplicationSerializer.Serialize(message) };
     }
 
+    private static RaftLog UpsertHistoryHoldLog(params HistoryHold[] holds)
+    {
+        HistoryHoldDeltaMessage delta = new();
+        foreach (HistoryHold hold in holds)
+        {
+            delta.Entries.Add(new HistoryHoldDeltaEntry
+            {
+                Remove = false,
+                Hold = new HistoryHoldMessage
+                {
+                    HoldId = hold.HoldId,
+                    HolderId = hold.HolderId,
+                    PartitionId = hold.PartitionId,
+                    TimestampNode = hold.Timestamp.N,
+                    TimestampPhysical = hold.Timestamp.L,
+                    TimestampCounter = hold.Timestamp.C,
+                    LeaseExpiryNode = hold.LeaseExpiry.N,
+                    LeaseExpiryPhysical = hold.LeaseExpiry.L,
+                    LeaseExpiryCounter = hold.LeaseExpiry.C,
+                },
+            });
+        }
+
+        return new RaftLog { Id = 1, LogType = ReplicationTypes.HistoryHold, LogData = ReplicationSerializer.Serialize(delta) };
+    }
+
+    private HistoryHoldStore NewHistoryHolds(RaftManager raft, string dir, string revision) =>
+        new(raft, dir, revision, kahunaLogger, new HistoryHoldLimits(0, 0, 0));
+
     private static RaftLog UpsertHoldLog(params SnapshotHold[] holds)
     {
         SnapshotFloorDeltaMessage delta = new();
@@ -113,7 +142,11 @@ public sealed class TestMetaSystemStateTransfer : BaseCluster, IDisposable
         SnapshotHold h2 = new("hold-2", "client-b", new HLCTimestamp(1, 3000, 0), farExpiry);
         srcFloor.Restore(RangeMapStore.MetaPartitionId, UpsertHoldLog(h1, h2));
 
-        MetaSystemStateTransfer srcTransfer = new(srcMap, srcFloor);
+        HistoryHoldStore srcHistory = NewHistoryHolds(srcRaft, srcDir, "src");
+        HistoryHold history = new("history-1", "cdc-a", 3, new HLCTimestamp(1, 5000, 0), farExpiry);
+        srcHistory.Restore(RangeMapStore.MetaPartitionId, UpsertHistoryHoldLog(history));
+
+        MetaSystemStateTransfer srcTransfer = new(srcMap, srcFloor, srcHistory);
         Stream blob = await srcTransfer.ExportPartitionState(RangeMapStore.MetaPartitionId, upToIndex: 5, CancellationToken.None);
 
         // A fresh node below the floor: both stores start empty on a different disk revision.
@@ -125,8 +158,14 @@ public sealed class TestMetaSystemStateTransfer : BaseCluster, IDisposable
         SnapshotFloorStore dstFloor = new(dstRaft, dstDir, "dst", kahunaLogger);
         Assert.Empty(dstFloor.Holds);
 
-        MetaSystemStateTransfer dstTransfer = new(dstMap, dstFloor);
+        HistoryHoldStore dstHistory = NewHistoryHolds(dstRaft, dstDir, "dst");
+        Assert.Empty(dstHistory.Holds);
+
+        MetaSystemStateTransfer dstTransfer = new(dstMap, dstFloor, dstHistory);
         await dstTransfer.ImportPartitionState(RangeMapStore.MetaPartitionId, blob, CancellationToken.None);
+
+        // The history hold registry travels with the other two.
+        Assert.Equal(history, Assert.Single(dstHistory.Holds).Value);
 
         // Range map restored, pending retirement included.
         Assert.Equal(2, dstMap.Current.Find("t:r", "any")?.PartitionId);
@@ -172,7 +211,7 @@ public sealed class TestMetaSystemStateTransfer : BaseCluster, IDisposable
         };
         Stream blob = new MemoryStream(ReplicationSerializer.Serialize(message), writable: false);
 
-        MetaSystemStateTransfer transfer = new(map, floor);
+        MetaSystemStateTransfer transfer = new(map, floor, NewHistoryHolds(raft, dir, "a"));
         await Assert.ThrowsAnyAsync<Exception>(() =>
             transfer.ImportPartitionState(RangeMapStore.MetaPartitionId, blob, CancellationToken.None));
 

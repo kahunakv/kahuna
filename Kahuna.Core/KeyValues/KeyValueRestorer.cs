@@ -256,6 +256,14 @@ internal sealed class KeyValueRestorer
                 }
 
                 case KeyValueRecordKind.ValueMutation:
+                    // The same verdict the live apply reached for this entry: a record the commit admission window
+                    // refused never applied anywhere, so its replay installs nothing either.
+                    if (KeyValueReplicator.IsRefusedByAdmission(
+                            log,
+                            new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter),
+                            keyValueMessage.AdmissionLagMs))
+                        return true;
+
                     (state, messageValue) = KeyValueMessageDecoder.Decode(keyValueMessage);
                     break;
 

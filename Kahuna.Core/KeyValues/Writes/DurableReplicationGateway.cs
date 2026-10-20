@@ -541,7 +541,7 @@ internal sealed class DurableReplicationGateway
                     continue;
 
                 PrepareRejectionKind kind = preparedIntentStore.TakePrepareRejectionForDelta(entries[i].Payload);
-                if (kind > rejection)
+                if (kind.Outranks(rejection))
                     rejection = kind;
             }
         }

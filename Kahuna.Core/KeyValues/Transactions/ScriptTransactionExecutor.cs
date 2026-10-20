@@ -688,10 +688,15 @@ internal sealed class ScriptTransactionExecutor
                 // self-contained, so a new run takes new locks under the new leader and reads again — exactly the
                 // retryable outcome, and what the client layer already does for MustRetry. An interactive session
                 // keeps Aborted for the same refusal: its reads under the lost exclusion cannot be repeated.
+                //
+                // A commit timestamp the commit admission window refused is not a conflict either: the frozen
+                // timestamp can never be admitted, nothing committed, and a new run mints a new one.
                 if (context.Result is { Type: KeyValueResponseType.Aborted } aborted)
                     return new()
                     {
-                        Type = aborted.ExclusionLost ? KeyValueResponseType.MustRetry : KeyValueResponseType.Aborted,
+                        Type = aborted.ExclusionLost || aborted.Refusal == CommitRefusalClass.CommitTimestampOutsideWindow
+                            ? KeyValueResponseType.MustRetry
+                            : KeyValueResponseType.Aborted,
                         Reason = aborted.Reason ?? "Transaction aborted",
                         Refusal = aborted.Refusal
                     };

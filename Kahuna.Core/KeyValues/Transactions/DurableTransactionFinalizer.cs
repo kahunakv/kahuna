@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kahuna.Server.KeyValues.Writes;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
@@ -296,6 +297,10 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     // configuration flag's upgrade order).
     private readonly int maxDeadlineExtensions;
 
+    // The lag bound of the commit admission window written into every prepare this finalizer proposes; zero when
+    // the window is off. Each replica judges the prepare by the bound it carries (see CommitAdmission).
+    private readonly long commitAdmissionLagMs;
+
     // Names the arms that refuse a commit without any other trace: the deadline gate and the exhausted prepare
     // loop. Null in bare protocol tests.
     private readonly ILogger? logger;
@@ -327,9 +332,11 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         DecideDelegate? decide = null,
         bool materializeOnResolve = false,
         int maxDeadlineExtensions = 0,
-        ILogger? logger = null)
+        ILogger? logger = null,
+        long commitAdmissionLagMs = 0)
     {
         this.decide = decide;
+        this.commitAdmissionLagMs = Math.Max(0, commitAdmissionLagMs);
         this.materializeOnResolve = materializeOnResolve;
         this.maxDeadlineExtensions = Math.Max(0, maxDeadlineExtensions);
         this.logger = logger;
@@ -692,6 +699,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         bool staleBase = false;
         bool rangeMoved = false;
         bool identitySettled = false;
+        bool admissionRefused = false;
         bool deadlineLapsed = false;
         bool recordDecided = false;
         int boundedRounds = 0;
@@ -726,12 +734,16 @@ internal sealed class DurableTransactionFinalizer : IDisposable
                     case Writes.PrepareRejectionKind.Settled:
                         identitySettled = true;
                         break;
+
+                    case Writes.PrepareRejectionKind.AdmissionRefused:
+                        admissionRefused = true;
+                        break;
                 }
 
                 unacknowledged.Add(i);
             }
 
-            if (staleBase || rangeMoved || identitySettled)
+            if (staleBase || rangeMoved || identitySettled || admissionRefused)
                 break;
 
             // The round budget of a live or unclassified conflict is spent: give up before another helping pass.
@@ -849,6 +861,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
                 : identitySettled ? PrepareRetryLoopOutcome.Settled
                 : recordDecided ? PrepareRetryLoopOutcome.RecordDecided
                 : staleBase ? PrepareRetryLoopOutcome.StaleBase
+                : admissionRefused ? PrepareRetryLoopOutcome.AdmissionRefused
                 : rangeMoved ? PrepareRetryLoopOutcome.RangeMoved
                 : deadlineLapsed ? PrepareRetryLoopOutcome.DeadlineLapsed
                 : PrepareRetryLoopOutcome.Exhausted);
@@ -952,6 +965,14 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             {
                 refusal = CommitRefusalClass.StagedBaseMoved;
                 reason = "A validated base moved before the prepare was durable";
+            }
+            else if (!allPrepared && admissionRefused)
+            {
+                // Every replica applied the prepare as a no-op, and a re-drive carries the same frozen commit
+                // timestamp, so this attempt can never prepare. The abort is retryable: the client's retry mints a
+                // new commit timestamp.
+                refusal = CommitRefusalClass.CommitTimestampOutsideWindow;
+                reason = $"The commit timestamp {input.CommitTimestamp} fell outside the commit admission window of a participant's log entry";
             }
             else if (!allPrepared)
             {
@@ -1656,7 +1677,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
         foreach (PreparedIntent intent in partition.Intents)
         {
-            if (intentStore.TryTakePrepareRejection(input.TransactionId, input.Epoch, intent.Key, out Writes.PrepareRejectionKind kind) && kind > dominant)
+            if (intentStore.TryTakePrepareRejection(input.TransactionId, input.Epoch, intent.Key, out Writes.PrepareRejectionKind kind) && kind.Outranks(dominant))
                 dominant = kind;
         }
 
@@ -1915,12 +1936,13 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     private Task<bool> ReplicateIntentsAsync(int partitionId, byte[] delta, CancellationToken cancellationToken) =>
         replicate(partitionId, ReplicationTypes.PreparedIntent, delta, Writes.WriteAdmissionClass.Terminal, Writes.WriteSubmissionStage.Settle, cancellationToken);
 
-    /// <summary>Encodes one partition's frozen intent set as a single prepare delta.</summary>
-    private static byte[] SerializePrepare(DurablePartitionPrepare partition)
+    /// <summary>Encodes one partition's frozen intent set as a single prepare delta, under this finalizer's commit
+    /// admission bound.</summary>
+    private byte[] SerializePrepare(DurablePartitionPrepare partition)
     {
         PreparedIntentCommand[] commands = new PreparedIntentCommand[partition.Intents.Count];
         for (int i = 0; i < partition.Intents.Count; i++)
-            commands[i] = new PrepareIntentCommand(partition.Intents[i]);
+            commands[i] = new PrepareIntentCommand(partition.Intents[i], commitAdmissionLagMs);
 
         return PreparedIntentStore.SerializeDelta(commands);
     }

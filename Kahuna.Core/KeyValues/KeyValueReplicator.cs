@@ -10,6 +10,7 @@ using Kommander.Time;
 using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kahuna.Server.KeyValues.Watch;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
@@ -83,6 +84,11 @@ internal sealed class KeyValueReplicator
     // Null (bare unit-test construction) leaves the miss to its counter and its error line.
     private readonly Action<int, long, string, long>? materializationMissing;
 
+    // The node's open watches. A committed write made outside a transaction is published here after its apply;
+    // a durable transaction's writes are published by the prepared-intent store when they settle. Null (bare
+    // unit-test construction) publishes nothing.
+    private readonly KeyValueWatchBroker? watchBroker;
+
     public KeyValueReplicator(
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         KeyValueActorRing persistentRouter,
@@ -99,8 +105,10 @@ internal sealed class KeyValueReplicator
         Func<string, long>? committedHeadRevisionProbe = null,
         Transactions.PreparedIntentStore? preparedIntentStore = null,
         Func<string, int>? keyOwner = null,
-        Action<int, long, string, long>? materializationMissing = null)
+        Action<int, long, string, long>? materializationMissing = null,
+        KeyValueWatchBroker? watchBroker = null)
     {
+        this.watchBroker                = watchBroker;
         this.preparedIntentStore        = preparedIntentStore;
         this.keyOwner                   = keyOwner;
         this.materializationMissing     = materializationMissing;
@@ -1142,6 +1150,56 @@ internal sealed class KeyValueReplicator
     }
 
     /// <summary>
+    /// Hands a committed key/value record to the node's open watches, after <see cref="ApplyLoggedMutation"/>
+    /// applied it, so a subscriber never sees a mutation this replica's state has not taken. Only a write made
+    /// outside a transaction is a watch event here: a record that carries a transaction id is a durable
+    /// transaction's materialization, which repeats a decision the prepared-intent store reports when the
+    /// intent settles (and more than one producer can write it); a range move's copy repeats a mutation the
+    /// source partition already reported; and history an installed snapshot already reflects was never this
+    /// node's to report. The record type is read here, at the call site, because an extend reaches the apply as
+    /// a set at the same revision.
+    /// </summary>
+    private void PublishDirectWrite(int partitionId, long logIndex, KeyValueRequestType type, in CommittedKeyValueMutation mutation, bool stateTransferCopy)
+    {
+        KeyValueWatchBroker? broker = watchBroker;
+        if (broker is null || !broker.HasSubscribers(partitionId))
+            return;
+
+        if (mutation.IsTransactional || stateTransferCopy)
+            return;
+
+        if (preparedIntentStore is not null && preparedIntentStore.IsHistoricalApply(partitionId, logIndex))
+            return;
+
+        KeyValueWatchEventKind kind = type switch
+        {
+            KeyValueRequestType.TryDelete => KeyValueWatchEventKind.Deleted,
+            KeyValueRequestType.TryExtend => KeyValueWatchEventKind.Extended,
+            _ => KeyValueWatchEventKind.Set
+        };
+
+        broker.Publish(partitionId, kind, mutation.Key, mutation.Value, mutation.Revision, mutation.Expires, mutation.LastModified, HLCTimestamp.Zero, logIndex);
+    }
+
+    /// <summary>
+    /// Whether the commit admission window refuses a write made outside a transaction (see
+    /// <see cref="CommitAdmission"/>). A refused record applies as a no-op on every replica: the leader's write
+    /// scheduler judged the same record by the same entry time and answered its writer with a retry.
+    /// </summary>
+    internal static bool IsRefusedByAdmission(RaftLog log, HLCTimestamp lastModified, long admissionLagMs)
+    {
+        if (admissionLagMs <= 0)
+            return false;
+
+        CommitAdmissionVerdict verdict = CommitAdmission.Judge(log.Time, lastModified, admissionLagMs);
+        if (verdict == CommitAdmissionVerdict.Admitted)
+            return false;
+
+        CommitAdmission.CountRefusal(verdict, "write");
+        return true;
+    }
+
+    /// <summary>
     /// Replicates the specified log entry for the given partition.
     /// </summary>
     /// <param name="partitionId">The unique identifier of the partition where the log entry should be replicated.</param>
@@ -1161,12 +1219,17 @@ internal sealed class KeyValueReplicator
             if (LocallyProposedKeyValueRecords.TryTake(log.LogData, out KeyValueProposal? proposal))
             {
                 KeyValueRequestType proposedType = proposal.Type;
+                CommittedKeyValueMutation proposed = CommittedKeyValueMutation.FromProposal(proposal, KeyValueMessageDecoder.StateOf(proposedType));
+
+                if (IsRefusedByAdmission(log, proposed.LastModified, proposal.AdmissionLagMs))
+                    return true;
 
                 ApplyLoggedMutation(
-                    partitionId, log.Id,
-                    CommittedKeyValueMutation.FromProposal(proposal, KeyValueMessageDecoder.StateOf(proposedType)),
+                    partitionId, log.Id, proposed,
                     witnessBelowHead: proposedType != KeyValueRequestType.TryExtend,
                     witnessCollision: proposedType == KeyValueRequestType.TrySet);
+
+                PublishDirectWrite(partitionId, log.Id, proposedType, proposed, stateTransferCopy: false);
                 return true;
             }
 
@@ -1182,13 +1245,19 @@ internal sealed class KeyValueReplicator
                 case KeyValueRecordKind.ValueMutation:
                 {
                     (KeyValueState state, byte[]? value) = KeyValueMessageDecoder.Decode(keyValueMessage);
+                    CommittedKeyValueMutation mutation = CommittedKeyValueMutation.FromRecord(keyValueMessage, value, state);
+
+                    if (IsRefusedByAdmission(log, mutation.LastModified, keyValueMessage.AdmissionLagMs))
+                        return true;
 
                     // An extend only refreshes the expiry of a value already applied, so it runs neither witness.
                     // A delete runs the below-head witness only; the same-revision value comparison is for sets.
                     ApplyLoggedMutation(
-                        partitionId, log.Id, CommittedKeyValueMutation.FromRecord(keyValueMessage, value, state),
+                        partitionId, log.Id, mutation,
                         witnessBelowHead: type != KeyValueRequestType.TryExtend,
                         witnessCollision: type == KeyValueRequestType.TrySet);
+
+                    PublishDirectWrite(partitionId, log.Id, type, mutation, keyValueMessage.StateTransferCopy);
                     return true;
                 }
 

@@ -157,6 +157,14 @@ public static class ConfigurationValidator
                     "or the ceiling could expire the write intent of a transaction that is still live. Use 0 to derive it.");
         }
 
+        if (configuration.CommitAdmissionLagMs is < 0 or > 3_600_000)
+            throw new KahunaServerException(
+                $"CommitAdmissionLagMs ({configuration.CommitAdmissionLagMs} ms) must be between 0 (off) and 3600000 ms.");
+
+        if (configuration.HistoryHoldMaxLeaseMs < 0 || configuration.HistoryHoldMaxPerHolder < 0 || configuration.HistoryHoldMaxTotal < 0)
+            throw new KahunaServerException(
+                "HistoryHoldMaxLeaseMs, HistoryHoldMaxPerHolder and HistoryHoldMaxTotal must not be negative (0 means no bound).");
+
         if (configuration.DefaultAdmissionWaitMs <= 0)
             throw new KahunaServerException(
                 $"DefaultAdmissionWaitMs ({configuration.DefaultAdmissionWaitMs} ms) must be greater than zero; " +

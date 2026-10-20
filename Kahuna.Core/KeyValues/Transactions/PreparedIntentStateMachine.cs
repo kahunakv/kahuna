@@ -20,12 +20,17 @@ namespace Kahuna.Server.KeyValues.Transactions;
 /// nothing installs, the fence never judges it, and the producer reads the decision from the record instead
 /// of driving an abort. Unlike <paramref name="StaleBase"/> this is a replicated verdict — every replica
 /// rejects the same entry from the same log-derived memory.</param>
+/// <param name="AdmissionRefused">Set by the store on a REJECTED prepare that would have installed a new pending
+/// intent with a commit timestamp outside the commit admission window of its log entry (see
+/// <see cref="CommitAdmission"/>). A replicated verdict: it reads only the entry, so every replica rejects it.
+/// The frozen commit timestamp cannot change, so the producer aborts the attempt retryably.</param>
 internal readonly record struct PreparedIntentApplyResult(
     TransactionApplyOutcome Outcome,
     PreparedIntent? Intent,
     string? RejectReason,
     bool StaleBase = false,
-    bool SettledReplay = false);
+    bool SettledReplay = false,
+    bool AdmissionRefused = false);
 
 /// <summary>
 /// The pure, deterministic state machine for a single key's durable prepared intent. Enforces exactly one live

@@ -6,6 +6,7 @@ using Kommander.WAL;
 
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kahuna.Server.KeyValues.Watch;
 using Kahuna.Server.KeyValues.Writes;
 using Kahuna.Server.Locks;
 using Kahuna.Server.Locks.Data;
@@ -731,4 +732,41 @@ public interface IKahuna
     /// </summary>
     public Task<(KeyValueResponseType Type, bool Held, long AppliedLogId)>
         GetPreparedIntentPresence(int partitionId, HLCTimestamp transactionId, long epoch, string key, CancellationToken ct);
+
+    // ── Watch streams ───────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Opens a watch on this node over the keys of <see cref="KeyValueWatchRequest.Scope"/>: a frame for every
+    /// committed mutation of a key in the scope that this node applies from now on, on every data partition the
+    /// scope covers. Any replica serves a watch; this node must host every partition the scope covers.
+    ///
+    /// <para>On <see cref="KeyValueResponseType.Get"/> the watch is registered before the task completes: every
+    /// entry this node applies afterwards is matched against it, so a read made after the call observes, or is
+    /// followed by an event for, every write committed after it. The caller reads the frames with
+    /// <see cref="KeyValueWatch.ReadAllAsync"/> and closes the watch by disposing it. The stream ends with
+    /// <see cref="KeyValueWatchFrameType.Lagged"/> when the reader falls behind, when this node replaces the
+    /// partition's state from a snapshot, when an apply fails, or when a range change moves the scope; the
+    /// consumer then reopens it. See <see cref="KeyValueWatchEvent"/> for the delivery and ordering contract.</para>
+    ///
+    /// <para>Refusals: <see cref="KeyValueResponseType.WatchUnsupportedOnEphemeral"/> (permanent),
+    /// <see cref="KeyValueResponseType.DoesNotExist"/> (this node hosts no replica of a covered partition; the
+    /// opening's routes name the replicas of each covered partition) and <see cref="KeyValueResponseType.MustRetry"/>
+    /// (the range map does not cover the scope yet, kept changing, or no longer covers a partition the request
+    /// named in <see cref="KeyValueWatchRequest.Partitions"/>).</para>
+    /// </summary>
+    public Task<KeyValueWatchOpening> WatchKeyValues(KeyValueWatchRequest request, CancellationToken ct);
+
+    /// <summary>
+    /// Acquires, renews, releases or lists history holds (see <see cref="HistoryHoldRequest"/>). A history hold keeps
+    /// the WAL of one data partition retained from a timestamp onward on every replica, so a watch can resume from that
+    /// timestamp on any of them, also after a restart or a replica move. The request is answered by the meta-partition
+    /// leader, wherever it arrives. Only a consumer that asks takes a hold; a watch never takes one.
+    ///
+    /// <para><b>Recovery contract.</b> The pin ends when the hold is removed from the registry (a release, or the
+    /// reaper's purge of a hold whose lease lapsed), not at bare lease expiry, so a renew that succeeds after the lease
+    /// lapsed still holds the history. <see cref="KeyValueResponseType.DoesNotExist"/> on a renew means the history must
+    /// be presumed reclaimed. A hold makes a resume likely, not certain: a replica that compacted before it applied the
+    /// hold answers <c>HistoryUnavailable</c>.</para>
+    /// </summary>
+    public Task<HistoryHoldAnswer> HistoryHold(HistoryHoldRequest request, CancellationToken ct);
 }

@@ -6,6 +6,7 @@ using Kommander.Time;
 
 using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.KeyValues.Transactions;
+using Kahuna.Server.KeyValues.Watch;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Replication;
 using Kahuna.Shared.KeyValue;
@@ -49,17 +50,34 @@ internal sealed class KeyValueReplicationDispatcher
         public long Version;
 
         public long LastApplied;
+
+        // The entry an apply in progress applies, so a watch that registers mid-apply can replay through it.
+        public long Applying;
     }
 
     private ApplyProgress ProgressOf(int partitionId) =>
         applyProgressByPartition.GetOrAdd(partitionId, static _ => new ApplyProgress());
 
     /// <summary>Marks an apply in progress (odd version). Applies are serialized per partition, so no two overlap.</summary>
-    private ApplyProgress BeginApply(int partitionId)
+    private ApplyProgress BeginApply(int partitionId, long logId = 0)
     {
         ApplyProgress progress = ProgressOf(partitionId);
+        if (logId > 0)
+            Volatile.Write(ref progress.Applying, logId);
         Interlocked.Increment(ref progress.Version);
         return progress;
+    }
+
+    /// <summary>
+    /// The highest log index of <paramref name="partitionId"/> whose apply on this node has started: the last applied
+    /// entry, or the one an apply in progress applies. Read after a watch registered, every entry above it applies
+    /// after the registration, so its events reach the watch live; every entry at or below it is in the log, so a
+    /// replay can deliver its events.
+    /// </summary>
+    internal long LiveIndex(int partitionId)
+    {
+        ApplyProgress progress = ProgressOf(partitionId);
+        return Math.Max(Volatile.Read(ref progress.LastApplied), Volatile.Read(ref progress.Applying));
     }
 
     /// <summary>Records the applied id (monotonic) and marks the apply complete (even version).</summary>
@@ -280,6 +298,15 @@ internal sealed class KeyValueReplicationDispatcher
             return BoolTask(result);
         }
 
+        if (log.LogType == ReplicationTypes.HistoryHold)
+        {
+            RegisterSynchronousApply(partitionId, log.Id);
+            bool result = runtime.HistoryHoldStore.Restore(partitionId, log);
+            if (result)
+                durabilityTracker?.Resolve(partitionId, log.Id);
+            return BoolTask(result);
+        }
+
         if (log.LogType == ReplicationTypes.TransactionRecord)
         {
             durabilityTracker?.RegisterPending(partitionId, log.Id, DurabilityChannel.TransactionRecords);
@@ -327,17 +354,40 @@ internal sealed class KeyValueReplicationDispatcher
     /// <returns></returns>
     public Task<bool> OnReplicationReceived(int partitionId, RaftLog log)
     {
-        ApplyProgress progress = BeginApply(partitionId);
+        ApplyProgress progress = BeginApply(partitionId, log.Id);
 
         try
         {
-            return ReplicateCore(partitionId, log);
+            Task<bool> applied = ReplicateCore(partitionId, log);
+
+            // Kommander advances past an entry whose apply failed. Whatever that entry should have emitted to a
+            // watch may be missing, so every watch on the partition ends instead of continuing past a gap.
+            if (applied.IsCompletedSuccessfully)
+            {
+                if (!applied.Result)
+                    runtime.WatchBroker.EndPartition(partitionId, KeyValueWatchLagReason.ApplyDiscontinuity);
+                else
+                    // The entry's events are published by now, so the watermark it allows can follow them. An apply
+                    // that completes later leaves the watermark at the previous entry, which is still sound.
+                    runtime.WatchWatermarks?.OnEntryApplied(partitionId, log.Time, log.Id);
+            }
+
+            return applied;
+        }
+        catch
+        {
+            runtime.WatchBroker.EndPartition(partitionId, KeyValueWatchLagReason.ApplyDiscontinuity);
+            throw;
         }
         finally
         {
             EndApply(progress, log.Id);
         }
     }
+
+    /// <summary>Called after every applied range-map entry, so the watches whose scope spans ranges can check
+    /// whether the partitions they cover changed. Runs on the meta partition's apply path; must not block.</summary>
+    internal Action? RangeMapApplied { get; set; }
 
     private Task<bool> ReplicateCore(int partitionId, RaftLog log)
     {
@@ -357,6 +407,7 @@ internal sealed class KeyValueReplicationDispatcher
             {
                 SyncKeySpaceRegistryFromRangeMap(rangeMapStore, keySpaceRegistry);
                 durabilityTracker?.Resolve(partitionId, log.Id);
+                RangeMapApplied?.Invoke();
             }
             return BoolTask(result);
         }
@@ -365,6 +416,15 @@ internal sealed class KeyValueReplicationDispatcher
         {
             RegisterSynchronousApply(partitionId, log.Id);
             bool result = snapshotFloorStore.Replicate(partitionId, log);
+            if (result)
+                durabilityTracker?.Resolve(partitionId, log.Id);
+            return BoolTask(result);
+        }
+
+        if (log.LogType == ReplicationTypes.HistoryHold)
+        {
+            RegisterSynchronousApply(partitionId, log.Id);
+            bool result = runtime.HistoryHoldStore.Replicate(partitionId, log);
             if (result)
                 durabilityTracker?.Resolve(partitionId, log.Id);
             return BoolTask(result);
@@ -400,6 +460,10 @@ internal sealed class KeyValueReplicationDispatcher
 
             return TrueTask;
         }
+
+        // Carries nothing: its only effect is its entry time, which moves the partition's watch watermark.
+        if (log.LogType == ReplicationTypes.ProgressTick)
+            return TrueTask;
 
         if (log.LogType == ReplicationTypes.CompletionReceipt)
         {

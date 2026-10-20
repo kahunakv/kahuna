@@ -41,7 +41,8 @@ internal sealed record PreparedIntent(
     long BaseRevision,
     KeyValueState BaseState,
     HLCTimestamp RecoveryDeadline,
-    PreparedIntentResolution Resolution)
+    PreparedIntentResolution Resolution,
+    string? Origin = null)
 {
     /// <summary>The <see cref="BaseRevision"/> value marking a mutation with no validated base: the key was
     /// written without a prior read in its transaction (a blind, last-writer-wins write), so the commit-time
@@ -78,6 +79,14 @@ internal static class PreparedIntentDigest
         h = Fold(h, intent.BaseRevision, prime);
         h = Fold(h, (long)intent.BaseState, prime);
         h = FoldTimestamp(h, intent.CommitTimestamp, prime);
+
+        // Folded only when present, so the digest of an intent with no origin is the one every older node computes:
+        // a re-prepare with a different origin is a different mutation and is rejected.
+        if (intent.Origin is not null)
+        {
+            h = Fold(h, 0x4F52_4947, prime);
+            h = FoldString(h, intent.Origin, prime);
+        }
 
         return unchecked((long)h);
     }

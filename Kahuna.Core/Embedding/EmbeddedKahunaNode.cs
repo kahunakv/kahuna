@@ -602,6 +602,11 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             PublishedHeadReads = options.PublishedHeadReads,
             StagedBaseFenceRetentionMs = options.StagedBaseFenceRetentionMs,
             OnePhaseApplyTimeValidation = options.OnePhaseApplyTimeValidation,
+            CommitAdmissionLagMs = options.CommitAdmissionLagMs,
+            HistoryHoldMaxLeaseMs = options.HistoryHoldMaxLeaseMs,
+            HistoryHoldMaxPerHolder = options.HistoryHoldMaxPerHolder,
+            HistoryHoldMaxTotal = options.HistoryHoldMaxTotal,
+            TransactionOriginTags = options.TransactionOriginTags,
             FusedEphemeralFinalize = options.FusedEphemeralFinalize,
             ScriptActorTurns = options.ScriptActorTurns,
             SingleProcessRaftGroup = singleProcessRaftGroup

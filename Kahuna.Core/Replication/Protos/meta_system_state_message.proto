@@ -12,4 +12,7 @@ package Kahuna.Server.Replication.Protos;
 message MetaSystemStateMessage {
   bytes rangeMap = 1;       // serialized RangeMapMessage
   bytes snapshotFloor = 2;  // serialized SnapshotFloorMessage (full hold set)
+  // Serialized HistoryHoldStateMessage (full history hold registry). Absent in a snapshot exported by an older node;
+  // the installing node then gets an empty registry, which loses availability of resumes, never safety.
+  bytes historyHolds = 3;
 }

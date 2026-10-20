@@ -37,7 +37,9 @@ internal static class ReplicationLogRouter
             or ReplicationTypes.CoordinatorDecision
             or ReplicationTypes.TransactionRecord
             or ReplicationTypes.PreparedIntent
-            or ReplicationTypes.CompletionReceipt => ReplicationLogOwner.KeyValues,
+            or ReplicationTypes.CompletionReceipt
+            or ReplicationTypes.ProgressTick
+            or ReplicationTypes.HistoryHold => ReplicationLogOwner.KeyValues,
         ReplicationTypes.Locks => ReplicationLogOwner.Locks,
         _ => ReplicationLogOwner.None
     };

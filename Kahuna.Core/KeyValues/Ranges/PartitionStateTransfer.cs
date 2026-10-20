@@ -113,6 +113,17 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
     /// <summary>Registers an installed-boundary observer; see <see cref="installedThroughObservers"/>.</summary>
     internal void AddInstalledThroughObserver(Action<int, long> observer) => installedThroughObservers.Add(observer);
 
+    /// <summary>
+    /// Callbacks told that a partition's state on this node was replaced without per-key log entries: an install
+    /// rewrote its rows from a snapshot, or an un-host purge deleted them. Nothing on the apply path reports such
+    /// a change key by key, so a consumer that follows the partition through the apply (a watch) must be told
+    /// that it can no longer assume continuity.
+    /// </summary>
+    private readonly List<Action<int>> stateReplacedObservers = [];
+
+    /// <summary>Registers a state-replaced observer; see <see cref="stateReplacedObservers"/>.</summary>
+    internal void AddStateReplacedObserver(Action<int> observer) => stateReplacedObservers.Add(observer);
+
     private readonly PartitionDataEnumerator enumerator;
 
     private readonly IPersistenceBackend persistenceBackend;
@@ -526,6 +537,9 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
 
             foreach (Action<int, long> observer in installedThroughObservers)
                 observer(partitionId, header.UpToIndex);
+
+            foreach (Action<int> observer in stateReplacedObservers)
+                observer(partitionId);
         }
         finally
         {
@@ -869,6 +883,11 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
         {
             if (!stillUnhosted())
                 return false;
+
+            // The node no longer receives this partition's entries, and the rows go away below, possibly only
+            // in part if the walk aborts.
+            foreach (Action<int> observer in stateReplacedObservers)
+                observer(partitionId);
 
             // Flush the background writer first: a write applied just before the loss and still
             // queued would otherwise land after the purge and resurrect rows.

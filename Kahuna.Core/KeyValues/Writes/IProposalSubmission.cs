@@ -1,4 +1,5 @@
 using Kommander.Data;
+using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues.Writes;
 
@@ -45,6 +46,13 @@ internal interface IProposalSubmission
     /// proposing it (e.g. a key-range write whose descriptor moved since admission). Producers with no fence
     /// return false.</summary>
     bool IsStale(IWriteRangeFence fence);
+
+    /// <summary>Whether the commit admission window refuses this submission's entries at
+    /// <paramref name="entryTime"/>, the time Kommander stamped on the proposal that carried them. Every replica's
+    /// apply judges the same entries by the same time and turns a refused entry into a no-op, so the scheduler
+    /// releases a refused submission retryably instead of completing it. Producers whose entries create no
+    /// commit, or whose apply reports its own verdict, return false.</summary>
+    bool IsRefusedAt(HLCTimestamp entryTime) => false;
 
     /// <summary>Exactly-once terminal completion — the batch committed; apply the record's effect and resolve the
     /// producer's caller. <paramref name="entryLogIndices"/> is the committed Raft log index of each of this

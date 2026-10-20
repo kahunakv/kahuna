@@ -2,6 +2,7 @@
 using Kahuna.Client;
 using Kahuna.Client.Communication;
 using Kahuna.Server.KeyValues;
+using Kahuna.Server.KeyValues.Watch;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
@@ -19,7 +20,17 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
 {
     private readonly IKahuna kahuna;
 
+    private readonly IReadOnlyDictionary<string, IKahuna>? nodes;
+
     public InProcessKahunaCommunication(IKahuna kahuna) => this.kahuna = kahuna;
+
+    /// <summary>A transport over several nodes: a watch opens on the node its URL names, as a real transport
+    /// dials it. The first node answers every other call.</summary>
+    public InProcessKahunaCommunication(IReadOnlyDictionary<string, IKahuna> nodes)
+    {
+        this.nodes = nodes;
+        kahuna = nodes.Values.First();
+    }
 
     public async Task<(bool, byte[]?, long, HLCTimestamp, int)> TryGetKeyValue(
         string url, HLCTimestamp transactionId, string key, long revision,
@@ -68,6 +79,27 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
             NextCursor = result.NextCursor,
             HasMore = result.HasMore
         };
+    }
+
+    public Task<HistoryHoldAnswer> HistoryHold(string url, HistoryHoldRequest request, CancellationToken cancellationToken) =>
+        (nodes is null ? kahuna : nodes[url]).HistoryHold(request, cancellationToken);
+
+    public async Task<KahunaWatchOpening> OpenWatch(string url, KeyValueWatchRequest request, CancellationToken cancellationToken)
+    {
+        IKahuna node = nodes is null ? kahuna : nodes[url];
+        KeyValueWatchOpening opening = await node.WatchKeyValues(request, cancellationToken);
+
+        return opening.Watch is { } watch
+            ? new(KeyValueResponseType.Get, new InProcessWatchStream(watch), watch.Partitions, [])
+            : KahunaWatchOpening.Refused(opening.Type, opening.Routes);
+    }
+
+    /// <summary>A node-side watch read directly, as a transport would deliver it.</summary>
+    private sealed class InProcessWatchStream(KeyValueWatch watch) : IKahunaWatchStream
+    {
+        public IAsyncEnumerable<KeyValueWatchFrame> ReadAllAsync(CancellationToken cancellationToken) => watch.ReadAllAsync(cancellationToken);
+
+        public ValueTask DisposeAsync() => watch.DisposeAsync();
     }
 
     public async IAsyncEnumerable<KeyValueGetByBucketItem> ScanByRange(
@@ -258,7 +290,8 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
             DecisionDurability = txOptions.DecisionDurability,
             Priority           = txOptions.Priority,
             ReadTimestamp      = txOptions.ReadTimestamp,
-            ConflictPolicy     = txOptions.ConflictPolicy
+            ConflictPolicy     = txOptions.ConflictPolicy,
+            Origin             = txOptions.Origin
         };
         (KeyValueResponseType type, TransactionHandle handle) = await kahuna.LocateAndStartTransaction(opts, cancellationToken);
         if (type != KeyValueResponseType.Set)
@@ -266,7 +299,7 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
         return (url, handle.TransactionId);
     }
 
-    public async Task<(bool committed, string? recordAnchorKey)> CommitTransactionSession(
+    public async Task<(bool committed, string? recordAnchorKey, HLCTimestamp commitTimestamp)> CommitTransactionSession(
         string url, string uniqueId, HLCTimestamp transactionId, string? recordAnchorKey, CancellationToken cancellationToken)
     {
         TransactionHandle handle = new(transactionId, uniqueId, recordAnchorKey);
@@ -277,9 +310,9 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
         // the SDK can move to a terminal state rather than looping on Pending.
         TransactionCommitAnswer answer = await kahuna.LocateAndCommitTransaction(handle, cancellationToken);
         if (answer.Type == KeyValueResponseType.Committed)
-            return (true, answer.RecordAnchorKey);
+            return (true, answer.RecordAnchorKey, answer.CommitTimestamp);
         if (answer.Type == KeyValueResponseType.MustRetry)
-            return (false, answer.RecordAnchorKey);
+            return (false, answer.RecordAnchorKey, HLCTimestamp.Zero);
         throw new KahunaException(
             answer.Refusal == CommitRefusalClass.None
                 ? "Failed to commit key/value transaction: " + answer.Type

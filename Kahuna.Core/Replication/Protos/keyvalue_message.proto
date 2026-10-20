@@ -39,4 +39,14 @@ message KeyValueMessage {
   // MaterializeIntent (by-reference) record, whose intent identity is (transactionId, epoch, key);
   // zero on every value-carrying record.
   int64 epoch = 24;
+  // True on a record a range move re-logs on the destination partition to copy a key that already
+  // existed on the source: the same revision and timestamps the key had there, not a new write. The
+  // apply is unchanged; only a watch stream skips it, since it reports no new mutation.
+  bool stateTransferCopy = 25;
+  // The lag bound of the commit admission window, in milliseconds, written by the leader on a write made outside
+  // a transaction while the window is on. Each replica admits the record only if its lastModified falls inside
+  // (entry time - lag, entry time + 5 s); a record outside applies as a no-op. Zero (absent) is always admitted:
+  // the window was off, or the record copies an existing commit. An older reader skips this field and admits
+  // every record, so no node may write it until every node reads it.
+  int64 admissionLagMs = 26;
 }

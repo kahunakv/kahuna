@@ -114,6 +114,9 @@
     <Protobuf Include="Replication\Protos\snapshotfloor_message.proto">
       <Generator>MSBuild:Compile</Generator>
     </Protobuf>
+    <Protobuf Include="Replication\Protos\history_hold_message.proto">
+      <Generator>MSBuild:Compile</Generator>
+    </Protobuf>
     <Protobuf Include="Replication\Protos\meta_system_state_message.proto">
       <Generator>MSBuild:Compile</Generator>
     </Protobuf>

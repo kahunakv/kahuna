@@ -579,6 +579,9 @@ public sealed partial class KahunaManager
         LocateAndAcquireSnapshotHold(string holderId, HLCTimestamp timestamp, int leaseMs, CancellationToken ct) =>
         keyValues.AcquireSnapshotHold(holderId, timestamp, leaseMs, ct);
 
+    public Task<HistoryHoldAnswer> HistoryHold(HistoryHoldRequest request, CancellationToken ct) =>
+        keyValues.HistoryHold(request, ct);
+
     public Task<(KeyValueResponseType Type, HLCTimestamp LeaseExpiry)>
         LocateAndRenewSnapshotHold(string holdId, int leaseMs, CancellationToken ct) =>
         keyValues.RenewSnapshotHold(holdId, leaseMs, ct);

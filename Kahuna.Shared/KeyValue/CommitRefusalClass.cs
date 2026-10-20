@@ -65,5 +65,10 @@ public enum CommitRefusalClass
     AdmissionCapacity = 14,
 
     /// <summary>The coordinator does not know the transaction and no durable record could be consulted.</summary>
-    UnknownTransaction = 15
+    UnknownTransaction = 15,
+
+    /// <summary>Retryable: the commit timestamp fell outside the commit admission window of a participant's log
+    /// entry. It was minted too long before its prepare reached the log, or the coordinator's clock ran more than
+    /// 5 s ahead of the participant's leader. Nothing was committed; a retry mints a new commit timestamp.</summary>
+    CommitTimestampOutsideWindow = 16
 }

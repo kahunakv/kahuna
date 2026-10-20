@@ -14,9 +14,9 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// whose needed log entries were already compacted, or a cold-restarted node whose local WAL was
 /// trimmed past the tail it would replay.
 ///
-/// <para>The meta partition hosts <b>two</b> independent state machines — the range-descriptor map
-/// (<see cref="RangeMapStore"/>) and the snapshot-floor hold registry (<see cref="SnapshotFloorStore"/>).
-/// A repair must export and install <b>both</b> as one blob: installing only one would leave the
+/// <para>The meta partition hosts <b>three</b> independent state machines — the range-descriptor map
+/// (<see cref="RangeMapStore"/>), the snapshot-floor hold registry (<see cref="SnapshotFloorStore"/>) and the history
+/// hold registry (<see cref="HistoryHoldStore"/>). A repair must export and install <b>all of them</b> as one blob: installing only one would leave the
 /// recovering node's other state machine stale or empty. This is required because
 /// <see cref="SnapshotFloorStore"/> replicates <b>deltas</b> — once old deltas are compacted, the
 /// hold set can only be reconstructed from a whole-state snapshot, not from surviving log entries.
@@ -41,10 +41,13 @@ internal sealed class MetaSystemStateTransfer : IRaftSystemStateTransfer
 
     private readonly SnapshotFloorStore snapshotFloorStore;
 
-    public MetaSystemStateTransfer(RangeMapStore rangeMapStore, SnapshotFloorStore snapshotFloorStore)
+    private readonly HistoryHoldStore historyHoldStore;
+
+    public MetaSystemStateTransfer(RangeMapStore rangeMapStore, SnapshotFloorStore snapshotFloorStore, HistoryHoldStore historyHoldStore)
     {
         this.rangeMapStore = rangeMapStore;
         this.snapshotFloorStore = snapshotFloorStore;
+        this.historyHoldStore = historyHoldStore;
     }
 
     public Task<Stream> ExportPartitionState(int partitionId, long upToIndex, CancellationToken ct)
@@ -53,6 +56,7 @@ internal sealed class MetaSystemStateTransfer : IRaftSystemStateTransfer
         {
             RangeMap = UnsafeByteOperations.UnsafeWrap(rangeMapStore.SerializeState()),
             SnapshotFloor = UnsafeByteOperations.UnsafeWrap(snapshotFloorStore.SerializeState()),
+            HistoryHolds = UnsafeByteOperations.UnsafeWrap(historyHoldStore.SerializeState()),
         };
 
         // The message is serialised straight into pooled 64 KB segments: no exact-size array for the whole
@@ -83,12 +87,15 @@ internal sealed class MetaSystemStateTransfer : IRaftSystemStateTransfer
             message = ReplicationSerializer.UnserializeMetaSystemStateMessage(buffer);
         }
 
-        // Parse and validate BOTH sub-states before installing either: a decode/validation failure
-        // here throws before any swap, leaving the node's prior state intact so Kommander retries.
+        // Parse and validate every sub-state before installing any: a decode/validation failure here throws before any
+        // swap, leaving the node's prior state intact so Kommander retries. A blob from an exporter that predates the
+        // history hold registry carries no field 3 and installs an empty registry.
         RangeMap rangeMap = rangeMapStore.ParseState(message.RangeMap.Span);
         Dictionary<string, SnapshotHold> holds = snapshotFloorStore.ParseState(message.SnapshotFloor.Span);
+        Dictionary<string, HistoryHold> historyHolds = historyHoldStore.ParseState(message.HistoryHolds.Span);
 
         rangeMapStore.CommitState(rangeMap);
         snapshotFloorStore.CommitState(holds);
+        historyHoldStore.CommitState(historyHolds);
     }
 }

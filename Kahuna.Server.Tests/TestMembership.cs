@@ -918,5 +918,8 @@ public sealed class TestMembership : BaseCluster
 
         public Task<(KeyValueResponseType Type, KeyValueApplyFingerprint Fingerprint)> GetPartitionApplyFingerprint(int partitionId, CancellationToken ct) => throw new NotImplementedException();
         public Task<(KeyValueResponseType Type, bool Held, long AppliedLogId)> GetPreparedIntentPresence(int partitionId, HLCTimestamp transactionId, long epoch, string key, CancellationToken ct) => throw new NotImplementedException();
+        public Task<Kahuna.Server.KeyValues.Watch.KeyValueWatchOpening> WatchKeyValues(KeyValueWatchRequest request, CancellationToken ct) => throw new NotImplementedException();
+
+        public Task<HistoryHoldAnswer> HistoryHold(HistoryHoldRequest request, CancellationToken ct) => throw new NotImplementedException();
     }
 }

@@ -10,6 +10,8 @@ using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues.Logging;
 using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.KeyValues.Transactions;
+using Kahuna.Server.KeyValues.Watch;
+using Kahuna.Server.Routing;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.ScriptParser;
 using Kahuna.Server.Persistence.Backend;
@@ -99,11 +101,13 @@ internal sealed class KeyValuesManagerBuilder
     internal NodeMaintenanceService nodeMaintenance = null!;
     internal KvStateMachineTransfer kvStateMachineTransfer = null!;
     internal MetaSystemStateTransfer metaSystemStateTransfer = null!;
+    internal HistoryHoldStore historyHoldStore = null!;
     internal RangeSplitter rangeSplitter = null!;
     internal RangeSplitTrigger rangeSplitTrigger = null!;
     internal RangeMerger rangeMerger = null!;
     internal RangeMergeTrigger rangeMergeTrigger = null!;
     internal KeySpaceAdminService keySpaceAdmin = null!;
+    internal KeyValueWatchService watchService = null!;
 
     internal KeyValuesManagerBuilder(
         KeyValuesManager manager,
@@ -149,6 +153,16 @@ internal sealed class KeyValuesManagerBuilder
         // otherwise create a new instance owned by this manager.
         snapshotFloorStore = externalFloorStore ?? new(raft, configuration.StoragePath, configuration.StorageRevision, logger, configuration.SnapshotHoldStartupGraceWindow);
 
+        // History hold registry: replicated on the meta partition too. Loaded from its durable copy here, before Raft
+        // starts the partitions, so each restored partition can be pinned before its first compaction.
+        historyHoldStore = new(
+            raft,
+            configuration.StoragePath,
+            configuration.StorageRevision,
+            logger,
+            new HistoryHoldLimits(configuration.HistoryHoldMaxLeaseMs, configuration.HistoryHoldMaxPerHolder, configuration.HistoryHoldMaxTotal),
+            configuration.SnapshotHoldStartupGraceWindow);
+
         // Completion-receipt store: shared with the BackgroundWriterActor when provided (so the writer
         // snapshots the receipts this manager records), otherwise owned locally. The durable overload
         // reloads any persisted receipts so a re-commit after a cold restart still answers Committed.
@@ -182,6 +196,10 @@ internal sealed class KeyValuesManagerBuilder
         // Enabling the apply-time gate over a snapshot that predates the ledger fails closed here (see the
         // store's contract), before the node serves anything.
         preparedIntentStore.ConfigureOnePhaseApplyTimeValidation(configuration.OnePhaseApplyTimeValidation);
+
+        // The watch watermark is capped by the lowest pending commit timestamp of each partition; the store keeps
+        // that index only while the commit admission window is on.
+        preparedIntentStore.ConfigureCommitAdmission(configuration.CommitAdmissionLagMs > 0);
 
         // Said once at startup so an operator can confirm the setting the node runs with without scraping the
         // gate metric; the metric's outcome tag is what names each exclusion afterwards.
@@ -284,11 +302,16 @@ internal sealed class KeyValuesManagerBuilder
             PartitionStateTransfer = partitionStateTransfer,
             DivergenceContainment = divergenceContainment,
             SnapshotFloorStore = snapshotFloorStore,
+            HistoryHoldStore = historyHoldStore,
             CompletionReceiptStore = completionReceiptStore,
             TransactionRecordStore = transactionRecordStore,
             PreparedIntentStore = preparedIntentStore,
             WriteAggregator = writeAggregator
         };
+
+        // A durable transaction's write is reported to watches when its intent settles on the partition; the
+        // store publishes there, so it needs the broker before any delta applies.
+        preparedIntentStore.AttachWatchBroker(runtime.WatchBroker);
 
         routers = new(runtime);
         runtime.Routers = routers;
@@ -353,6 +376,7 @@ internal sealed class KeyValuesManagerBuilder
         actorSystem.Spawn<SnapshotFloorReaperActor, SnapshotFloorReaperRequest>(
             "snapshot-floor-reaper",
             snapshotFloorStore,
+            historyHoldStore,
             configuration,
             logger
         );
@@ -435,7 +459,9 @@ internal sealed class KeyValuesManagerBuilder
             // key's range moved out names nothing this partition should still hold.
             keyOwner: key => locator.LocateRange(key).PartitionId,
             // A record verified missing gates the partition at that entry: candidacy withheld, MustRetry, re-seed.
-            materializationMissing: divergenceContainment.ContainMissingMaterialization);
+            materializationMissing: divergenceContainment.ContainMissingMaterialization,
+            // A committed write made outside a transaction is reported to watches after its apply.
+            watchBroker: runtime.WatchBroker);
 
         // A materializing resolve installs the committed value from the intent at its own apply, in log order and
         // before the settle removes the intent — live through the replicator, on a restart replay through the
@@ -515,6 +541,38 @@ internal sealed class KeyValuesManagerBuilder
         // An install certifies the projection through its boundary; the apply high-water mark the fingerprint
         // reports must say so, or a freshly seeded replica would compare as behind its peers until the next apply.
         partitionStateTransfer.AddInstalledThroughObserver(replicationDispatcher.NoteInstalledThrough);
+
+        // An install or an un-host purge replaces a partition's state with no per-key entries, and a range-map
+        // change can move a watched scope to other partitions: either way a watch cannot continue as it was.
+        KeyValueWatchBroker watchBroker = runtime.WatchBroker;
+        partitionStateTransfer.AddStateReplacedObserver(partitionId => watchBroker.EndPartition(partitionId, KeyValueWatchLagReason.PartitionStateReplaced));
+        // A resume replays the retained log; a snapshot install leaves no per-entry history below its boundary, so the
+        // boundary is recorded (durably) for the replay to refuse.
+        PartitionInstallBoundaries installBoundaries = new(configuration.StoragePath, configuration.StorageRevision, logger);
+        partitionStateTransfer.AddInstalledThroughObserver(installBoundaries.Record);
+        runtime.InstallBoundaries = installBoundaries;
+
+        KeyValueWatchReplayer replayer = new(raft, replicationDispatcher.LiveIndex, installBoundaries, configuration.CommitAdmissionLagMs > 0, logger);
+
+        watchService = new(watchBroker, raft, rangeMapStore, keySpaceRegistry, ClientEndpointAdvertiserFactory.Create(raft, configuration), replayer);
+        replicationDispatcher.RangeMapApplied = watchService.OnRangeMapApplied;
+
+        // Progress watermarks exist only under the commit admission window: without it a low commit timestamp can
+        // reach a partition's log after higher ones, and no watermark would hold.
+        if (configuration.CommitAdmissionLagMs > 0)
+        {
+            runtime.WatchWatermarks = new KeyValueWatchWatermarks(watchBroker, preparedIntentStore, configuration.CommitAdmissionLagMs);
+            watchBroker.TracksTransactionEnds = true;
+
+            actorSystem.Spawn<WatchProgressTickActor, WatchProgressTickRequest>(
+                "watch-progress-tick",
+                raft,
+                runtime.WatchWatermarks,
+                rangeMapStore,
+                logger,
+                runtime.Shutdown.Token
+            );
+        }
         // The applied-log-id gauge, per partition, on its own instance-owned meter so a disposed node's
         // dispatcher is not kept reachable through the callback.
         applyGaugeMeter = KeyValueApplyMetrics.RegisterGauges(replicationDispatcher.SnapshotAppliedLogIds);
@@ -578,7 +636,37 @@ internal sealed class KeyValuesManagerBuilder
         // meta WAL compaction floor by shipping the range map + snapshot-floor holds together —
         // required because the hold registry now replicates deltas that cannot be rebuilt from
         // surviving log entries once compacted.
-        metaSystemStateTransfer = new(rangeMapStore, snapshotFloorStore);
+        metaSystemStateTransfer = new(rangeMapStore, snapshotFloorStore, historyHoldStore);
+
+        // A hold's partition must still exist: the hash pool, or a range descriptor's partition that is not retired.
+        int hashPoolSize = raft.Configuration.InitialPartitions;
+        historyHoldStore.AttachPartitionLiveness(partitionId =>
+        {
+            if (partitionId >= Ranges.DataPartitionRouter.FirstUserPartitionId && partitionId < Ranges.DataPartitionRouter.FirstUserPartitionId + hashPoolSize)
+                return true;
+
+            RangeMap map = rangeMapStore.Current;
+            if (map.IsRetired(partitionId))
+                return false;
+
+            foreach (RangeDescriptor descriptor in map.Descriptors)
+            {
+                if (descriptor.PartitionId == partitionId)
+                    return true;
+            }
+
+            return false;
+        });
+
+        // Each replica pins its own WAL from the registry. The reconcile reads the WAL, so it runs on its own actor;
+        // a registry change, which can commit on the apply path, only signals it.
+        HistoryHoldPinner pinner = new(raft, historyHoldStore, logger);
+        IActorRef<HistoryHoldPinnerActor, HistoryHoldPinnerRequest> pinnerActor =
+            actorSystem.Spawn<HistoryHoldPinnerActor, HistoryHoldPinnerRequest>("history-hold-pinner", pinner, logger);
+
+        runtime.HistoryHoldPinner = pinner;
+        runtime.HistoryHoldPinnerActor = pinnerActor;
+        historyHoldStore.Changed += () => pinnerActor.Send(new HistoryHoldPinnerRequest());
 
         // RangeSplitter and RangeSplitTrigger both depend on this (KeyValuesManager) being fully
         // constructed, so we assign after all other fields are set.

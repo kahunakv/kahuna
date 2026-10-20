@@ -68,6 +68,7 @@ internal abstract class BaseHandler
         // The follower apply/restore path (KeyValueReplicator) reads NoRevision; carry it so a
         // SetNoRevision write suppresses revision history on followers exactly as it does on the leader.
         kvm.NoRevision = proposal.NoRevision;
+        kvm.AdmissionLagMs = proposal.AdmissionLagMs;
 
         // The value is presence-tracked: a value-less record (delete) must clear it, or the reused
         // shell would carry the previous write's value onto the wire.
@@ -289,6 +290,10 @@ internal abstract class BaseHandler
         // that arrived with a routed generation.
         proposal.RoutedGeneration = fenceGeneration;
 
+        // The commit admission window's lag bound travels in the record, so every replica judges the write by the
+        // bound it was proposed under, whatever its own setting.
+        proposal.AdmissionLagMs = context.Configuration.CommitAdmissionLagMs;
+
         // Serialize the committed record here, on the owning actor, so the queued envelope carries bytes — not
         // the value graph, which stays in the proposal dictionary below until completion.
         byte[] serialized = SerializeProposal(proposal.Type, proposal, currentTime);
@@ -311,7 +316,9 @@ internal abstract class BaseHandler
             actorContext.Self,
             KeyValueReplyRef.From(actorContext.Reply.Value),
             0, // placeholder: the aggregator stamps EnqueueTicks from its own TimeProvider at admission.
-            expectedTerm: context.Raft.GetPartitionTerm(partitionId)
+            expectedTerm: context.Raft.GetPartitionTerm(partitionId),
+            commitTimestamp: proposal.LastModified,
+            admissionLagMs: proposal.AdmissionLagMs
         );
 
         // Hand the staged write to the partition aggregator. On synchronous backpressure (the partition's

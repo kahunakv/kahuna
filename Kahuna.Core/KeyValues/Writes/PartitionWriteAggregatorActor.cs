@@ -492,6 +492,15 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
 
             (bool committed, bool transient) = ClassifyOutcome(ok, failStatus, threw: false);
 
+            // The entries committed, but the commit admission window can still refuse them at apply: every replica
+            // judges them by the proposal's time, which is the batch ticket, and applies a refused entry as a
+            // no-op. Release such a submission retryably so its producer never reports a write no replica took.
+            if (committed && item.IsRefusedAt(result.TicketId))
+            {
+                committed = false;
+                transient = true;
+            }
+
             // Carry the committed index of each of this submission's own entries, so a producer applying on
             // completion can name the exact log entries its apply covered.
             long[]? entryLogIndices = null;

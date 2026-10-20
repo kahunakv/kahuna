@@ -238,6 +238,10 @@ public interface IInterNodeCommunication
     /// </summary>
     public Task<(KeyValueResponseType Type, HLCTimestamp Floor, int LiveHolds)> GetSnapshotFloor(string node, CancellationToken cancellationToken);
 
+    /// <summary>Forwards a history hold request to <paramref name="node"/>, the meta-partition leader. A transport failure
+    /// answers <see cref="KeyValueResponseType.MustRetry"/>.</summary>
+    public Task<HistoryHoldAnswer> HistoryHold(string node, HistoryHoldRequest request, CancellationToken cancellationToken);
+
     /// <summary>
     /// Reads <paramref name="node"/>'s own apply fingerprint for a partition — its applied kv log id and
     /// committed-head count. Answered from that node's memory, leader or not; Type is

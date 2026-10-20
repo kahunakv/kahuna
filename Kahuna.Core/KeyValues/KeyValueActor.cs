@@ -539,9 +539,10 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
     /// well within this bound, except right after one node's wall clock jumps forward: a snapshot minted on
     /// that node leads every other node until their next Raft message from it folds the jump in, which takes
     /// one heartbeat. A read that arrives inside that window is refused (see <see cref="FenceClockAtSnapshot"/>),
-    /// never served without the fence.
+    /// never served without the fence. The same bound caps how far a commit may lead its log entry (see
+    /// <see cref="CommitAdmission.MaxClockLeadMs"/>).
     /// </summary>
-    private const long MaxSnapshotClockLeadMs = 5_000;
+    private const long MaxSnapshotClockLeadMs = CommitAdmission.MaxClockLeadMs;
 
     /// <summary>Spacing of the warning that names a refused snapshot read; the counter records every one.</summary>
     private const long SnapshotRefusalWarningSpacingMs = 1_000;

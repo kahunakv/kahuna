@@ -23,6 +23,9 @@ namespace Kahuna.Server.KeyValues.Transactions;
 /// </summary>
 internal sealed class TransactionCoordinator : IDisposable
 {
+    /// <summary>The longest transaction origin label accepted at start.</summary>
+    internal const int MaxOriginLength = 64;
+
     /// <summary>
     /// Grace added on top of a session's own timeout before the reaper reclaims it. Kept at or above
     /// the write-intent TTL (DefaultTxCompleteTimeout, 15 s) so that by the time a session is reaped
@@ -147,6 +150,10 @@ internal sealed class TransactionCoordinator : IDisposable
         if (options.ReadTimestamp != HLCTimestamp.Zero && options.ReadValidation == ReadValidation.TrackAndValidate)
             return (KeyValueResponseType.InvalidInput, new TransactionHandle(HLCTimestamp.Zero, coordinatorKey));
 
+        // The origin travels on every prepared intent of the transaction, so it is kept short.
+        if (options.Origin is { Length: > MaxOriginLength })
+            return (KeyValueResponseType.InvalidInput, new TransactionHandle(HLCTimestamp.Zero, coordinatorKey));
+
         // Clamp to the server's hard maximum so no admitted session can outlive it — the bound that
         // makes age-based reclamation of a transaction's orphaned MVCC read snapshots correct.
         int timeout = Math.Min(
@@ -205,6 +212,8 @@ internal sealed class TransactionCoordinator : IDisposable
                     ReadTimestamp      = options.ReadTimestamp,
                     Priority           = priority,
                     ConflictPolicy     = TransactionConflictPolicyWire.Normalize(options.ConflictPolicy),
+                    // Written into the intents only once every node reads it (see the setting).
+                    Origin             = configuration.TransactionOriginTags && !string.IsNullOrEmpty(options.Origin) ? options.Origin : null,
                     Action             = KeyValueTransactionAction.Commit,
                     AsyncRelease       = options.AsyncRelease,
                     Timeout            = timeout,
@@ -452,7 +461,7 @@ internal sealed class TransactionCoordinator : IDisposable
 
             // The caller (CommitTransaction) removes the session and retains the outcome for every terminal
             // result uniformly, so a definite Aborted is finalized the same way a Committed is.
-            return new(KeyValueResponseType.Committed, recordAnchorKey);
+            return new(KeyValueResponseType.Committed, recordAnchorKey, CommitTimestamp: context.DurableCommitTimestamp);
         }
         catch (KahunaAbortedException ex)
         {
@@ -590,7 +599,7 @@ internal sealed class TransactionCoordinator : IDisposable
 
         return classified switch
         {
-            DurableFinalizeResult.Committed => new(KeyValueResponseType.Committed, recordAnchorKey),
+            DurableFinalizeResult.Committed => new(KeyValueResponseType.Committed, recordAnchorKey, CommitTimestamp: unresolved.CommitTimestamp),
             DurableFinalizeResult.Aborted => new(KeyValueResponseType.Aborted, recordAnchorKey, context.Result?.Refusal ?? CommitRefusalClass.None, context.Result?.Reason),
             _ => new(KeyValueResponseType.MustRetry, recordAnchorKey, CommitRefusalClass.Unresolved, "The finalize threw with a durable attempt unresolved: " + thrown)
         };
@@ -1682,7 +1691,10 @@ internal sealed class TransactionCoordinator : IDisposable
         // consumed most of the margin) renews the record's decision-deadline lease instead of being presumed
         // aborted. Bounded per attempt; 0 disables renewal for a mixed-version rollout.
         maxDeadlineExtensions: configuration.DurableDecisionDeadlineMaxExtensions,
-        logger: logger);
+        logger: logger,
+        // Every prepare carries the commit admission window's lag bound, so each replica refuses a commit timestamp
+        // that reaches the participant's log too late (or too far ahead) and a watch can promise a watermark.
+        commitAdmissionLagMs: configuration.CommitAdmissionLagMs);
 
     /// <summary>Schedules a durable transaction's post-decision resolution to run off the commit critical path.
     /// Exceptions are swallowed — the decision is already durable and recovery finishes any lost run — and the task
@@ -1827,7 +1839,7 @@ internal sealed class TransactionCoordinator : IDisposable
         if (!DurableFinalizeInputBuilder.TryBuild(
                 txId, epoch, context.CoordinatorKey ?? context.RecordAnchorKey, context.RecordAnchorKey,
                 commitTimestamp, decisionDeadline, persistentKeys, staged,
-                manager.LocateDurablePartition, out input, context.WrittenBaseObservations))
+                manager.LocateDurablePartition, out input, context.WrittenBaseObservations, context.Origin))
             return false;
 
         opId = commitTimestamp;
@@ -1838,6 +1850,8 @@ internal sealed class TransactionCoordinator : IDisposable
     // transaction's caller can commit or roll back the ephemeral subset accordingly. Sets context.Result too.
     private async Task<DurableFinalizeResult> DurableFinalize(TransactionContext context, DurableFinalizeInput input, HLCTimestamp opId, CancellationToken cancellationToken)
     {
+        context.DurableCommitTimestamp = input.CommitTimestamp;
+
         // A retry of a frozen finalize whose decision deadline is already behind this attempt's clock cannot
         // commit: the record's deadline gate rejects every commit whose attempt HLC passed the deadline, and HLCs
         // only advance. Re-driving the prepares would only re-initialise the record on the (possibly new) anchor

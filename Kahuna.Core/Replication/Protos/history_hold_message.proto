@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package Kahuna.Server.Replication.Protos;
+
+// A single history hold (mirrors HistoryHold): one holder's claim that the WAL of one data partition stays retained
+// from its timestamp onward, on every replica, so a watch can resume from that timestamp.
+message HistoryHoldMessage {
+  string holdId = 1;
+  string holderId = 2;
+  int32  partitionId = 3;
+  int32  timestampNode     = 4;
+  int64  timestampPhysical = 5;
+  uint32 timestampCounter  = 6;
+  int32  leaseExpiryNode     = 7;
+  int64  leaseExpiryPhysical = 8;
+  uint32 leaseExpiryCounter  = 9;
+}
+
+// Full snapshot of all registered holds. Used for the durable on-disk copy and for the meta-partition state transfer;
+// each such blob fully replaces the registry.
+message HistoryHoldStateMessage {
+  repeated HistoryHoldMessage holds = 1;
+}
+
+// A single change to the registry, keyed by holdId. Upsert installs or overwrites the hold; Remove deletes it. Both are
+// idempotent, so a re-delivered entry or a replay of the tail above an installed snapshot converges to the same set.
+message HistoryHoldDeltaEntry {
+  bool remove = 1;                // false = upsert the hold, true = remove it
+  HistoryHoldMessage hold = 2;    // upsert: the full hold; remove: only holdId is read
+}
+
+// One replicated registry mutation. A batch, so a change to several holds (an acquire across partitions, a purge)
+// commits as a single atomic meta-partition log entry.
+message HistoryHoldDeltaMessage {
+  repeated HistoryHoldDeltaEntry entries = 1;
+}

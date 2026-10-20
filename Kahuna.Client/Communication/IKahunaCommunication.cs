@@ -60,6 +60,14 @@ public interface IKahunaCommunication
 
      Task<KeyValueGetByRangePageResult> GetByRange(string url, HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default);
 
+     /// <summary>
+     /// Opens one watch on the node at <paramref name="url"/> and waits for the node's answer. On
+     /// <see cref="KeyValueResponseType.Get"/> the watch is registered on the node before this returns. The
+     /// returned stream outlives <paramref name="cancellationToken"/>, which bounds only the opening; the caller
+     /// ends the stream by disposing it.
+     /// </summary>
+     Task<KahunaWatchOpening> OpenWatch(string url, KeyValueWatchRequest request, CancellationToken cancellationToken);
+
      IAsyncEnumerable<KeyValueGetByBucketItem> ScanByRange(string url, HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int pageSize, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken);
 
      Task<List<KeyValueGetByBucketItem>> GetByBucket(string url, HLCTimestamp transactionId, string prefixKey, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default);
@@ -68,7 +76,7 @@ public interface IKahunaCommunication
      
      Task<(string, HLCTimestamp transactionId)> StartTransactionSession(string url, string uniqueId, KahunaTransactionOptions txOptions, CancellationToken cancellationToken);
      
-     Task<(bool committed, string? recordAnchorKey)> CommitTransactionSession(string url, string uniqueId, HLCTimestamp transactionId, string? recordAnchorKey, CancellationToken cancellationToken);
+     Task<(bool committed, string? recordAnchorKey, HLCTimestamp commitTimestamp)> CommitTransactionSession(string url, string uniqueId, HLCTimestamp transactionId, string? recordAnchorKey, CancellationToken cancellationToken);
 
      Task<bool> RollbackTransactionSession(string url, string uniqueId, HLCTimestamp transactionId, string? recordAnchorKey, CancellationToken cancellationToken);
 
@@ -136,6 +144,10 @@ public interface IKahunaCommunication
 
      Task<(HLCTimestamp effectiveFloor, int liveHolds)> GetSnapshotFloor(
          string url, CancellationToken cancellationToken);
+
+     /// <summary>Sends a history hold request to the node at <paramref name="url"/>, which routes it to the
+     /// meta-partition leader.</summary>
+     Task<HistoryHoldAnswer> HistoryHold(string url, HistoryHoldRequest request, CancellationToken cancellationToken);
 
      Task<KahunaClusterMembershipResponse> GetClusterMembership(string url, CancellationToken cancellationToken);
 

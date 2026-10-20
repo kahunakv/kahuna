@@ -505,6 +505,10 @@ public static class KeyValuesHandlers
             };
         });
 
+        // A server-sent-events stream of one watch; see KeyValueWatchSseHandler.
+        app.MapPost("/v1/kv/watch", static (KahunaWatchRequest request, IKahuna keyValues, HttpContext http) =>
+            KeyValueWatchSseHandler.Serve(request, keyValues, http));
+
         app.MapPost("/v1/kv/get-by-range", async (KahunaGetByRangeRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
         {
             if (string.IsNullOrEmpty(request.Prefix))
@@ -703,7 +707,8 @@ public static class KeyValuesHandlers
                 Priority = request.Priority,
                 ReadTimestamp = request.ReadTimestamp,
                 AdmissionWaitMs = request.AdmissionWaitMs,
-                ConflictPolicy = TransactionConflictPolicyWire.Normalize(request.ConflictPolicy)
+                ConflictPolicy = TransactionConflictPolicyWire.Normalize(request.ConflictPolicy),
+                Origin = request.Origin
             }, cancellationToken);
 
             return new KahunaStartTransactionResponse { Type = type, TransactionId = handle.TransactionId };
@@ -720,7 +725,7 @@ public static class KeyValuesHandlers
 
             TransactionCommitAnswer answer = await keyValues.LocateAndCommitTransaction(handle, cancellationToken);
 
-            return new KahunaCommitTransactionResponse { Type = answer.Type, RecordAnchorKey = answer.RecordAnchorKey, Refusal = answer.Refusal, Reason = answer.Reason };
+            return new KahunaCommitTransactionResponse { Type = answer.Type, RecordAnchorKey = answer.RecordAnchorKey, Refusal = answer.Refusal, Reason = answer.Reason, CommitTimestamp = answer.CommitTimestamp };
         });
 
         app.MapPost("/v1/kv/rollback-tx-session", async (KahunaCommitTransactionRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
@@ -736,6 +741,9 @@ public static class KeyValuesHandlers
 
             return new KahunaCommitTransactionResponse { Type = type };
         });
+
+        app.MapPost("/v1/kv/history-holds", async (KahunaHistoryHoldRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
+            HistoryHoldWire.ToRest(await keyValues.HistoryHold(HistoryHoldWire.FromRest(request), cancellationToken)));
 
         app.MapPost("/v1/kv/snapshot-hold/acquire", async (KahunaAcquireSnapshotHoldRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
         {

@@ -174,6 +174,10 @@ public sealed partial class KahunaManager : IKahuna, IDisposable
         placement = new PartitionPlacementCoordinator(
             raft, keyValues, locks, components.DurabilityProvider, backgroundWriter, logger);
 
+        // A partition gained here needs its history holds pinned; one lost needs its pin released.
+        // The view stops raising the event when the coordinator is disposed.
+        placement.View.HostedPartitionsChanged += (_, _) => keyValues.SignalHistoryHoldPinner();
+
         // The node's backup/PITR wiring (storage target, flush barrier, MVCC snapshot holds,
         // retention policy, GC reaper) lives in the facade; a node without a backup directory gets
         // a disabled one so every caller sees the same refusal.

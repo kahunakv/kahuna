@@ -13,6 +13,7 @@ using System.Text.Json;
 using Flurl.Http;
 using Kommander.Diagnostics;
 using Kahuna.Client.Routing;
+using Kahuna.Shared.Communication.Grpc;
 using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Routing;
@@ -204,7 +205,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
         logger?.LogWarning("Retry: {Exception} {Time}", ex.Message, timeSpan);
     }
     
-    private static bool IsTransientError(FlurlHttpException exception)
+    internal static bool IsTransientError(FlurlHttpException exception)
     {
         if (exception is FlurlHttpTimeoutException)
             return true;
@@ -1552,6 +1553,9 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
         };
     }
 
+    public Task<KahunaWatchOpening> OpenWatch(string url, KeyValueWatchRequest request, CancellationToken cancellationToken) =>
+        RestKahunaWatchStream.OpenAsync(url, request, cancellationToken);
+
     /// <summary>
     /// REST has no server-push equivalent of the gRPC range-scan stream, so the stream is reconstructed
     /// from the paged endpoint: each page's <c>nextCursor</c> is echoed back verbatim on the next request.
@@ -1660,7 +1664,8 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             Priority = txOptions.Priority,
             ReadTimestamp = txOptions.ReadTimestamp,
             AdmissionWaitMs = txOptions.AdmissionWaitMs,
-            ConflictPolicy = txOptions.ConflictPolicy
+            ConflictPolicy = txOptions.ConflictPolicy,
+            Origin = txOptions.Origin
         };
 
         KahunaStartTransactionResponse response = await PostWithMustRetry<KahunaStartTransactionRequest, KahunaStartTransactionResponse>(
@@ -1674,7 +1679,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
         throw new KahunaException("Failed to start key/value transaction: " + response.Type, response.Type);
     }
 
-    public async Task<(bool committed, string? recordAnchorKey)> CommitTransactionSession(string url, string uniqueId, HLCTimestamp transactionId, string? recordAnchorKey, CancellationToken cancellationToken)
+    public async Task<(bool committed, string? recordAnchorKey, HLCTimestamp commitTimestamp)> CommitTransactionSession(string url, string uniqueId, HLCTimestamp transactionId, string? recordAnchorKey, CancellationToken cancellationToken)
     {
         KahunaCommitTransactionRequest request = new()
         {
@@ -1697,7 +1702,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
         ).ConfigureAwait(false);
 
         if (response.Type == KeyValueResponseType.Committed)
-            return (true, response.RecordAnchorKey);
+            return (true, response.RecordAnchorKey, response.CommitTimestamp);
 
         // The answer names the arm that refused the commit, so the exception carries it beside the outcome.
         throw new KahunaException(
@@ -2150,6 +2155,24 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
                .PostJsonAsync(KahunaEmptyRequest.Instance, cancellationToken: cancellationToken)
                .ReceiveJson<KahunaBackupInfo>())).ConfigureAwait(false);
         return response ?? throw new KahunaException("TakeCoordinatedBackup returned null", LockResponseType.Errored);
+    }
+
+    public async Task<HistoryHoldAnswer> HistoryHold(string url, HistoryHoldRequest request, CancellationToken cancellationToken)
+    {
+        byte[] payload = JsonSerializer.SerializeToUtf8Bytes(HistoryHoldWire.ToRest(request), KahunaJsonContext.Default.KahunaHistoryHoldRequest);
+        KahunaHistoryHoldResponse? response = await loggingRetryPolicy.ExecuteAsync(() =>
+            url.WithOAuthBearerToken("xxx")
+               .AppendPathSegments("v1/kv/history-holds")
+               .WithHeader("Accept", "application/json")
+               .WithHeader("Content-Type", "application/json")
+               .WithSettings(KahunaRestJson.Http2Settings)
+               .PostAsync(new Utf8JsonContent(payload), cancellationToken: cancellationToken)
+               .ReceiveJson<KahunaHistoryHoldResponse>()).ConfigureAwait(false);
+
+        if (response is null)
+            throw new KahunaException("HistoryHold returned null", KeyValueResponseType.Errored);
+
+        return HistoryHoldWire.FromRest(response);
     }
 
     public async Task<(KeyValueResponseType type, string holdId, HLCTimestamp leaseExpiry)> AcquireSnapshotHold(

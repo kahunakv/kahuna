@@ -799,10 +799,13 @@ internal sealed class RangeStateTransferService
                 LastModifiedCounter = entry.LastModifiedCounter,
                 TimeNode = currentTime.N,
                 TimePhysical = currentTime.L,
-                TimeCounter = currentTime.C
+                TimeCounter = currentTime.C,
                 // Transaction identity intentionally absent: the copied value is a terminal committed
                 // state whose completion receipt travels in the separate receipt handoff — carrying the
                 // identity here would re-record receipts on apply.
+                // Marked as a copy: the key already existed on the source with this revision, so a watch on
+                // the destination must not report it as a new mutation (a page retry would report it twice).
+                StateTransferCopy = true
             };
 
             if (entry.HasValue)

@@ -490,6 +490,13 @@ internal static class RestoreEngine
             }
 
             case KeyValueRecordKind.ValueMutation:
+                // A record the commit admission window refused applied as a no-op on every replica.
+                if (msg.AdmissionLagMs > 0 && CommitAdmission.Judge(
+                        entry.Time,
+                        new(msg.LastModifiedNode, msg.LastModifiedPhysical, msg.LastModifiedCounter),
+                        msg.AdmissionLagMs) != CommitAdmissionVerdict.Admitted)
+                    return null;
+
                 (state, value) = KeyValueMessageDecoder.Decode(msg);
                 break;
 
@@ -560,6 +567,10 @@ internal static class RestoreEngine
             switch (command)
             {
                 case PrepareIntentCommand prepare:
+                    // A prepare the commit admission window refused installed nothing on any replica.
+                    if (CommitAdmission.Judge(entry.Time, prepare.Intent.CommitTimestamp, prepare.AdmissionLagMs) != CommitAdmissionVerdict.Admitted)
+                        break;
+
                     liveIntents[new PreparedIntentIdentity(prepare.Intent.TransactionId, prepare.Intent.Epoch, prepare.Intent.Key)] = prepare.Intent;
                     break;
 

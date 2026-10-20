@@ -10,7 +10,11 @@ internal abstract record PreparedIntentCommand;
 
 /// <summary>Installs a prepared intent for its key. Idempotent for an exact-duplicate mutation; a different live
 /// transaction on the same key conflicts and is never overwritten.</summary>
-internal sealed record PrepareIntentCommand(PreparedIntent Intent) : PreparedIntentCommand;
+/// <param name="AdmissionLagMs">The lag bound of the commit admission window the prepare was proposed under; zero
+/// when the window was off or when the prepare copies an existing intent (a range move's handoff). A positive bound
+/// makes every replica admit the prepare only if the intent's commit timestamp falls inside the window around the
+/// time of the log entry that carries it (see <see cref="CommitAdmission"/>); a refused prepare installs nothing.</param>
+internal sealed record PrepareIntentCommand(PreparedIntent Intent, long AdmissionLagMs = 0) : PreparedIntentCommand;
 
 /// <summary>Records the transaction's terminal decision on its intent: commit (value will materialize) or abort
 /// (value is discarded). Idempotent; never flips an already-resolved intent to the other outcome.</summary>

@@ -987,6 +987,30 @@ public sealed class EmbeddedKahunaOptions
     public bool OnePhaseApplyTimeValidation { get; set; }
 
     /// <summary>
+    /// Milliseconds a new commit's timestamp may trail the time of the log entry that carries it. Positive turns
+    /// on the commit admission window that lets watches send progress watermarks; zero (the default) turns it
+    /// off. Turn it on only when every node in the group runs a version that reads the bound, with the same value
+    /// on every node. See <see cref="Server.Configuration.KahunaConfiguration.CommitAdmissionLagMs"/>.
+    /// </summary>
+    public int CommitAdmissionLagMs { get; set; }
+
+    /// <summary>The longest lease a history hold may ask for, in milliseconds; zero means no bound. See
+    /// <see cref="Server.Configuration.KahunaConfiguration.HistoryHoldMaxLeaseMs"/>.</summary>
+    public int HistoryHoldMaxLeaseMs { get; set; } = 86_400_000;
+
+    /// <summary>The most history holds one holder may register; zero means no bound. See
+    /// <see cref="Server.Configuration.KahunaConfiguration.HistoryHoldMaxPerHolder"/>.</summary>
+    public int HistoryHoldMaxPerHolder { get; set; } = 4_096;
+
+    /// <summary>The most history holds the registry may hold; zero means no bound. See
+    /// <see cref="Server.Configuration.KahunaConfiguration.HistoryHoldMaxTotal"/>.</summary>
+    public int HistoryHoldMaxTotal { get; set; } = 65_536;
+
+    /// <summary>Keeps transaction origin labels and writes them into prepared intents. Turn it on only when every node
+    /// reads them. See <see cref="Server.Configuration.KahunaConfiguration.TransactionOriginTags"/>.</summary>
+    public bool TransactionOriginTags { get; set; }
+
+    /// <summary>
     /// Lets a transaction whose whole write set is one ephemeral key led by this node finalize in a single
     /// turn of the actor that owns the key. Defaults to true. See
     /// <see cref="Server.Configuration.KahunaConfiguration.FusedEphemeralFinalize"/>.

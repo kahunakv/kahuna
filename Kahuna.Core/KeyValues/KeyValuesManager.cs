@@ -19,6 +19,7 @@ using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kahuna.Server.KeyValues.Watch;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Replication;
@@ -87,6 +88,9 @@ internal sealed partial class KeyValuesManager : IDisposable
 
     /// <summary>Key-space registration, range lookup, and the manual split/merge entry points.</summary>
     private readonly KeySpaceAdminService keySpaceAdmin;
+
+    /// <summary>Opens key-value watches served by this replica.</summary>
+    private readonly KeyValueWatchService watchService;
 
     /// <summary>Restore replay, committed-entry apply, replication errors and leader changes.</summary>
     private readonly KeyValueReplicationDispatcher replicationDispatcher;
@@ -549,6 +553,7 @@ internal sealed partial class KeyValuesManager : IDisposable
         this.rangeMerger = built.rangeMerger;
         this.rangeMergeTrigger = built.rangeMergeTrigger;
         this.keySpaceAdmin = built.keySpaceAdmin;
+        this.watchService = built.watchService;
         this.keySpaceRegistry = built.keySpaceRegistry;
         this.writeFrequencyRegistry = built.writeFrequencyRegistry;
         this.durableApplyResults = built.durableApplyResults;
@@ -568,6 +573,21 @@ internal sealed partial class KeyValuesManager : IDisposable
 
     private void OnPartitionRestoreFinished(int partitionId)
     {
+        // Before the partition takes new entries, and so before its first compaction: a partition with a history hold
+        // is pinned whole now, and the reconcile narrows the pin off this thread.
+        if (runtime.HistoryHoldPinner is { } pinner)
+        {
+            try
+            {
+                pinner.PinOnRestore(partitionId);
+                runtime.HistoryHoldPinnerActor?.Send(new HistoryHoldPinnerRequest());
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Failed to pin the history holds of partition #{PartitionId} after its restore", partitionId);
+            }
+        }
+
         try
         {
             int released = preparedIntentStore.ReleaseSettledIntentsWithDurableRows(partitionId);
@@ -664,6 +684,19 @@ internal sealed partial class KeyValuesManager : IDisposable
     /// </summary>
     internal SnapshotFloorStore SnapshotFloorStore => snapshotFloorStore;
 
+    /// <summary>Asks the history hold pinner to bring this node's pins in line with the registry, after the set of
+    /// partitions this node hosts changed. Never blocks.</summary>
+    internal void SignalHistoryHoldPinner() => runtime.HistoryHoldPinnerActor?.Send(new HistoryHoldPinnerRequest());
+
+    /// <summary>The install boundaries a watch resume must start above. Test access.</summary>
+    internal Watch.PartitionInstallBoundaries InstallBoundariesForTests => runtime.InstallBoundaries!;
+
+    /// <summary>The history hold registry. Test access.</summary>
+    internal HistoryHoldStore HistoryHoldStoreForTests => runtime.HistoryHoldStore;
+
+    /// <summary>The history hold pinner. Test access.</summary>
+    internal HistoryHoldPinner? HistoryHoldPinnerForTests => runtime.HistoryHoldPinner;
+
     /// <summary>Node-local persistent-participant completion receipts. Diagnostic/test access.</summary>
     internal CompletionReceiptStore CompletionReceiptStore => completionReceiptStore;
 
@@ -674,6 +707,9 @@ internal sealed partial class KeyValuesManager : IDisposable
     public void SignalShutdown()
     {
         try { runtime.Shutdown.Cancel(); } catch (ObjectDisposedException) { /* already disposed */ }
+
+        // No entry applies after shutdown, so an open watch would go quiet instead of ending.
+        runtime.WatchBroker.EndAll(KeyValueWatchLagReason.Shutdown);
     }
 
     public void Dispose()
@@ -692,6 +728,9 @@ internal sealed partial class KeyValuesManager : IDisposable
         snapshotFloorStore.Dispose();
         rangeSplitTrigger?.Dispose();
         durableGaugeMeter.Dispose();
+        runtime.WatchWatermarks?.Dispose();
+        runtime.HistoryHoldPinner?.Dispose();
+        runtime.HistoryHoldStore.Dispose();
         admissionGaugeMeter.Dispose();
         applyGaugeMeter.Dispose();
         functionGaugeMeter.Dispose();

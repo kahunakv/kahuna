@@ -52,6 +52,18 @@ message PreparedIntentCommandMessage {
   // header). An older reader skips this field and resolves without installing, so no node may write it until
   // every node reads it.
   bool   materializeOnResolve = 29;
+
+  // Prepare only. The lag bound of the commit admission window, in milliseconds: each replica installs the prepare
+  // only if its commit timestamp falls inside (entry time - lag, entry time + 5 s), and applies a refused prepare
+  // as a no-op. Zero (absent) is always admitted: the window was off, or the prepare copies an existing intent.
+  // Never hoisted into the delta header. An older reader skips this field and admits every prepare, so no node may
+  // write it until every node reads it.
+  int64  admissionLagMs = 30;
+
+  // Prepare and snapshot entries: what produced the transaction's writes (a maintenance label); absent for an
+  // ordinary transaction. Part of the intent's digest when present. An older reader skips it, so no node may write
+  // it until every node reads it.
+  optional string origin = 31;
 }
 
 // The fields every transition in a delta has in common. A delta almost always carries one transaction attempt's

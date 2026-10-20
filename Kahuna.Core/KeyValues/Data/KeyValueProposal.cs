@@ -80,6 +80,11 @@ internal sealed class KeyValueProposal
     /// </summary>
     public long RoutedGeneration { get; set; }
 
+    /// <summary>The lag bound of the commit admission window this write is proposed under, in milliseconds; zero
+    /// when the window is off. Written into the record, and read back by the leader's own apply, so both judge the
+    /// write by the same bound (see <see cref="CommitAdmission"/>).</summary>
+    public long AdmissionLagMs { get; set; }
+
     /// <summary>
     /// Constructor for creating a new instance of the KeyValueProposal class.
     /// </summary>

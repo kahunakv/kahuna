@@ -158,7 +158,9 @@ public static class InteractiveConsole
                 "clear",
                 "exit",
                 "quit",
-                "cluster"
+                "cluster",
+                "watch",
+                "keys-only"
             ];
 
             string[] constants =
@@ -356,6 +358,12 @@ public static class InteractiveConsole
                 if (commandTrim.StartsWith("delete-sequence ", StringComparison.InvariantCultureIgnoreCase))
                 {
                     await DeleteSequence(connection, history, commandTrim);
+                    continue;
+                }
+
+                if (commandTrim.Equals("watch", StringComparison.InvariantCultureIgnoreCase) || commandTrim.StartsWith("watch ", StringComparison.InvariantCultureIgnoreCase))
+                {
+                    await Watch(connection, history, commandTrim);
                     continue;
                 }
 
@@ -737,6 +745,76 @@ public static class InteractiveConsole
     /// shell holds a pool of connections, and defaulting would decommission whichever node the pool
     /// happened to hand over.
     /// </summary>
+    // Prints every event under a prefix until the watch ends or the user presses Ctrl+C or Esc, then
+    // returns to the prompt. Ctrl+C is read as a key while the watch runs: the shell's CancelKeyPress
+    // handler exits the whole shell, and a watch must stop without that.
+    private static async Task Watch(KahunaClient connection, List<string> history, string commandTrim)
+    {
+        history.Add(commandTrim);
+
+        string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);
+        bool keysOnly = parts.Length == 3 && parts[2].Equals("keys-only", StringComparison.OrdinalIgnoreCase);
+
+        if (parts.Length < 2 || (parts.Length > 2 && !keysOnly))
+        {
+            AnsiConsole.MarkupLine("[yellow]usage: watch <prefix> [[keys-only]][/]\n");
+            return;
+        }
+
+        using CancellationTokenSource stop = new();
+
+        bool treatControlCAsInput = Console.TreatControlCAsInput;
+        Task keys = Task.CompletedTask;
+
+        if (!Console.IsInputRedirected)
+        {
+            Console.TreatControlCAsInput = true;
+            keys = StopOnKey(stop);
+            AnsiConsole.MarkupLine("[grey]press Ctrl+C or Esc to stop[/]");
+        }
+
+        try
+        {
+            await KeyValueWatchCommand.Run(connection, parts[1], keysOnly, null, stop.Token);
+        }
+        finally
+        {
+            await stop.CancelAsync();
+            await keys;
+            Console.TreatControlCAsInput = treatControlCAsInput;
+        }
+
+        AnsiConsole.WriteLine();
+    }
+
+    // Cancels the watch on Ctrl+C or Esc. It polls instead of blocking on ReadKey, so it stops as soon as
+    // the watch ends by itself and never takes a key meant for the prompt. Other keys are discarded.
+    private static async Task StopOnKey(CancellationTokenSource stop)
+    {
+        try
+        {
+            while (!stop.IsCancellationRequested)
+            {
+                while (Console.KeyAvailable)
+                {
+                    ConsoleKeyInfo key = Console.ReadKey(intercept: true);
+
+                    bool controlC = key.KeyChar == '\u0003' || (key.Key == ConsoleKey.C && (key.Modifiers & ConsoleModifiers.Control) != 0);
+                    if (controlC || key.Key == ConsoleKey.Escape)
+                    {
+                        await stop.CancelAsync();
+                        return;
+                    }
+                }
+
+                await Task.Delay(50, stop.Token);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
     private static async Task ClusterLeave(KahunaClient connection, string commandTrim)
     {
         string[] parts = commandTrim.Split(" ", StringSplitOptions.RemoveEmptyEntries);

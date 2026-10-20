@@ -37,7 +37,8 @@ internal static class DurableFinalizeInputBuilder
         IReadOnlyDictionary<string, StagedValue> stagedByKey,
         Func<string, (int PartitionId, long Generation)> locate,
         out DurableFinalizeInput? input,
-        IReadOnlyDictionary<(string Key, KeyValueDurability Durability), KeyValueTransactionReadKey>? writtenBases = null)
+        IReadOnlyDictionary<(string Key, KeyValueDurability Durability), KeyValueTransactionReadKey>? writtenBases = null,
+        string? origin = null)
     {
         input = null;
 
@@ -104,7 +105,8 @@ internal static class DurableFinalizeInputBuilder
                 BaseRevision: baseRevision,
                 BaseState: baseState,
                 RecoveryDeadline: decisionDeadline,
-                Resolution: PreparedIntentResolution.Pending
+                Resolution: PreparedIntentResolution.Pending,
+                Origin: origin
             );
 
             (int partitionId, long generation) = locate(key);

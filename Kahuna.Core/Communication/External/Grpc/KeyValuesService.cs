@@ -2151,6 +2151,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             ReadTimestamp = new HLCTimestamp(request.ReadTimestampNode, request.ReadTimestampPhysical, request.ReadTimestampCounter),
             AdmissionWaitMs = request.AdmissionWaitMs,
             ConflictPolicy = TransactionConflictPolicyWire.FromGrpc(request.ConflictPolicy),
+            Origin = request.HasOrigin ? request.Origin : null,
         }, context.CancellationToken);
 
         GrpcStartTransactionResponse response = new()
@@ -2203,7 +2204,10 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         GrpcCommitTransactionResponse response = new()
         {
             Type = (GrpcKeyValueResponseType)answer.Type,
-            Refusal = (int)answer.Refusal
+            Refusal = (int)answer.Refusal,
+            CommitTimestampNode = answer.CommitTimestamp.N,
+            CommitTimestampPhysical = answer.CommitTimestamp.L,
+            CommitTimestampCounter = answer.CommitTimestamp.C
         };
 
         if (answer.RecordAnchorKey is not null)
@@ -2515,6 +2519,28 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         gate.RequirePeer(context);
 
         await serverBatcher.BatchServerKeyValueRequests(requestStream, responseStream, context);
+    }
+
+    /// <summary>
+    /// Bidirectional watch streams: one call carries any number of watches (see <see cref="KeyValueWatchGrpcSession"/>).
+    /// A refused watch is answered with a typed refusal frame for its watch id. A retryable failure that ends the
+    /// whole call is mapped to <see cref="StatusCode.Unavailable"/>, which a client retries, rather than to an
+    /// unclassifiable <see cref="StatusCode.Unknown"/>.
+    /// </summary>
+    public override async Task Watch(
+        IAsyncStreamReader<GrpcWatchRequest> requestStream,
+        IServerStreamWriter<GrpcWatchResponse> responseStream,
+        ServerCallContext context)
+    {
+        try
+        {
+            await new KeyValueWatchGrpcSession(keyValues, logger).RunAsync(requestStream, responseStream, context.CancellationToken);
+        }
+        catch (Exception ex) when (RetryableFailureClassifier.IsRetryable(ex) && !context.CancellationToken.IsCancellationRequested)
+        {
+            logger.LogWarning("Mapping retryable {ExceptionType} on Watch to Unavailable: {Message}", ex.GetType().Name, ex.Message);
+            throw new RpcException(new Status(StatusCode.Unavailable, ex.Message));
+        }
     }
 
     /// <summary>
@@ -2904,6 +2930,12 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             LiveHolds              = liveHolds
         };
     }
+
+    public override Task<GrpcHistoryHoldResponse> HistoryHold(GrpcHistoryHoldRequest request, ServerCallContext context)
+        => Guard(request, context, static (s, r, c) => s.HistoryHoldCore(r, c), static _ => KeyValueMustRetry.HistoryHold());
+
+    private async Task<GrpcHistoryHoldResponse> HistoryHoldCore(GrpcHistoryHoldRequest request, ServerCallContext context) =>
+        HistoryHoldWire.ToGrpc(await keyValues.HistoryHold(HistoryHoldWire.FromGrpc(request), context.CancellationToken).ConfigureAwait(false));
 
     public override Task<GrpcGetPartitionApplyFingerprintResponse> GetPartitionApplyFingerprint(GrpcGetPartitionApplyFingerprintRequest request, ServerCallContext context)
         => Guard(request, context, static (s, r, c) => s.GetPartitionApplyFingerprintCore(r, c), static _ => KeyValueMustRetry.GetPartitionApplyFingerprint());

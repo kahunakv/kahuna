@@ -37,6 +37,39 @@ public sealed class KahunaControlOptions
     [Option("scan-by-prefix", Required = false, HelpText = "Executes a 'scan-by-prefix' command")]
     public string? ScanByPrefix { get; set; }
 
+    [Option("watch", Required = false, HelpText = "Watches every key that starts with the given prefix until Ctrl+C")]
+    public string? Watch { get; set; }
+
+    [Option("watch-keys-only", Required = false, HelpText = "Makes 'watch' print keys without their values")]
+    public bool WatchKeysOnly { get; set; }
+
+    [Option("watch-from", Required = false, HelpText = "Makes 'watch' replay every retained event above this timestamp first (node:physical:counter or physical ms)")]
+    public string? WatchFrom { get; set; }
+
+    [Option("history-hold-acquire", Required = false, HelpText = "Holds the history of --partitions from --history-from for the given holder")]
+    public string? HistoryHoldAcquire { get; set; }
+
+    [Option("history-hold-renew", Required = false, HelpText = "Renews the given history holds (comma-separated ids), moving them to --history-from when given")]
+    public string? HistoryHoldRenew { get; set; }
+
+    [Option("history-hold-release", Required = false, HelpText = "Releases the given history holds (comma-separated ids)")]
+    public string? HistoryHoldRelease { get; set; }
+
+    [Option("history-hold-list", Required = false, HelpText = "Lists the history holds, of --holder when given")]
+    public bool HistoryHoldList { get; set; }
+
+    [Option("partitions", Required = false, HelpText = "Comma-separated data partitions for --history-hold-acquire")]
+    public string? Partitions { get; set; }
+
+    [Option("history-from", Required = false, HelpText = "Timestamp for a history hold (node:physical:counter or physical ms)")]
+    public string? HistoryFrom { get; set; }
+
+    [Option("lease-ms", Required = false, HelpText = "Lease of a history hold in milliseconds. Default 600000")]
+    public int LeaseMs { get; set; } = 600_000;
+
+    [Option("holder", Required = false, HelpText = "Limits --history-hold-list to one holder")]
+    public string? Holder { get; set; }
+
     [Option("expires", Required = false, HelpText = "Defines the 'expires' parameter")]
     public int Expires { get; set; }
 

@@ -74,4 +74,12 @@ public sealed class KeyValueTransactionOptions
     /// the option existed. See <see cref="TransactionConflictPolicy.Yield"/> for the contract and its limits.
     /// </summary>
     public TransactionConflictPolicy ConflictPolicy { get; set; } = TransactionConflictPolicy.Normal;
+
+    /// <summary>
+    /// A short label naming what produced this transaction's writes (for example a schema rewrite or a cleanup
+    /// sweep), carried on every prepared intent and on every watch event the transaction produces, so a change-feed
+    /// consumer can tell maintenance writes from user writes. Null for an ordinary transaction. At most 64
+    /// characters. Kept only on a cluster that enables the setting <c>TransactionOriginTags</c>.
+    /// </summary>
+    public string? Origin { get; set; }
 }

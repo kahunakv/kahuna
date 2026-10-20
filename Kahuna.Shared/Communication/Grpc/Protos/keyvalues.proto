@@ -45,6 +45,8 @@ service KeyValuer {
   rpc GetSnapshotFloor    (GrpcGetSnapshotFloorRequest)     returns (GrpcGetSnapshotFloorResponse);
   rpc GetPartitionApplyFingerprint (GrpcGetPartitionApplyFingerprintRequest) returns (GrpcGetPartitionApplyFingerprintResponse);
   rpc GetPreparedIntentPresence (GrpcGetPreparedIntentPresenceRequest) returns (GrpcGetPreparedIntentPresenceResponse);
+  rpc Watch (stream GrpcWatchRequest) returns (stream GrpcWatchResponse);
+  rpc HistoryHold (GrpcHistoryHoldRequest) returns (GrpcHistoryHoldResponse);
 }
 
 message GrpcTrySetKeyValueRequest {
@@ -1002,6 +1004,9 @@ message GrpcStartTransactionRequest
   // Whether the session yields its point-key write intents to foreground writers. Convert with
   // TransactionConflictPolicyWire; unspecified and unknown values decode as Normal.
   GrpcTransactionConflictPolicy ConflictPolicy = 13;
+  // What produced the transaction's writes, carried on its prepared intents and watch events. Absent for an
+  // ordinary transaction.
+  optional string Origin = 14;
 }
 
 message GrpcStartTransactionResponse
@@ -1076,6 +1081,11 @@ message GrpcCommitTransactionResponse
   // predates the field. Carried as an integer so a newer node can name a class an older one does not know.
   int32 Refusal = 4;
   optional string Reason = 5;
+  // On a commit: the transaction's commit timestamp, the one its writes and watch events carry. Zero when it
+  // committed no persistent key through the durable path, or the answering node predates the field.
+  int32  CommitTimestampNode = 6;
+  int64  CommitTimestampPhysical = 7;
+  uint32 CommitTimestampCounter = 8;
 }
 
 message GrpcRollbackTransactionResponse
@@ -1890,6 +1900,10 @@ enum GrpcKeyValueResponseType {
   // caller should back off first. Deliberately distinct from TYPE_MUST_RETRY, which is transient and
   // should be retried promptly.
   TYPE_ADMISSION_REFUSED = 108;
+  // A watch was asked for ephemeral keys. An ephemeral write never reaches Raft, so no replicated event
+  // exists to report. The refusal is permanent: a retry gets the same answer.
+  TYPE_WATCH_UNSUPPORTED_ON_EPHEMERAL = 109;
+  TYPE_HISTORY_HOLD_LIMIT_REACHED = 110;
 }
 
 enum GrpcKeyValueDurability {
@@ -2020,4 +2034,148 @@ message GrpcGetPreparedIntentPresenceResponse {
   GrpcKeyValueResponseType Type = 1;
   bool Held = 2;
   int64 AppliedLogId = 3;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Watch streams. One bidirectional call carries any number of watches, each named by a watch id the
+// client chooses. The client opens and cancels watches with requests; the server answers each open
+// with an OPENED or a REFUSED frame, then sends the watch's frames until a terminal frame (LAGGED,
+// HISTORY_UNAVAILABLE or REFUSED) or a cancel. Ending the request stream ends every watch on the call.
+// ---------------------------------------------------------------------------------------------
+
+enum GrpcWatchRequestType {
+  WATCH_REQUEST_OPEN = 0;
+  WATCH_REQUEST_CANCEL = 1;
+}
+
+enum GrpcWatchScopeKind {
+  WATCH_SCOPE_KEY = 0;
+  WATCH_SCOPE_PREFIX = 1;
+  WATCH_SCOPE_RANGE = 2;
+}
+
+message GrpcWatchRequest {
+  GrpcWatchRequestType Type = 1;
+  // Chosen by the client, unique among the open watches of the call. Zero is invalid.
+  int64 WatchId = 2;
+  GrpcWatchScopeKind ScopeKind = 3;
+  // The key, the prefix, or the key space of a range.
+  string ScopeValue = 4;
+  // The bounds of a range: StartKey inclusive, EndKey exclusive. Absent is unbounded; an empty
+  // string is a real bound.
+  optional string StartKey = 5;
+  optional string EndKey = 6;
+  GrpcKeyValueDurability Durability = 7;
+  bool KeysOnly = 8;
+  // Frames the server buffers for a slow reader before it ends the watch with LAGGED. Zero takes the
+  // node's default.
+  int32 Capacity = 9;
+  // Limits the watch to these partitions of the scope. Empty watches every partition the scope covers.
+  repeated int32 Partitions = 10;
+  // Replays every retained event above this timestamp before the live events, on every partition that
+  // ResumePartitions does not name. Zero is live only.
+  int32  ResumeFromNode = 11;
+  int64  ResumeFromPhysical = 12;
+  uint32 ResumeFromCounter = 13;
+  // A cursor per partition, overriding ResumeFrom for the partitions it names.
+  repeated GrpcWatchCursor ResumePartitions = 14;
+}
+
+message GrpcWatchCursor {
+  int32  PartitionId = 1;
+  int32  TimestampNode = 2;
+  int64  TimestampPhysical = 3;
+  uint32 TimestampCounter = 4;
+}
+
+enum GrpcWatchFrameType {
+  WATCH_FRAME_EVENT = 0;
+  WATCH_FRAME_PROGRESS = 1;
+  WATCH_FRAME_TRANSACTION_END = 2;
+  WATCH_FRAME_LAGGED = 3;
+  WATCH_FRAME_HISTORY_UNAVAILABLE = 4;
+  WATCH_FRAME_REFUSED = 5;
+  WATCH_FRAME_OPENED = 6;
+}
+
+enum GrpcWatchEventKind {
+  WATCH_EVENT_SET = 0;
+  WATCH_EVENT_DELETED = 1;
+  WATCH_EVENT_EXTENDED = 2;
+}
+
+// The replicas of one partition a refused watch covers, so the client can open it where it is hosted.
+message GrpcWatchRoute {
+  int32 PartitionId = 1;
+  bool HostedHere = 2;
+  // Advertised client endpoints, the believed leader first.
+  repeated string Endpoints = 3;
+}
+
+message GrpcWatchFrame {
+  int64 WatchId = 1;
+  GrpcWatchFrameType Type = 2;
+  // The partition the frame is about, or -1 for the whole watch.
+  int32 PartitionId = 3;
+  string Key = 4;
+  GrpcWatchEventKind Kind = 5;
+  // Absent for a delete, an extend and a keys-only watch; present and empty for a zero-byte value.
+  optional bytes Value = 6;
+  int64 Revision = 7;
+  int32 ExpiresNode = 8;
+  int64 ExpiresPhysical = 9;
+  uint32 ExpiresCounter = 10;
+  int32 CommitTimestampNode = 11;
+  int64 CommitTimestampPhysical = 12;
+  uint32 CommitTimestampCounter = 13;
+  int32 TransactionIdNode = 14;
+  int64 TransactionIdPhysical = 15;
+  uint32 TransactionIdCounter = 16;
+  int32 TimestampNode = 17;
+  int64 TimestampPhysical = 18;
+  uint32 TimestampCounter = 19;
+  // Mirrors Kahuna.Shared.KeyValue.KeyValueWatchLagReason.
+  int32 LagReason = 20;
+  GrpcKeyValueResponseType Refusal = 21;
+  // OPENED: the partitions the watch is registered on.
+  repeated int32 Partitions = 22;
+  // REFUSED with TYPE_DOES_NOT_EXIST: where each partition of the scope is hosted.
+  repeated GrpcWatchRoute Routes = 23;
+  // EVENT: what produced the transaction that wrote the key; absent for an ordinary write.
+  optional string Origin = 24;
+}
+
+// Several frames per message, so a busy watch does not pay one HTTP/2 write per event.
+message GrpcWatchResponse {
+  repeated GrpcWatchFrame Frames = 1;
+}
+
+// One registered history hold: the WAL of one data partition stays retained on every replica from the timestamp on.
+message GrpcHistoryHoldInfo {
+  string HoldId = 1;
+  string HolderId = 2;
+  int32  PartitionId = 3;
+  int32  TimestampNode = 4;
+  int64  TimestampPhysical = 5;
+  uint32 TimestampCounter = 6;
+  int32  LeaseExpiryNode = 7;
+  int64  LeaseExpiryPhysical = 8;
+  uint32 LeaseExpiryCounter = 9;
+}
+
+// A request to the history hold registry. Operation: 0 acquire, 1 renew, 2 release, 3 list.
+message GrpcHistoryHoldRequest {
+  int32 Operation = 1;
+  optional string HolderId = 2;     // acquire: the holder; list: limits the list to it
+  repeated int32 Partitions = 3;    // acquire: one hold per partition
+  int32  TimestampNode = 4;         // acquire: hold from here; renew: move forward to here (zero keeps)
+  int64  TimestampPhysical = 5;
+  uint32 TimestampCounter = 6;
+  int32  LeaseMs = 7;               // acquire, renew
+  repeated string HoldIds = 8;      // renew, release
+}
+
+message GrpcHistoryHoldResponse {
+  GrpcKeyValueResponseType Type = 1;
+  repeated GrpcHistoryHoldInfo Holds = 2;
 }

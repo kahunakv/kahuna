@@ -15,13 +15,14 @@ internal readonly record struct FinalizeOutcome(
     KeyValueResponseType Type,
     string? RecordAnchorKey,
     CommitRefusalClass Refusal = CommitRefusalClass.None,
-    string? Reason = null)
+    string? Reason = null,
+    Kommander.Time.HLCTimestamp CommitTimestamp = default)
 {
     /// <summary>True when this outcome is a final answer that must be retained rather than retried.</summary>
     internal bool IsTerminal => Type != KeyValueResponseType.MustRetry;
 
     /// <summary>The outcome as the commit entry point answers it.</summary>
-    internal TransactionCommitAnswer ToAnswer() => new(Type, RecordAnchorKey, Refusal, Reason);
+    internal TransactionCommitAnswer ToAnswer() => new(Type, RecordAnchorKey, Refusal, Reason, CommitTimestamp);
 }
 
 /// <summary>

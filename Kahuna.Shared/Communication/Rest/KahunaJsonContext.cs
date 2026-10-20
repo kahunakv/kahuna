@@ -110,6 +110,18 @@ namespace Kahuna.Shared.Communication.Rest;
 [JsonSerializable(typeof(KeyValueTransactionResponse))]
 [JsonSerializable(typeof(IReadOnlyList<KahunaBackupInfo>))]
 [JsonSerializable(typeof(KahunaEmptyRequest))]
+[JsonSerializable(typeof(KahunaWatchRequest))]
+[JsonSerializable(typeof(KahunaWatchCursor))]
+[JsonSerializable(typeof(List<KahunaWatchCursor>))]
+[JsonSerializable(typeof(KahunaWatchFrameResponse))]
+[JsonSerializable(typeof(KahunaWatchRouteResponse))]
+[JsonSerializable(typeof(List<KahunaWatchRouteResponse>))]
+[JsonSerializable(typeof(List<int>))]
+[JsonSerializable(typeof(KahunaHistoryHoldRequest))]
+[JsonSerializable(typeof(KahunaHistoryHoldResponse))]
+[JsonSerializable(typeof(KahunaHistoryHoldInfoResponse))]
+[JsonSerializable(typeof(List<KahunaHistoryHoldInfoResponse>))]
+[JsonSerializable(typeof(List<string>))]
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
 public sealed partial class KahunaJsonContext : JsonSerializerContext
 {

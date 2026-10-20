@@ -74,6 +74,11 @@ internal class TransactionContext
     /// </summary>
     public TransactionConflictPolicy ConflictPolicy { get; init; } = TransactionConflictPolicy.Normal;
 
+    /// <summary>What produced this transaction's writes, stamped onto every prepared intent it freezes and so onto
+    /// every watch event it produces; null for an ordinary transaction, and always null while the cluster does not
+    /// enable origin tags.</summary>
+    public string? Origin { get; init; }
+
     /// <summary>
     /// Admission slot held by an interactive session for its whole lifetime, released exactly once when the
     /// session leaves the active map — by commit, by rollback, or by the reaper reclaiming it. Null for script
@@ -169,6 +174,9 @@ internal class TransactionContext
     /// finalize slot (owner finalize or reaper), so no additional synchronization is needed.
     /// </summary>
     internal DurableFinalizeInput? UnresolvedDurableFinalize { get; set; }
+
+    /// <summary>The commit timestamp frozen into the durable finalize that ran last, answered on a commit.</summary>
+    internal HLCTimestamp DurableCommitTimestamp { get; set; }
 
     /// <summary>
     /// True once any finalize attempt of this transaction had its commit rejected by the record's deadline

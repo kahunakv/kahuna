@@ -812,6 +812,21 @@ public sealed class KahunaCommandLineOptions
     [Option("range-move-settle-timeout", Required = false, HelpText = "Maximum seconds a range split or merge holds its quiesce while it waits for the moving range's in-flight transactions to decide and settle before the cutover. Writes into the moving range are refused (retryably) for at most this long per attempt. 0 disables the wait, so a range under sustained writes may never split. Clamped to 15. Default 10.", Default = 10)]
     public int RangeMoveSettleTimeoutSeconds { get; set; } = 10;
 
+    [Option("commit-admission-lag-ms", Required = false, HelpText = "Milliseconds a new commit's timestamp may trail the time of the log entry that carries it. Positive turns on the commit admission window: a prepare or a write outside a transaction whose timestamp falls outside (entry time - lag, entry time + 5 s) is refused retryably, and watches send progress watermarks. Enable only when every node runs a version that reads it, with the same value on every node. 0 disables it. Default 0.", Default = 0)]
+    public int CommitAdmissionLagMs { get; set; }
+
+    [Option("history-hold-max-lease-ms", Required = false, HelpText = "Longest lease, in milliseconds, a history hold may ask for. A hold keeps a partition's WAL retained on every replica until it is released or purged after its lease. 0 means no bound. Default 86400000 (one day).", Default = 86_400_000)]
+    public int HistoryHoldMaxLeaseMs { get; set; } = 86_400_000;
+
+    [Option("history-hold-max-per-holder", Required = false, HelpText = "Most history holds one holder may register (one per data partition). 0 means no bound. Default 4096.", Default = 4_096)]
+    public int HistoryHoldMaxPerHolder { get; set; } = 4_096;
+
+    [Option("history-hold-max-total", Required = false, HelpText = "Most history holds the cluster may hold. 0 means no bound. Default 65536.", Default = 65_536)]
+    public int HistoryHoldMaxTotal { get; set; } = 65_536;
+
+    [Option("transaction-origin-tags", Required = false, HelpText = "Keep the origin label a transaction names at start and write it into its prepared intents and watch events. Enable only when every node runs a version that reads it. Default off.")]
+    public bool TransactionOriginTags { get; set; }
+
     [Option("range-merge-min-size", Required = false, HelpText = "Key count below which two adjacent ranges become eligible to be merged back together. 0 disables auto-merge entirely (the checker is not started). Default 10.", Default = 10)]
     public int RangeMergeMinSize { get; set; } = 10;
 

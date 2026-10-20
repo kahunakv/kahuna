@@ -30,7 +30,11 @@ internal enum PrepareRetryLoopOutcome
 
     /// <summary>The record turned terminal while the loop waited (recovery or a fence decided it): the finalize
     /// concluded from the record.</summary>
-    RecordDecided
+    RecordDecided,
+
+    /// <summary>A prepare was refused by the commit admission window: the frozen commit timestamp can never be
+    /// admitted, so the finalize aborted the attempt retryably.</summary>
+    AdmissionRefused
 }
 
 /// <summary>What a decision-deadline renewal attempt did; the tag of <see cref="DurableTransactionMetrics.DeadlineExtensions"/>.</summary>
@@ -1527,6 +1531,7 @@ internal static class DurableTransactionMetrics
     private static readonly KeyValuePair<string, object?> LoopOutcomeSettled = new("outcome", "settled");
     private static readonly KeyValuePair<string, object?> LoopOutcomeDeadlineLapsed = new("outcome", "deadline_lapsed");
     private static readonly KeyValuePair<string, object?> LoopOutcomeRecordDecided = new("outcome", "record_decided");
+    private static readonly KeyValuePair<string, object?> LoopOutcomeAdmissionRefused = new("outcome", "admission_refused");
 
     internal static void PrepareRetryLoopEnded(PrepareRetryLoopOutcome outcome) =>
         PrepareRetryLoops.Add(1, outcome switch
@@ -1538,6 +1543,7 @@ internal static class DurableTransactionMetrics
             PrepareRetryLoopOutcome.Settled => LoopOutcomeSettled,
             PrepareRetryLoopOutcome.DeadlineLapsed => LoopOutcomeDeadlineLapsed,
             PrepareRetryLoopOutcome.RecordDecided => LoopOutcomeRecordDecided,
+            PrepareRetryLoopOutcome.AdmissionRefused => LoopOutcomeAdmissionRefused,
             _ => LoopOutcomeExhausted
         });
 
