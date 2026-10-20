@@ -13,6 +13,25 @@ namespace Kahuna.Server.KeyValues;
 /// locks, and other specific outcomes. The response may include additional metadata such as the revision
 /// number, timestamp, or context items depending on the operation performed.
 /// </remarks>
+/// <summary>
+/// What transiently denied a write, when the actor names it. Tells settlement lag — a wait the caller can give
+/// a long budget, because the holder is already past the point of waiting on anyone — from a lock conflict
+/// that a client bounds with its deadlock budget.
+/// </summary>
+public enum WriteDenialCause
+{
+    /// <summary>The denial names no cause (a lock conflict, a stale route, or an answer that is not a denial).</summary>
+    None = 0,
+
+    /// <summary>A foreign durable prepared intent whose canonical decision is still pending covers the key: its
+    /// coordinator is inside its decision window and holds no further waits, so the write only has to wait.</summary>
+    DurableIntent = 1,
+
+    /// <summary>A foreign write intent whose transaction is already durably decided still covers the key: only
+    /// its deferred settlement has to run to clear it.</summary>
+    SettlingWriteIntent = 2
+}
+
 public sealed class KeyValueResponse
 {
     /// <summary>
@@ -85,6 +104,16 @@ public sealed class KeyValueResponse
     /// </summary>
     public static KeyValueResponse Denied(KeyValueResponseType type, HLCTimestamp holder) =>
         new(type) { HolderTransactionId = holder };
+
+    /// <summary>
+    /// What transiently denied a write, when the actor names it; <see cref="WriteDenialCause.None"/> otherwise.
+    /// The manager's write loop routes the holder's decision for a named cause before it answers the caller.
+    /// </summary>
+    public WriteDenialCause DenialCause { get; private set; }
+
+    /// <summary>A transient denial that names the holder and what kind of wait it is.</summary>
+    public static KeyValueResponse Denied(KeyValueResponseType type, HLCTimestamp holder, WriteDenialCause cause) =>
+        new(type) { HolderTransactionId = holder, DenialCause = cause };
 
     /// <summary>
     /// The covered keys a range-lock acquire could not take, when the actor knows them. Advisory, like

@@ -665,7 +665,7 @@ public sealed class TestOnePhaseApplyTimeGateCluster : BaseCluster
                 cluster.Taps[leader].ResetCounts();
                 (TransactionHandle offHandle, _) = await StartAndRead(coordinator, coordinatorKey, offPartitionRead, ct);
                 await Write(coordinator, offHandle, key, "101", ct);
-                Assert.Equal(KeyValueResponseType.Committed, (await coordinator.LocateAndCommitTransaction(offHandle, ct)).Item1);
+                Assert.Equal(KeyValueResponseType.Committed, (await coordinator.LocateAndCommitTransaction(offHandle, ct)).Type);
                 Assert.Equal(0, cluster.Taps[leader].OnePhaseBundles);
                 Assert.True(cluster.Taps[leader].TwoPhaseAnchorBundles >= 1);
 
@@ -678,7 +678,7 @@ public sealed class TestOnePhaseApplyTimeGateCluster : BaseCluster
                     coordinatorKey: rangeHandle.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
                 Assert.Equal(KeyValueResponseType.Locked, lockType);
                 await Write(coordinator, rangeHandle, key, "102", ct);
-                Assert.Equal(KeyValueResponseType.Committed, (await coordinator.LocateAndCommitTransaction(rangeHandle, ct)).Item1);
+                Assert.Equal(KeyValueResponseType.Committed, (await coordinator.LocateAndCommitTransaction(rangeHandle, ct)).Type);
                 Assert.Equal(0, cluster.Taps[leader].OnePhaseBundles);
                 Assert.True(cluster.Taps[leader].TwoPhaseAnchorBundles >= 1);
 
@@ -688,7 +688,7 @@ public sealed class TestOnePhaseApplyTimeGateCluster : BaseCluster
                 cluster.Taps[leader].ResetCounts();
                 (TransactionHandle onHandle, _) = await StartAndRead(coordinator, coordinatorKey, onPartitionRead, ct);
                 await Write(coordinator, onHandle, key, "103", ct);
-                Assert.Equal(KeyValueResponseType.Committed, (await coordinator.LocateAndCommitTransaction(onHandle, ct)).Item1);
+                Assert.Equal(KeyValueResponseType.Committed, (await coordinator.LocateAndCommitTransaction(onHandle, ct)).Type);
                 Assert.True(cluster.Taps[leader].OnePhaseBundles >= 1, "an on-partition point read must keep the bundle open");
 
                 Assert.Equal("103", await ReadValue(cluster.Managers[0], key, ct));
@@ -745,7 +745,7 @@ public sealed class TestOnePhaseApplyTimeGateCluster : BaseCluster
                 (TransactionHandle grouped, _) = await StartAndRead(coordinator, coordinatorKey, groupedIndex, ct);
                 await ReadInTransaction(coordinator, grouped, row, ct);
                 await Write(coordinator, grouped, row, "101", ct);
-                Assert.Equal(KeyValueResponseType.Committed, (await coordinator.LocateAndCommitTransaction(grouped, ct)).Item1);
+                Assert.Equal(KeyValueResponseType.Committed, (await coordinator.LocateAndCommitTransaction(grouped, ct)).Type);
                 Assert.True(cluster.Taps[leader].OnePhaseBundles >= 1, "an index read placed with its rows must keep the bundle open");
                 Assert.True(gate.Total("kahuna.durable_tx.one_phase_gate", "entered") >= 1);
 
@@ -755,7 +755,7 @@ public sealed class TestOnePhaseApplyTimeGateCluster : BaseCluster
                 (TransactionHandle apart, _) = await StartAndRead(coordinator, coordinatorKey, apartIndex, ct);
                 await ReadInTransaction(coordinator, apart, row, ct);
                 await Write(coordinator, apart, row, "102", ct);
-                Assert.Equal(KeyValueResponseType.Committed, (await coordinator.LocateAndCommitTransaction(apart, ct)).Item1);
+                Assert.Equal(KeyValueResponseType.Committed, (await coordinator.LocateAndCommitTransaction(apart, ct)).Type);
                 Assert.Equal(0, cluster.Taps[leader].OnePhaseBundles);
                 Assert.True(cluster.Taps[leader].TwoPhaseAnchorBundles >= 1);
                 Assert.True(gate.Total("kahuna.durable_tx.one_phase_gate", "off_partition_read") > offPartitionBefore);
@@ -771,7 +771,7 @@ public sealed class TestOnePhaseApplyTimeGateCluster : BaseCluster
                     coordinatorKey: ranged.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
                 Assert.Equal(KeyValueResponseType.Locked, lockType);
                 await Write(coordinator, ranged, row, "103", ct);
-                Assert.Equal(KeyValueResponseType.Committed, (await coordinator.LocateAndCommitTransaction(ranged, ct)).Item1);
+                Assert.Equal(KeyValueResponseType.Committed, (await coordinator.LocateAndCommitTransaction(ranged, ct)).Type);
                 Assert.Equal(0, cluster.Taps[leader].OnePhaseBundles);
                 Assert.True(gate.Total("kahuna.durable_tx.one_phase_gate", "predicate_read") > predicateBefore);
 

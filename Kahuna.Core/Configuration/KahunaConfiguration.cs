@@ -631,6 +631,21 @@ public sealed class KahunaConfiguration
     /// </summary>
     public int DurableDecisionDeadlineMultiplier { get; set; } = 4;
 
+    /// <summary>
+    /// How many times one finalize attempt may renew its decision-deadline lease. A coordinator that is alive and
+    /// inside a productive wait — a prepare refused only by predecessors whose records are already decided and
+    /// whose intents are still settling, or a prepare and validation that consumed most of the margin — moves the
+    /// canonical record's deadline forward by one margin through a replicated record transition, so a slow
+    /// settlement never turns a healthy commit into a presumed abort. The record accepts a renewal only while the
+    /// attempt still holds the lease, so a dead coordinator is presumed aborted exactly as before. Each renewal is
+    /// one record round on the anchor partition and is sent only when less than half of the lease remains, so a
+    /// healthy commit never pays it. 0 disables renewal.
+    /// <para><b>Rolling upgrade.</b> The renewal is a record transition an older node cannot decode. Run with 0
+    /// on the upgraded nodes for the duration of a mixed-version rollout, then remove the override once every
+    /// node runs the new build.</para>
+    /// </summary>
+    public int DurableDecisionDeadlineMaxExtensions { get; set; } = 8;
+
     public int RevisionsToKeepCached { get; set; }
 
     public TimeSpan CacheEntryTtl { get; set; }

@@ -97,6 +97,24 @@ internal sealed record AbortTransactionCommand(
     HLCTimestamp CreatedAt) : TransactionRecordCommand;
 
 /// <summary>
+/// Moves an <see cref="TransactionDecision.Undecided"/> record's decision deadline forward — a lease renewal by
+/// a coordinator that is alive and inside a productive wait (settlement lag of a predecessor, a long prepare
+/// loop), so that wait is not turned into a presumed abort. Legal only while the lease is still held: the
+/// attempt HLC must not have passed the record's current deadline (a lapsed lease yields to presumed-abort
+/// recovery exactly as before), and the new deadline must be later than the current one (a replay, or a
+/// renewal that lost to a later one, is an idempotent no-op). A terminal record rejects it, and it can never
+/// create a record from absence. The recovery sweep reads the deadline off the record, so a renewed record is
+/// left alone until the renewed deadline.
+/// </summary>
+internal sealed record ExtendDecisionDeadlineCommand(
+    HLCTimestamp TransactionId,
+    long Epoch,
+    long ManifestHash,
+    HLCTimestamp NewDeadline,
+    HLCTimestamp OpId,
+    HLCTimestamp AttemptHlc) : TransactionRecordCommand;
+
+/// <summary>
 /// Removes a <b>terminal</b> record once its retention window has elapsed and its participants' completion
 /// receipts have been released — the retention GC transition. It is rejected against an <c>Undecided</c> record
 /// (an in-flight transaction's record is never dropped) and is an idempotent no-op against an already-absent one,

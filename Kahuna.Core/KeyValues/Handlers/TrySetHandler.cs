@@ -164,15 +164,18 @@ internal sealed class TrySetHandler : BaseHandler
         // based on it), treat an undecided intent as a live conflict, and ignore an aborted one. No-op off the
         // durable-intent path (null store).
         //
-        // Every conflict answer below is MustRetry and names the transaction the writer is waiting behind. The
-        // answer type stays MustRetry so an existing caller keeps its retry loop; a caller that reads the holder
-        // can apply wait-die instead of waiting out its whole deadline against a writer that will not yield.
+        // Every denial below names the transaction the writer is waiting behind, so a caller that reads the holder
+        // can apply wait-die instead of waiting out its whole deadline against a writer that will not yield. The
+        // answer type says what kind of wait it is: an undecided durable intent is lag — its coordinator is inside
+        // its decision window and holds no further waits, so a deadlock through it is impossible — and answers
+        // WaitingForReplication; a live lock conflict answers MustRetry, which a client bounds with its deadlock
+        // budget.
         KeyValueEntry? resolvedEntry = entry;
         if (ForeignIntentWriteResolver.Resolve(
                 context, message.Key, message.TransactionId, ref resolvedEntry, ApplyCommittedHead,
                 out HLCTimestamp blockingIntentOwner, message.ForeignDecisionHint)
             == ForeignIntentWriteDecision.MustRetry)
-            return (KeyValueResponse.Denied(KeyValueResponseType.MustRetry, blockingIntentOwner), entry, exists);
+            return (KeyValueResponse.Denied(KeyValueResponseType.WaitingForReplication, blockingIntentOwner, WriteDenialCause.DurableIntent), entry, exists);
 
         entry = resolvedEntry!;
         exists = entry.State is not (KeyValueState.Deleted or KeyValueState.Undefined);
@@ -205,6 +208,12 @@ internal sealed class TrySetHandler : BaseHandler
             {
                 if (KeyValueWriteIntentLease.IsLive(context, message.Key, entry.WriteIntent, currentTime))
                 {
+                    // A holder whose transaction is already durably decided is not a live conflict: under deferred
+                    // settlement its intent only survives until the resolution clears it, so the writer waits for
+                    // that settlement instead of spending its deadlock budget against a lock nobody is holding.
+                    if (IsAwaitingSettlement(message.Key, entry.WriteIntent.TransactionId, message.ForeignDecisionHint))
+                        return (KeyValueResponse.Denied(KeyValueResponseType.WaitingForReplication, entry.WriteIntent.TransactionId, WriteDenialCause.SettlingWriteIntent), entry, exists);
+
                     if (RequesterMayTakeOverYieldingIntent(message) && entry.WriteIntent.Yielding)
                     {
                         if (entry.WriteIntent.Pinned)

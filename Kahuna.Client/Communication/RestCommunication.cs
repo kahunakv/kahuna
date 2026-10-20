@@ -673,7 +673,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             if (response.Type == KeyValueResponseType.MustRetry)
                 await WaitBeforeMustRetry(retries - 1, cancellationToken).ConfigureAwait(false);
 
-        } while (response.Type == KeyValueResponseType.MustRetry);
+        } while (response.Type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication);
             
         throw new KahunaException("Failed to set key/value: " + response.Type, response.Type);
     }
@@ -891,7 +891,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             if (response.Type == KeyValueResponseType.MustRetry)
                 await WaitBeforeMustRetry(retries - 1, cancellationToken).ConfigureAwait(false);
 
-        } while (response.Type == KeyValueResponseType.MustRetry);
+        } while (response.Type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication);
             
         throw new KahunaException("Failed to set key/value: " + response.Type, response.Type);
     }
@@ -979,7 +979,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             if (response.Type == KeyValueResponseType.MustRetry)
                 await WaitBeforeMustRetry(retries - 1, cancellationToken).ConfigureAwait(false);
 
-        } while (response.Type == KeyValueResponseType.MustRetry);
+        } while (response.Type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication);
             
         throw new KahunaException("Failed to set key/value: " + response.Type, response.Type);
     }
@@ -1062,7 +1062,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             if (response.Type == KeyValueResponseType.MustRetry)
                 await WaitBeforeMustRetry(retries - 1, cancellationToken).ConfigureAwait(false);
 
-        } while (response.Type == KeyValueResponseType.MustRetry);
+        } while (response.Type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication);
             
         throw new KahunaException("Failed to get key/value: " + response.Type, response.Type);
     }
@@ -1147,7 +1147,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             if (response.Type == KeyValueResponseType.MustRetry)
                 await WaitBeforeMustRetry(retries - 1, cancellationToken).ConfigureAwait(false);
 
-        } while (response.Type == KeyValueResponseType.MustRetry);
+        } while (response.Type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication);
             
         throw new KahunaException("Failed to check if exists key/value: " + response.Type, response.Type);
     }
@@ -1225,7 +1225,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             if (response.Type == KeyValueResponseType.MustRetry)
                 await WaitBeforeMustRetry(retries - 1, cancellationToken).ConfigureAwait(false);
 
-        } while (response.Type == KeyValueResponseType.MustRetry);
+        } while (response.Type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication);
             
         throw new KahunaException("Failed to delete key/value: " + response.Type, response.Type);
     }
@@ -1305,7 +1305,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             if (response.Type == KeyValueResponseType.MustRetry)
                 await WaitBeforeMustRetry(retries - 1, cancellationToken).ConfigureAwait(false);
 
-        } while (response.Type == KeyValueResponseType.MustRetry);
+        } while (response.Type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication);
             
         throw new KahunaException("Failed to extend key/value: " + response.Type, response.Type);
     }
@@ -1374,7 +1374,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             if (response.Type == KeyValueResponseType.MustRetry)
                 await WaitBeforeMustRetry(retries - 1, cancellationToken).ConfigureAwait(false);
 
-        } while (response.Type == KeyValueResponseType.MustRetry);
+        } while (response.Type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication);
             
         //throw new KahunaException("Failed to extend key/value: " + response.Type, response.Type);
         
@@ -1699,7 +1699,12 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
         if (response.Type == KeyValueResponseType.Committed)
             return (true, response.RecordAnchorKey);
 
-        throw new KahunaException("Failed to commit key/value transaction: " + response.Type, response.Type);
+        // The answer names the arm that refused the commit, so the exception carries it beside the outcome.
+        throw new KahunaException(
+            response.Refusal == CommitRefusalClass.None
+                ? "Failed to commit key/value transaction: " + response.Type
+                : $"Failed to commit key/value transaction: {response.Type} ({response.Refusal}: {response.Reason ?? "no reason given"})",
+            response.Type);
     }
 
     public async Task<bool> RollbackTransactionSession(string url, string uniqueId, HLCTimestamp transactionId, string? recordAnchorKey, CancellationToken cancellationToken)
@@ -2018,7 +2023,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
                 url, verb, request, jsonTypeInfo, cancellationToken
             ).ConfigureAwait(false);
 
-            if (readType(response) != KeyValueResponseType.MustRetry)
+            if (readType(response) is not (KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication))
                 return response;
 
             if (logger is not null && logger.IsEnabled(LogLevel.Debug))

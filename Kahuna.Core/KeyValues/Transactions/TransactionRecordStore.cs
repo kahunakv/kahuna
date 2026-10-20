@@ -410,6 +410,7 @@ internal sealed class TransactionRecordStore
         InitializeTransactionCommand i => (i.TransactionId, i.Epoch),
         CommitTransactionCommand c => (c.TransactionId, c.Epoch),
         AbortTransactionCommand a => (a.TransactionId, a.Epoch),
+        ExtendDecisionDeadlineCommand e => (e.TransactionId, e.Epoch),
         PurgeTransactionCommand p => (p.TransactionId, p.Epoch),
         _ => throw new ArgumentOutOfRangeException(nameof(command), command.GetType().Name, "unknown transaction-record command")
     };
@@ -492,6 +493,17 @@ internal sealed class TransactionRecordStore
                     Epoch = p.Epoch
                 };
 
+            case ExtendDecisionDeadlineCommand e:
+                return new()
+                {
+                    Kind = TransactionRecordCommandKindMessage.TransactionRecordExtendDeadline,
+                    TransactionIdNode = e.TransactionId.N, TransactionIdPhysical = e.TransactionId.L, TransactionIdCounter = e.TransactionId.C,
+                    Epoch = e.Epoch, ManifestHash = e.ManifestHash,
+                    OpIdNode = e.OpId.N, OpIdPhysical = e.OpId.L, OpIdCounter = e.OpId.C,
+                    AttemptNode = e.AttemptHlc.N, AttemptPhysical = e.AttemptHlc.L, AttemptCounter = e.AttemptHlc.C,
+                    DecisionDeadlineNode = e.NewDeadline.N, DecisionDeadlinePhysical = e.NewDeadline.L, DecisionDeadlineCounter = e.NewDeadline.C
+                };
+
             default:
                 throw new ArgumentOutOfRangeException(nameof(command), command.GetType().Name, "unknown transaction-record command");
         }
@@ -549,6 +561,12 @@ internal sealed class TransactionRecordStore
 
             case TransactionRecordCommandKindMessage.TransactionRecordPurge:
                 return new PurgeTransactionCommand(txId, m.Epoch);
+
+            case TransactionRecordCommandKindMessage.TransactionRecordExtendDeadline:
+                return new ExtendDecisionDeadlineCommand(txId, m.Epoch, m.ManifestHash,
+                    new HLCTimestamp(m.DecisionDeadlineNode, m.DecisionDeadlinePhysical, m.DecisionDeadlineCounter),
+                    opId,
+                    new HLCTimestamp(m.AttemptNode, m.AttemptPhysical, m.AttemptCounter));
 
             default:
                 throw new ArgumentOutOfRangeException(nameof(m), m.Kind, "unknown transaction-record command kind");

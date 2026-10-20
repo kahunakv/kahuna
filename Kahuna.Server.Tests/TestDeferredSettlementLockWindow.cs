@@ -70,8 +70,8 @@ public sealed class TestDeferredSettlementLockWindow
     /// <summary>
     /// The same holder, now with a committed canonical record: its intent survives only until resolution runs, so
     /// the acquire must not answer AlreadyLocked. Resolution never runs in this constructed state, so the acquire
-    /// waits out its budget and reports the retryable MustRetry — the point being that the caller is told to retry
-    /// rather than told it lost a lock race.
+    /// waits out its budget and reports the wait it was (WaitingForReplication) — the point being that the caller
+    /// is told to wait on lag rather than told it lost a lock race or hit a deadlock budget.
     /// </summary>
     [Fact]
     public async Task AcquireExclusiveLock_WhenHolderIsDurablyDecided_IsNotReportedAsLocked()
@@ -88,7 +88,7 @@ public sealed class TestDeferredSettlementLockWindow
         KeyValueResponseType type = await AcquireAsNewTransaction(kahuna, key, "lockwin/decided/second", ct);
 
         Assert.NotEqual(KeyValueResponseType.AlreadyLocked, type);
-        Assert.Equal(KeyValueResponseType.MustRetry, type);
+        Assert.Equal(KeyValueResponseType.WaitingForReplication, type);
     }
 
     /// <summary>

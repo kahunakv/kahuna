@@ -22,7 +22,34 @@ internal enum PrepareRetryLoopOutcome
     Cancelled,
     StaleBase,
     RangeMoved,
-    Settled
+    Settled,
+
+    /// <summary>Every refusal was a decided-but-unsettled predecessor and the decision deadline (with every
+    /// renewal the record accepted) arrived first: the finalize answered MustRetry without recording an abort.</summary>
+    DeadlineLapsed,
+
+    /// <summary>The record turned terminal while the loop waited (recovery or a fence decided it): the finalize
+    /// concluded from the record.</summary>
+    RecordDecided
+}
+
+/// <summary>What a decision-deadline renewal attempt did; the tag of <see cref="DurableTransactionMetrics.DeadlineExtensions"/>.</summary>
+internal enum DeadlineExtensionOutcome
+{
+    /// <summary>The renewal replicated and the record is still undecided.</summary>
+    Extended,
+
+    /// <summary>The renewal found the record already terminal.</summary>
+    RecordTerminal,
+
+    /// <summary>The renewal could not be replicated (anchor unreachable, fence refused).</summary>
+    Unavailable,
+
+    /// <summary>The attempt had already passed the deadline it meant to renew, so no renewal was sent.</summary>
+    Lapsed,
+
+    /// <summary>The renewal budget of the attempt was spent.</summary>
+    BudgetSpent
 }
 
 /// <summary>What an over-budget retention sweep could do; the tag of <see cref="DurableTransactionMetrics.GcBudgetSweeps"/>.</summary>
@@ -158,6 +185,36 @@ internal static class DurableTransactionMetrics
             description: "Backoff sleeps in key/value manager retry loops, by site.");
 
     internal static void AddKvRetryWait(string site) => KvRetryWaits.Add(1, new KeyValuePair<string, object?>("site", site));
+
+    /// <summary>
+    /// Decision-deadline renewals a live finalize attempted, tagged by <c>outcome</c>: <c>extended</c> (the
+    /// record's deadline moved forward), <c>record_terminal</c> (the record had already decided),
+    /// <c>unavailable</c> (the renewal could not be replicated), <c>lapsed</c> (the attempt had already passed
+    /// the deadline it meant to renew) and <c>budget_spent</c> (the attempt's renewal budget was used up). A
+    /// finalize renews only while it is inside a productive wait — settlement lag of a decided predecessor, or
+    /// a validation that consumed most of the margin — so <c>extended</c> counts the healthy commits the frozen
+    /// deadline alone would have presumed aborted.
+    /// </summary>
+    internal static readonly Counter<long> DeadlineExtensions =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.deadline_extensions",
+            description: "Decision-deadline renewals attempted by live finalizes, tagged by outcome.");
+
+    private static readonly KeyValuePair<string, object?> ExtensionExtended = new("outcome", "extended");
+    private static readonly KeyValuePair<string, object?> ExtensionRecordTerminal = new("outcome", "record_terminal");
+    private static readonly KeyValuePair<string, object?> ExtensionUnavailable = new("outcome", "unavailable");
+    private static readonly KeyValuePair<string, object?> ExtensionLapsed = new("outcome", "lapsed");
+    private static readonly KeyValuePair<string, object?> ExtensionBudgetSpent = new("outcome", "budget_spent");
+
+    internal static void DeadlineExtensionAttempted(DeadlineExtensionOutcome outcome) =>
+        DeadlineExtensions.Add(1, outcome switch
+        {
+            DeadlineExtensionOutcome.Extended => ExtensionExtended,
+            DeadlineExtensionOutcome.RecordTerminal => ExtensionRecordTerminal,
+            DeadlineExtensionOutcome.Unavailable => ExtensionUnavailable,
+            DeadlineExtensionOutcome.Lapsed => ExtensionLapsed,
+            _ => ExtensionBudgetSpent
+        });
 
     /// <summary>
     /// Commits rejected because the attempt's HLC passed the transaction's frozen decision deadline, so the
@@ -1468,6 +1525,8 @@ internal static class DurableTransactionMetrics
     private static readonly KeyValuePair<string, object?> LoopOutcomeStaleBase = new("outcome", "stale_base");
     private static readonly KeyValuePair<string, object?> LoopOutcomeRangeMoved = new("outcome", "range_moved");
     private static readonly KeyValuePair<string, object?> LoopOutcomeSettled = new("outcome", "settled");
+    private static readonly KeyValuePair<string, object?> LoopOutcomeDeadlineLapsed = new("outcome", "deadline_lapsed");
+    private static readonly KeyValuePair<string, object?> LoopOutcomeRecordDecided = new("outcome", "record_decided");
 
     internal static void PrepareRetryLoopEnded(PrepareRetryLoopOutcome outcome) =>
         PrepareRetryLoops.Add(1, outcome switch
@@ -1477,6 +1536,8 @@ internal static class DurableTransactionMetrics
             PrepareRetryLoopOutcome.StaleBase => LoopOutcomeStaleBase,
             PrepareRetryLoopOutcome.RangeMoved => LoopOutcomeRangeMoved,
             PrepareRetryLoopOutcome.Settled => LoopOutcomeSettled,
+            PrepareRetryLoopOutcome.DeadlineLapsed => LoopOutcomeDeadlineLapsed,
+            PrepareRetryLoopOutcome.RecordDecided => LoopOutcomeRecordDecided,
             _ => LoopOutcomeExhausted
         });
 

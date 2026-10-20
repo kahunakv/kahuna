@@ -338,4 +338,146 @@ public sealed class TestTransactionRecordStateMachine
         Assert.Equal(TransactionApplyOutcome.Rejected, r.Outcome);
         Assert.Same(rec, r.Record);
     }
+
+    // ── decision-deadline lease renewal ───────────────────────────────────────────
+
+    private static ExtendDecisionDeadlineCommand Extend(long hash, HLCTimestamp newDeadline, HLCTimestamp attempt) =>
+        new(TxId, Epoch, hash, newDeadline, OpId: attempt, AttemptHlc: attempt);
+
+    [Fact]
+    public void ExtendDeadline_UndecidedWithinLease_MovesTheDeadlineForward()
+    {
+        TransactionRecord rec = TransactionRecordStateMachine.Apply(null, Init(Ts(2000), Ts(9000))).Record!;
+
+        TransactionRecordApplyResult r = TransactionRecordStateMachine.Apply(rec, Extend(rec.ManifestHash, Ts(15000), attempt: Ts(8000)));
+
+        Assert.Equal(TransactionApplyOutcome.Applied, r.Outcome);
+        Assert.Equal(Ts(15000), r.Record!.DecisionDeadline);
+        Assert.Equal(TransactionDecision.Undecided, r.Record.Decision);
+        Assert.Equal(Ts(2000), r.Record.CommitTimestamp);
+    }
+
+    [Fact]
+    public void ExtendDeadline_ThenCommitPastTheFrozenDeadline_Commits()
+    {
+        // The renewal is what lets a commit land after the frozen deadline: the same attempt is refused before the
+        // renewal and accepted after it.
+        TransactionRecord rec = TransactionRecordStateMachine.Apply(null, Init(Ts(2000), Ts(9000))).Record!;
+
+        Assert.Equal(TransactionApplyOutcome.Rejected, TransactionRecordStateMachine.Apply(rec, Commit(rec.ManifestHash, Ts(500), attempt: Ts(12000))).Outcome);
+
+        rec = TransactionRecordStateMachine.Apply(rec, Extend(rec.ManifestHash, Ts(15000), attempt: Ts(8000))).Record!;
+        TransactionRecordApplyResult r = TransactionRecordStateMachine.Apply(rec, Commit(rec.ManifestHash, Ts(500), attempt: Ts(12000)));
+
+        Assert.Equal(TransactionApplyOutcome.Applied, r.Outcome);
+        Assert.Equal(TransactionDecision.Commit, r.Record!.Decision);
+        Assert.Equal(Ts(12000), r.Record.DecidedAt);
+    }
+
+    [Fact]
+    public void ExtendDeadline_NotLaterThanTheCurrentDeadline_IsNoop()
+    {
+        TransactionRecord rec = TransactionRecordStateMachine.Apply(null, Init(Ts(2000), Ts(9000))).Record!;
+
+        // A replay, or a renewal that lost to a later one, never moves the deadline backwards.
+        TransactionRecordApplyResult same = TransactionRecordStateMachine.Apply(rec, Extend(rec.ManifestHash, Ts(9000), attempt: Ts(8000)));
+        TransactionRecordApplyResult earlier = TransactionRecordStateMachine.Apply(rec, Extend(rec.ManifestHash, Ts(7000), attempt: Ts(6000)));
+
+        Assert.Equal(TransactionApplyOutcome.IdempotentNoop, same.Outcome);
+        Assert.Same(rec, same.Record);
+        Assert.Equal(TransactionApplyOutcome.IdempotentNoop, earlier.Outcome);
+        Assert.Same(rec, earlier.Record);
+    }
+
+    [Fact]
+    public void ExtendDeadline_AttemptPastTheCurrentDeadline_Rejected()
+    {
+        // A lease can only be renewed while it is held: an attempt that already passed the deadline yielded to
+        // presumed-abort recovery, and renewing it would let a commit land the gate was meant to refuse.
+        TransactionRecord rec = TransactionRecordStateMachine.Apply(null, Init(Ts(2000), Ts(9000))).Record!;
+
+        TransactionRecordApplyResult r = TransactionRecordStateMachine.Apply(rec, Extend(rec.ManifestHash, Ts(20000), attempt: Ts(9001)));
+
+        Assert.Equal(TransactionApplyOutcome.Rejected, r.Outcome);
+        Assert.Same(rec, r.Record);
+        Assert.Equal(Ts(9000), rec.DecisionDeadline);
+        Assert.NotNull(r.RejectReason);
+    }
+
+    [Fact]
+    public void ExtendDeadline_AtExactlyTheDeadline_StillHeld()
+    {
+        TransactionRecord rec = TransactionRecordStateMachine.Apply(null, Init(Ts(2000), Ts(9000))).Record!;
+
+        TransactionRecordApplyResult r = TransactionRecordStateMachine.Apply(rec, Extend(rec.ManifestHash, Ts(16900), attempt: Ts(9000)));
+
+        Assert.Equal(TransactionApplyOutcome.Applied, r.Outcome);
+        Assert.Equal(Ts(16900), r.Record!.DecisionDeadline);
+    }
+
+    [Fact]
+    public void ExtendDeadline_AfterCommit_Rejected()
+    {
+        TransactionRecord rec = TransactionRecordStateMachine.Apply(null, Init(Ts(2000), Ts(9000))).Record!;
+        rec = TransactionRecordStateMachine.Apply(rec, Commit(rec.ManifestHash, Ts(500), Ts(2100))).Record!;
+
+        TransactionRecordApplyResult r = TransactionRecordStateMachine.Apply(rec, Extend(rec.ManifestHash, Ts(15000), attempt: Ts(3000)));
+
+        Assert.Equal(TransactionApplyOutcome.Rejected, r.Outcome);
+        Assert.Same(rec, r.Record);
+        Assert.Equal(TransactionDecision.Commit, r.Record!.Decision);
+    }
+
+    [Fact]
+    public void ExtendDeadline_AfterAbort_Rejected()
+    {
+        TransactionRecord rec = TransactionRecordStateMachine.Apply(null, Init(Ts(2000), Ts(9000))).Record!;
+        rec = TransactionRecordStateMachine.Apply(rec, Abort(rec.ManifestHash, TransactionAbortClass.PresumedAbort, Ts(500), Ts(9500), Ts(2000), Ts(9000))).Record!;
+
+        TransactionRecordApplyResult r = TransactionRecordStateMachine.Apply(rec, Extend(rec.ManifestHash, Ts(15000), attempt: Ts(3000)));
+
+        Assert.Equal(TransactionApplyOutcome.Rejected, r.Outcome);
+        Assert.Same(rec, r.Record);
+        Assert.Equal(TransactionDecision.Abort, r.Record!.Decision);
+    }
+
+    [Fact]
+    public void ExtendDeadline_FromAbsent_Rejected()
+    {
+        // A renewal never creates a record: there is no lease to renew before the initialization landed.
+        TransactionRecordApplyResult r = TransactionRecordStateMachine.Apply(null, Extend(Hash(Manifest(), Ts(2000)), Ts(15000), attempt: Ts(3000)));
+
+        Assert.Equal(TransactionApplyOutcome.Rejected, r.Outcome);
+        Assert.Null(r.Record);
+    }
+
+    [Fact]
+    public void ExtendDeadline_MismatchedManifest_Rejected()
+    {
+        TransactionRecord rec = TransactionRecordStateMachine.Apply(null, Init(Ts(2000), Ts(9000))).Record!;
+
+        TransactionRecordApplyResult r = TransactionRecordStateMachine.Apply(rec, Extend(rec.ManifestHash + 1, Ts(15000), attempt: Ts(3000)));
+
+        Assert.Equal(TransactionApplyOutcome.Rejected, r.Outcome);
+        Assert.Same(rec, r.Record);
+    }
+
+    [Fact]
+    public void ExtendDeadline_RoundTripsThroughTheReplicatedDelta()
+    {
+        // The renewal is a replicated record transition: encoded into a delta, decoded by the store's apply, and
+        // reflected on the record every replica converges to.
+        TransactionRecordStore store = new();
+        InitializeTransactionCommand init = Init(Ts(2000), Ts(9000));
+        store.Apply(init);
+
+        store.Replicate(0, new Kommander.Data.RaftLog
+        {
+            LogType = Replication.ReplicationTypes.TransactionRecord,
+            LogData = TransactionRecordStore.SerializeDelta([Extend(init.ManifestHash, Ts(15000), attempt: Ts(8000))])
+        });
+
+        Assert.Equal(Ts(15000), store.Get(TxId, Epoch)!.DecisionDeadline);
+        Assert.Equal(TransactionDecision.Undecided, store.Get(TxId, Epoch)!.Decision);
+    }
 }

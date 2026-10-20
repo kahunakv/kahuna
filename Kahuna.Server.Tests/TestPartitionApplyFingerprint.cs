@@ -132,8 +132,8 @@ public sealed class TestPartitionApplyFingerprint : BaseCluster
                 r => r.Item1);
             Assert.Equal(KeyValueResponseType.Set, setType);
 
-            (KeyValueResponseType commitType, _) = await RetryOnMustRetryAsync(
-                () => dataLeader.LocateAndCommitTransaction(handle, ct), r => r.Item1);
+            (KeyValueResponseType commitType, string? _) = await RetryOnMustRetryAsync(
+                () => dataLeader.LocateAndCommitTransaction(handle, ct), r => r.Type);
             Assert.Equal(KeyValueResponseType.Committed, commitType);
         }
 

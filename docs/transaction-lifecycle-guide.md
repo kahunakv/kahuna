@@ -261,6 +261,28 @@ commit had already applied under the ordered log (`…{outcome=committed}`). A r
 that arrives with its deadline already behind the attempt clock is concluded the same way before any
 prepare is re-driven (`kahuna.durable_tx.retries_past_deadline`).
 
+**The deadline is a lease a live coordinator renews.** A finalize that is alive and inside a productive
+wait — its prepare refused only by predecessors whose records are already decided and whose intents are
+still settling, or a prepare and validation that consumed most of the margin — proposes an
+`ExtendDecisionDeadline` transition on the canonical record, moving the deadline to *now + the frozen
+margin*. The record accepts it only while the lease is still held (the renewing attempt's HLC has not
+passed the current deadline) and only forward, so a dead coordinator is presumed aborted exactly as before
+and a lapsed lease cannot be revived. A renewal is sent only when less than half of the lease remains, so a
+healthy commit never pays the extra record round; each attempt renews at most
+`DurableDecisionDeadlineMaxExtensions` times (0 disables renewal, which a mixed-version rollout needs because
+an older node cannot decode the transition). The recovery sweep reads the deadline off the record, so a
+renewed record is left alone until the renewed deadline. `kahuna.durable_tx.deadline_extensions{outcome}`
+counts the renewals.
+
+**Settlement lag never records an abort.** The prepare retry loop (§6.3) reads the helping pass's report:
+when every holder of a refused key is a transaction whose record is already terminal, the wait is finite
+and the loop is bounded by the (renewed) deadline instead of its eight rounds. If the deadline still
+arrives, the attempt answers `MustRetry` with class `SettlementLag` — nothing durable is decided, the record
+stays `Undecided`, the prepares stay installed for a same-identity retry
+(`kahuna.durable_tx.prepare_retry_loops{outcome=deadline_lapsed}`). A holder that is still undecided is a
+live conflict and keeps the eight-round budget, after which the loop records the abort with class
+`PrepareExhausted` and logs a warning naming the transaction, its intent count and what held its keys.
+
 ### 6.6 Session ownership and routing
 
 An interactive session lives on the node that began it — the leader of its coordinator key's partition at
@@ -393,11 +415,11 @@ intent with resolution `Pending`**. Anything touching that key in the window mus
 | Point read / exists | `DurableReadVisibility` → `PreparedIntentVisibility`. Committed intent → serve the intent's value (a committed *delete* or an expired value reads as does-not-exist); aborted → ignore; **undecided → wait**. |
 | Range / bucket scan | The scan overlays the intent window and resolves the whole set at once via `TryRouteForeignScanDecisions` + `DurableReadVisibility.ScanDecision`. |
 | First transactional read of the key (no MVCC entry yet) | Does not answer from the overlay: it records its MVCC pin from the committed intent (`DurableSnapshotSource`), exactly as a transactional scan does, so a competing commit that lands afterwards makes the transaction's next read or write of the key answer `Aborted` early rather than only failing read-set validation at commit. Undecided → wait. |
-| Write (set/delete/extend) | `ForeignIntentWriteResolver` materializes a committed intent into the entry *before* the write derives its next revision, flags and existence checks. Undecided → retryable. |
+| Write (set/delete/extend) | `ForeignIntentWriteResolver` materializes a committed intent into the entry *before* the write derives its next revision, flags and existence checks. Undecided → `WaitingForReplication` naming the holder: lag, not a lock conflict (the holder is inside its decision window and waits on no one), so a client can give it a longer budget than a deadlock wait. The same answer covers a live write intent whose owner is already durably decided and only waiting for its settlement to clear it; a live undecided write intent, a prefix lock and a foreign range lock keep `MustRetry`. |
 | Any read after a later write moved the head past the intent | A non-transactional write does not wait for settlement: it materializes the committed intent and writes the next revision, and the intent lingers until settled. A head **strictly newer** than the intent wins everywhere — point reads (latest and snapshot; a persistent cache miss loads the head first), transactional pins, and scans (a newer row stands, and a newer delete stays deleted) — so a client never reads back the value its own write replaced. An equal revision is not proof (an extend reuses it), so there the intent is served. |
-| Point lock acquire | Resolved exactly like a write before the lock is granted: a committed intent is materialized into the entry, so the new holder never holds a key whose committed head it cannot see; undecided → `WaitingForReplication`, which the acquire loop waits out (routing the holder's decision when it is not local). |
+| Point lock acquire | Resolved exactly like a write before the lock is granted: a committed intent is materialized into the entry, so the new holder never holds a key whose committed head it cannot see; undecided → `WaitingForReplication`, which the acquire loop waits out (routing the holder's decision when it is not local). A wait budget that runs out answers `WaitingForReplication` too, never `MustRetry`. |
 | Transactional read that already holds its own MVCC entry on the key | Skips the overlay (its own view is authoritative), but if a committed intent is newer than the resident entry, the pin is behind the committed head and the read answers `Aborted` — the same answer it gives once the entry has advanced. It never returns the pinned pre-commit value. |
-| A new transaction's prepare | Blocked (one live intent per key) until the predecessor settles — absorbed by the bounded prepare retry in §6.3. |
+| A new transaction's prepare | Blocked (one live intent per key) until the predecessor settles — absorbed by the prepare retry in §6.3, which a decided predecessor bounds by the decision deadline (renewed while the wait lasts, §6.4) and a live one by eight rounds. |
 
 **Settlement never erases another transaction's lock state.** A commit that settles after it released its own
 intent can land on a key that another transaction has since locked and read. The apply advances the entry,
@@ -531,6 +553,15 @@ Every path maps onto three outcomes, and the distinction is load-bearing:
 | **`MustRetry`** | This attempt did not establish a terminal outcome; or a script whose lock or staging was dropped by a leader change (its run was durably aborted, and a re-run is a new transaction) | Interactive finalize: retry with the same identity; a script: re-run the script |
 | `Errored` / `InvalidInput` | Malformed input or an internal error | Fix the request |
 
+The commit answer (`TransactionCommitAnswer` from `LocateAndCommitTransaction`, and the `Refusal` / `Reason`
+fields of the gRPC and REST commit replies) also names **which arm refused** through `CommitRefusalClass`:
+`Conflict`, `StagedBaseMoved`, `DecisionDeadline`, `PrepareExhausted`, `LostLock`, `LostStagedIntent`,
+`StagedChainBreak`, `PresumedAbort`, `ExplicitRollback`, `InvalidWorkingSet` or `Faulted` on an `Aborted`;
+`SettlementLag`, `Unresolved` or `AdmissionCapacity` on a `MustRetry`; `UnknownTransaction` on an `Errored`.
+The answer deconstructs to the `(type, anchor)` pair it answered before the class existed, so a caller that
+only reads the outcome is unchanged; the client SDK puts the class and reason in the exception message of a
+refused commit.
+
 Admission and unresolved infrastructure failures are retryable rather than fabricated conflicts.
 `MustRetry` does **not** prove that no record or prepare was replicated: a frozen durable finalize may
 have initialized its record and prepared some participants. Retry its finalize with the same identity;
@@ -561,7 +592,8 @@ whole script. A script that ends by its own control flow (`ROLLBACK`, `RETURN`, 
 
 Observability: `kahuna.durable_tx.resident_prepared_intents`, `…resident_prepared_intent_bytes`,
 `…outstanding`, `…resident_records`, `…admission_rejections`, `…late_commit_rejections`,
-`…late_commit_conclusions{outcome}`, `…retries_past_deadline{outcome}`,
+`…late_commit_conclusions{outcome}`, `…retries_past_deadline{outcome}`, `…deadline_extensions{outcome}`,
+`…prepare_retry_loops{outcome}`,
 `…replica_fence_lagging_replicas`, `…replica_fence_lag_transitions{state,reason}`, `…replica_fence_lagging_asks{kind}`.
 
 ---

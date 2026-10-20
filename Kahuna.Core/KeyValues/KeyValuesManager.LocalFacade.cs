@@ -224,7 +224,7 @@ internal sealed partial class KeyValuesManager
     /// <summary>The durable-2PC maintenance service, for tests that drive or observe the retention budget.</summary>
     internal DurableMaintenanceService DurableMaintenance => durableMaintenance;
 
-    internal Task<int> TryResolveDecidedDurableBlockersAsync(
+    internal Task<BlockerHelpResult> TryResolveDecidedDurableBlockersAsync(
         int partitionId, IReadOnlyList<PreparedIntent> intents, HLCTimestamp transactionId, long epoch, CancellationToken cancellationToken) =>
         durableMaintenance.TryResolveDecidedDurableBlockersAsync(partitionId, intents, transactionId, epoch, cancellationToken);
 
@@ -357,7 +357,7 @@ internal sealed partial class KeyValuesManager
     public Task<(KeyValueResponseType, TransactionHandle)> LocateAndStartTransaction(KeyValueTransactionOptions options, CancellationToken cancellationToken) =>
         transactionSessions.LocateAndStartTransaction(options, cancellationToken);
 
-    public Task<(KeyValueResponseType, string?)> LocateAndCommitTransaction(TransactionHandle handle, CancellationToken cancellationToken) =>
+    public Task<TransactionCommitAnswer> LocateAndCommitTransaction(TransactionHandle handle, CancellationToken cancellationToken) =>
         transactionSessions.LocateAndCommitTransaction(handle, cancellationToken);
 
     public Task<TransactionWorkingSet?> LocateAndGetTransactionWorkingSet(string coordinatorKey, HLCTimestamp transactionId, CancellationToken cancellationToken) =>
@@ -387,7 +387,7 @@ internal sealed partial class KeyValuesManager
     internal int? GetRecordedSessionTimeout(HLCTimestamp transactionId) =>
         transactionSessions.GetRecordedSessionTimeout(transactionId);
 
-    public Task<(KeyValueResponseType, string?)> CommitTransaction(TransactionHandle handle) =>
+    public Task<TransactionCommitAnswer> CommitTransaction(TransactionHandle handle) =>
         transactionSessions.CommitTransaction(handle);
 
     public Task<KeyValueResponseType> RollbackTransaction(TransactionHandle handle) =>

@@ -1746,7 +1746,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         );
     }
 
-    public async Task<(KeyValueResponseType, string?)> CommitTransaction(string node, TransactionHandle handle, CancellationToken cancellationToken)
+    public async Task<TransactionCommitAnswer> CommitTransaction(string node, TransactionHandle handle, CancellationToken cancellationToken)
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);
 
@@ -1770,13 +1770,16 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             // preserves that indeterminacy: the commit path is idempotent and a retry (carrying the
             // record anchor when one exists) consults the session or the durable decision to
             // resolve the true outcome. Hand the caller's own anchor back so the retry keeps it.
-            return (KeyValueResponseType.MustRetry, handle.RecordAnchorKey);
+            return new TransactionCommitAnswer(KeyValueResponseType.MustRetry, handle.RecordAnchorKey, CommitRefusalClass.Unresolved, "The forwarded commit was not answered");
         }
 
         GrpcCommitTransactionResponse remoteResponse = response.CommitTransaction!;
 
-
-        return ((KeyValueResponseType)remoteResponse.Type, remoteResponse.HasRecordAnchorKey ? remoteResponse.RecordAnchorKey : null);
+        return new TransactionCommitAnswer(
+            (KeyValueResponseType)remoteResponse.Type,
+            remoteResponse.HasRecordAnchorKey ? remoteResponse.RecordAnchorKey : null,
+            (CommitRefusalClass)remoteResponse.Refusal,
+            remoteResponse.HasReason ? remoteResponse.Reason : null);
     }
 
     public async Task<KeyValueResponseType> RollbackTransaction(string node, TransactionHandle handle, CancellationToken cancellationToken)

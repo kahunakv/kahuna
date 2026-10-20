@@ -1678,7 +1678,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         throw Unreachable(node);
     }
 
-    public async Task<(KeyValueResponseType, string?)> CommitTransaction(string node, TransactionHandle handle, CancellationToken cancellationToken)
+    public async Task<TransactionCommitAnswer> CommitTransaction(string node, TransactionHandle handle, CancellationToken cancellationToken)
     {
         if (TryGetNode(node, out IKahuna? kahunaNode))
         {

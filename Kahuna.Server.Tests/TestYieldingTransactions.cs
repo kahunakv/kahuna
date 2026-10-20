@@ -172,10 +172,10 @@ public sealed class TestYieldingTransactions
         // The foreground transaction takes the key over and commits.
         TransactionHandle foreground = await StartTx(kahuna, "yield/blind/1/n", TransactionConflictPolicy.Normal, KeyValueTransactionLocking.Pessimistic, ct);
         Assert.Equal(KeyValueResponseType.Set, (await Set(kahuna, foreground, key, "winner", ct)).Item1);
-        Assert.Equal(KeyValueResponseType.Committed, (await kahuna.LocateAndCommitTransaction(foreground, ct)).Item1);
+        Assert.Equal(KeyValueResponseType.Committed, (await kahuna.LocateAndCommitTransaction(foreground, ct)).Type);
 
         // The yielding commit aborts at the pin even though it never re-touched the key.
-        Assert.Equal(KeyValueResponseType.Aborted, (await kahuna.LocateAndCommitTransaction(yielding, ct)).Item1);
+        Assert.Equal(KeyValueResponseType.Aborted, (await kahuna.LocateAndCommitTransaction(yielding, ct)).Type);
 
         (KeyValueResponseType readType, ReadOnlyKeyValueEntry? entry) = await kahuna.LocateAndTryGetValue(
             HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
@@ -257,7 +257,7 @@ public sealed class TestYieldingTransactions
 
         TransactionHandle yielding = await StartTx(kahuna, "yield/clean/1/y", TransactionConflictPolicy.Yield, KeyValueTransactionLocking.Pessimistic, ct);
         Assert.Equal(KeyValueResponseType.Set, (await Set(kahuna, yielding, key, "kept", ct)).Item1);
-        Assert.Equal(KeyValueResponseType.Committed, (await kahuna.LocateAndCommitTransaction(yielding, ct)).Item1);
+        Assert.Equal(KeyValueResponseType.Committed, (await kahuna.LocateAndCommitTransaction(yielding, ct)).Type);
 
         (KeyValueResponseType readType, ReadOnlyKeyValueEntry? entry) = await kahuna.LocateAndTryGetValue(
             HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
@@ -304,10 +304,11 @@ public sealed class TestYieldingTransactions
 
         // A foreground acquire now meets a pinned intent. It is told to wait, not denied: it never takes the
         // key over, and it never reports AlreadyLocked. Its bounded wait then expires with the retryable
-        // MustRetry, because the yielding transaction's decision has not landed yet.
+        // WaitingForReplication — the yielding transaction's decision has not landed yet, which is lag the
+        // caller may give a longer budget than a lock conflict, never the MustRetry a live holder answers.
         TransactionHandle foreground = await StartTx(kahuna, key + "/n", TransactionConflictPolicy.Normal, KeyValueTransactionLocking.Pessimistic, ct);
         (KeyValueResponseType waitingType, _, _, _) = await Acquire(kahuna, foreground, key, ct);
-        Assert.Equal(KeyValueResponseType.MustRetry, waitingType);
+        Assert.Equal(KeyValueResponseType.WaitingForReplication, waitingType);
 
         // The yielding transaction's decision lands (here, a rollback releases the pinned intent).
         Assert.Equal(KeyValueResponseType.RolledBack, await kahuna.LocateAndRollbackTransaction(yielding, ct));

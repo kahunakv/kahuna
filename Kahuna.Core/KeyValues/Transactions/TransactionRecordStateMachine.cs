@@ -50,6 +50,10 @@ internal readonly record struct TransactionRecordApplyResult(
 /// Commit            --Abort--------------------> rejected
 /// Abort             --Commit-------------------> rejected
 /// Undecided         --Commit(AttemptHlc>deadline)-> rejected     (a late commit yields to presumed-abort recovery)
+/// Undecided         --ExtendDeadline(new>cur, AttemptHlc<=cur)-> Undecided (deadline moved forward: a lease renewal)
+/// Undecided         --ExtendDeadline(new<=cur)-> Undecided        (idempotent: never shortens)
+/// Undecided         --ExtendDeadline(AttemptHlc>cur)-> rejected   (a lapsed lease cannot be renewed)
+/// absent|Commit|Abort--ExtendDeadline------------> rejected
 /// any               --* with mismatched (TxnId,Epoch,ManifestHash)-> rejected (invariant violation)
 /// </code>
 /// </summary>
@@ -61,6 +65,7 @@ internal static class TransactionRecordStateMachine
             InitializeTransactionCommand init => ApplyInitialize(existing, init),
             CommitTransactionCommand commit => ApplyCommit(existing, commit),
             AbortTransactionCommand abort => ApplyAbort(existing, abort),
+            ExtendDecisionDeadlineCommand extend => ApplyExtendDeadline(existing, extend),
             PurgeTransactionCommand purge => ApplyPurge(existing, purge),
             _ => Rejected(existing, "unknown command")
         };
@@ -200,6 +205,38 @@ internal static class TransactionRecordStateMachine
                 };
 
                 return Applied(aborted);
+        }
+    }
+
+    private static TransactionRecordApplyResult ApplyExtendDeadline(TransactionRecord? existing, ExtendDecisionDeadlineCommand extend)
+    {
+        if (existing is null)
+            return Rejected(null, "deadline extension cannot create a record from absence");
+
+        if (!IdentityMatches(existing, extend.TransactionId, extend.Epoch, extend.ManifestHash, out string? reason))
+            return Rejected(existing, reason);
+
+        switch (existing.Decision)
+        {
+            case TransactionDecision.Commit:
+                return Rejected(existing, "deadline extension after commit");
+
+            case TransactionDecision.Abort:
+                return Rejected(existing, "deadline extension after abort");
+
+            case TransactionDecision.Undecided:
+            default:
+                // A lease can only be renewed while it is held: an attempt that already passed the current
+                // deadline lost to presumed-abort recovery by design, and renewing it here would let a commit
+                // land that the deadline gate was meant to refuse. Compared by HLC, never a local clock.
+                if (extend.AttemptHlc > existing.DecisionDeadline)
+                    return Rejected(existing, "deadline extension past decision deadline");
+
+                // The deadline never moves backwards: a replay, or a renewal that lost to a later one, changes nothing.
+                if (extend.NewDeadline <= existing.DecisionDeadline)
+                    return IdempotentNoop(existing);
+
+                return Applied(existing with { DecisionDeadline = extend.NewDeadline });
         }
     }
 

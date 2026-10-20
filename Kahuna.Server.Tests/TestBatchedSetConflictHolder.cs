@@ -170,8 +170,9 @@ public sealed class TestBatchedSetConflictHolder : BaseCluster
 
     /// <summary>
     /// Under deferred settlement a committed-but-undecided durable intent blocks a write before the in-memory
-    /// intent check runs. The blocked item names the intent's transaction, so a caller waiting behind a
-    /// prepare that has not yet decided can apply the same policy it applies to a live lock.
+    /// intent check runs. The blocked item names the intent's transaction and answers the wait it is
+    /// (WaitingForReplication, not the MustRetry a live lock answers): the holder is inside its decision window
+    /// and waits on no one, so the caller may give it a longer budget than a deadlock wait.
     /// </summary>
     [Fact]
     public async Task BatchedSet_OverUndecidedDurableIntent_NamesTheIntentOwner()
@@ -194,7 +195,7 @@ public sealed class TestBatchedSetConflictHolder : BaseCluster
             [SetItem(key, WriterTransaction)], ct);
 
         KahunaSetKeyValueResponseItem blocked = Assert.Single(responses);
-        Assert.Equal(KeyValueResponseType.MustRetry, blocked.Type);
+        Assert.Equal(KeyValueResponseType.WaitingForReplication, blocked.Type);
         Assert.Equal(HolderTransaction, blocked.HolderTransactionId);
     }
 

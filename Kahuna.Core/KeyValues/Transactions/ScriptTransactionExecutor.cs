@@ -692,7 +692,8 @@ internal sealed class ScriptTransactionExecutor
                     return new()
                     {
                         Type = aborted.ExclusionLost ? KeyValueResponseType.MustRetry : KeyValueResponseType.Aborted,
-                        Reason = aborted.Reason ?? "Transaction aborted"
+                        Reason = aborted.Reason ?? "Transaction aborted",
+                        Refusal = aborted.Refusal
                     };
 
                 return context.Result ?? new() { Type = KeyValueResponseType.Errored };

@@ -205,7 +205,7 @@ public sealed class TestDurableFinalizeLeaderChange : BaseCluster
 
             using HeldCommitReplies holds = new(rafts[leader], partition);
 
-            Task<(KeyValueResponseType, string?)> commit = session.LocateAndCommitTransaction(handle, ct);
+            Task<TransactionCommitAnswer> commit = session.LocateAndCommitTransaction(handle, ct);
 
             // The record reaching Commit while the FIRST reply on this partition is still held is what proves
             // the bundle: a two-phase finalize's first proposal carries only the record initialize and the
@@ -299,7 +299,7 @@ public sealed class TestDurableFinalizeLeaderChange : BaseCluster
             // Let the anchor bundle (record initialize + prepare) answer, and hold the decision that follows it.
             using HeldCommitReplies holds = new(rafts[leader], anchorPartition, releaseFirst: 1);
 
-            Task<(KeyValueResponseType, string?)> commit = session.LocateAndCommitTransaction(handle, ct);
+            Task<TransactionCommitAnswer> commit = session.LocateAndCommitTransaction(handle, ct);
 
             await WaitUntilAsync(() =>
                 managers[leader].DurableTransactionRecordStore.Get(handle.TransactionId, 1)?.Decision == TransactionDecision.Commit,
@@ -387,7 +387,7 @@ public sealed class TestDurableFinalizeLeaderChange : BaseCluster
 
             using HeldCommitReplies holds = new(rafts[leader], anchorPartition);
 
-            Task<(KeyValueResponseType, string?)> commit = session.LocateAndCommitTransaction(handle, ct);
+            Task<TransactionCommitAnswer> commit = session.LocateAndCommitTransaction(handle, ct);
 
             // The anchor bundle applied — the intent is pending and the record exists — and its reply is held, so
             // the finalize is stuck before its decision. The record still reads Undecided, which is what

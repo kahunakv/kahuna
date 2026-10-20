@@ -166,7 +166,7 @@ public interface IInterNodeCommunication
     
     public Task<(KeyValueResponseType, TransactionHandle)> StartTransaction(string node, KeyValueTransactionOptions options, CancellationToken cancellationToken);
 
-    public Task<(KeyValueResponseType, string?)> CommitTransaction(string node, TransactionHandle handle, CancellationToken cancellationToken);
+    public Task<TransactionCommitAnswer> CommitTransaction(string node, TransactionHandle handle, CancellationToken cancellationToken);
 
     public Task<KeyValueResponseType> RollbackTransaction(string node, TransactionHandle handle, CancellationToken cancellationToken);
 

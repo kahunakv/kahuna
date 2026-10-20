@@ -158,8 +158,8 @@ public sealed class TestStaleLeaderActorMutationFence : BaseCluster
                 r => r.Item1);
             Assert.Equal(KeyValueResponseType.Set, liveSet);
 
-            (KeyValueResponseType commitType, _) = await RetryOnMustRetryAsync(
-                () => live.LocateAndCommitTransaction(handle, ct), r => r.Item1);
+            (KeyValueResponseType commitType, string? _) = await RetryOnMustRetryAsync(
+                () => live.LocateAndCommitTransaction(handle, ct), r => r.Type);
             Assert.Equal(KeyValueResponseType.Committed, commitType);
 
             // The acknowledged write is on every reachable replica, not only on the node that answered.

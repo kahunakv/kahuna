@@ -718,9 +718,9 @@ public static class KeyValuesHandlers
             // session is gone, so a retry that supplies it resolves the outcome instead of erroring.
             TransactionHandle handle = new(request.TransactionId, request.CoordinatorKey, request.RecordAnchorKey);
 
-            (KeyValueResponseType type, string? recordAnchorKey) = await keyValues.LocateAndCommitTransaction(handle, cancellationToken);
+            TransactionCommitAnswer answer = await keyValues.LocateAndCommitTransaction(handle, cancellationToken);
 
-            return new KahunaCommitTransactionResponse { Type = type, RecordAnchorKey = recordAnchorKey };
+            return new KahunaCommitTransactionResponse { Type = answer.Type, RecordAnchorKey = answer.RecordAnchorKey, Refusal = answer.Refusal, Reason = answer.Reason };
         });
 
         app.MapPost("/v1/kv/rollback-tx-session", async (KahunaCommitTransactionRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>

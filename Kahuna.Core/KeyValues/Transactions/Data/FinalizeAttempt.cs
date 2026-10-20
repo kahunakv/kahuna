@@ -5,15 +5,23 @@ namespace Kahuna.Server.KeyValues.Transactions.Data;
 
 /// <summary>
 /// The result of a single finalize (commit / rollback / reap) attempt on a session. Carries the response
-/// type the caller reports and, for a commit, the transaction's immutable record anchor. A terminal
+/// type the caller reports, for a commit the transaction's immutable record anchor, and for a refused commit
+/// the refusal class and the coordinator's reason, so the answer names the arm that refused. A terminal
 /// outcome (anything other than <see cref="KeyValueResponseType.MustRetry"/>) is retained and mirrored to
 /// concurrent finalizers; a <see cref="KeyValueResponseType.MustRetry"/> is non-terminal and releases the
 /// finalize slot so a later call can run a fresh attempt.
 /// </summary>
-internal readonly record struct FinalizeOutcome(KeyValueResponseType Type, string? RecordAnchorKey)
+internal readonly record struct FinalizeOutcome(
+    KeyValueResponseType Type,
+    string? RecordAnchorKey,
+    CommitRefusalClass Refusal = CommitRefusalClass.None,
+    string? Reason = null)
 {
     /// <summary>True when this outcome is a final answer that must be retained rather than retried.</summary>
     internal bool IsTerminal => Type != KeyValueResponseType.MustRetry;
+
+    /// <summary>The outcome as the commit entry point answers it.</summary>
+    internal TransactionCommitAnswer ToAnswer() => new(Type, RecordAnchorKey, Refusal, Reason);
 }
 
 /// <summary>

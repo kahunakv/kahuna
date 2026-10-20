@@ -887,11 +887,11 @@ internal sealed class DurableMaintenanceService
     /// partition leadership exactly like the recovery sweep — a non-leader's local intent store is not
     /// authoritative, and its replicate seam could not apply the settle delta anyway.
     /// </summary>
-    internal async Task<int> TryResolveDecidedDurableBlockersAsync(
+    internal async Task<BlockerHelpResult> TryResolveDecidedDurableBlockersAsync(
         int partitionId, IReadOnlyList<PreparedIntent> intents, HLCTimestamp transactionId, long epoch, CancellationToken cancellationToken)
     {
         if (raft.Joined && !await raft.AmILeaderIfHosted(partitionId, cancellationToken).ConfigureAwait(false))
-            return 0;
+            return BlockerHelpResult.NotInspected;
 
         DurableTransactionRecovery recovery = durableBlockerRecovery ??= BuildPreparedIntentRecovery();
         return await recovery.TryResolveDecidedBlockersAsync(partitionId, intents, transactionId, epoch, cancellationToken).ConfigureAwait(false);
@@ -911,7 +911,7 @@ internal sealed class DurableMaintenanceService
             return 0;
 
         DurableTransactionRecovery recovery = durableBlockerRecovery ??= BuildPreparedIntentRecovery();
-        return await recovery.TryResolveDecidedBlockersAsync(partitionId, keys, transactionId, requestingEpoch: null, cancellationToken).ConfigureAwait(false);
+        return (await recovery.TryResolveDecidedBlockersAsync(partitionId, keys, transactionId, requestingEpoch: null, cancellationToken).ConfigureAwait(false)).Settled;
     }
 
     // The drain below must leave the caller's 30-second quiesce window enough room for the catch-up

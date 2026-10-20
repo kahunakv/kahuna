@@ -14,6 +14,13 @@ public sealed class KeyValueTransactionResult
     public string? Reason { get; set; }
 
     /// <summary>
+    /// Why an <see cref="KeyValueResponseType.Aborted"/> or <see cref="KeyValueResponseType.MustRetry"/> result
+    /// refused the commit — the arm of the coordinator that refused, carried to the client beside
+    /// <see cref="Reason"/>. <see cref="CommitRefusalClass.None"/> for every other result.
+    /// </summary>
+    public CommitRefusalClass Refusal { get; set; }
+
+    /// <summary>
     /// True when an <see cref="KeyValueResponseType.Aborted"/> result refused the commit because a lock or a
     /// staging the transaction relied on was dropped by a partition leader change, not because of a conflict
     /// with another transaction (<see cref="TransactionAbortClass.LostExclusion"/>). An interactive session

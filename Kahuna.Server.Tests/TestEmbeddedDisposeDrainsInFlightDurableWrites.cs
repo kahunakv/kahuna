@@ -107,7 +107,7 @@ public sealed class TestEmbeddedDisposeDrainsInFlightDurableWrites
         // flight.
         holder.Arm();
 
-        Task<(KeyValueResponseType, string?)> commit = node.Kahuna.LocateAndCommitTransaction(handle, ct);
+        Task<TransactionCommitAnswer> commit = node.Kahuna.LocateAndCommitTransaction(handle, ct);
 
         await holder.Held.Task.WaitAsync(TimeSpan.FromSeconds(10), ct);
 

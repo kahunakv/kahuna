@@ -1072,6 +1072,10 @@ message GrpcCommitTransactionResponse
   optional string ServedFrom = 1;
   GrpcKeyValueResponseType Type = 2;
   optional string RecordAnchorKey = 3;
+  // Why the commit was refused (Kahuna's CommitRefusalClass), 0 when it was not refused or the answering node
+  // predates the field. Carried as an integer so a newer node can name a class an older one does not know.
+  int32 Refusal = 4;
+  optional string Reason = 5;
 }
 
 message GrpcRollbackTransactionResponse
@@ -1866,6 +1870,10 @@ enum GrpcKeyValueResponseType {
   TYPE_COMMITTED = 8;
   TYPE_ROLLEDBACK = 9;
   TYPE_EXISTS = 10;
+  // Lag, not a lock conflict: a replication intent in flight, a foreign durable intent whose decision is
+  // pending, or a holder already decided and still settling. Retry it; it clears on its own and a client may
+  // give it a longer budget than a deadlock wait.
+  TYPE_WAITING_FOR_REPLICATION = 11;
   TYPE_ERRORED = 99;
   TYPE_INVALID_INPUT = 100;
   TYPE_MUST_RETRY = 101;

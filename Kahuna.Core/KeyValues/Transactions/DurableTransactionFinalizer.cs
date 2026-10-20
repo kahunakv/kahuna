@@ -1,9 +1,11 @@
 using System.Diagnostics;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kahuna.Shared.KeyValue;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
 using Kommander.Data;
 using Kommander.Time;
+using Microsoft.Extensions.Logging;
 
 namespace Kahuna.Server.KeyValues.Transactions;
 
@@ -54,12 +56,19 @@ internal enum StagedBaseValidation
     Unknown
 }
 
-/// <summary>The outcome of a finalize attempt, already mapped to the MustRetry/Aborted result contract: only a
-/// conflict-class abort is <see cref="DurableFinalizeResult.Aborted"/>; every other abort and every
-/// infrastructural failure is <see cref="DurableFinalizeResult.MustRetry"/>.
-/// <para><paramref name="LateCommitRejected"/> marks a <see cref="DurableFinalizeResult.MustRetry"/> whose commit
-/// request the record's deadline gate withheld (the attempt HLC passed the frozen decision deadline), so the
-/// coordinator can count that cause once per transaction rather than once per retried attempt.</para></summary>
+/// <summary>The outcome of a finalize attempt, mapped to the result contract: a durable abort is
+/// <see cref="DurableFinalizeResult.Aborted"/> whatever its class (the record decides once and a later commit
+/// against it is rejected), and every attempt that reached no record-backed outcome is
+/// <see cref="DurableFinalizeResult.MustRetry"/>.
+/// <para><paramref name="LateCommitRejected"/> marks an attempt whose commit request the record's deadline gate
+/// withheld (the attempt HLC passed the frozen decision deadline), so the coordinator can count that cause once
+/// per transaction rather than once per retried attempt.</para>
+/// <para><paramref name="Refusal"/> and <paramref name="Reason"/> name the arm that refused the commit, for the
+/// client-facing answer; <see cref="CommitRefusalClass.None"/> on a commit.</para>
+/// <para><paramref name="DecisionDeadline"/> is the decision deadline in force when the attempt ended — the
+/// frozen one, or the last extension the record accepted — so a same-identity retry compares its attempt
+/// clock against the deadline the record actually holds. <see cref="HLCTimestamp.Zero"/> when the attempt
+/// never extended it.</para></summary>
 internal readonly record struct DurableFinalizeOutcome(
     DurableFinalizeResult Result,
     TransactionAbortClass AbortClass,
@@ -67,7 +76,10 @@ internal readonly record struct DurableFinalizeOutcome(
     // True when Result was read from the canonical record after the decision applied (locally on the anchor
     // leader, or from the anchor leader's typed answer), so the resolution can take its direction from it
     // without a second canonical read.
-    bool CanonicalDecisionRead = false);
+    bool CanonicalDecisionRead = false,
+    CommitRefusalClass Refusal = CommitRefusalClass.None,
+    string? Reason = null,
+    HLCTimestamp DecisionDeadline = default);
 
 /// <summary>
 /// Drives one transaction's finalize under the durable-intent 2PC model: initialize the canonical
@@ -83,11 +95,16 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     // cannot multiply their individual fan-out into an unbounded actor-inbox flood.
     internal const int MaxConcurrentLocalApplies = 32;
 
-    // A prepare rejected only because the key still holds a predecessor's committed-but-unsettled intent (deferred
-    // settlement removes it a moment later) is retryable in place — re-prepare the set a few times before conceding,
-    // so a healthy commit is not aborted merely because background settlement had not caught up. Small: the blocking
-    // intent settles within a few ms and the frozen decision deadline is the real ceiling.
+    // A prepare refused because another transaction's intent holds the key is retryable in place: the set is
+    // re-prepared a bounded number of rounds before conceding. The bound applies to a live conflict — a holder
+    // whose decision is still pending, or one the helping pass could not classify — so a mutual wait between two
+    // finalizes breaks quickly. Settlement lag (every holder already decided, only waiting to settle) is bounded
+    // by the decision deadline instead; see the retry loop in FinalizeAsync.
     private const int MaxPrepareRetries = 8;
+
+    // A renewal is sent once less than this fraction of the lease remains: late enough that a healthy finalize
+    // never pays the extra record round, early enough that a renewal round trip lands before the lease lapses.
+    private const int LeaseRenewalDivisor = 2;
 
     private readonly SemaphoreSlim localApplyGate;
 
@@ -139,10 +156,11 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
     /// <summary>Settles foreign intents blocking <paramref name="intents"/>' keys on <paramref name="partitionId"/>
     /// whose canonical record is already terminal (decided but not yet settled — settlement lag, not a live
-    /// conflict), returning how many were settled. Wired to
+    /// conflict), and reports what held the keys: how many were settled, how many holders are decided, how many
+    /// are still undecided, and whether the pass could look at all. Wired to
     /// <see cref="DurableTransactionRecovery.TryResolveDecidedBlockersAsync"/>; null disables the helping pass and
     /// keeps the pure backoff-retry behaviour (bare protocol tests, or a deployment that opts out).</summary>
-    public delegate Task<int> ResolveDecidedBlockersDelegate(
+    public delegate Task<BlockerHelpResult> ResolveDecidedBlockersDelegate(
         int partitionId, IReadOnlyList<PreparedIntent> intents, HLCTimestamp transactionId, long epoch, CancellationToken cancellationToken);
 
     /// <summary>Proposes [record init + anchor prepare + commit decision] as ONE atomic durable batch on the
@@ -273,6 +291,15 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     // without installing, which loses the write on that node.
     private readonly bool materializeOnResolve;
 
+    // How many times one attempt may renew the record's decision-deadline lease (0 disables renewal). Each
+    // renewal is a record transition an older node cannot decode, so a mixed-version group runs with 0 (see the
+    // configuration flag's upgrade order).
+    private readonly int maxDeadlineExtensions;
+
+    // Names the arms that refuse a commit without any other trace: the deadline gate and the exhausted prepare
+    // loop. Null in bare protocol tests.
+    private readonly ILogger? logger;
+
     public DurableTransactionFinalizer(
         TransactionRecordStore recordStore,
         // Applied by the ordered scheduler-completion path (the single apply owner), never mutated by the
@@ -298,10 +325,14 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         bool materializeByReference = false,
         SemaphoreSlim? localApplyGate = null,
         DecideDelegate? decide = null,
-        bool materializeOnResolve = false)
+        bool materializeOnResolve = false,
+        int maxDeadlineExtensions = 0,
+        ILogger? logger = null)
     {
         this.decide = decide;
         this.materializeOnResolve = materializeOnResolve;
+        this.maxDeadlineExtensions = Math.Max(0, maxDeadlineExtensions);
+        this.logger = logger;
         // A node-shared gate bounds local applies across the finalizer and its recovery paths together; a
         // finalizer built without one (protocol tests) bounds only itself.
         this.localApplyGate = localApplyGate ?? new SemaphoreSlim(MaxConcurrentLocalApplies);
@@ -429,7 +460,8 @@ internal sealed class DurableTransactionFinalizer : IDisposable
                     // exists yet), never fabricated: a prior attempt of this same frozen input may have left a
                     // decision proposal in flight, and only a record-backed abort fences it out.
                     DurableFinalizeOutcome conflictOutcome = await DecideAsync(
-                        input, commit: false, TransactionAbortClass.Conflict, opId, cancellationToken).ConfigureAwait(false);
+                        input, commit: false, TransactionAbortClass.Conflict, opId, cancellationToken,
+                        CommitRefusalClass.StagedBaseMoved, "A validated base moved before the prepare was durable").ConfigureAwait(false);
                     await FinishResolutionAsync(input, conflictOutcome, cancellationToken).ConfigureAwait(false);
                     return conflictOutcome;
                 }
@@ -623,14 +655,10 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
         DurableTransactionMetrics.FinalizeFirstPrepareMs.Record(Stopwatch.GetElapsedTime(firstPrepareStart).TotalMilliseconds);
 
-        // ── Prepare retry (window narrowing): a prepare rejected because the key still holds a predecessor's
-        // committed-but-unsettled intent is retryable — the predecessor's background settlement removes that intent a
-        // moment later. Re-prepare the participants that are still unacknowledged (the record is already durable,
-        // so no re-init; an acknowledged participant's intent stays put): a blocked partition retries until the
-        // foreign intent settles. Bounded, with a short backoff to yield to settlement. No decision has been written
-        // yet, so a retry that succeeds still commits truthfully instead of aborting a healthy commit to MustRetry. A
-        // genuine conflict (another live transaction, or an undecided intent that never resolves) simply exhausts the
-        // budget and falls through to the truthful abort below; the frozen decision deadline is the final ceiling.
+        // ── Prepare retry: a prepare refused because the key still holds another transaction's intent is retried in
+        // place — the record is already durable, so no re-init, and an acknowledged participant's intent stays put;
+        // only the refused participants are re-proposed. No decision has been written while the loop runs, so a
+        // retry that succeeds still commits truthfully.
         //
         // Each refusal is classified before it is retried: a stale base is final (heads only advance, so every
         // re-ask answers the same) and aborts as a conflict at once; a range that moved since freeze can never
@@ -638,7 +666,20 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         // input already decided (the refused prepare was a re-driven duplicate — a proposal released as not-leader
         // at a step-down, or an apply this node never observed, whose first copy had landed and committed on the
         // successor) and concludes from the canonical record at once; a held key is helped and retried; a refusal
-        // with no verdict (a lost reply, an older remote node) is retried as before. ──
+        // with no verdict (a lost reply, an older remote node) is retried blind.
+        //
+        // The helping pass reports what holds the refused keys, and that report picks the loop's bound:
+        //  - every visible holder is a transaction whose record is already terminal: settlement lag. The wait is
+        //    productive and finite — those intents settle, by this pass or by deferred settlement — so the loop
+        //    keeps helping until the decision deadline, renewing the record's deadline lease while it waits (see
+        //    RenewDeadlineLeaseAsync). If the deadline still arrives nothing is decided: the attempt answers
+        //    MustRetry and leaves its prepares for a same-identity retry, instead of recording an abort for a
+        //    healthy commit that only waited on a slow settlement.
+        //  - some holder is still undecided (a live coordinator inside its decision window), the pass could not
+        //    look (helping unavailable, the partition led elsewhere, no attempt clock to measure the deadline), or
+        //    no holder was visible for a key that keeps being refused: the loop is bounded by MaxPrepareRetries
+        //    rounds of short backoff, after which the truthful abort below records the refusal. A live mutual wait
+        //    between two finalizes has to break quickly, not after a whole deadline.
         //
         // The loop's cost is attributed separately from the first barrier: rounds, helper calls and time, and
         // backoff time per finalize, plus how the loop ended. All are recorded only for finalizes that entered it.
@@ -651,9 +692,20 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         bool staleBase = false;
         bool rangeMoved = false;
         bool identitySettled = false;
+        bool deadlineLapsed = false;
+        bool recordDecided = false;
+        int boundedRounds = 0;
+        bool lastRoundWasLag = false;
+        BlockerHelpResult lastHelp = BlockerHelpResult.NotInspected;
         List<int> unacknowledged = new(input.Partitions.Count);
 
-        for (int attempt = 0; !allPrepared && attempt < MaxPrepareRetries && !cancellationToken.IsCancellationRequested; attempt++)
+        // The decision-deadline lease of this attempt: the frozen deadline, renewed while the attempt is inside a
+        // productive wait. The frozen margin is the lease length.
+        HLCTimestamp deadline = input.DecisionDeadline;
+        long leaseMs = Math.Max(1, input.DecisionDeadline.L - input.CommitTimestamp.L);
+        int extensions = 0;
+
+        while (!allPrepared && !cancellationToken.IsCancellationRequested)
         {
             unacknowledged.Clear();
             for (int i = 0; i < input.Partitions.Count; i++)
@@ -682,18 +734,23 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             if (staleBase || rangeMoved || identitySettled)
                 break;
 
+            // The round budget of a live or unclassified conflict is spent: give up before another helping pass.
+            if (!lastRoundWasLag && boundedRounds >= MaxPrepareRetries)
+                break;
+
             // Helping pass over the refused participants only, concurrently: a blocking intent whose record is
             // already decided is pure settlement lag — settle it now and re-prepare immediately, instead of
             // sleeping in the hope that the deferred-settlement task wins the race. Only when nothing could be
             // helped (a live conflict, or helping unavailable) does the backoff apply; helping failures degrade to
             // that same backoff, never to an escaped exception.
+            BlockerHelpResult help = BlockerHelpResult.NotInspected;
             bool helped = false;
             if (resolveDecidedBlockers is not null)
             {
                 long helperStart = Stopwatch.GetTimestamp();
                 try
                 {
-                    Task<int>[] helps = new Task<int>[unacknowledged.Count];
+                    Task<BlockerHelpResult>[] helps = new Task<BlockerHelpResult>[unacknowledged.Count];
                     for (int k = 0; k < unacknowledged.Count; k++)
                     {
                         DurablePartitionPrepare partition = input.Partitions[unacknowledged[k]];
@@ -701,14 +758,13 @@ internal sealed class DurableTransactionFinalizer : IDisposable
                     }
 
                     helperCalls += helps.Length;
-                    foreach (int settled in await Task.WhenAll(helps).ConfigureAwait(false))
-                    {
-                        if (settled > 0)
-                            helped = true;
-                    }
+                    foreach (BlockerHelpResult partitionHelp in await Task.WhenAll(helps).ConfigureAwait(false))
+                        help = help.Add(partitionHelp);
+
+                    helped = help.Settled > 0;
                 }
                 catch (OperationCanceledException) { retryCancelled = true; }
-                catch { helped = false; }
+                catch { help = BlockerHelpResult.NotInspected; helped = false; }
                 finally
                 {
                     helperMs += Stopwatch.GetElapsedTime(helperStart).TotalMilliseconds;
@@ -718,10 +774,40 @@ internal sealed class DurableTransactionFinalizer : IDisposable
                     break;
             }
 
+            lastHelp = help;
+
+            // Settlement lag is bounded by the deadline lease; everything else by the round budget. Without an
+            // attempt clock the deadline cannot be measured, so the round budget applies.
+            bool settlementLag = help.Inspected && help.Undecided == 0 && help.Decided > 0 && attemptClock is not null;
+            lastRoundWasLag = settlementLag;
+            if (settlementLag)
+            {
+                HLCTimestamp now = attemptClock!();
+                DeadlineLeaseState lease = await RenewDeadlineLeaseAsync(input, deadline, leaseMs, extensions, opId, now, cancellationToken).ConfigureAwait(false);
+                deadline = lease.Deadline;
+                extensions = lease.Extensions;
+
+                if (lease.RecordTerminal)
+                {
+                    recordDecided = true;
+                    break;
+                }
+
+                if (now >= deadline)
+                {
+                    deadlineLapsed = true;
+                    break;
+                }
+            }
+            else
+                boundedRounds++;
+
             if (!helped)
             {
+                // A lag wait polls more slowly than a live-conflict wait: it may last a whole lease, and every
+                // round is a helping pass over the blockers.
                 long backoffStart = Stopwatch.GetTimestamp();
-                try { await Task.Delay(Math.Min(2 * (attempt + 1), 20), cancellationToken).ConfigureAwait(false); }
+                try { await Task.Delay(Math.Min(2 * (retryRounds + 1), settlementLag ? 50 : 20), cancellationToken).ConfigureAwait(false); }
                 catch (OperationCanceledException) { retryCancelled = true; }
                 finally
                 {
@@ -761,8 +847,10 @@ internal sealed class DurableTransactionFinalizer : IDisposable
                 allPrepared ? PrepareRetryLoopOutcome.Prepared
                 : retryCancelled || cancellationToken.IsCancellationRequested ? PrepareRetryLoopOutcome.Cancelled
                 : identitySettled ? PrepareRetryLoopOutcome.Settled
+                : recordDecided ? PrepareRetryLoopOutcome.RecordDecided
                 : staleBase ? PrepareRetryLoopOutcome.StaleBase
                 : rangeMoved ? PrepareRetryLoopOutcome.RangeMoved
+                : deadlineLapsed ? PrepareRetryLoopOutcome.DeadlineLapsed
                 : PrepareRetryLoopOutcome.Exhausted);
         }
 
@@ -772,7 +860,22 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         // decided is durable (the record is Undecided and the acknowledged intents stay recoverable), so a clean
         // retry from a fresh freeze is truthful; the abandoned-attempt fence covers a client that gives up instead.
         if (!allPrepared && rangeMoved && !staleBase && !identitySettled)
-            return Retry();
+            return Retry() with { DecisionDeadline = deadline };
+
+        // Settlement lag outlived the deadline lease: nothing is decided, and recording an abort here would turn a
+        // healthy commit that only waited on a slow settlement into a lost transaction. The attempt answers
+        // MustRetry and leaves its prepares installed for a same-identity retry, which re-drives the same frozen
+        // input once the blockers have settled; the coordinator's fence covers a client that gives up instead.
+        if (!allPrepared && deadlineLapsed && !staleBase && !identitySettled)
+        {
+            logger?.LogWarning(
+                "Prepare of transaction {TransactionId} ({Intents} intents) waited on decided-but-unsettled predecessors until its decision deadline {Deadline} ({Rounds} rounds, {Extensions} lease renewals, {Decided} decided holders); answering MustRetry without an abort",
+                input.TransactionId, input.Manifest.Count, deadline, retryRounds, extensions, lastHelp.Decided);
+
+            return Retry(CommitRefusalClass.SettlementLag,
+                $"Decided-but-unsettled predecessors still held {unacknowledged.Count} of {input.Partitions.Count} partitions at the decision deadline after {retryRounds} rounds")
+                with { DecisionDeadline = deadline };
+        }
 
         // ── Post-prepare validation, only meaningful when everything is durable ──
         // The replica fence confirmation runs alongside the read-set validation: both need the prepares
@@ -804,21 +907,35 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
         long decisionStart = Stopwatch.GetTimestamp();
         DurableFinalizeOutcome outcome;
-        if (identitySettled)
+        if (identitySettled || recordDecided)
         {
             // This input already decided: its earlier attempt's prepare landed, committed (or aborted) and settled
-            // before this attempt's re-driven prepare applied. The truthful outcome is the record's, and no new
-            // decision may be proposed for it — an abort here would only lose to the commit at the anchor.
+            // before this attempt's re-driven prepare applied, or the record turned terminal while the loop waited.
+            // The truthful outcome is the record's, and no new decision may be proposed for it — an abort here
+            // would only lose to the commit at the anchor.
             outcome = await ConcludeSettledAsync(input, opId, cancellationToken).ConfigureAwait(false);
         }
         else if (allPrepared && validated)
-            outcome = await DecideAsync(input, commit: true, TransactionAbortClass.None, opId, cancellationToken).ConfigureAwait(false);
+        {
+            // A coordinator that is alive and about to decide renews its lease when the prepare and validation
+            // consumed most of the margin, so the commit is judged against a deadline it still holds instead of
+            // being presumed aborted for having been slow. A renewal the record refuses changes nothing: the
+            // decision below is judged by the record either way.
+            if (attemptClock is not null && maxDeadlineExtensions > 0)
+            {
+                DeadlineLeaseState lease = await RenewDeadlineLeaseAsync(input, deadline, leaseMs, extensions, opId, attemptClock(), cancellationToken).ConfigureAwait(false);
+                deadline = lease.Deadline;
+                extensions = lease.Extensions;
+            }
+
+            outcome = await DecideAsync(input, commit: true, TransactionAbortClass.None, opId, cancellationToken, effectiveDeadline: deadline).ConfigureAwait(false);
+        }
         else if (allPrepared && validation == TransactionAbortClass.RetryableFailure)
         {
             // The commit-time checks proved nothing: no conflict was found and no exclusion was lost, so there is
             // no abort to record. The prepares stay installed for a retry under the same identity, and a caller
             // that abandons the attempt fences it (see TransactionCoordinator.FenceAbandonedFinalize).
-            outcome = Retry();
+            outcome = Retry(CommitRefusalClass.Unresolved, "The commit-time checks proved nothing; retry");
         }
         else
         {
@@ -828,7 +945,35 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             TransactionAbortClass abortClass = !allPrepared
                 ? staleBase ? TransactionAbortClass.Conflict : TransactionAbortClass.RetryableFailure
                 : validation;
-            outcome = await DecideAsync(input, commit: false, abortClass, opId, cancellationToken).ConfigureAwait(false);
+
+            CommitRefusalClass refusal;
+            string? reason = null;
+            if (!allPrepared && staleBase)
+            {
+                refusal = CommitRefusalClass.StagedBaseMoved;
+                reason = "A validated base moved before the prepare was durable";
+            }
+            else if (!allPrepared)
+            {
+                int refused = 0;
+                for (int i = 0; i < acknowledged.Length; i++)
+                    if (!acknowledged[i]) refused++;
+
+                refusal = retryCancelled || cancellationToken.IsCancellationRequested ? CommitRefusalClass.Faulted : CommitRefusalClass.PrepareExhausted;
+                reason = refusal == CommitRefusalClass.Faulted
+                    ? $"The prepare of {refused} of {input.Partitions.Count} partitions was not acknowledged before the attempt was cancelled"
+                    : $"The prepare of {refused} of {input.Partitions.Count} partitions was still refused after {retryRounds} rounds ({lastHelp.Undecided} undecided holders, {lastHelp.Decided} decided holders{(lastHelp.Inspected ? "" : ", holders not inspected")})";
+
+                // The exhausted loop records a durable abort for this transaction; name it, with the size of the
+                // transaction and what held its keys, so the refusal is not silent.
+                logger?.LogWarning(
+                    "Prepare retry loop of transaction {TransactionId} ({Intents} intents) gave up after {Rounds} rounds with {Refused} of {Partitions} partitions still refused (undecided holders {Undecided}, decided holders {Decided}, inspected {Inspected}); recording an abort",
+                    input.TransactionId, input.Manifest.Count, retryRounds, refused, input.Partitions.Count, lastHelp.Undecided, lastHelp.Decided, lastHelp.Inspected);
+            }
+            else
+                refusal = validation == TransactionAbortClass.LostExclusion ? CommitRefusalClass.LostLock : CommitRefusalClass.Conflict;
+
+            outcome = await DecideAsync(input, commit: false, abortClass, opId, cancellationToken, refusal, reason).ConfigureAwait(false);
         }
         DurableTransactionMetrics.FinalizeDecisionMs.Record(Stopwatch.GetElapsedTime(decisionStart).TotalMilliseconds);
 
@@ -836,9 +981,94 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         // deadline window that a future finalize's prepare must fit inside.
         recordDecisionLatencyMs?.Invoke(Stopwatch.GetElapsedTime(startTicks).TotalMilliseconds, input.Manifest.Count);
 
+        // The deadline in force when the attempt ended travels with the outcome, so a same-identity retry of an
+        // unresolved attempt compares its clock against the deadline the record holds, not the frozen one.
+        outcome = outcome with { DecisionDeadline = deadline };
+
         await FinishResolutionAsync(input, outcome, cancellationToken).ConfigureAwait(false);
 
         return outcome;
+    }
+
+    /// <summary>The deadline lease of a finalize attempt after a renewal attempt: the deadline now in force, how
+    /// many renewals the attempt has used, and whether the renewal found the record already terminal.</summary>
+    private readonly record struct DeadlineLeaseState(HLCTimestamp Deadline, int Extensions, bool RecordTerminal);
+
+    /// <summary>
+    /// Renews the record's decision-deadline lease when the attempt is alive, still holds it, and less than
+    /// 1/<see cref="LeaseRenewalDivisor"/> of it remains: proposes an <see cref="ExtendDecisionDeadlineCommand"/>
+    /// moving the deadline to <paramref name="now"/> plus one frozen margin. The record state machine accepts it
+    /// only while the lease is held (the attempt HLC has not passed the current deadline) and only forward, so a
+    /// renewal can never let a commit land that presumed-abort recovery already had the right to refuse; a lapsed
+    /// lease is reported as unchanged. Each attempt may renew at most <see cref="maxDeadlineExtensions"/> times, so
+    /// a coordinator that is alive but never progresses still yields to recovery after a bounded number of leases.
+    /// The renewal travels through the typed decision seam when wired (the anchor leader answers the canonical
+    /// record, so a record already decided is reported at once), else through the projection-free decision
+    /// replicate, else through the ordinary record replicate.
+    /// </summary>
+    private async Task<DeadlineLeaseState> RenewDeadlineLeaseAsync(
+        DurableFinalizeInput input, HLCTimestamp deadline, long leaseMs, int extensions, HLCTimestamp opId, HLCTimestamp now, CancellationToken cancellationToken)
+    {
+        if (maxDeadlineExtensions == 0 || deadline.L - now.L >= leaseMs / LeaseRenewalDivisor)
+            return new DeadlineLeaseState(deadline, extensions, RecordTerminal: false);
+
+        if (now > deadline)
+        {
+            DurableTransactionMetrics.DeadlineExtensionAttempted(DeadlineExtensionOutcome.Lapsed);
+            return new DeadlineLeaseState(deadline, extensions, RecordTerminal: false);
+        }
+
+        if (extensions >= maxDeadlineExtensions)
+        {
+            DurableTransactionMetrics.DeadlineExtensionAttempted(DeadlineExtensionOutcome.BudgetSpent);
+            return new DeadlineLeaseState(deadline, extensions, RecordTerminal: false);
+        }
+
+        HLCTimestamp renewed = new(now.N, now.L + leaseMs, now.C);
+        byte[] delta = TransactionRecordStore.SerializeDelta([
+            new ExtendDecisionDeadlineCommand(input.TransactionId, input.Epoch, input.ManifestHash, renewed, opId, now)]);
+
+        bool replicated;
+        Writes.DurableDecisionReply? typed = null;
+        try
+        {
+            if (decide is not null)
+            {
+                Writes.DurableDecisionReply reply = await decide(input.AnchorPartitionId, delta, input.TransactionId, input.Epoch, input.RecordAnchorKey, input.AnchorGeneration, cancellationToken).ConfigureAwait(false);
+                typed = reply;
+                replicated = reply.Replicated;
+            }
+            else
+            {
+                replicated = replicateDecision is not null
+                    ? await replicateDecision(input.AnchorPartitionId, delta, input.RecordAnchorKey, input.AnchorGeneration, cancellationToken).ConfigureAwait(false)
+                    : await ReplicateRecordAsync(input.AnchorPartitionId, delta, input.RecordAnchorKey, input.AnchorGeneration, Writes.WriteAdmissionClass.Terminal, Writes.WriteSubmissionStage.Decision, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            // A renewal that could not be sent changes nothing: the lease stands as it was.
+            replicated = false;
+        }
+
+        if (!replicated)
+        {
+            DurableTransactionMetrics.DeadlineExtensionAttempted(DeadlineExtensionOutcome.Unavailable);
+            return new DeadlineLeaseState(deadline, extensions, RecordTerminal: false);
+        }
+
+        if (typed is { Known: true, Decision: TransactionDecision.Commit or TransactionDecision.Abort })
+        {
+            DurableTransactionMetrics.DeadlineExtensionAttempted(DeadlineExtensionOutcome.RecordTerminal);
+            return new DeadlineLeaseState(deadline, extensions, RecordTerminal: true);
+        }
+
+        DurableTransactionMetrics.DeadlineExtensionAttempted(DeadlineExtensionOutcome.Extended);
+        return new DeadlineLeaseState(renewed, extensions + 1, RecordTerminal: false);
     }
 
     /// <summary>
@@ -985,7 +1215,8 @@ internal sealed class DurableTransactionFinalizer : IDisposable
                     // Recorded before the abort's decide round, so that round is never folded into the
                     // pre-submission time of a bundle that was never proposed.
                     DurableTransactionMetrics.OnePhasePreBundle(Stopwatch.GetElapsedTime(attemptStart).TotalMilliseconds, forwarded: false);
-                    return (await DecideAsync(input, commit: false, TransactionAbortClass.Conflict, opId, cancellationToken).ConfigureAwait(false), OnePhaseFallbackReason.None);
+                    return (await DecideAsync(input, commit: false, TransactionAbortClass.Conflict, opId, cancellationToken,
+                        CommitRefusalClass.StagedBaseMoved, "A validated base moved before the bundle was proposed").ConfigureAwait(false), OnePhaseFallbackReason.None);
 
                 case StagedBaseValidation.Unknown:
                     DurableTransactionMetrics.OnePhasePreBundle(Stopwatch.GetElapsedTime(attemptStart).TotalMilliseconds, forwarded: false);
@@ -1098,8 +1329,13 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             // the deadline gate, which yields to presumed-abort recovery.
             switch (reply.GatedVerdict)
             {
-                case BundledCommitVerdict.StaleBase or BundledCommitVerdict.StaleRead:
-                    return (await DecideAsync(input, commit: false, TransactionAbortClass.Conflict, opId, cancellationToken).ConfigureAwait(false), OnePhaseFallbackReason.None);
+                case BundledCommitVerdict.StaleBase:
+                    return (await DecideAsync(input, commit: false, TransactionAbortClass.Conflict, opId, cancellationToken,
+                        CommitRefusalClass.StagedBaseMoved, "A validated base moved before the bundled commit applied").ConfigureAwait(false), OnePhaseFallbackReason.None);
+
+                case BundledCommitVerdict.StaleRead:
+                    return (await DecideAsync(input, commit: false, TransactionAbortClass.Conflict, opId, cancellationToken,
+                        CommitRefusalClass.Conflict, "A read dependency moved before the bundled commit applied").ConfigureAwait(false), OnePhaseFallbackReason.None);
 
                 case BundledCommitVerdict.LeaderChanged:
                     // The anchor partition changed leader between the validation and the propose, so the locks
@@ -1108,7 +1344,8 @@ internal sealed class DurableTransactionFinalizer : IDisposable
                     // grants again. Recorded as a lost exclusion, not a conflict: no other transaction need have
                     // touched the keys.
                     DurableTransactionMetrics.LostLockAborted(LostLockDetection.BundleApply);
-                    return (await DecideAsync(input, commit: false, TransactionAbortClass.LostExclusion, opId, cancellationToken).ConfigureAwait(false), OnePhaseFallbackReason.None);
+                    return (await DecideAsync(input, commit: false, TransactionAbortClass.LostExclusion, opId, cancellationToken,
+                        CommitRefusalClass.LostLock, "The anchor partition changed leader between the validation and the bundled commit").ConfigureAwait(false), OnePhaseFallbackReason.None);
 
                 case BundledCommitVerdict.PrepareMissing:
                 {
@@ -1132,7 +1369,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             if (reply.PrepareAcknowledged)
             {
                 DurableTransactionMetrics.LateCommitRejections.Add(1);
-                return (await ConcludeLateCommitAsync(input, opId, cancellationToken).ConfigureAwait(false), OnePhaseFallbackReason.None);
+                return (await ConcludeLateCommitAsync(input, opId, attemptHlc, input.DecisionDeadline, cancellationToken).ConfigureAwait(false), OnePhaseFallbackReason.None);
             }
 
             return (Retry(), OnePhaseFallbackReason.None);
@@ -1187,15 +1424,22 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     /// </summary>
     public async Task<DurableFinalizeOutcome> FenceAbandonedAsync(DurableFinalizeInput input, HLCTimestamp opId, CancellationToken cancellationToken)
     {
-        DurableFinalizeOutcome outcome = await DecideAsync(input, commit: false, TransactionAbortClass.PresumedAbort, opId, cancellationToken).ConfigureAwait(false);
+        DurableFinalizeOutcome outcome = await DecideAsync(input, commit: false, TransactionAbortClass.PresumedAbort, opId, cancellationToken,
+            CommitRefusalClass.PresumedAbort, "The unresolved attempt was fenced through the record before a new attempt").ConfigureAwait(false);
 
         await FinishResolutionAsync(input, outcome, cancellationToken).ConfigureAwait(false);
 
         return outcome;
     }
 
+    /// <param name="refusal">For an abort, the arm that asked for it, carried on the outcome when the record
+    /// confirms this very abort class; a record that already held another abort reports that one's class.</param>
+    /// <param name="reason">The reason that travels with <paramref name="refusal"/>.</param>
+    /// <param name="effectiveDeadline">For a commit, the deadline the attempt holds (the frozen one, or its last
+    /// renewal), named in the warning when the record's deadline gate withholds the commit.</param>
     private async Task<DurableFinalizeOutcome> DecideAsync(
-        DurableFinalizeInput input, bool commit, TransactionAbortClass abortClass, HLCTimestamp opId, CancellationToken cancellationToken)
+        DurableFinalizeInput input, bool commit, TransactionAbortClass abortClass, HLCTimestamp opId, CancellationToken cancellationToken,
+        CommitRefusalClass refusal = CommitRefusalClass.None, string? reason = null, HLCTimestamp? effectiveDeadline = null)
     {
         // Mint a fresh attempt HLC immediately before the transition so a slow prepare/validate can push the
         // attempt past the frozen decision deadline (the gate that yields a late commit to presumed-abort
@@ -1266,18 +1510,23 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         if (commit && decisionRead == TransactionDecision.Undecided)
         {
             DurableTransactionMetrics.LateCommitRejections.Add(1);
-            return await ConcludeLateCommitAsync(input, opId, cancellationToken).ConfigureAwait(false);
+            return await ConcludeLateCommitAsync(input, opId, attemptHlc, effectiveDeadline ?? input.DecisionDeadline, cancellationToken).ConfigureAwait(false);
         }
 
         // A durable abort is terminal whatever drove it: the record decides once and a later commit against it is
         // rejected, so every abort class reports Aborted. Only a record that is still undecided is retryable. Both
         // reads above are canonical (the anchor leader's store after the apply), so the resolution may take its
-        // direction from the outcome without reading the record again.
+        // direction from the outcome without reading the record again. The abort names the arm that asked for it
+        // when the record confirms that class; an abort another decision won (recovery's presumed abort, a fence)
+        // names that decision's class instead.
         return decisionRead switch
         {
             TransactionDecision.Commit => new DurableFinalizeOutcome(DurableFinalizeResult.Committed, TransactionAbortClass.None, CanonicalDecisionRead: true),
-            TransactionDecision.Abort => new DurableFinalizeOutcome(DurableFinalizeResult.Aborted, abortClassRead, CanonicalDecisionRead: true),
-            _ => Retry()
+            TransactionDecision.Abort when !commit && abortClassRead == abortClass && refusal != CommitRefusalClass.None =>
+                new DurableFinalizeOutcome(DurableFinalizeResult.Aborted, abortClassRead, CanonicalDecisionRead: true, Refusal: refusal, Reason: reason),
+            TransactionDecision.Abort => new DurableFinalizeOutcome(DurableFinalizeResult.Aborted, abortClassRead, CanonicalDecisionRead: true,
+                Refusal: CommitRefusals.FromAbortClass(abortClassRead), Reason: $"Transaction aborted: {abortClassRead}, decided by another attempt or by recovery"),
+            _ => Retry(CommitRefusalClass.Unresolved, "The decision applied but the record could not be read as terminal; retry")
         };
     }
 
@@ -1676,7 +1925,10 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         return PreparedIntentStore.SerializeDelta(commands);
     }
 
-    private static DurableFinalizeOutcome Retry() => new(DurableFinalizeResult.MustRetry, TransactionAbortClass.RetryableFailure);
+    private static DurableFinalizeOutcome Retry() => Retry(CommitRefusalClass.Unresolved, "Durable finalize could not complete; retry");
+
+    private static DurableFinalizeOutcome Retry(CommitRefusalClass refusal, string reason) =>
+        new(DurableFinalizeResult.MustRetry, TransactionAbortClass.RetryableFailure, Refusal: refusal, Reason: reason);
 
     /// <summary>
     /// Concludes a commit the record's deadline gate withheld. The gate compares the attempt HLC with the frozen
@@ -1690,9 +1942,18 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     /// Committed. Only a fence that cannot be replicated stays MustRetry, and the flag keeps the coordinator's
     /// per-transaction accounting of the gate.
     /// </summary>
-    private async Task<DurableFinalizeOutcome> ConcludeLateCommitAsync(DurableFinalizeInput input, HLCTimestamp opId, CancellationToken cancellationToken)
+    private async Task<DurableFinalizeOutcome> ConcludeLateCommitAsync(
+        DurableFinalizeInput input, HLCTimestamp opId, HLCTimestamp attemptHlc, HLCTimestamp deadline, CancellationToken cancellationToken)
     {
-        DurableFinalizeOutcome concluded = await DecideAsync(input, commit: false, TransactionAbortClass.PresumedAbort, opId, cancellationToken).ConfigureAwait(false);
+        // The gate's refusal is otherwise silent — a counter and nothing else — so name the transaction, its size
+        // and how late the attempt was, which is what an operator needs to size the margin.
+        logger?.LogWarning(
+            "Commit of transaction {TransactionId} ({Intents} intents) was withheld by the decision-deadline gate: attempt {Attempt} is {LateMs} ms past the deadline {Deadline}; concluding through the record fence",
+            input.TransactionId, input.Manifest.Count, attemptHlc, attemptHlc.L - deadline.L, deadline);
+
+        DurableFinalizeOutcome concluded = await DecideAsync(input, commit: false, TransactionAbortClass.PresumedAbort, opId, cancellationToken,
+            CommitRefusalClass.DecisionDeadline,
+            $"The decision deadline passed {attemptHlc.L - deadline.L} ms before the commit of {input.Manifest.Count} intents could be recorded").ConfigureAwait(false);
 
         DurableTransactionMetrics.LateCommitConcluded(concluded.Result);
 
@@ -1715,8 +1976,10 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         return record?.Decision switch
         {
             TransactionDecision.Commit => new DurableFinalizeOutcome(DurableFinalizeResult.Committed, TransactionAbortClass.None, CanonicalDecisionRead: true),
-            TransactionDecision.Abort => new DurableFinalizeOutcome(DurableFinalizeResult.Aborted, record.AbortClass, CanonicalDecisionRead: true),
-            _ => await DecideAsync(input, commit: false, TransactionAbortClass.PresumedAbort, opId, cancellationToken).ConfigureAwait(false)
+            TransactionDecision.Abort => new DurableFinalizeOutcome(DurableFinalizeResult.Aborted, record.AbortClass, CanonicalDecisionRead: true,
+                Refusal: CommitRefusals.FromAbortClass(record.AbortClass), Reason: $"Transaction aborted: {record.AbortClass}, decided by an earlier attempt or by recovery"),
+            _ => await DecideAsync(input, commit: false, TransactionAbortClass.PresumedAbort, opId, cancellationToken,
+                CommitRefusalClass.PresumedAbort, "The transaction had settled but its record could not be read; fenced through the record").ConfigureAwait(false)
         };
     }
 }

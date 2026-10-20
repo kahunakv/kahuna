@@ -392,7 +392,8 @@ public sealed class TestPartitionWriteAggregatorEndToEnd
     {
         // The pipelined aggregator must never carry two proposals for the SAME key in flight at once. The
         // guard is the key actor's replication intent: with capacity free (2 allowed, 1 used), a second write
-        // to the same key is refused (MustRetry) instead of dispatched, and no second executor call appears.
+        // to the same key is told to wait (WaitingForReplication: replication lag, not a lock conflict) instead
+        // of dispatched, and no second executor call appears.
         EmbeddedKahunaOptions options = MemoryNode(batchItems: 1, lingerMs: 0);
         options.KeyValueWriteMaxInFlightBatchesPerPartition = 2;
 
@@ -417,7 +418,7 @@ public sealed class TestPartitionWriteAggregatorEndToEnd
             (KeyValueResponseType second, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
                 HLCTimestamp.Zero, "dup/k", Encoding.UTF8.GetBytes("v2"), null, -1, KeyValueFlags.Set, 0,
                 KeyValueDurability.Persistent, ct);
-            Assert.Equal(KeyValueResponseType.MustRetry, second);
+            Assert.Equal(KeyValueResponseType.WaitingForReplication, second);
             Assert.Equal(callsWithFirst, recorder.Calls.Count(c => c.Partition == partition));
 
             recorder.Release(partition);

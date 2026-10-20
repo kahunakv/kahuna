@@ -278,7 +278,7 @@ public interface IKahuna
 
     public Task<(KeyValueResponseType, TransactionHandle)> LocateAndStartTransaction(KeyValueTransactionOptions options, CancellationToken cancellationToken);
 
-    public Task<(KeyValueResponseType, string?)> LocateAndCommitTransaction(TransactionHandle handle, CancellationToken cancellationToken);
+    public Task<TransactionCommitAnswer> LocateAndCommitTransaction(TransactionHandle handle, CancellationToken cancellationToken);
 
     public Task<KeyValueResponseType> LocateAndRollbackTransaction(TransactionHandle handle, CancellationToken cancellationToken);
 
@@ -389,7 +389,7 @@ public interface IKahuna
 
     public Task<(KeyValueResponseType, TransactionHandle)> StartTransaction(KeyValueTransactionOptions options);
 
-    public Task<(KeyValueResponseType, string?)> CommitTransaction(TransactionHandle handle);
+    public Task<TransactionCommitAnswer> CommitTransaction(TransactionHandle handle);
 
     public Task<KeyValueResponseType> RollbackTransaction(TransactionHandle handle);
 

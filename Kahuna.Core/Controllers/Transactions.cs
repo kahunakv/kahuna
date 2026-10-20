@@ -143,7 +143,7 @@ public sealed partial class KahunaManager
     /// <param name="handle">The handle returned by <see cref="LocateAndStartTransaction"/>.</param>
     /// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
     /// <returns>A task representing the asynchronous operation with the commit outcome.</returns>
-    public Task<(KeyValueResponseType, string?)> LocateAndCommitTransaction(TransactionHandle handle, CancellationToken cancellationToken)
+    public Task<TransactionCommitAnswer> LocateAndCommitTransaction(TransactionHandle handle, CancellationToken cancellationToken)
     {
         return keyValues.LocateAndCommitTransaction(handle, cancellationToken);
     }
@@ -317,7 +317,7 @@ public sealed partial class KahunaManager
     /// </summary>
     /// <param name="handle">The handle returned by <see cref="StartTransaction"/>.</param>
     /// <returns>A task containing the commit outcome.</returns>
-    public Task<(KeyValueResponseType, string?)> CommitTransaction(TransactionHandle handle)
+    public Task<TransactionCommitAnswer> CommitTransaction(TransactionHandle handle)
     {
         return keyValues.CommitTransaction(handle);
     }

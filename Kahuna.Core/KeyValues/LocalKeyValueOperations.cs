@@ -105,6 +105,8 @@ internal sealed class LocalKeyValueOperations
         try
         {
             bool attemptedRoutedResolve = false;
+            bool lastAnswerWasWait = false;
+
             LazyRetryDelays retryDelays = new(TimeSpan.FromMilliseconds(1), MaxRetries);
             for (int retryAttempt = 0; retryAttempt < MaxRetries; retryAttempt++)
             {
@@ -120,14 +122,29 @@ internal sealed class LocalKeyValueOperations
 
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
+                    lastAnswerWasWait = true;
+
+                    // A wait on a foreign durable intent whose canonical record is remote: resolve the decision off
+                    // the mailbox once and re-issue, so a committed holder is materialized and the write proceeds
+                    // instead of waiting for its settlement.
+                    if (response.DenialCause != WriteDenialCause.None
+                        && await TryRouteForeignDecision(request, key, transactionId, durability, attemptedRoutedResolve))
+                    {
+                        attemptedRoutedResolve = true;
+                        if (request.ForeignDecisionHint.TransactionId != HLCTimestamp.Zero)
+                            continue;
+                    }
+
                     Transactions.DurableTransactionMetrics.AddKvRetryWait("TrySetKeyValue_3609");
                     if (retryDelays.TryNext(out TimeSpan delay)) await Task.Delay(delay);
                     continue;
                 }
 
-                // A MustRetry caused by a foreign prepared intent whose canonical record is remote: resolve the
-                // decision off the mailbox once and re-issue so a committed intent is materialized (write proceeds)
-                // instead of bouncing the caller until settlement.
+                lastAnswerWasWait = false;
+
+                // A MustRetry over a foreign prepared intent whose canonical record is remote (an older actor
+                // answer): resolve the decision off the mailbox once and re-issue so a committed intent is
+                // materialized instead of bouncing the caller until settlement.
                 if (response.Type == KeyValueResponseType.MustRetry
                     && await TryRouteForeignDecision(request, key, transactionId, durability, attemptedRoutedResolve))
                 {
@@ -139,7 +156,10 @@ internal sealed class LocalKeyValueOperations
                 return (response.Type, response.Revision, response.Ticket);
             }
 
-            return (KeyValueResponseType.MustRetry, -1, HLCTimestamp.Zero);
+            // The budget ran out. A wait (a replication intent in flight, a holder still settling or still deciding)
+            // is lag the caller can give a longer budget than a deadlock wait, so it is answered as the wait it was;
+            // anything else is the transient MustRetry.
+            return (lastAnswerWasWait ? KeyValueResponseType.WaitingForReplication : KeyValueResponseType.MustRetry, -1, HLCTimestamp.Zero);
         }
         finally
         {
@@ -198,11 +218,9 @@ internal sealed class LocalKeyValueOperations
                 if (response is null)
                     return new() { Key = item.Key ?? "", Type = KeyValueResponseType.Errored, Durability = item.Durability };
 
-                // A residual WaitingForReplication (a live replication intent the caller should retry against)
-                // is retryable, not a terminal error.
-                if (response.Type == KeyValueResponseType.WaitingForReplication)
-                    return new() { Key = item.Key ?? "", Type = KeyValueResponseType.MustRetry, Durability = item.Durability };
-
+                // A residual WaitingForReplication (a replication intent in flight, a holder still settling or
+                // still deciding) is lag: answered as the wait it is, so the caller can give it a longer budget
+                // than a deadlock wait, and never a terminal error.
                 return new()
                 {
                     Key = item.Key ?? "",
@@ -210,7 +228,8 @@ internal sealed class LocalKeyValueOperations
                     Revision = response.Revision,
                     LastModified = response.Ticket,
                     Durability = item.Durability,
-                    // A MustRetry over a live foreign writer names that writer so the caller can apply wait-die.
+                    // A denial over a foreign writer names that writer so the caller can apply wait-die, or wait
+                    // for the settlement of a holder that already decided.
                     HolderTransactionId = response.HolderTransactionId
                 };
             }
@@ -293,10 +312,12 @@ internal sealed class LocalKeyValueOperations
                     };
                 }
 
+                // The budget ran out on a wait: lag, answered as the wait it is so the caller can give it a longer
+                // budget than a deadlock wait.
                 return new()
                 {
                     Key = item.Key ?? "",
-                    Type = KeyValueResponseType.MustRetry,
+                    Type = KeyValueResponseType.WaitingForReplication,
                     Revision = -1,
                     LastModified = HLCTimestamp.Zero,
                     Durability = item.Durability
@@ -346,6 +367,7 @@ internal sealed class LocalKeyValueOperations
         try
         {
             bool attemptedRoutedResolve = false;
+            bool lastAnswerWasWait = false;
 
             LazyRetryDelays retryDelays = new(TimeSpan.FromMilliseconds(1), MaxRetries);
             for (int retryAttempt = 0; retryAttempt < MaxRetries; retryAttempt++)
@@ -362,14 +384,29 @@ internal sealed class LocalKeyValueOperations
 
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
+                    lastAnswerWasWait = true;
+
+                    // A wait on a foreign durable intent whose canonical record is remote: resolve the decision off
+                    // the mailbox once and re-issue, so a committed holder is materialized and the write proceeds
+                    // instead of waiting for its settlement.
+                    if (response.DenialCause != WriteDenialCause.None
+                        && await TryRouteForeignDecision(request, key, transactionId, durability, attemptedRoutedResolve))
+                    {
+                        attemptedRoutedResolve = true;
+                        if (request.ForeignDecisionHint.TransactionId != HLCTimestamp.Zero)
+                            continue;
+                    }
+
                     Transactions.DurableTransactionMetrics.AddKvRetryWait("TryExtendKeyValue_3840");
                     if (retryDelays.TryNext(out TimeSpan delay)) await Task.Delay(delay);
                     continue;
                 }
 
-                // A MustRetry caused by a foreign prepared intent whose canonical record is remote: resolve the
-                // decision off the mailbox once and re-issue so a committed intent is materialized (write proceeds)
-                // instead of bouncing the caller until settlement.
+                lastAnswerWasWait = false;
+
+                // A MustRetry over a foreign prepared intent whose canonical record is remote (an older actor
+                // answer): resolve the decision off the mailbox once and re-issue so a committed intent is
+                // materialized instead of bouncing the caller until settlement.
                 if (response.Type == KeyValueResponseType.MustRetry
                     && await TryRouteForeignDecision(request, key, transactionId, durability, attemptedRoutedResolve))
                 {
@@ -381,7 +418,10 @@ internal sealed class LocalKeyValueOperations
                 return (response.Type, response.Revision, response.Ticket);
             }
 
-            return (KeyValueResponseType.MustRetry, -1, HLCTimestamp.Zero);
+            // The budget ran out. A wait (a replication intent in flight, a holder still settling or still deciding)
+            // is lag the caller can give a longer budget than a deadlock wait, so it is answered as the wait it was;
+            // anything else is the transient MustRetry.
+            return (lastAnswerWasWait ? KeyValueResponseType.WaitingForReplication : KeyValueResponseType.MustRetry, -1, HLCTimestamp.Zero);
         }
         finally
         {
@@ -424,7 +464,8 @@ internal sealed class LocalKeyValueOperations
         try
         {
             bool attemptedRoutedResolve = false;
-            
+            bool lastAnswerWasWait = false;
+
             LazyRetryDelays retryDelays = new(TimeSpan.FromMilliseconds(1), MaxRetries);
             for (int retryAttempt = 0; retryAttempt < MaxRetries; retryAttempt++)
             {
@@ -440,14 +481,29 @@ internal sealed class LocalKeyValueOperations
 
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
+                    lastAnswerWasWait = true;
+
+                    // A wait on a foreign durable intent whose canonical record is remote: resolve the decision off
+                    // the mailbox once and re-issue, so a committed holder is materialized and the write proceeds
+                    // instead of waiting for its settlement.
+                    if (response.DenialCause != WriteDenialCause.None
+                        && await TryRouteForeignDecision(request, key, transactionId, durability, attemptedRoutedResolve))
+                    {
+                        attemptedRoutedResolve = true;
+                        if (request.ForeignDecisionHint.TransactionId != HLCTimestamp.Zero)
+                            continue;
+                    }
+
                     Transactions.DurableTransactionMetrics.AddKvRetryWait("TryDeleteKeyValue_3914");
                     if (retryDelays.TryNext(out TimeSpan delay)) await Task.Delay(delay);
                     continue;
                 }
 
-                // A MustRetry caused by a foreign prepared intent whose canonical record is remote: resolve the
-                // decision off the mailbox once and re-issue so a committed intent is materialized (write proceeds)
-                // instead of bouncing the caller until settlement.
+                lastAnswerWasWait = false;
+
+                // A MustRetry over a foreign prepared intent whose canonical record is remote (an older actor
+                // answer): resolve the decision off the mailbox once and re-issue so a committed intent is
+                // materialized instead of bouncing the caller until settlement.
                 if (response.Type == KeyValueResponseType.MustRetry
                     && await TryRouteForeignDecision(request, key, transactionId, durability, attemptedRoutedResolve))
                 {
@@ -459,7 +515,10 @@ internal sealed class LocalKeyValueOperations
                 return (response.Type, response.Revision, response.Ticket);
             }
 
-            return (KeyValueResponseType.MustRetry, -1, HLCTimestamp.Zero);
+            // The budget ran out. A wait (a replication intent in flight, a holder still settling or still deciding)
+            // is lag the caller can give a longer budget than a deadlock wait, so it is answered as the wait it was;
+            // anything else is the transient MustRetry.
+            return (lastAnswerWasWait ? KeyValueResponseType.WaitingForReplication : KeyValueResponseType.MustRetry, -1, HLCTimestamp.Zero);
         }
         finally
         {

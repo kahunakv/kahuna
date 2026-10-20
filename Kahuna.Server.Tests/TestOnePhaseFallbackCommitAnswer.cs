@@ -142,7 +142,7 @@ public sealed class TestOnePhaseFallbackCommitAnswer
         // Commit A. The one-phase probe sees B's intent on readKey (conflict → fallback, nothing durable
         // yet); the fallback's record init is the first record batch and parks at the executor.
         (Task arrived, TaskCompletionSource release) = parking!.ArmOneShot();
-        Task<(KeyValueResponseType, string?)> commitA = kahuna.LocateAndCommitTransaction(handleA, ct);
+        Task<TransactionCommitAnswer> commitA = kahuna.LocateAndCommitTransaction(handleA, ct);
 
         await arrived.WaitAsync(TimeSpan.FromSeconds(30), ct);
 

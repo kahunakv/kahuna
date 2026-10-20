@@ -275,12 +275,16 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
         // there is no race between reading the anchor and freezing the working set. Mirror the gRPC transport
         // contract: true = committed, false = transient MustRetry (retryable), throw on a terminal failure so
         // the SDK can move to a terminal state rather than looping on Pending.
-        (KeyValueResponseType type, string? returnedAnchor) = await kahuna.LocateAndCommitTransaction(handle, cancellationToken);
-        if (type == KeyValueResponseType.Committed)
-            return (true, returnedAnchor);
-        if (type == KeyValueResponseType.MustRetry)
-            return (false, returnedAnchor);
-        throw new KahunaException("Failed to commit key/value transaction: " + type, type);
+        TransactionCommitAnswer answer = await kahuna.LocateAndCommitTransaction(handle, cancellationToken);
+        if (answer.Type == KeyValueResponseType.Committed)
+            return (true, answer.RecordAnchorKey);
+        if (answer.Type == KeyValueResponseType.MustRetry)
+            return (false, answer.RecordAnchorKey);
+        throw new KahunaException(
+            answer.Refusal == CommitRefusalClass.None
+                ? "Failed to commit key/value transaction: " + answer.Type
+                : $"Failed to commit key/value transaction: {answer.Type} ({answer.Refusal}: {answer.Reason})",
+            answer.Type);
     }
 
     public async Task<bool> RollbackTransactionSession(

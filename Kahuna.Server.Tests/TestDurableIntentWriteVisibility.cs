@@ -94,7 +94,7 @@ public sealed class TestDurableIntentWriteVisibility
     }
 
     [Fact]
-    public async Task Write_MeetingUndecidedIntent_MustRetry()
+    public async Task Write_MeetingUndecidedIntent_WaitsForTheDecision()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         await using EmbeddedKahunaNode node = await StartNode(loggerFactory, ct);
@@ -106,7 +106,9 @@ public sealed class TestDurableIntentWriteVisibility
             HLCTimestamp.Zero, "wtest/b", Encoding.UTF8.GetBytes("V2"), null, -1,
             KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
 
-        Assert.Equal(KeyValueResponseType.MustRetry, t);
+        // An undecided foreign intent is lag — its coordinator is inside its decision window — not a lock
+        // conflict, so the write is told to wait rather than to retry against a deadlock budget.
+        Assert.Equal(KeyValueResponseType.WaitingForReplication, t);
     }
 
     [Fact]
@@ -126,7 +128,7 @@ public sealed class TestDurableIntentWriteVisibility
     }
 
     [Fact]
-    public async Task Delete_MeetingUndecidedIntent_MustRetry()
+    public async Task Delete_MeetingUndecidedIntent_WaitsForTheDecision()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         await using EmbeddedKahunaNode node = await StartNode(loggerFactory, ct);
@@ -137,7 +139,7 @@ public sealed class TestDurableIntentWriteVisibility
         (KeyValueResponseType t, _, _) = await node.Kahuna.LocateAndTryDeleteKeyValue(
             HLCTimestamp.Zero, "wtest/f", KeyValueDurability.Persistent, ct);
 
-        Assert.Equal(KeyValueResponseType.MustRetry, t);
+        Assert.Equal(KeyValueResponseType.WaitingForReplication, t);
     }
 
     [Fact]
@@ -156,7 +158,7 @@ public sealed class TestDurableIntentWriteVisibility
     }
 
     [Fact]
-    public async Task Extend_MeetingUndecidedIntent_MustRetry()
+    public async Task Extend_MeetingUndecidedIntent_WaitsForTheDecision()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         await using EmbeddedKahunaNode node = await StartNode(loggerFactory, ct);
@@ -167,7 +169,7 @@ public sealed class TestDurableIntentWriteVisibility
         (KeyValueResponseType t, _, _) = await node.Kahuna.LocateAndTryExtendKeyValue(
             HLCTimestamp.Zero, "wtest/h", 30000, KeyValueDurability.Persistent, ct);
 
-        Assert.Equal(KeyValueResponseType.MustRetry, t);
+        Assert.Equal(KeyValueResponseType.WaitingForReplication, t);
     }
 
     [Fact]

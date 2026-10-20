@@ -106,7 +106,7 @@ public sealed class TestApplyDivergenceContainment : BaseCluster
         Assert.Equal(KeyValueResponseType.Set, setType);
 
         (KeyValueResponseType commitType, _) = await RetryOnMustRetryAsync(
-            () => session.LocateAndCommitTransaction(handle, ct), r => r.Item1);
+            () => session.LocateAndCommitTransaction(handle, ct), r => r.Type);
         Assert.Equal(KeyValueResponseType.Committed, commitType);
 
         return handle.TransactionId;

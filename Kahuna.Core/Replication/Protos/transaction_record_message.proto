@@ -11,6 +11,11 @@ enum TransactionRecordCommandKindMessage {
   TRANSACTION_RECORD_COMMIT     = 1; // Undecided -> Commit (within the decision deadline)
   TRANSACTION_RECORD_ABORT      = 2; // Undecided|absent -> Abort (may create a tombstone from absence)
   TRANSACTION_RECORD_PURGE      = 3; // terminal -> removed (retention GC; rejects a purge of an Undecided record)
+  // Undecided -> Undecided with a later decision deadline (a lease renewal by a live coordinator). Carries the new
+  // deadline in the decisionDeadline fields and the renewing attempt's HLC in the attempt fields; legal only while
+  // the attempt has not passed the record's current deadline. A node that predates this kind cannot decode it, so a
+  // producer must not send it into a mixed-version group (see DurableDecisionDeadlineMaxExtensions).
+  TRANSACTION_RECORD_EXTEND_DEADLINE = 4;
 }
 
 message TransactionParticipantRefMessage {

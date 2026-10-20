@@ -281,12 +281,12 @@ internal sealed class TransactionCoordinator : IDisposable
     /// the caller's own bounded-retry exhaustion as an unresolved/indeterminate outcome — never a fabricated
     /// terminal failure. Found=false is returned only when there is no anchor to consult at all.</para>
     /// </summary>
-    private async Task<(bool Found, KeyValueResponseType Response)> TryConsultDurableTransactionRecord(TransactionHandle handle)
+    private async Task<(bool Found, KeyValueResponseType Response, CommitRefusalClass Refusal)> TryConsultDurableTransactionRecord(TransactionHandle handle)
     {
         // No anchor ⇒ the handle carries no route to any canonical record, so the outcome cannot be consulted
         // here at all. The caller decides how to report an unconsultable lost session.
         if (string.IsNullOrEmpty(handle.RecordAnchorKey))
-            return (false, KeyValueResponseType.Errored);
+            return (false, KeyValueResponseType.Errored, CommitRefusalClass.None);
 
         TransactionRecord? record;
         try
@@ -299,23 +299,23 @@ internal sealed class TransactionCoordinator : IDisposable
         {
             // The anchor leader cannot be resolved from here right now, so the outcome cannot be
             // proven either way — answer the retryable unknown rather than a terminal Errored.
-            return (true, KeyValueResponseType.MustRetry);
+            return (true, KeyValueResponseType.MustRetry, CommitRefusalClass.Unresolved);
         }
 
         // No resident record on the routed anchor leader: indeterminate, not terminal. See the summary — a
         // finalize that is in flight or a not-yet-propagated commit both look like this, and a definite Errored
         // would mislabel a committed transaction as having done nothing. Retry re-observes the truth.
         if (record is null)
-            return (true, KeyValueResponseType.MustRetry);
+            return (true, KeyValueResponseType.MustRetry, CommitRefusalClass.Unresolved);
 
-        KeyValueResponseType response = record.Decision switch
+        return record.Decision switch
         {
-            TransactionDecision.Commit => KeyValueResponseType.Committed,
-            TransactionDecision.Abort => KeyValueResponseType.Aborted, // terminal whatever the class: it can never commit
-            _ => KeyValueResponseType.MustRetry // still undecided → recovery completes it
+            TransactionDecision.Commit => (true, KeyValueResponseType.Committed, CommitRefusalClass.None),
+            // Terminal whatever the class: it can never commit.
+            TransactionDecision.Abort => (true, KeyValueResponseType.Aborted, CommitRefusals.FromAbortClass(record.AbortClass)),
+            // Still undecided → recovery completes it.
+            _ => (true, KeyValueResponseType.MustRetry, CommitRefusalClass.Unresolved)
         };
-
-        return (true, response);
     }
 
     /// <summary>
@@ -323,7 +323,7 @@ internal sealed class TransactionCoordinator : IDisposable
     /// The handle carries both the transaction ID (used to locate the session) and the
     /// coordinator key (used by the caller to route this request to the right node).
     /// </summary>
-    public async Task<(KeyValueResponseType, string?)> CommitTransaction(TransactionHandle handle)
+    public async Task<TransactionCommitAnswer> CommitTransaction(TransactionHandle handle)
     {
         // The commit may have reached this coordinator via placement forwarding, but everything it
         // does from here — staged-base validation reads, durable prepare legs, the decision
@@ -340,7 +340,7 @@ internal sealed class TransactionCoordinator : IDisposable
             // replays the recorded terminal answer; otherwise the durable record is consulted below, and only
             // a handle with no routable anchor is reported as the unknown Errored — never a conflict Aborted.
             if (terminalOutcomes.TryGet(transactionId, out TerminalOutcomeWindow.RetainedOutcome retained))
-                return (retained.Outcome.Type, retained.Outcome.RecordAnchorKey);
+                return retained.Outcome.ToAnswer();
 
             // The in-memory session is gone (evicted, restarted, or it lived on a node that failed), but an
             // all-persistent transaction's outcome survives as its canonical durable record anchored on the
@@ -348,13 +348,14 @@ internal sealed class TransactionCoordinator : IDisposable
             // committed → Committed; undecided → MustRetry (recovery finishes it); absent → MustRetry too,
             // because absence proves nothing (a finalize still in flight and a not-yet-propagated commit both
             // look absent). Only a handle with no routable anchor stays unknown Errored.
-            (bool found, KeyValueResponseType durableRecord) = await TryConsultDurableTransactionRecord(handle);
+            (bool found, KeyValueResponseType durableRecord, CommitRefusalClass durableRefusal) = await TryConsultDurableTransactionRecord(handle);
             if (found)
-                return (durableRecord, handle.RecordAnchorKey);
+                return new TransactionCommitAnswer(durableRecord, handle.RecordAnchorKey, durableRefusal,
+                    durableRefusal == CommitRefusalClass.None ? null : "Outcome consulted from the canonical record after the session was lost");
 
             logger.LogWarning("Trying to commit unknown transaction {TransactionId}", transactionId);
 
-            return (KeyValueResponseType.Errored, null);
+            return new TransactionCommitAnswer(KeyValueResponseType.Errored, null, CommitRefusalClass.UnknownTransaction, "Unknown transaction: no session and no routable record anchor");
         }
 
         // Serialize against a concurrent commit, rollback, or reaper on the same session. The owner runs the
@@ -366,15 +367,15 @@ internal sealed class TransactionCoordinator : IDisposable
         // the reap once it re-arms, or replays the retained outcome once the reap turns terminal.
         FinalizeAdmission admission = context.EnterFinalize(out FinalizeAttempt? attempt);
         if (admission == FinalizeAdmission.Rejected)
-            return (KeyValueResponseType.MustRetry, null);
+            return new TransactionCommitAnswer(KeyValueResponseType.MustRetry, null, CommitRefusalClass.Unresolved, "The session is being reaped between attempts");
 
         if (admission == FinalizeAdmission.Mirror)
         {
             FinalizeOutcome mirrored = await attempt!.Completion;
-            return (mirrored.Type, mirrored.RecordAnchorKey);
+            return mirrored.ToAnswer();
         }
 
-        FinalizeOutcome outcome = new(KeyValueResponseType.Aborted, null);
+        FinalizeOutcome outcome = new(KeyValueResponseType.Aborted, null, CommitRefusalClass.Faulted, "The finalize did not publish an outcome");
         try
         {
             outcome = await ExecuteCommit(context, transactionId);
@@ -391,7 +392,7 @@ internal sealed class TransactionCoordinator : IDisposable
                 FinalizeSession(transactionId);
             }
 
-            return (outcome.Type, outcome.RecordAnchorKey);
+            return outcome.ToAnswer();
         }
         finally
         {
@@ -412,7 +413,7 @@ internal sealed class TransactionCoordinator : IDisposable
         // before two-phase commit reads it. Operations that registered before finalization began are part
         // of the commit; any that arrive after are rejected. A drain timeout is a non-terminal MustRetry.
         if (!await FreezeForFinalize(context))
-            return new(KeyValueResponseType.MustRetry, null);
+            return new(KeyValueResponseType.MustRetry, null, CommitRefusalClass.Unresolved, "In-flight operations did not drain before the finalize");
 
         // The working set is now frozen: capture the immutable record anchor under the finalize fence and
         // return it from the commit itself. This is the race-free anchor source — a concurrent operation
@@ -430,16 +431,22 @@ internal sealed class TransactionCoordinator : IDisposable
             await TwoPhaseCommit(context, CancellationToken.None);
 
             if (context.Result is null)
-                return new(KeyValueResponseType.Errored, recordAnchorKey);
+                return new(KeyValueResponseType.Errored, recordAnchorKey, CommitRefusalClass.Faulted, "The finalize produced no result");
 
             // A durable finalize that recorded its canonical decision but left some participant resolution to the
             // background reports MustRetry, not a definite outcome: the decision is durable, so recovery finishes
             // the rest. Non-terminal — the session stays live and a retry re-observes MustRetry until it completes.
             if (context.Result.Type is KeyValueResponseType.MustRetry)
-                return new(KeyValueResponseType.MustRetry, recordAnchorKey);
+                return new(KeyValueResponseType.MustRetry, recordAnchorKey,
+                    context.Result.Refusal == CommitRefusalClass.None ? CommitRefusalClass.Unresolved : context.Result.Refusal,
+                    context.Result.Reason);
 
+            // The refusal class names the arm that refused; a result that set none threw or errored before any
+            // arm could name itself.
             if (context.Result.Type is KeyValueResponseType.Aborted or KeyValueResponseType.Errored)
-                return new(KeyValueResponseType.Aborted, recordAnchorKey);
+                return new(KeyValueResponseType.Aborted, recordAnchorKey,
+                    context.Result.Refusal == CommitRefusalClass.None ? CommitRefusalClass.Faulted : context.Result.Refusal,
+                    context.Result.Reason);
 
             logger.LogCommittedInteractiveTransaction(transactionId);
 
@@ -451,25 +458,25 @@ internal sealed class TransactionCoordinator : IDisposable
         {
             logger.LogKahunaAbortedException(ex);
 
-            return ClassifyThrownCommit(context, recordAnchorKey);
+            return ClassifyThrownCommit(context, recordAnchorKey, ex.Message);
         }
         catch (TaskCanceledException ex)
         {
             logger.LogTaskCanceledException(ex);
 
-            return ClassifyThrownCommit(context, recordAnchorKey);
+            return ClassifyThrownCommit(context, recordAnchorKey, ex.Message);
         }
         catch (OperationCanceledException ex)
         {
             logger.LogOperationCanceledException(ex);
 
-            return ClassifyThrownCommit(context, recordAnchorKey);
+            return ClassifyThrownCommit(context, recordAnchorKey, ex.Message);
         }
         catch (Exception ex)
         {
             logger.LogOperationCanceledException(ex);
 
-            return ClassifyThrownCommit(context, recordAnchorKey);
+            return ClassifyThrownCommit(context, recordAnchorKey, ex.Message);
         }
         finally
         {
@@ -513,7 +520,7 @@ internal sealed class TransactionCoordinator : IDisposable
             // A rollback cannot override a durably decided commit: if the canonical transaction record exists for
             // this lost session (routed to the anchor leader), return its outcome (committed → Committed, undecided
             // → MustRetry) instead of rolling back a transaction whose commit may already be durable.
-            (bool found, KeyValueResponseType durableRecord) = await TryConsultDurableTransactionRecord(handle);
+            (bool found, KeyValueResponseType durableRecord, CommitRefusalClass _) = await TryConsultDurableTransactionRecord(handle);
             if (found)
                 return durableRecord;
 
@@ -571,18 +578,21 @@ internal sealed class TransactionCoordinator : IDisposable
     /// Without an unresolved durable attempt nothing durable is in flight, and the throw is the definite
     /// Aborted it always was.
     /// </summary>
-    private FinalizeOutcome ClassifyThrownCommit(TransactionContext context, string? recordAnchorKey)
+    private FinalizeOutcome ClassifyThrownCommit(TransactionContext context, string? recordAnchorKey, string thrown)
     {
+        // A result an arm already named (a refused mutation, a lost lock) outranks the throw that carried it out.
         if (context.UnresolvedDurableFinalize is not { } unresolved)
-            return new(KeyValueResponseType.Aborted, recordAnchorKey);
+            return context.Result is { Type: KeyValueResponseType.Aborted, Refusal: not CommitRefusalClass.None } named
+                ? new(KeyValueResponseType.Aborted, recordAnchorKey, named.Refusal, named.Reason)
+                : new(KeyValueResponseType.Aborted, recordAnchorKey, CommitRefusalClass.Faulted, "The finalize threw: " + thrown);
 
         DurableFinalizeResult classified = ApplyDurableOutcome(context, ClassifyFromCanonicalRecord(unresolved));
 
         return classified switch
         {
             DurableFinalizeResult.Committed => new(KeyValueResponseType.Committed, recordAnchorKey),
-            DurableFinalizeResult.Aborted => new(KeyValueResponseType.Aborted, recordAnchorKey),
-            _ => new(KeyValueResponseType.MustRetry, recordAnchorKey)
+            DurableFinalizeResult.Aborted => new(KeyValueResponseType.Aborted, recordAnchorKey, context.Result?.Refusal ?? CommitRefusalClass.None, context.Result?.Reason),
+            _ => new(KeyValueResponseType.MustRetry, recordAnchorKey, CommitRefusalClass.Unresolved, "The finalize threw with a durable attempt unresolved: " + thrown)
         };
     }
 
@@ -1406,7 +1416,7 @@ internal sealed class TransactionCoordinator : IDisposable
         // only honest outcome is a retryable abort.
         if (context.LocksAcquired is null)
         {
-            context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction modified keys but holds no lock set" };
+            context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction modified keys but holds no lock set", Refusal = CommitRefusalClass.InvalidWorkingSet };
             return;
         }
 
@@ -1420,7 +1430,7 @@ internal sealed class TransactionCoordinator : IDisposable
         {
             DurableTransactionMetrics.StagedChainBreakAborts.Add(1);
             logger.LogWarning("Refusing to commit transaction {TransactionId}: {Break}", context.TransactionId, stagedChainBreak);
-            context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Lost staging: " + stagedChainBreak, ExclusionLost = true };
+            context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Lost staging: " + stagedChainBreak, ExclusionLost = true, Refusal = CommitRefusalClass.StagedChainBreak };
             return;
         }
 
@@ -1442,13 +1452,13 @@ internal sealed class TransactionCoordinator : IDisposable
         {
             if (context.ModifiedKeys.Any(static k => k.Item2 != KeyValueDurability.Persistent))
             {
-                context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "A durable transaction cannot modify an ephemeral key" };
+                context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "A durable transaction cannot modify an ephemeral key", Refusal = CommitRefusalClass.InvalidWorkingSet };
                 return;
             }
 
             if (context.RecordAnchorKey is null)
             {
-                context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "A durable transaction with modifications must have a record anchor" };
+                context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "A durable transaction with modifications must have a record anchor", Refusal = CommitRefusalClass.InvalidWorkingSet };
                 return;
             }
         }
@@ -1517,7 +1527,7 @@ internal sealed class TransactionCoordinator : IDisposable
         // in-memory (ticket-free) commit path; every persistent-bearing transaction is finalized durably or aborts.
         if (persistentKeys.Count > 0)
         {
-            context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Persistent mutation could not be staged for a durable commit" };
+            context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Persistent mutation could not be staged for a durable commit", Refusal = CommitRefusalClass.InvalidWorkingSet };
             return;
         }
 
@@ -1593,13 +1603,11 @@ internal sealed class TransactionCoordinator : IDisposable
 
     private readonly ConcurrentDictionary<Task, byte> deferredResolutions = new();
 
-    // Resolution (materialize committed values, settle intents) runs synchronously before the finalizer returns
-    // (a null scheduler = await inline). Deferred settlement would return after the decision barrier and materialize
-    // in the background, but that requires the cross-node anchor decision lookup: a latest read on another node that
-    // meets a committed-but-unmaterialized foreign intent must resolve it against the remote canonical record.
-    // Without that lookup a back-to-back transaction on a different node reads the stale prior value, violating
-    // read-your-writes, so settlement is synchronous until the cross-node lookup lands. The finalizer
-    // still supports deferred settlement via its scheduler seam for when it does.
+    // Resolution (materialize committed values, settle intents) runs off the commit critical path by default
+    // (DurableDeferredSettlement): the finalizer returns once the decision record is durable and settles in the
+    // background, and a read or write that meets a committed-but-unsettled foreign intent resolves it through the
+    // durable-intent visibility path (the local record, or the record routed to the anchor leader). A null
+    // scheduler awaits resolution inline instead (synchronous settlement).
     private DurableTransactionFinalizer DurableFinalizer => durableFinalizer ??= new DurableTransactionFinalizer(
         manager.DurableTransactionRecordStore, manager.DurablePreparedIntentStore, ReplicateDurableAsync,
         // Deferred settlement runs resolution off the commit critical path when configured; otherwise resolution is
@@ -1669,7 +1677,12 @@ internal sealed class TransactionCoordinator : IDisposable
         // locally when this node leads the anchor, from the anchor leader's answer otherwise — so a remote anchor
         // costs no separate lookup call. Supersedes replicateDecision + lookupRecordRouted for the decision; both
         // stay wired for the read-back an older remote node still needs and for the resolution direction.
-        decide: manager.ReplicateDurableDecisionThroughSchedulerFenced);
+        decide: manager.ReplicateDurableDecisionThroughSchedulerFenced,
+        // A live finalize inside a productive wait (settlement lag of a decided predecessor, a validation that
+        // consumed most of the margin) renews the record's decision-deadline lease instead of being presumed
+        // aborted. Bounded per attempt; 0 disables renewal for a mixed-version rollout.
+        maxDeadlineExtensions: configuration.DurableDecisionDeadlineMaxExtensions,
+        logger: logger);
 
     /// <summary>Schedules a durable transaction's post-decision resolution to run off the commit critical path.
     /// Exceptions are swallowed — the decision is already durable and recovery finishes any lost run — and the task
@@ -1854,7 +1867,8 @@ internal sealed class TransactionCoordinator : IDisposable
             context.Result = new KeyValueTransactionResult
             {
                 Type = KeyValueResponseType.MustRetry,
-                Reason = "Durable prepared-intent capacity reached; retry"
+                Reason = "Durable prepared-intent capacity reached; retry",
+                Refusal = CommitRefusalClass.AdmissionCapacity
             };
             return DurableFinalizeResult.MustRetry;
         }
@@ -1868,7 +1882,8 @@ internal sealed class TransactionCoordinator : IDisposable
             context.Result = new KeyValueTransactionResult
             {
                 Type = KeyValueResponseType.MustRetry,
-                Reason = "Durable admission at capacity; retry"
+                Reason = "Durable admission at capacity; retry",
+                Refusal = CommitRefusalClass.AdmissionCapacity
             };
             return DurableFinalizeResult.MustRetry;
         }
@@ -1954,8 +1969,12 @@ internal sealed class TransactionCoordinator : IDisposable
     {
         // A terminal outcome is record-backed (classified from the canonical record), so no stalled proposal can
         // contradict it; only a MustRetry leaves the attempt unresolved and keeps the fence obligation in place.
+        // An unresolved attempt that extended the record's decision deadline keeps the extended deadline on the
+        // frozen input, so a same-identity retry compares its attempt clock against the deadline the record holds.
         if (outcome.Result is DurableFinalizeResult.Committed or DurableFinalizeResult.Aborted)
             context.UnresolvedDurableFinalize = null;
+        else if (context.UnresolvedDurableFinalize is { } unresolved && outcome.DecisionDeadline > unresolved.DecisionDeadline)
+            context.UnresolvedDurableFinalize = unresolved with { DecisionDeadline = outcome.DecisionDeadline };
 
         // Per-transaction view of the deadline gate: the finalizer counts one event per rejected attempt, and a
         // client that retries the same commit produces one attempt per retry. Count the transaction once, on its
@@ -1990,17 +2009,31 @@ internal sealed class TransactionCoordinator : IDisposable
                 Type = KeyValueResponseType.Aborted,
                 Reason = context.Result is { Type: KeyValueResponseType.Aborted, ExclusionLost: true, Reason: { } lostReason }
                     ? lostReason
-                    : "Transaction aborted: a leader change dropped a lock or a staging the transaction relied on",
-                ExclusionLost = true
+                    : outcome.Reason ?? "Transaction aborted: a leader change dropped a lock or a staging the transaction relied on",
+                ExclusionLost = true,
+                Refusal = context.Result is { Type: KeyValueResponseType.Aborted, ExclusionLost: true, Refusal: not CommitRefusalClass.None } lostNamed
+                    ? lostNamed.Refusal
+                    : outcome.Refusal != CommitRefusalClass.None ? outcome.Refusal : CommitRefusalClass.LostLock
             },
+            // The validation that failed named its arm on the result (a read-set conflict, a lost staged intent);
+            // the finalizer names every arm it decided itself (a moved base, an exhausted prepare loop, the
+            // deadline gate); a class read back from a record another attempt decided maps from its abort class.
             DurableFinalizeResult.Aborted => new KeyValueTransactionResult
             {
                 Type = KeyValueResponseType.Aborted,
-                Reason = outcome.AbortClass == TransactionAbortClass.Conflict
-                    ? "Transaction conflict"
-                    : $"Transaction aborted: {outcome.AbortClass}"
+                Reason = outcome.AbortClass == TransactionAbortClass.Conflict && context.Result is { Type: KeyValueResponseType.Aborted, Reason: { } conflictReason }
+                    ? conflictReason
+                    : outcome.Reason ?? (outcome.AbortClass == TransactionAbortClass.Conflict ? "Transaction conflict" : $"Transaction aborted: {outcome.AbortClass}"),
+                Refusal = outcome.AbortClass == TransactionAbortClass.Conflict && context.Result is { Type: KeyValueResponseType.Aborted, Refusal: not CommitRefusalClass.None } conflictNamed
+                    ? conflictNamed.Refusal
+                    : outcome.Refusal != CommitRefusalClass.None ? outcome.Refusal : CommitRefusals.FromAbortClass(outcome.AbortClass)
             },
-            _ => new KeyValueTransactionResult { Type = KeyValueResponseType.MustRetry, Reason = "Durable finalize could not complete; retry" }
+            _ => new KeyValueTransactionResult
+            {
+                Type = KeyValueResponseType.MustRetry,
+                Reason = outcome.Reason ?? "Durable finalize could not complete; retry",
+                Refusal = outcome.Refusal != CommitRefusalClass.None ? outcome.Refusal : CommitRefusalClass.Unresolved
+            }
         };
 
         return outcome.Result;
@@ -2121,8 +2154,10 @@ internal sealed class TransactionCoordinator : IDisposable
         return record?.Decision switch
         {
             TransactionDecision.Commit => new DurableFinalizeOutcome(DurableFinalizeResult.Committed, TransactionAbortClass.None),
-            TransactionDecision.Abort => new DurableFinalizeOutcome(DurableFinalizeResult.Aborted, record.AbortClass),
-            _ => new DurableFinalizeOutcome(DurableFinalizeResult.MustRetry, TransactionAbortClass.RetryableFailure)
+            TransactionDecision.Abort => new DurableFinalizeOutcome(DurableFinalizeResult.Aborted, record.AbortClass,
+                Refusal: CommitRefusals.FromAbortClass(record.AbortClass), Reason: $"Transaction aborted: {record.AbortClass}"),
+            _ => new DurableFinalizeOutcome(DurableFinalizeResult.MustRetry, TransactionAbortClass.RetryableFailure,
+                Refusal: CommitRefusalClass.Unresolved, Reason: "The finalize threw before a record-backed outcome")
         };
     }
 
@@ -2341,7 +2376,8 @@ internal sealed class TransactionCoordinator : IDisposable
             context.Result = new()
             {
                 Type = KeyValueResponseType.Aborted,
-                Reason = "Read observation instability: a key was observed at two different base revisions"
+                Reason = "Read observation instability: a key was observed at two different base revisions",
+                Refusal = CommitRefusalClass.Conflict
             };
 
             return false;
@@ -2386,7 +2422,8 @@ internal sealed class TransactionCoordinator : IDisposable
                 context.Result = new()
                 {
                     Type = KeyValueResponseType.Aborted,
-                    Reason = $"Read dependency validation failed for {readKey.Key}: {KeyValueResponseType.Errored}"
+                    Reason = $"Read dependency validation failed for {readKey.Key}: {KeyValueResponseType.Errored}",
+                    Refusal = CommitRefusalClass.Conflict
                 };
 
                 logger.LogWarning(
@@ -2713,7 +2750,7 @@ internal sealed class TransactionCoordinator : IDisposable
             logger.LogWarning("Refusing to commit transaction {TransactionId}: {Reason}", context.TransactionId, lost.Reason);
         }
 
-        context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Lost lock: " + lost.Reason, ExclusionLost = true };
+        context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Lost lock: " + lost.Reason, ExclusionLost = true, Refusal = CommitRefusalClass.LostLock };
     }
 
     /// <summary>
@@ -2942,7 +2979,8 @@ internal sealed class TransactionCoordinator : IDisposable
                     Type = KeyValueResponseType.Aborted,
                     Reason = isReadKey
                         ? $"Write intent probe returned no result for read key {key}"
-                        : $"Range lock probe returned no result for written key {key}"
+                        : $"Range lock probe returned no result for written key {key}",
+                    Refusal = CommitRefusalClass.Conflict
                 };
 
                 logger.LogWriteSkewGuardAborted(context.TransactionId, key);
@@ -2960,7 +2998,8 @@ internal sealed class TransactionCoordinator : IDisposable
                 context.Result = new()
                 {
                     Type = KeyValueResponseType.Aborted,
-                    Reason = $"Committed base for written key {key} changed after validation"
+                    Reason = $"Committed base for written key {key} changed after validation",
+                    Refusal = CommitRefusalClass.StagedBaseMoved
                 };
 
                 logger.LogWarning(
@@ -2981,7 +3020,8 @@ internal sealed class TransactionCoordinator : IDisposable
                 {
                     Type = KeyValueResponseType.Aborted,
                     Reason = $"Write intent of the staged write on key {key} was lost before commit",
-                    ExclusionLost = true
+                    ExclusionLost = true,
+                    Refusal = CommitRefusalClass.LostStagedIntent
                 };
 
                 logger.LogWarning(
@@ -3011,7 +3051,8 @@ internal sealed class TransactionCoordinator : IDisposable
                     Type = KeyValueResponseType.MustRetry,
                     Reason = isReadKey
                         ? $"Commit probe could not be completed for read key {key}: the leader answered {type}"
-                        : $"Commit probe could not be completed for written key {key}: the leader answered {type}"
+                        : $"Commit probe could not be completed for written key {key}: the leader answered {type}",
+                    Refusal = CommitRefusalClass.Unresolved
                 };
 
                 logger.LogWarning(
@@ -3029,7 +3070,8 @@ internal sealed class TransactionCoordinator : IDisposable
                 Type = KeyValueResponseType.Aborted,
                 Reason = isReadKey
                     ? $"Concurrent write intent detected on read key {key}"
-                    : $"Foreign range lock covers written key {key}"
+                    : $"Foreign range lock covers written key {key}",
+                Refusal = CommitRefusalClass.Conflict
             };
 
             logger.LogWriteSkewGuardAborted(context.TransactionId, key);
@@ -3110,7 +3152,8 @@ internal sealed class TransactionCoordinator : IDisposable
                 context.Result = new()
                 {
                     Type = KeyValueResponseType.Aborted,
-                    Reason = $"Yielding transaction lost key {probe.Key} to a foreground writer"
+                    Reason = $"Yielding transaction lost key {probe.Key} to a foreground writer",
+                    Refusal = CommitRefusalClass.Conflict
                 };
                 return false;
             }
@@ -3210,7 +3253,7 @@ internal sealed class TransactionCoordinator : IDisposable
 
         if (context.LocksAcquired is null)
         {
-            context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction modified keys but holds no lock set" };
+            context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Transaction modified keys but holds no lock set", Refusal = CommitRefusalClass.InvalidWorkingSet };
             return;
         }
 
@@ -3270,7 +3313,7 @@ internal sealed class TransactionCoordinator : IDisposable
                 if (type != KeyValueResponseType.Committed)
                 {
                     string reason = $"Failed to commit mutation {key}: {type}";
-                    context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = reason };
+                    context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = reason, Refusal = CommitRefusalClass.Faulted };
                     logger.LogWarning("CommitMutations: {Type} {Key} {TicketId}", type, key, HLCTimestamp.Zero);
                     throw new KahunaAbortedException(reason);
                 }
@@ -3287,7 +3330,8 @@ internal sealed class TransactionCoordinator : IDisposable
                 context.Result = new()
                 {
                     Type = KeyValueResponseType.Aborted,
-                    Reason = $"Foreign range lock covers written key {key}"
+                    Reason = $"Foreign range lock covers written key {key}",
+                    Refusal = CommitRefusalClass.Conflict
                 };
 
                 logger.LogWriteSkewGuardAborted(context.TransactionId, key);
@@ -3331,7 +3375,7 @@ internal sealed class TransactionCoordinator : IDisposable
             case KeyValueFinalizeStage.Prepare:
             case KeyValueFinalizeStage.Unknown:
             default:
-                context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Couldn't prepare mutations" };
+                context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Couldn't prepare mutations", Refusal = CommitRefusalClass.Conflict };
 
                 logger.LogWarning("Couldn't propose {Key} {Response}", key, type);
 
@@ -3379,7 +3423,7 @@ internal sealed class TransactionCoordinator : IDisposable
 
             if (type != KeyValueResponseType.Prepared)
             {
-                context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Couldn't prepare mutations" };
+                context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Couldn't prepare mutations", Refusal = CommitRefusalClass.Conflict };
 
                 logger.LogWarning("Couldn't propose {Key} {Response}", key, type);
 
@@ -3412,7 +3456,7 @@ internal sealed class TransactionCoordinator : IDisposable
                 logger.LogWarning("Couldn't propose {Key} {Response}", proposalResponse.Item3, proposalResponse.Item1);
             }
 
-            context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Couldn't prepare mutations" };
+            context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = "Couldn't prepare mutations", Refusal = CommitRefusalClass.Conflict };
 
             return (false, preparedMutations);
         }
@@ -3462,7 +3506,7 @@ internal sealed class TransactionCoordinator : IDisposable
                 }
 
                 string reason = $"Failed to commit mutation {key}: {response}";
-                context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = reason };
+                context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = reason, Refusal = CommitRefusalClass.Faulted };
                 logger.LogWarning("CommitMutations: {Type} {Key} {TicketId}", response, key, ticketId);
                 throw new KahunaAbortedException(reason);
             }
@@ -3470,7 +3514,7 @@ internal sealed class TransactionCoordinator : IDisposable
             if (!committed)
             {
                 string reason = $"Exhausted retries committing mutation {key}";
-                context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = reason };
+                context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = reason, Refusal = CommitRefusalClass.Unresolved };
                 logger.LogError("CommitMutations: exhausted {MaxRetries} retries for {Key}", MaxPhase2Retries, key);
                 throw new KahunaAbortedException(reason);
             }
@@ -3561,7 +3605,7 @@ internal sealed class TransactionCoordinator : IDisposable
                 pendingCommits.Count, string.Join(", ", pendingCommits.Keys));
 
             string reason = $"All {pendingCommits.Count} participant(s) failed to commit and none committed";
-            context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = reason };
+            context.Result = new() { Type = KeyValueResponseType.Aborted, Reason = reason, Refusal = CommitRefusalClass.Faulted };
             throw new KahunaAbortedException(reason);
         }
 

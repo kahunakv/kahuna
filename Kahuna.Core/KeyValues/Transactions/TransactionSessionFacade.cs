@@ -56,7 +56,7 @@ internal sealed class TransactionSessionFacade
     /// <param name="readKeys">A list of keys read during the transaction.</param>
     /// <param name="cancellationToken">A token used to monitor for cancellation requests.</param>
     /// <returns>A task that represents the asynchronous operation, containing the result of the transaction operation.</returns>
-    public Task<(KeyValueResponseType, string?)> LocateAndCommitTransaction(TransactionHandle handle, CancellationToken cancellationToken)
+    public Task<TransactionCommitAnswer> LocateAndCommitTransaction(TransactionHandle handle, CancellationToken cancellationToken)
     {
         return locator.LocateAndCommitTransaction(handle, cancellationToken);
     }
@@ -190,7 +190,7 @@ internal sealed class TransactionSessionFacade
     /// </summary>
     /// <param name="handle">The handle returned by <see cref="StartTransaction"/>.</param>
     /// <returns>A task that represents the asynchronous operation containing the commit result.</returns>
-    public Task<(KeyValueResponseType, string?)> CommitTransaction(TransactionHandle handle)
+    public Task<TransactionCommitAnswer> CommitTransaction(TransactionHandle handle)
     {
         return txCoordinator.CommitTransaction(handle);
     }

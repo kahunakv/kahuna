@@ -2198,15 +2198,19 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         // Commit returns the coordinator's canonical record anchor captured from the frozen finalize
         // snapshot under the fence, so there is no race window between reading the anchor and freezing the
         // working set. The anchor is null when the transaction confirmed no persistent write.
-        (KeyValueResponseType type, string? recordAnchorKey) = await keyValues.LocateAndCommitTransaction(handle, context.CancellationToken);
+        TransactionCommitAnswer answer = await keyValues.LocateAndCommitTransaction(handle, context.CancellationToken);
 
         GrpcCommitTransactionResponse response = new()
         {
-            Type = (GrpcKeyValueResponseType)type,
+            Type = (GrpcKeyValueResponseType)answer.Type,
+            Refusal = (int)answer.Refusal
         };
 
-        if (recordAnchorKey is not null)
-            response.RecordAnchorKey = recordAnchorKey;
+        if (answer.RecordAnchorKey is not null)
+            response.RecordAnchorKey = answer.RecordAnchorKey;
+
+        if (answer.Reason is not null)
+            response.Reason = answer.Reason;
 
         return response;
     }

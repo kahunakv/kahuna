@@ -540,6 +540,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             DurableDecisionOutstandingMax = options.DurableDecisionOutstandingMax, DurablePreparedIntentMaxCount = options.DurablePreparedIntentMaxCount, DurablePreparedIntentMaxBytes = options.DurablePreparedIntentMaxBytes,
             DurableDecisionDeadlineFloorMs = options.DurableDecisionDeadlineFloorMs,
             DurableDecisionDeadlineCeilingMs = options.DurableDecisionDeadlineCeilingMs,
+            DurableDecisionDeadlineMaxExtensions = options.DurableDecisionDeadlineMaxExtensions,
             MaxEntriesPerActor = options.MaxEntriesPerActor,
             MaxBytesPerActor = options.MaxBytesPerActor,
             CollectBatchMax = options.CollectBatchMax,

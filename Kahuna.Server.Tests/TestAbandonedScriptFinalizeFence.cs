@@ -141,10 +141,10 @@ public sealed class TestAbandonedScriptFinalizeFence
         Assert.Equal(PreparedIntentResolution.Pending, leftover.Resolution);
         Assert.Equal(TransactionDecision.Undecided, kahuna.DurableTransactionRecordStore.Get(abandoned, 1)!.Decision);
 
-        // The hazard: a writer of the fresh key is refused while the abandoned intent stays undecided.
+        // The hazard: a writer of the fresh key is told to wait while the abandoned intent stays undecided.
         (KeyValueResponseType blockedType, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
             HLCTimestamp.Zero, freshKey, "x"u8.ToArray(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
-        Assert.Equal(KeyValueResponseType.MustRetry, blockedType);
+        Assert.Equal(KeyValueResponseType.WaitingForReplication, blockedType);
 
         // ── The fence the script executor applies when its finalize ended unresolved. ──
         DurableFinalizeInput input = new(

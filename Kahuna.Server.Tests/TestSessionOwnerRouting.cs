@@ -174,8 +174,8 @@ public sealed class TestSessionOwnerRouting : BaseCluster
 
             await MoveLeadership(rafts, partition, owner, successor, ct);
 
-            (KeyValueResponseType commitType, _) = await RetryOnMustRetryAsync(
-                () => managers[owner].LocateAndCommitTransaction(handle, ct), r => r.Item1);
+            (KeyValueResponseType commitType, string? _) = await RetryOnMustRetryAsync(
+                () => managers[owner].LocateAndCommitTransaction(handle, ct), r => r.Type);
 
             Assert.Equal(KeyValueResponseType.Committed, commitType);
 
@@ -211,8 +211,8 @@ public sealed class TestSessionOwnerRouting : BaseCluster
 
             await MoveLeadership(rafts, partition, owner, successor, ct);
 
-            (KeyValueResponseType commitType, _) = await RetryOnMustRetryAsync(
-                () => managers[successor].LocateAndCommitTransaction(handle, ct), r => r.Item1);
+            (KeyValueResponseType commitType, string? _) = await RetryOnMustRetryAsync(
+                () => managers[successor].LocateAndCommitTransaction(handle, ct), r => r.Type);
 
             Assert.Equal(KeyValueResponseType.Committed, commitType);
 
@@ -251,8 +251,8 @@ public sealed class TestSessionOwnerRouting : BaseCluster
             int dataLeader = await LeaderIndexOf(dataPartition, rafts, ct);
             await MoveLeadership(rafts, dataPartition, dataLeader, (dataLeader + 1) % Nodes, ct);
 
-            (KeyValueResponseType commitType, _) = await RetryOnMustRetryAsync(
-                () => managers[owner].LocateAndCommitTransaction(handle, ct), r => r.Item1);
+            (KeyValueResponseType commitType, string? _) = await RetryOnMustRetryAsync(
+                () => managers[owner].LocateAndCommitTransaction(handle, ct), r => r.Type);
 
             Assert.Equal(KeyValueResponseType.Aborted, commitType);
 

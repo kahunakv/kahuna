@@ -343,6 +343,14 @@ public sealed class EmbeddedKahunaOptions
     public long DurableDecisionDeadlineCeilingMs { get; set; } = 60_000;
 
     /// <summary>
+    /// How many times one finalize attempt may renew its decision-deadline lease while it waits productively
+    /// (settlement lag of a decided predecessor, or a validation that consumed most of the margin), so a slow
+    /// settlement never turns a healthy commit into a presumed abort. 0 disables renewal. An embedded node is a
+    /// single process, so the mixed-version caution of the server setting does not apply.
+    /// </summary>
+    public int DurableDecisionDeadlineMaxExtensions { get; set; } = 8;
+
+    /// <summary>
     /// When true (default), a durable transaction's post-decision resolution (materialize committed values, settle
     /// intents) runs off the commit critical path — finalize returns once the decision record is durable and
     /// settlement completes in the background (recovery finishes a lost run). Reads/writes that meet a

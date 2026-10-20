@@ -158,8 +158,11 @@ internal sealed class LocalLockOperations
             if (response.Type != KeyValueResponseType.WaitingForReplication)
                 return (response.Type, response.HolderTransactionId, response.Type == KeyValueResponseType.Locked ? response.Revision : PointLockBase.None);
 
+            // The wait budget ran out on lag (a holder still settling or still deciding, a replication intent in
+            // flight), not on a lock conflict: answer the wait itself, so the caller can give it a longer budget
+            // than a deadlock wait.
             if (Environment.TickCount64 >= deadline)
-                return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero, PointLockBase.None);
+                return (KeyValueResponseType.WaitingForReplication, response.HolderTransactionId, PointLockBase.None);
 
             Transactions.DurableTransactionMetrics.AddKvRetryWait("AcquireExclusiveLockWithWait_4389");
             await Task.Delay(backoffMs);

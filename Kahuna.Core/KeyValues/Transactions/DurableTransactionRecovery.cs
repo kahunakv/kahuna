@@ -187,10 +187,12 @@ internal sealed class DurableTransactionRecovery
     /// Targeted "helping" resolution for a blocked finalize: given the intents a transaction failed to prepare on
     /// <paramref name="partitionId"/>, finds the foreign intents currently holding those keys whose canonical
     /// record is already terminal — committed- or aborted-but-unsettled, i.e. only waiting on deferred settlement —
-    /// and settles them now. Returns how many blocking intents were confirmed settled — their settle delta
+    /// and settles them now. Reports how many blocking intents were confirmed settled — their settle delta
     /// replicated — so the caller re-prepares immediately only on real progress and otherwise sleeps through its
-    /// backoff; a pass whose materializations, local applies or settle did not land reports zero, never the
-    /// size of the group it attempted.
+    /// backoff; a pass whose materializations, local applies or settle did not land reports zero settled, never
+    /// the size of the group it attempted. The report also counts the blocked keys held by a decided transaction
+    /// and those held by an undecided one, so the caller can tell settlement lag (bounded by its decision
+    /// deadline) from a live conflict (bounded by its retry rounds).
     ///
     /// <para>A blocker whose record is still <c>Undecided</c> is never touched: helping must not presume-abort a
     /// live coordinator inside its decision window. That case stays with the caller's bounded retry (and, past the
@@ -198,7 +200,7 @@ internal sealed class DurableTransactionRecovery
     /// sweep's resolution path, so it is idempotent under races with the deferred-settlement task, the sweep, or
     /// another helper — whoever loses applies no-ops in Raft order.</para>
     /// </summary>
-    public Task<int> TryResolveDecidedBlockersAsync(
+    public Task<BlockerHelpResult> TryResolveDecidedBlockersAsync(
         int partitionId,
         IReadOnlyList<PreparedIntent> blockedIntents,
         HLCTimestamp requestingTransactionId,
@@ -218,7 +220,7 @@ internal sealed class DurableTransactionRecovery
     /// covered keys held by decided-but-unsettled predecessors. A null <paramref name="requestingEpoch"/> excludes
     /// every intent of the requesting transaction whatever its epoch; the acquire never settles its own.
     /// </summary>
-    public async Task<int> TryResolveDecidedBlockersAsync(
+    public async Task<BlockerHelpResult> TryResolveDecidedBlockersAsync(
         int partitionId,
         IReadOnlyList<string> blockedKeys,
         HLCTimestamp requestingTransactionId,
@@ -250,35 +252,36 @@ internal sealed class DurableTransactionRecovery
         }
 
         if (byBlocker is null)
-            return 0;
+            return BlockerHelpResult.NoBlockers;
 
         // Independent blockers resolve concurrently, a few at a time: each is a distinct decided transaction, so
         // their materializations and settles coalesce into shared proposals instead of queueing one durable round
         // behind another. The degree is small and fixed so one helping pass cannot flood the scheduler.
         List<PreparedIntent>[] groups = [.. byBlocker.Values];
-        int[] settledPerGroup = new int[groups.Length];
+        BlockerHelpResult[] perGroup = new BlockerHelpResult[groups.Length];
 
         await Parallel.ForEachAsync(
             Enumerable.Range(0, groups.Length),
             new ParallelOptions { MaxDegreeOfParallelism = MaxConcurrentBlockerGroups, CancellationToken = cancellationToken },
             async (index, ct) =>
             {
-                settledPerGroup[index] = await HelpBlockerGroupAsync(partitionId, groups[index], ct).ConfigureAwait(false);
+                perGroup[index] = await HelpBlockerGroupAsync(partitionId, groups[index], ct).ConfigureAwait(false);
             }).ConfigureAwait(false);
 
-        int settled = 0;
-        foreach (int count in settledPerGroup)
-            settled += count;
+        BlockerHelpResult report = BlockerHelpResult.NoBlockers;
+        foreach (BlockerHelpResult group in perGroup)
+            report = report.Add(group);
 
-        if (settled > 0)
-            DurableTransactionMetrics.PrepareConflictBlockersSettled.Add(settled);
+        if (report.Settled > 0)
+            DurableTransactionMetrics.PrepareConflictBlockersSettled.Add(report.Settled);
 
-        return settled;
+        return report;
     }
 
-    /// <summary>Settles one blocker's intents when its record is terminal; returns the confirmed count. An
-    /// undecided blocker (or one with no record yet) is a live conflict, not settlement lag, and is left alone.</summary>
-    private async Task<int> HelpBlockerGroupAsync(int partitionId, List<PreparedIntent> group, CancellationToken cancellationToken)
+    /// <summary>Settles one blocker's intents when its record is terminal and reports the group as decided with
+    /// the confirmed settled count. An undecided blocker (or one with no record yet) is a live conflict, not
+    /// settlement lag: it is left alone and reported as undecided.</summary>
+    private async Task<BlockerHelpResult> HelpBlockerGroupAsync(int partitionId, List<PreparedIntent> group, CancellationToken cancellationToken)
     {
         PreparedIntent representative = group[0];
         TransactionRecord? record = await lookupRecord(
@@ -292,7 +295,7 @@ internal sealed class DurableTransactionRecovery
         };
 
         if (commit is null)
-            return 0;
+            return new BlockerHelpResult(Inspected: true, Settled: 0, Decided: 0, Undecided: group.Count);
 
         ResolveGroupResult result = await ResolveGroupAsync(partitionId, group, commit.Value, ResolutionSource.Helping, cancellationToken).ConfigureAwait(false);
 
@@ -301,7 +304,7 @@ internal sealed class DurableTransactionRecovery
         if (result.Settled == 0)
             DurableTransactionMetrics.HelpingSettledNone(result.Cause);
 
-        return result.Settled;
+        return new BlockerHelpResult(Inspected: true, Settled: result.Settled, Decided: group.Count, Undecided: 0);
     }
 
     /// <summary>

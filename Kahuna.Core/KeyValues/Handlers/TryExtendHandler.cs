@@ -46,10 +46,13 @@ internal sealed class TryExtendHandler : BaseHandler
         // Resolve its canonical outcome before treating the key as absent — a committed set materializes into a
         // resident entry to extend, an undecided intent retries, and an aborted or committed-delete intent leaves
         // the key absent. No-op off the durable-intent path.
+        // An undecided foreign intent is lag, not a lock conflict (see TrySetHandler): the holder is inside its
+        // decision window, so the extend answers WaitingForReplication and names it.
         if (ForeignIntentWriteResolver.Resolve(
-                context, message.Key, message.TransactionId, ref entry, ApplyCommittedHead, message.ForeignDecisionHint)
+                context, message.Key, message.TransactionId, ref entry, ApplyCommittedHead,
+                out HLCTimestamp blockingIntentOwner, message.ForeignDecisionHint)
             == ForeignIntentWriteDecision.MustRetry)
-            return KeyValueStaticResponses.MustRetryResponse;
+            return KeyValueResponse.Denied(KeyValueResponseType.WaitingForReplication, blockingIntentOwner, WriteDenialCause.DurableIntent);
 
         if (entry is null)
             return KeyValueStaticResponses.DoesNotExistResponse;
@@ -79,6 +82,11 @@ internal sealed class TryExtendHandler : BaseHandler
             {
                 if (KeyValueWriteIntentLease.IsLive(context, message.Key, entry.WriteIntent, currentTime))
                 {
+                    // A holder already durably decided only waits for its settlement to clear the intent (see
+                    // TrySetHandler): a wait, not a lock conflict.
+                    if (IsAwaitingSettlement(message.Key, entry.WriteIntent.TransactionId, message.ForeignDecisionHint))
+                        return KeyValueResponse.Denied(KeyValueResponseType.WaitingForReplication, entry.WriteIntent.TransactionId, WriteDenialCause.SettlingWriteIntent);
+
                     if (RequesterMayTakeOverYieldingIntent(message) && entry.WriteIntent.Yielding)
                     {
                         if (entry.WriteIntent.Pinned)
@@ -90,11 +98,11 @@ internal sealed class TryExtendHandler : BaseHandler
                         if (IsStealableYieldingIntent(message.Key, entry.WriteIntent))
                             TakeOverYieldingIntent(message, message.Key, entry, currentTime);
                         else
-                            return KeyValueStaticResponses.MustRetryResponse;
+                            return KeyValueResponse.Denied(KeyValueResponseType.MustRetry, entry.WriteIntent.TransactionId);
                     }
                     else
                     {
-                        return KeyValueStaticResponses.MustRetryResponse;
+                        return KeyValueResponse.Denied(KeyValueResponseType.MustRetry, entry.WriteIntent.TransactionId);
                     }
                 }
                 else

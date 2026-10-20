@@ -173,8 +173,8 @@ public sealed class TestSnapshotReadStagedWriteWindowCluster : BaseCluster
             // The new leader refused the bundle before anything was appended: a clean retry, never a commit.
             Assert.Equal(KeyValueResponseType.MustRetry, firstAttempt);
 
-            (KeyValueResponseType finalType, _) = await RetryOnMustRetryAsync(
-                () => coordinator.LocateAndCommitTransaction(tx, ct), r => r.Item1, timeoutMs: 30_000);
+            (KeyValueResponseType finalType, string? _) = await RetryOnMustRetryAsync(
+                () => coordinator.LocateAndCommitTransaction(tx, ct), r => r.Type, timeoutMs: 30_000);
 
             // The retried commit's probe finds the staged intent gone with the old leadership.
             Assert.Equal(KeyValueResponseType.Aborted, finalType);

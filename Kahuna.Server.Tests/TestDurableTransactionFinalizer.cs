@@ -799,6 +799,7 @@ public sealed class TestDurableTransactionFinalizer
 
             Assert.Equal(DurableFinalizeResult.Aborted, outcome.Result);
             Assert.Equal(TransactionAbortClass.PresumedAbort, outcome.AbortClass);
+            Assert.Equal(CommitRefusalClass.DecisionDeadline, outcome.Refusal);
 
             // The outcome still names the deadline gate as its cause, so the coordinator counts the transaction
             // once however many times the client retried this commit.
@@ -1709,7 +1710,7 @@ public sealed class TestDurableTransactionFinalizer
             resolveDecidedBlockers: (_, _, _, _, _) =>
             {
                 Interlocked.Increment(ref helperCalls);
-                return Task.FromResult(0);
+                return Task.FromResult(BlockerHelpResult.NotInspected);
             });
 
         using MetricCapture capture = new("outcome",
@@ -1769,7 +1770,9 @@ public sealed class TestDurableTransactionFinalizer
     /// <summary>
     /// The helper's answer drives the finalizer's backoff for real: when every materialization of the committed
     /// blocker is refused, the helper reports no progress, the finalize sleeps through every round's backoff (the
-    /// full 72 ms budget) instead of re-proposing at once, and the blocker's intent is left untouched.
+    /// full 72 ms budget) instead of re-proposing at once, and the blocker's intent is left untouched. Without an
+    /// attempt clock the finalizer cannot measure its deadline, so the wait keeps the round budget and ends in the
+    /// exhausted abort; with a clock the same wait is bounded by the deadline (see the settlement-lag tests).
     /// </summary>
     [Fact]
     public async Task Helping_BlockerMaterializationRefused_FinalizeBacksOff_AndLeavesTheBlocker()
@@ -1794,6 +1797,7 @@ public sealed class TestDurableTransactionFinalizer
 
         Assert.Equal(DurableFinalizeResult.Aborted, outcome.Result);
         Assert.Equal(TransactionAbortClass.RetryableFailure, outcome.AbortClass);
+        Assert.Equal(CommitRefusalClass.PrepareExhausted, outcome.Refusal);
         Assert.Contains(8, capture.Samples("kahuna.durable_tx.finalize_helper_calls"));
         // Nominal sum 2+4+...+16 = 72 ms; timers can undershoot by a fraction of a millisecond per round.
         Assert.Contains(capture.Samples("kahuna.durable_tx.finalize_backoff_ms"), d => d >= 64);
@@ -1833,6 +1837,211 @@ public sealed class TestDurableTransactionFinalizer
         Assert.Contains(0, capture.Samples("kahuna.durable_tx.finalize_backoff_ms"));
         Assert.True(capture.Total("kahuna.durable_tx.prepare_retry_loops", "prepared") >= 1);
         Assert.Null(intents.Get("acct/2")); // blocker settled by helping, own intent settled by resolution
+    }
+
+    // ── settlement lag: bounded by the deadline lease, never recorded as an abort ─
+
+    /// <summary>A clock that answers the given values in order and repeats the last one.</summary>
+    private static Func<HLCTimestamp> Clock(params long[] values)
+    {
+        int next = -1;
+        return () => Ts(values[Math.Min(Interlocked.Increment(ref next), values.Length - 1)]);
+    }
+
+    /// <summary>
+    /// A committed blocker whose settle keeps failing for longer than the eight-round budget: every helping pass
+    /// reports a decided holder, so the loop is bounded by the decision deadline instead of the rounds, keeps
+    /// helping, and commits once the settle lands on the thirteenth pass. No abort is ever recorded.
+    /// </summary>
+    [Fact]
+    public async Task Helping_DecidedBlockerSettlesAfterTheRoundBudget_CommitsWithoutAnAbort()
+    {
+        HLCTimestamp blockerTx = Ts(500);
+        Seam seam = new();
+        TransactionRecordStore records = new();
+        PreparedIntentStore intents = new();
+        seam.Records = records;
+        seam.Intents = intents;
+        InstallCommittedBlocker(records, intents, blockerTx, "acct/2");
+
+        int materializationsRefused = 12;
+        seam.Fail = (_, type) => type == ReplicationTypes.KeyValues && Interlocked.Decrement(ref materializationsRefused) >= 0;
+
+        // The attempt clock stays well inside the frozen deadline (9000) for the whole wait.
+        DurableTransactionFinalizer finalizer = new(records, intents, seam.Replicate,
+            attemptClock: Clock(2000, 2100, 2200, 2300, 2400, 2500, 2600, 2700, 2800, 2900, 3000, 3100, 3200, 3300, 3400, 3500),
+            resolveDecidedBlockers: HelpingRecovery(records, intents, seam).TryResolveDecidedBlockersAsync);
+
+        using MetricCapture capture = new("outcome", "kahuna.durable_tx.prepare_retry_loops", "kahuna.durable_tx.finalize_helper_calls");
+
+        HLCTimestamp txId = Ts(1000);
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(txId, 1, revision: 2, baseRevision: 1, (5, "acct/2")), Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+        Assert.Equal(CommitRefusalClass.None, outcome.Refusal);
+        Assert.Equal(TransactionDecision.Commit, records.Get(txId, 1)!.Decision);
+        Assert.Contains(capture.Samples("kahuna.durable_tx.finalize_helper_calls"), calls => calls >= 13);
+        Assert.True(capture.Total("kahuna.durable_tx.prepare_retry_loops", "prepared") >= 1);
+        Assert.Equal(0, capture.Total("kahuna.durable_tx.prepare_retry_loops", "exhausted"));
+        Assert.Null(intents.Get("acct/2"));
+    }
+
+    /// <summary>
+    /// A committed blocker that never settles: the loop waits until the decision deadline and then answers
+    /// MustRetry with the settlement-lag class — nothing durable is decided, the record stays Undecided, the
+    /// attempt's prepares and the blocker's intent stay put for a same-identity retry.
+    /// </summary>
+    [Fact]
+    public async Task Helping_DecidedBlockerNeverSettles_AnswersMustRetryAtTheDeadline_WithoutAnAbort()
+    {
+        HLCTimestamp blockerTx = Ts(500);
+        Seam seam = new();
+        TransactionRecordStore records = new();
+        seam.Records = records;
+        PreparedIntentStore intents = new();
+        seam.Intents = intents;
+        InstallCommittedBlocker(records, intents, blockerTx, "acct/2");
+
+        seam.Fail = (_, type) => type == ReplicationTypes.KeyValues;
+
+        // Two helping rounds inside the deadline, then the clock jumps past it; renewal is off (the default).
+        DurableTransactionFinalizer finalizer = new(records, intents, seam.Replicate,
+            attemptClock: Clock(2000, 2500, 9500),
+            resolveDecidedBlockers: HelpingRecovery(records, intents, seam).TryResolveDecidedBlockersAsync);
+
+        using MetricCapture capture = new("outcome", "kahuna.durable_tx.prepare_retry_loops");
+
+        HLCTimestamp txId = Ts(1000);
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(txId, 1, (5, "acct/2")), Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.MustRetry, outcome.Result);
+        Assert.Equal(CommitRefusalClass.SettlementLag, outcome.Refusal);
+        Assert.NotNull(outcome.Reason);
+        Assert.Equal(Ts(9000), outcome.DecisionDeadline);
+        Assert.Equal(TransactionDecision.Undecided, records.Get(txId, 1)!.Decision);
+        Assert.True(capture.Total("kahuna.durable_tx.prepare_retry_loops", "deadline_lapsed") >= 1);
+        Assert.Equal(0, capture.Total("kahuna.durable_tx.prepare_retry_loops", "exhausted"));
+
+        PreparedIntent? holder = intents.Get("acct/2");
+        Assert.NotNull(holder);
+        Assert.Equal(blockerTx, holder!.TransactionId);
+    }
+
+    /// <summary>
+    /// A helping wait that consumes most of the frozen margin renews the record's deadline lease, and the commit
+    /// then lands at an attempt clock past the frozen deadline: without the renewal the record's gate would have
+    /// withheld it and the transaction would have been presumed aborted.
+    /// </summary>
+    [Fact]
+    public async Task Helping_WaitConsumesTheMargin_LeaseRenewed_CommitsPastTheFrozenDeadline()
+    {
+        HLCTimestamp blockerTx = Ts(500);
+        Seam seam = new();
+        TransactionRecordStore records = new();
+        PreparedIntentStore intents = new();
+        seam.Records = records;
+        seam.Intents = intents;
+        InstallCommittedBlocker(records, intents, blockerTx, "acct/2");
+
+        int materializationsRefused = 2;
+        seam.Fail = (_, type) => type == ReplicationTypes.KeyValues && Interlocked.Decrement(ref materializationsRefused) >= 0;
+
+        // Frozen deadline 9000, commit timestamp 1100: a lease of 7900 ms. Round 1 at 5000 keeps more than half
+        // of the lease and does not renew; round 2 at 8000 has 1000 ms left and renews to 15900; round 3 at 11000
+        // settles the blocker and prepares; the pre-decision check at 14000 has 1900 ms left and renews to 21900;
+        // the commit's attempt at 17000 is past the frozen deadline but inside the renewed one.
+        DurableTransactionFinalizer finalizer = new(records, intents, seam.Replicate,
+            attemptClock: Clock(5000, 8000, 11000, 14000, 17000),
+            resolveDecidedBlockers: HelpingRecovery(records, intents, seam).TryResolveDecidedBlockersAsync,
+            maxDeadlineExtensions: 4);
+
+        using MetricCapture capture = new("outcome", "kahuna.durable_tx.deadline_extensions", "kahuna.durable_tx.late_commit_rejections");
+
+        HLCTimestamp txId = Ts(1000);
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(txId, 1, revision: 2, baseRevision: 1, (5, "acct/2")), Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+        Assert.False(outcome.LateCommitRejected);
+        Assert.Equal(Ts(21900), outcome.DecisionDeadline);
+
+        TransactionRecord record = records.Get(txId, 1)!;
+        Assert.Equal(TransactionDecision.Commit, record.Decision);
+        Assert.Equal(Ts(21900), record.DecisionDeadline);
+        Assert.Equal(Ts(17000), record.DecidedAt);
+        Assert.Equal(2, capture.Total("kahuna.durable_tx.deadline_extensions", "extended"));
+    }
+
+    /// <summary>The same wait with renewal disabled is presumed aborted at the frozen deadline, which is what the
+    /// renewal exists to prevent.</summary>
+    [Fact]
+    public async Task Helping_WaitConsumesTheMargin_RenewalOff_LateCommitIsPresumedAborted()
+    {
+        HLCTimestamp blockerTx = Ts(500);
+        Seam seam = new();
+        TransactionRecordStore records = new();
+        PreparedIntentStore intents = new();
+        seam.Records = records;
+        seam.Intents = intents;
+        InstallCommittedBlocker(records, intents, blockerTx, "acct/2");
+
+        int materializationsRefused = 2;
+        seam.Fail = (_, type) => type == ReplicationTypes.KeyValues && Interlocked.Decrement(ref materializationsRefused) >= 0;
+
+        DurableTransactionFinalizer finalizer = new(records, intents, seam.Replicate,
+            attemptClock: Clock(5000, 8000, 8500, 9500),
+            resolveDecidedBlockers: HelpingRecovery(records, intents, seam).TryResolveDecidedBlockersAsync);
+
+        HLCTimestamp txId = Ts(1000);
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(txId, 1, revision: 2, baseRevision: 1, (5, "acct/2")), Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.Aborted, outcome.Result);
+        Assert.True(outcome.LateCommitRejected);
+        Assert.Equal(CommitRefusalClass.DecisionDeadline, outcome.Refusal);
+        Assert.Equal(TransactionAbortClass.PresumedAbort, records.Get(txId, 1)!.AbortClass);
+    }
+
+    /// <summary>
+    /// A blocker whose record is still undecided is a live conflict, not lag: the loop keeps its round budget
+    /// whatever the clock says, and the exhausted loop records the abort named as an exhausted prepare.
+    /// </summary>
+    [Fact]
+    public async Task Helping_UndecidedBlocker_KeepsTheRoundBudget_AndAbortsAsPrepareExhausted()
+    {
+        HLCTimestamp blockerTx = Ts(500);
+        Seam seam = new();
+        TransactionRecordStore records = new();
+        PreparedIntentStore intents = new();
+        seam.Records = records;
+        seam.Intents = intents;
+
+        // The blocker's record exists but has no decision: a coordinator inside its decision window.
+        intents.Apply(new PrepareIntentCommand(Intent(blockerTx, 1, "acct/2")));
+        records.Apply(new InitializeTransactionCommand(
+            blockerTx, 1, "coord", "anchor", CommitTimestamp: Ts(600), DecisionDeadline: Ts(9000),
+            ManifestHash: 0, [], OpId: Ts(600), CreatedAt: Ts(500)));
+
+        DurableTransactionFinalizer finalizer = new(records, intents, seam.Replicate,
+            attemptClock: () => Ts(2000),
+            resolveDecidedBlockers: HelpingRecovery(records, intents, seam).TryResolveDecidedBlockersAsync);
+
+        using MetricCapture capture = new("outcome", "kahuna.durable_tx.prepare_retry_loops", "kahuna.durable_tx.finalize_helper_calls");
+
+        HLCTimestamp txId = Ts(1000);
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(txId, 1, (5, "acct/2")), Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.Aborted, outcome.Result);
+        Assert.Equal(TransactionAbortClass.RetryableFailure, outcome.AbortClass);
+        Assert.Equal(CommitRefusalClass.PrepareExhausted, outcome.Refusal);
+        Assert.Contains("1 undecided holders", outcome.Reason);
+        Assert.Contains(8, capture.Samples("kahuna.durable_tx.finalize_helper_calls"));
+        Assert.True(capture.Total("kahuna.durable_tx.prepare_retry_loops", "exhausted") >= 1);
+        Assert.Equal(TransactionDecision.Abort, records.Get(txId, 1)!.Decision);
+        Assert.Equal(TransactionDecision.Undecided, records.Get(blockerTx, 1)!.Decision);
     }
 
     // ── per-participant prepare results ───────────────────────────────────────

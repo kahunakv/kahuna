@@ -409,10 +409,28 @@ intents, and by every finalize until one of those is in the window. The estimate
 first sample; before it the floor applies.
 
 A commit attempt whose HLC has passed the frozen deadline is rejected by the record state machine;
-that rejection increments `kahuna.durable_tx.late_commit_rejections`. The finalizer then drives the
-presumed-abort CAS itself and reports the canonical winner: `Aborted` with class `PresumedAbort`, or
-`Committed` if a prior commit already applied. It does not leave a permanently expired finalize in a
-retry loop. A rising rejection rate means the deadline is too tight for current latency.
+that rejection increments `kahuna.durable_tx.late_commit_rejections` and logs a warning naming the
+transaction, its intent count and how late the attempt was. The finalizer then drives the
+presumed-abort CAS itself and reports the canonical winner: `Aborted` with class `PresumedAbort` (refusal
+class `DecisionDeadline`), or `Committed` if a prior commit already applied. It does not leave a
+permanently expired finalize in a retry loop. A rising rejection rate means the deadline is too tight for
+current latency.
+
+The deadline is a **lease** a live coordinator renews. A finalize inside a productive wait — a prepare
+refused only by predecessors whose records are already decided and whose intents are still settling, or
+a prepare and validation that consumed most of the margin — proposes an `ExtendDecisionDeadlineCommand`
+on the record, moving the deadline to now plus the frozen margin. The state machine accepts it only while
+the lease is still held (the attempt HLC has not passed the current deadline) and only forward; a
+terminal record rejects it. A renewal is sent only when less than half of the lease remains, and each
+attempt may renew at most `DurableDecisionDeadlineMaxExtensions` times. The recovery sweep reads the
+deadline off the record, so a renewed record waits. `kahuna.durable_tx.deadline_extensions{outcome}`
+counts renewals as `extended`, `record_terminal`, `unavailable`, `lapsed` or `budget_spent`.
+
+The prepare retry loop uses the same lease. The helping pass reports whether the holders of a refused key
+are decided or still undecided: decided holders are settlement lag, bounded by the (renewed) deadline, and
+a deadline that still arrives answers `MustRetry` with refusal class `SettlementLag` without recording an
+abort (`prepare_retry_loops{outcome=deadline_lapsed}`); an undecided holder is a live conflict, bounded by
+eight rounds, after which the abort is recorded with refusal class `PrepareExhausted` and a warning.
 
 ### Abort classification
 
@@ -580,6 +598,7 @@ takes ownership of the lock set, so the transition into finalization does not it
 | `DurableDecisionDeadlineFloorMs` | 5,000 | Lower clamp on the per-transaction decision-deadline margin, and the value used before the estimator's first sample. |
 | `DurableDecisionDeadlineCeilingMs` | 60,000 | Upper clamp on the decision-deadline margin, capping how long a dead coordinator's undecided record can block recovery. Must be ≥ the floor. |
 | `DurableDecisionDeadlineMultiplier` | 4 | Multiplier applied to the observed finalize cost — the total p99, or the per-intent p99 × the manifest size, whichever is larger — before clamping to the floor/ceiling. |
+| `DurableDecisionDeadlineMaxExtensions` | 8 | How many times one finalize attempt may renew its decision-deadline lease while it waits productively (settlement lag of a decided predecessor, or a validation that consumed most of the margin). 0 disables renewal; run with 0 during a mixed-version rollout, because an older node cannot decode the renewal transition. |
 | `TransactionOutcomeRetentionTtl` | 5 minutes | Age window for terminal outcomes; a non-positive value disables age-based removal. Also the retention window of the durable-2PC canonical records and the completion receipts they release — see the memory budget below, which makes that window yield. |
 | `DurableRecordRetentionMax` | 200,000 | Memory budget for the durable-2PC metadata resident on a node, as a count of canonical transaction records. Above it the retention sweep reclaims the oldest terminal records **before** their TTL, down to 90% of the budget, each anchor leader taking its proportional share. A non-positive value disables the count budget. |
 | `DurableRecordRetentionMaxBytes` | 256 MiB | The same budget as an estimated heap byte size of resident records plus completion receipts (reported by the `kahuna.durable_tx.resident_record_bytes` / `resident_receipt_bytes` gauges). A non-positive value disables the byte budget. |
@@ -721,8 +740,12 @@ The coordinator currently relies primarily on structured logs. Useful messages i
 
 Durable-path health is also exposed as metrics: `late_commit_rejections` (a commit attempt that missed
 its decision deadline), `deadline_expiry_aborts` (recovery presume-aborting an undecided record whose
-deadline passed), and the `decision_deadline_margin_ms` histogram (the adaptive margin being chosen). A
-rising rejection/expiry rate is the signal to widen the deadline configuration.
+deadline passed), `deadline_extensions{outcome}` (lease renewals by live finalizes),
+`prepare_retry_loops{outcome}` (how each contended prepare loop ended, including `deadline_lapsed` for a
+settlement-lag wait that answered `MustRetry` without an abort), and the `decision_deadline_margin_ms`
+histogram (the adaptive margin being chosen). A rising rejection/expiry rate is the signal to widen the
+deadline configuration; a rising `extended` rate shows the healthy commits the frozen deadline alone
+would have presumed aborted.
 
 The focused server tests are organized around the same boundaries:
 

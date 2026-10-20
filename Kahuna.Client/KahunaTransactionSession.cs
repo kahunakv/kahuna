@@ -161,8 +161,10 @@ public class KahunaTransactionSession : IAsyncDisposable
                     TransactionOperationId.NewRandom()
                 ).ConfigureAwait(false);
             }
-            catch (KahunaException ex) when (ex.KeyValueErrorCode is KeyValueResponseType.AlreadyLocked or KeyValueResponseType.MustRetry)
+            catch (KahunaException ex) when (ex.KeyValueErrorCode is KeyValueResponseType.AlreadyLocked or KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
             {
+                // AlreadyLocked and MustRetry are a live holder; WaitingForReplication is lag (a holder that
+                // already decided and is settling, or a decision in flight). All three clear on their own.
                 successLock = false;
                 denial = ex.KeyValueErrorCode;
             }

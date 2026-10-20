@@ -334,8 +334,8 @@ public sealed class TestDurableTransactionRecovery
     /// blocker (transaction 1000) still holds.</summary>
     private static PreparedIntent Requester(string key = BlockedKey) => PendingIntent(key, Ts(5000), RequesterTx);
 
-    private static Task<int> Help(DurableTransactionRecovery recovery, params string[] keys) =>
-        recovery.TryResolveDecidedBlockersAsync(PartitionId, [.. keys.Select(Requester)], RequesterTx, 1, CancellationToken.None);
+    private static async Task<int> Help(DurableTransactionRecovery recovery, params string[] keys) =>
+        (await recovery.TryResolveDecidedBlockersAsync(PartitionId, [.. keys.Select(Requester)], RequesterTx, 1, CancellationToken.None)).Settled;
 
     /// <summary>
     /// Every materialization of the committed blocker is refused. The helper must report zero — not the size

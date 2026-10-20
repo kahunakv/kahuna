@@ -77,7 +77,7 @@ public sealed class TestOnePhaseLeaderLossAfterQuorumDurability : BaseCluster
         TransactionHandle Handle,
         int Lost,
         int Successor,
-        Task<(KeyValueResponseType, string?)> AbandonedCommit);
+        Task<TransactionCommitAnswer> AbandonedCommit);
 
     /// <summary>
     /// Runs the shared prefix of both fixtures: begins the transaction on the leader of the key's partition,
@@ -113,7 +113,7 @@ public sealed class TestOnePhaseLeaderLossAfterQuorumDurability : BaseCluster
 
         using HeldCommitReplies holds = new(rafts[lost], partition);
 
-        Task<(KeyValueResponseType, string?)> abandonedCommit = session.LocateAndCommitTransaction(handle, ct);
+        Task<TransactionCommitAnswer> abandonedCommit = session.LocateAndCommitTransaction(handle, ct);
 
         // The record reaching Commit under the FIRST held reply is what proves the bundle: a two-phase
         // finalize's first proposal carries only the record initialize and the prepare.
@@ -240,8 +240,8 @@ public sealed class TestOnePhaseLeaderLossAfterQuorumDurability : BaseCluster
             // answered as unknown; that is a different gap, and not what this fixture is about.
             TransactionHandle retriedHandle = scenario.Handle with { RecordAnchorKey = scenario.Key };
 
-            (KeyValueResponseType retriedType, _) = await RetryOnMustRetryAsync(
-                () => managers[scenario.Successor].LocateAndCommitTransaction(retriedHandle, ct), r => r.Item1);
+            (KeyValueResponseType retriedType, string? _) = await RetryOnMustRetryAsync(
+                () => managers[scenario.Successor].LocateAndCommitTransaction(retriedHandle, ct), r => r.Type);
 
             Assert.Equal(KeyValueResponseType.Committed, retriedType);
 
@@ -300,14 +300,14 @@ public sealed class TestOnePhaseLeaderLossAfterQuorumDurability : BaseCluster
             TransactionHandle retriedHandle = scenario.Handle with { RecordAnchorKey = scenario.Key };
 
             // Straight at the owner: it still holds the session, so this re-drives its finalize.
-            (KeyValueResponseType ownerType, _) = await RetryOnMustRetryAsync(
-                () => managers[scenario.Lost].LocateAndCommitTransaction(retriedHandle, ct), r => r.Item1, timeoutMs: 60_000);
+            (KeyValueResponseType ownerType, string? _) = await RetryOnMustRetryAsync(
+                () => managers[scenario.Lost].LocateAndCommitTransaction(retriedHandle, ct), r => r.Type, timeoutMs: 60_000);
 
             Assert.Equal(KeyValueResponseType.Committed, ownerType);
 
             // And through the survivor that leads the partition now, which probes the owner for the session.
-            (KeyValueResponseType successorType, _) = await RetryOnMustRetryAsync(
-                () => managers[scenario.Successor].LocateAndCommitTransaction(retriedHandle, ct), r => r.Item1, timeoutMs: 60_000);
+            (KeyValueResponseType successorType, string? _) = await RetryOnMustRetryAsync(
+                () => managers[scenario.Successor].LocateAndCommitTransaction(retriedHandle, ct), r => r.Type, timeoutMs: 60_000);
 
             Assert.Equal(KeyValueResponseType.Committed, successorType);
 
