@@ -231,7 +231,9 @@ internal sealed class KeyValueWatchGrpcSession
         {
             // The client is gone or the transport failed. End the call so the request loop stops and every watch
             // is closed.
-            logger.LogDebug("Watch stream write failed, ending the call: {ExceptionType} {Message}", ex.GetType().Name, ex.Message);
+            if (logger.IsEnabled(LogLevel.Debug))
+                logger.LogDebug("Watch stream write failed, ending the call: {ExceptionType} {Message}", ex.GetType().Name, ex.Message);
+
             await session.CancelAsync().ConfigureAwait(false);
         }
     }
