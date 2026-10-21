@@ -851,11 +851,18 @@ public sealed class TestSettledIntentFlushRetention : IDisposable
                 File.Delete(snapshot);
 
             {
-                await using EmbeddedKahunaNode node = new(PersistentOptions(storagePath, walPath, decorator: null), loggerFactory);
+                // The gated partition withholds this node's candidacy, and it is the only voter: no leader can
+                // ever be elected, so the start's wait for that partition's leader runs out its election
+                // budget. That is the point. The start retries undecided rounds until its own budget runs
+                // out (infinite by default), so this restart gets a finite one: the first undecided round
+                // already exceeds it and the start fails there instead of waiting forever.
+                EmbeddedKahunaOptions restartOptions = PersistentOptions(storagePath, walPath, decorator: null);
+                restartOptions.StartupLeaderWait = TimeSpan.FromSeconds(1);
 
-                // The gated partition withholds this node's candidacy, and it is the only voter: the start's
-                // wait for that partition's leader runs out its election budget. That is the point.
-                await Assert.ThrowsAsync<RaftException>(() => node.StartAsync(ct));
+                await using EmbeddedKahunaNode node = new(restartOptions, loggerFactory);
+
+                RaftException noLeader = await Assert.ThrowsAsync<RaftException>(() => node.StartAsync(ct));
+                Assert.Contains("startup leader wait budget", noLeader.Message);
 
                 KahunaManager kahuna = (KahunaManager)node.Kahuna;
 
