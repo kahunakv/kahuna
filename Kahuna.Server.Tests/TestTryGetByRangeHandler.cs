@@ -654,14 +654,14 @@ public sealed class TestTryGetByRangeHandler : RaftTrackingTest
         finally { scheduler.Stop(); }
     }
 
-    private static PersistenceRequestItem FlushedRow(string key, string value) =>
+    private static PersistenceRequestItem FlushedRow(string key, string value, long revision = 1, long physical = 1000) =>
         new(
             key: key,
             value: Encoding.UTF8.GetBytes(value),
-            revision: 1,
+            revision: revision,
             expiresNode: 0, expiresPhysical: 0, expiresCounter: 0,
-            lastUsedNode: 0, lastUsedPhysical: 1000, lastUsedCounter: 0,
-            lastModifiedNode: 0, lastModifiedPhysical: 1000, lastModifiedCounter: 0,
+            lastUsedNode: 0, lastUsedPhysical: physical, lastUsedCounter: 0,
+            lastModifiedNode: 0, lastModifiedPhysical: physical, lastModifiedCounter: 0,
             state: (int)KeyValueState.Set);
 
     /// <summary>Walks every page of a scan as the scan loop does: each next page starts after the last returned key.</summary>
@@ -988,7 +988,8 @@ public sealed class TestTryGetByRangeHandler : RaftTrackingTest
             overlay, "doc/", "doc/", cursorRowExcluded: false, endKey: null, endInclusive: false, limit: 10,
             isSnapshotRead: true, snapshotTs, currentTime, shouldAbort: null);
 
-        Assert.Equal(["doc/b"], fenced.HistoryFencedKeys!.ToList());
+        Assert.Equal(["doc/b"], fenced.HistoryFencedKeys!.Keys.ToList());
+        Assert.Equal(-1L, fenced.HistoryFencedKeys["doc/b"]);
         Assert.Equal(["doc/a"], fenced.Projected.Select(static i => i.Key).ToList());
 
         memory.StoreKeyValues(
@@ -1012,6 +1013,233 @@ public sealed class TestTryGetByRangeHandler : RaftTrackingTest
         Assert.Equal(["doc/a", "doc/b"], served.Projected.Select(static i => i.Key).ToList());
         Assert.Equal(0L, served.Projected[1].Entry.Revision);
         Assert.Equal(KeyValueState.Set, served.Projected[1].Entry.State);
+    }
+
+    /// <summary>
+    /// The stage-2 projection of a row with flushed history below its queued revisions: the row is fenced, with the
+    /// ceiling the history is complete below, and still projected from that history. Whether that projection is the
+    /// row's as-of image depends on the queued revisions, which only the resident archive can see, so the decision is
+    /// the merge's.
+    /// </summary>
+    [Fact]
+    public void ProjectSnapshotPage_QueuedRevisionsAboveFlushedHistory_ProjectsTheRowBelowThemAndFencesIt()
+    {
+        HLCTimestamp flushedTs   = new(0, 1000, 0);
+        HLCTimestamp snapshotTs  = new(0, 2000, 0);
+        HLCTimestamp thirdTs     = new(0, 2400, 0);
+        HLCTimestamp fourthTs    = new(0, 2500, 0);
+        HLCTimestamp currentTime = new(0, 3000, 0);
+
+        MemoryPersistenceBackend memory = new();
+        memory.StoreKeyValues([FlushedRow("doc/a", "a-disk"), FlushedRow("doc/b", "b-v2", revision: 2, physical: flushedTs.L)]);
+
+        // doc/b: revisions 3 and 4 committed after the snapshot, both still queued for the writer.
+        UnflushedKeyValueWritesIndex unflushed = new();
+        unflushed.Record("doc/b", Encoding.UTF8.GetBytes("b-v3"), 3, HLCTimestamp.Zero, thirdTs, thirdTs, KeyValueState.Set, false);
+        unflushed.Record("doc/b", Encoding.UTF8.GetBytes("b-v4"), 4, HLCTimestamp.Zero, fourthTs, fourthTs, KeyValueState.Set, false);
+
+        UnflushedOverlayPersistenceBackend overlay = new(memory, unflushed, new UnflushedLockWritesIndex());
+
+        RangeDiskPage page = TryGetByRangeHandler.ReadDiskPage(
+            overlay, "doc/", "doc/", cursorRowExcluded: false, endKey: null, endInclusive: false, limit: 10,
+            isSnapshotRead: true, snapshotTs, currentTime, shouldAbort: null);
+
+        Assert.Equal(["doc/b"], page.HistoryFencedKeys!.Keys.ToList());
+        Assert.Equal(2L, page.HistoryFencedKeys["doc/b"]);
+        Assert.Equal(["doc/a", "doc/b"], page.Projected.Select(static i => i.Key).ToList());
+        Assert.Equal(2L, page.Projected[1].Entry.Revision);
+        Assert.Equal("b-v2", Encoding.UTF8.GetString(page.Projected[1].Entry.Value!));
+    }
+
+    /// <summary>
+    /// A resident row committed several times since the snapshot on a leader whose flusher is behind: every one of
+    /// those revisions is still queued, so the projection fences the row, and the archive, trimmed to the unflushed
+    /// revisions and the newest few, holds nothing at or before the snapshot. The row's as-of image is its last
+    /// flushed revision. The projection takes it from the history below the queued revisions, and the merge serves it
+    /// once the archive has shown every queued revision past the snapshot, instead of leaving the row out of the page
+    /// (a read-committed COUNT(*) counted one row fewer than the table held).
+    /// </summary>
+    [Fact]
+    public async Task SnapshotRangeScan_ResidentRowWithEveryQueuedRevisionPastTheSnapshot_ServesItsLastFlushedRevision()
+    {
+        (RaftManager raft, FairReadScheduler scheduler, KahunaConfiguration config,
+            ILogger<IKahuna> logger) = CreateRaftAndConfig("range-queued-history-flushed-projection");
+
+        scheduler.Start();
+        try
+        {
+            HLCTimestamp flushedTs  = new(0, 1000, 0);
+            HLCTimestamp snapshotTs = new(0, 2000, 0);
+            HLCTimestamp thirdTs    = new(0, 2400, 0);
+            HLCTimestamp fourthTs   = new(0, 2500, 0);
+            HLCTimestamp fifthTs    = new(0, 2600, 0);
+
+            MemoryPersistenceBackend memory = new();
+            memory.StoreKeyValues(
+            [
+                FlushedRow("doc/a", "a-disk"),
+                FlushedRow("doc/b", "b-v2", revision: 2, physical: flushedTs.L),
+                FlushedRow("doc/c", "c-disk")
+            ]);
+
+            UnflushedKeyValueWritesIndex unflushed = new();
+            unflushed.Record("doc/b", Encoding.UTF8.GetBytes("b-v3"), 3, HLCTimestamp.Zero, thirdTs, thirdTs, KeyValueState.Set, false);
+            unflushed.Record("doc/b", Encoding.UTF8.GetBytes("b-v4"), 4, HLCTimestamp.Zero, fourthTs, fourthTs, KeyValueState.Set, false);
+            unflushed.Record("doc/b", Encoding.UTF8.GetBytes("b-v5"), 5, HLCTimestamp.Zero, fifthTs, fifthTs, KeyValueState.Set, false);
+
+            UnflushedOverlayPersistenceBackend overlay = new(memory, unflushed, new UnflushedLockWritesIndex());
+
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
+            IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
+                actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
+                    "range-queued-history-flushed-projection-actor", null!, null!, overlay, raft,
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+
+            ((KeyValueActor)actorRef.Runner.Actor!).GetContext().InsertStoreEntry("doc/b", ResidentWithQueuedRevisions(thirdTs, fourthTs, fifthTs));
+
+            KeyValueResponse? served = await actorRef.Ask(
+                MakeSnapshotRangeScan("doc/", limit: 10, snapshotTs), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+            Assert.NotNull(served);
+            Assert.Equal(KeyValueResponseType.Get, served!.Type);
+            Assert.Equal(["doc/a", "doc/b", "doc/c"], served.RangeResult!.Items.Select(static i => i.Item1).ToList());
+            Assert.Equal(2L, served.RangeResult.Items[1].Item2.Revision);
+            Assert.Equal("b-v2", Encoding.UTF8.GetString(served.RangeResult.Items[1].Item2.Value!));
+            Assert.False(served.RangeResult.HasMore);
+
+            // A snapshot inside the queued revisions is served from the archive, as before.
+            KeyValueResponse? archived = await actorRef.Ask(
+                MakeSnapshotRangeScan("doc/", limit: 10, new HLCTimestamp(0, 2450, 0)), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+            Assert.NotNull(archived);
+            Assert.Equal(KeyValueResponseType.Get, archived!.Type);
+            Assert.Equal(["doc/a", "doc/b", "doc/c"], archived.RangeResult!.Items.Select(static i => i.Item1).ToList());
+            Assert.Equal(3L, archived.RangeResult.Items[1].Item2.Revision);
+        }
+        finally { scheduler.Stop(); }
+    }
+
+    /// <summary>
+    /// The projection of a fenced row is its as-of image only while the revisions it was taken below are the ones
+    /// still queued. When the flush of one of them lands between the projection (stage 2) and the merge (stage 3),
+    /// the archive may since have trimmed a revision the projection never saw, so the page answers MustRetry rather
+    /// than serving the projection; the retry projects the row again, at the new ceiling, and serves it.
+    /// </summary>
+    [Fact]
+    public async Task SnapshotRangeScan_FlushLandsBetweenProjectionAndMerge_RetriesInsteadOfServingTheProjection()
+    {
+        (RaftManager raft, FairReadScheduler scheduler, KahunaConfiguration config,
+            ILogger<IKahuna> logger) = CreateRaftAndConfig("range-queued-history-moved-ceiling");
+
+        scheduler.Start();
+        try
+        {
+            HLCTimestamp flushedTs  = new(0, 1000, 0);
+            HLCTimestamp snapshotTs = new(0, 2000, 0);
+            HLCTimestamp thirdTs    = new(0, 2400, 0);
+            HLCTimestamp fourthTs   = new(0, 2500, 0);
+            HLCTimestamp fifthTs    = new(0, 2600, 0);
+
+            MemoryPersistenceBackend memory = new();
+            memory.StoreKeyValues(
+            [
+                FlushedRow("doc/a", "a-disk"),
+                FlushedRow("doc/b", "b-v2", revision: 2, physical: flushedTs.L)
+            ]);
+
+            UnflushedKeyValueWritesIndex unflushed = new();
+            unflushed.Record("doc/b", Encoding.UTF8.GetBytes("b-v3"), 3, HLCTimestamp.Zero, thirdTs, thirdTs, KeyValueState.Set, false);
+            unflushed.Record("doc/b", Encoding.UTF8.GetBytes("b-v4"), 4, HLCTimestamp.Zero, fourthTs, fourthTs, KeyValueState.Set, false);
+            unflushed.Record("doc/b", Encoding.UTF8.GetBytes("b-v5"), 5, HLCTimestamp.Zero, fifthTs, fifthTs, KeyValueState.Set, false);
+
+            // The flush of revision 3 lands right after the projection read doc/b's history below it.
+            FlushLandingBackend landing = new(memory, "doc/b", () =>
+            {
+                memory.StoreKeyValues([FlushedRow("doc/b", "b-v3", revision: 3, physical: thirdTs.L)]);
+                unflushed.RemoveFlushed("doc/b", 3, thirdTs);
+            });
+
+            UnflushedOverlayPersistenceBackend overlay = new(landing, unflushed, new UnflushedLockWritesIndex());
+
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
+            IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
+                actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
+                    "range-queued-history-moved-ceiling-actor", null!, null!, overlay, raft,
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+
+            ((KeyValueActor)actorRef.Runner.Actor!).GetContext().InsertStoreEntry("doc/b", ResidentWithQueuedRevisions(thirdTs, fourthTs, fifthTs));
+
+            KeyValueResponse? moved = await actorRef.Ask(
+                MakeSnapshotRangeScan("doc/", limit: 10, snapshotTs), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+            Assert.NotNull(moved);
+            Assert.Equal(KeyValueResponseType.MustRetry, moved!.Type);
+            Assert.Equal(1, landing.Landed);
+
+            KeyValueResponse? served = await actorRef.Ask(
+                MakeSnapshotRangeScan("doc/", limit: 10, snapshotTs), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+            Assert.NotNull(served);
+            Assert.Equal(KeyValueResponseType.Get, served!.Type);
+            Assert.Equal(["doc/a", "doc/b"], served.RangeResult!.Items.Select(static i => i.Item1).ToList());
+            Assert.Equal(2L, served.RangeResult.Items[1].Item2.Revision);
+        }
+        finally { scheduler.Stop(); }
+    }
+
+    /// <summary>
+    /// A resident entry as the archive trim leaves it on a leader whose flusher is behind: the head and the queued
+    /// revisions below it (3 and 4) are retained, the flushed revision 2 below them was trimmed.
+    /// </summary>
+    private static KeyValueEntry ResidentWithQueuedRevisions(HLCTimestamp thirdTs, HLCTimestamp fourthTs, HLCTimestamp fifthTs)
+    {
+        KeyValueEntry resident = new()
+        {
+            Bucket = "doc",
+            Value = Encoding.UTF8.GetBytes("b-v5"),
+            Revision = 5,
+            FlushedRevision = 2,
+            LastModified = fifthTs,
+            LastUsed = fifthTs,
+            State = KeyValueState.Set,
+            Revisions = new()
+        };
+        resident.Revisions[3] = new KeyValueRevisionEntry(Encoding.UTF8.GetBytes("b-v3"), thirdTs, HLCTimestamp.Zero, KeyValueState.Set);
+        resident.Revisions[4] = new KeyValueRevisionEntry(Encoding.UTF8.GetBytes("b-v4"), fourthTs, HLCTimestamp.Zero, KeyValueState.Set);
+        return resident;
+    }
+
+    /// <summary>
+    /// A backend that runs <paramref name="onHistoryRead"/> once, right after the first as-of history read of
+    /// <paramref name="key"/>: a flush that lands between a scan's projection and its merge.
+    /// </summary>
+    private sealed class FlushLandingBackend(MemoryPersistenceBackend inner, string key, Action onHistoryRead) : IPersistenceBackend
+    {
+        private int landed;
+
+        internal int Landed => landed;
+
+        public bool ServesReadsFromMemory => inner.ServesReadsFromMemory;
+        public bool StoreKeyValues(List<PersistenceRequestItem> items) => inner.StoreKeyValues(items);
+        public bool StoreLocks(List<PersistenceRequestItem> items) => inner.StoreLocks(items);
+        public LockEntry? GetLock(string resource) => inner.GetLock(resource);
+        public KeyValueEntry? GetKeyValue(string keyName) => inner.GetKeyValue(keyName);
+        public KeyValueEntry? GetKeyValueRevision(string keyName, long revision) => inner.GetKeyValueRevision(keyName, revision);
+
+        public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp)
+        {
+            KeyValueEntry? row = inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);
+
+            if (keyName == key && Interlocked.Exchange(ref landed, 1) == 0)
+                onHistoryRead();
+
+            return row;
+        }
+
+        public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName) => inner.GetKeyValueByPrefix(prefixKeyName);
+        public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit) => inner.GetKeyValueByRange(prefix, startKey, limit);
+        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, HLCTimestamp floorTimestamp, out RevisionPruneResult result) => inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, floorTimestamp, out result);
+        public Kahuna.Server.Persistence.Pitr.CheckpointResult CreateCheckpoint(string destinationPath, long appliedIndex, HLCTimestamp appliedTime) => inner.CreateCheckpoint(destinationPath, appliedIndex, appliedTime);
     }
 
     private static KeyValueRequest MakeRangeScan(string prefix, int limit)

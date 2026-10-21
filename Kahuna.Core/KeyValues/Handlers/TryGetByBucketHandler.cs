@@ -186,7 +186,7 @@ internal sealed class TryGetByBucketHandler : BaseHandler
         // revision queued for the writer, which the as-of projection must not read around.
         UnflushedKeyValueWritesIndex? unflushed = context.UnflushedWrites;
 
-        Task<(List<(string, ReadOnlyKeyValueEntry)>, Dictionary<string, ReadOnlyKeyValueEntry>?, HashSet<string>?)> readTask;
+        Task<(List<(string, ReadOnlyKeyValueEntry)>, Dictionary<string, ReadOnlyKeyValueEntry>?, Dictionary<string, long>?)> readTask;
         try
         {
             // Route the disk scan to the FairReadScheduler partition that owns this data range,
@@ -205,12 +205,12 @@ internal sealed class TryGetByBucketHandler : BaseHandler
                     {
                         KeyValueScanMetrics.ScansAbandonedCancelled.Add(1);
                         return (new List<(string, ReadOnlyKeyValueEntry)>(),
-                            (Dictionary<string, ReadOnlyKeyValueEntry>?)null, (HashSet<string>?)null);
+                            (Dictionary<string, ReadOnlyKeyValueEntry>?)null, (Dictionary<string, long>?)null);
                     }
 
                     if (!isSnapshotScan)
                         return (context.PersistenceBackend.GetKeyValueByPrefix(bucketKey),
-                            (Dictionary<string, ReadOnlyKeyValueEntry>?)null, (HashSet<string>?)null);
+                            (Dictionary<string, ReadOnlyKeyValueEntry>?)null, (Dictionary<string, long>?)null);
 
                     // Snapshot scan: one backend pass resolves the raw head page and every key's
                     // as-of image together, instead of one revision-history read per stale key.
@@ -259,11 +259,14 @@ internal sealed class TryGetByBucketHandler : BaseHandler
     /// The history can answer for such a key only below the oldest revision of it still queued for the
     /// background writer (<see cref="UnflushedHistoryFence"/>): a queued revision the as-of image should
     /// be is missing from it, and the projection would be an older row, or no row for a key whose first
-    /// revision is the queued one. Such a key gets no projection and is named in the returned set; stage 3
-    /// serves it from a resident entry or answers MustRetry (a row this actor does not own is served from
-    /// the projection alone, so nothing else could fence it).
+    /// revision is the queued one. Such a key is named in the returned map with the ceiling the history is
+    /// complete below, and its projection (taken by the backend from the flushed rows, so from below that
+    /// ceiling) is kept: it is the as-of image exactly when every queued revision is past the snapshot.
+    /// Stage 3 serves the key from a resident entry, whose archive holds the queued revisions and so can
+    /// tell, and answers MustRetry when the key is not resident (a row this actor does not own is served
+    /// from the projection alone, so nothing else could fence it).
     /// </summary>
-    internal static (List<(string, ReadOnlyKeyValueEntry)> Raw, Dictionary<string, ReadOnlyKeyValueEntry>? Projections, HashSet<string>? HistoryFencedKeys)
+    internal static (List<(string, ReadOnlyKeyValueEntry)> Raw, Dictionary<string, ReadOnlyKeyValueEntry>? Projections, Dictionary<string, long>? HistoryFencedKeys)
         ProjectBucketPage(
             List<(string Key, ReadOnlyKeyValueEntry Current, ReadOnlyKeyValueEntry? Snapshot)> asOfPage,
             HLCTimestamp readTimestamp,
@@ -272,7 +275,7 @@ internal sealed class TryGetByBucketHandler : BaseHandler
     {
         List<(string, ReadOnlyKeyValueEntry)> raw = new(asOfPage.Count);
         Dictionary<string, ReadOnlyKeyValueEntry> projections = new(asOfPage.Count);
-        HashSet<string>? fencedKeys = null;
+        Dictionary<string, long>? fencedKeys = null;
 
         foreach ((string k, ReadOnlyKeyValueEntry current, ReadOnlyKeyValueEntry? snap) in asOfPage)
         {
@@ -287,12 +290,10 @@ internal sealed class TryGetByBucketHandler : BaseHandler
             }
 
             // Head was written after the snapshot; the as-of image is a historical revision, which is
-            // not complete while a revision below the head is still queued for the writer.
-            if (UnflushedHistoryFence.HistoryMayLag(unflushed, k, archive: null, current.Revision - 1))
-            {
-                (fencedKeys ??= new(StringComparer.Ordinal)).Add(k);
-                continue;
-            }
+            // not complete while a revision below the head is still queued for the writer. The backend's
+            // projection below the flushed rows is kept for the resident entry to judge (see the summary).
+            if (UnflushedHistoryFence.HistoryMayLag(unflushed, k, archive: null, current.Revision - 1, out long flushedCeiling))
+                (fencedKeys ??= new(StringComparer.Ordinal))[k] = flushedCeiling;
 
             if (snap is null || snap.State is KeyValueState.Deleted or KeyValueState.Undefined)
                 continue;

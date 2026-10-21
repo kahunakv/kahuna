@@ -143,12 +143,21 @@ cluster-minted timestamps.
 Persisted history may lag committed state. The archive retains unflushed revisions, and a disk
 fallback that could omit a queued revision answers `MustRetry` until flush progress makes it safe.
 This covers the rows a scan reads without a resident entry too: the off-actor as-of projection of a
-range or bucket page leaves out a row whose head is past `T` while a revision below it is still
-queued, instead of projecting it from the incomplete history (which would drop a row whose first
-revision is the queued one, or serve an older one); the merge then serves the row from its resident
-entry, and answers `MustRetry` for the page when the row is not resident. A newly promoted leader
-reads every row it applied as a follower this way, so a snapshot scan there during a burst of
-commits retries for one flush cadence rather than counting short.
+range or bucket page fences a row whose head is past `T` while a revision below it is still
+queued, instead of projecting it across the queued revisions (which would drop a row whose first
+revision is the queued one, or serve an older one). The fenced row is still projected from the part
+of the history that is complete, below its oldest queued revision, and that projection is its as-of
+image exactly when every queued revision is past `T`. Only the resident archive can tell, since it
+retains every unflushed revision: the merge serves the row from the archive when it holds a revision
+at or before `T`, from the projection when the archive has shown every queued revision past `T` and
+the queued set is still the one the projection was taken below (a flush that landed in between fails
+the page closed instead, since a revision the projection never saw may have been trimmed from the
+archive since), and answers `MustRetry` for the page when the row is not resident. A newly promoted
+leader reads every row it applied as a follower this way, so a snapshot scan there during a burst of
+commits retries for one flush cadence rather than counting short. A leader whose flusher is behind
+shows the resident case: a row committed several times since `T` has its archive trimmed to the
+unflushed revisions and the newest few, all past `T`, and its as-of image is its last flushed
+revision, which the projection carries.
 A retained floor-boundary revision is not treated as an authoritative answer for timestamps in a
 trimmed gap above it; those reads consult disk. These safeguards do not create history for
 `SetNoRevision` writes, which deliberately suppress revision storage. TTL filtering also uses the

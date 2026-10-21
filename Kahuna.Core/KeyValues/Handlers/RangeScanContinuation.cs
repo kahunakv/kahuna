@@ -258,18 +258,22 @@ internal sealed class RangeScanContinuation : ReadContinuation
         if (Faulted)
             return KeyValueStaticResponses.MustRetryResponse;
 
+        // The rows of this page the projection could answer for only from below their queued revisions, each with
+        // the ceiling it was projected at (see TryGetByRangeHandler.ProjectSnapshotPage).
+        Dictionary<string, long>? fencedKeys = RangeScanPage?.HistoryFencedKeys;
+
         if (RangeScanPage is { } arrived)
         {
             tally.Add(arrived.Tally);
 
-            // The projection left out the rows whose persisted history is still missing a queued revision (see
-            // TryGetByRangeHandler.ProjectSnapshotPage). A resident one is served by the merge below from its
-            // entry, whose archive holds the queued revisions or fences itself. One that is not resident has no
-            // other source: the page would be short that row, so answer MustRetry, and the scan loop re-reads the
-            // page from the same cursor once the flush lands.
-            if (arrived.HistoryFencedKeys is { } fencedKeys)
+            // A fenced row is decided by its resident entry: the archive holds the queued revisions, so it either
+            // serves the row or proves that the projection below them is its as-of image (EvaluateKeySync). One
+            // that is not resident has no other source: the page would be short that row, or stale by the queued
+            // revisions, so answer MustRetry, and the scan loop re-reads the page from the same cursor once the
+            // flush lands.
+            if (fencedKeys is not null)
             {
-                foreach (string fencedKey in fencedKeys)
+                foreach (string fencedKey in fencedKeys.Keys)
                 {
                     if (context.Store.TryGetValue(fencedKey, out _))
                         continue;
@@ -347,19 +351,32 @@ internal sealed class RangeScanContinuation : ReadContinuation
                 ReadOnlyKeyValueEntry de = diskPage[diskIdx].Item2;
                 diskIdx++;
                 lastDiskKeyMerged = keyToProcess;
-                // Build a transient entry for the disk-only key; not inserted into the store
-                // (populateCache:false semantics — range scans must not pollute the LRU).
-                entry = new KeyValueEntry
+
+                if (fencedKeys is not null && fencedKeys.ContainsKey(keyToProcess)
+                    && context.Store.TryGetValue(keyToProcess, out KeyValueEntry? nowResident))
                 {
-                    Bucket = GetBucket(keyToProcess),
-                    Value = de.Value,
-                    Revision = de.Revision,
-                    FlushedRevision = de.Revision,
-                    Expires = de.Expires,
-                    LastUsed = de.LastUsed,
-                    LastModified = de.LastModified,
-                    State = de.State
-                };
+                    // A fenced row is projected only from below its queued revisions, so it is served through its
+                    // resident entry, whose archive holds those revisions. The entry is not in the memory batch:
+                    // it was loaded after stage 1 copied the batch (a point read warmed it), and the fence check
+                    // above found it resident.
+                    entry = nowResident;
+                }
+                else
+                {
+                    // Build a transient entry for the disk-only key; not inserted into the store
+                    // (populateCache:false semantics — range scans must not pollute the LRU).
+                    entry = new KeyValueEntry
+                    {
+                        Bucket = GetBucket(keyToProcess),
+                        Value = de.Value,
+                        Revision = de.Revision,
+                        FlushedRevision = de.Revision,
+                        Expires = de.Expires,
+                        LastUsed = de.LastUsed,
+                        LastModified = de.LastModified,
+                        State = de.State
+                    };
+                }
             }
             else
             {
@@ -451,7 +468,7 @@ internal sealed class RangeScanContinuation : ReadContinuation
                     goto Done;
             }
 
-            KeyValueResponse? response = EvaluateKeySync(context, keyToProcess, entry, diskProjections);
+            KeyValueResponse? response = EvaluateKeySync(context, keyToProcess, entry, diskProjections, fencedKeys);
             tally.EntriesInspected++;
 
             if (response is null || response.Type == KeyValueResponseType.DoesNotExist)
@@ -621,7 +638,12 @@ internal sealed class RangeScanContinuation : ReadContinuation
         memMaybeMore = next.Count == memBatch;
     }
 
-    private KeyValueResponse? EvaluateKeySync(KeyValueContext context, string key, KeyValueEntry? entry, Dictionary<string, ReadOnlyKeyValueEntry>? diskProjections)
+    private KeyValueResponse? EvaluateKeySync(
+        KeyValueContext context,
+        string key,
+        KeyValueEntry? entry,
+        Dictionary<string, ReadOnlyKeyValueEntry>? diskProjections,
+        Dictionary<string, long>? fencedKeys = null)
     {
         // Replication intent: a pending replication on this key means the entry is not yet
         // fully committed. Clear expired intents as housekeeping; block if still live.
@@ -762,6 +784,16 @@ internal sealed class RangeScanContinuation : ReadContinuation
                 // revision still queued for the background writer; if one of those is not in the
                 // archive either, the projection may be an older row than the committed answer.
                 if (UnflushedHistoryFence.HistoryMayLag(context.UnflushedWrites, key, entry.Revisions, entry.Revision - 1))
+                    return KeyValueStaticResponses.MustRetryResponse;
+
+                // Every revision queued now is in the archive and past the snapshot, so the row's as-of image
+                // is in the flushed history below them, which is what the projection of a fenced row was taken
+                // from (TryGetByRangeHandler.ProjectSnapshotPage). That holds only while the queued revisions are
+                // the ones the projection was taken below: a flush that landed since moved the ceiling up, and a
+                // revision the projection never saw may have been trimmed from the archive meanwhile. Fail the
+                // page closed then; the retry projects the row again at the new ceiling.
+                if (fencedKeys is not null && fencedKeys.TryGetValue(key, out long projectedCeiling)
+                    && UnflushedHistoryFence.FlushedHistoryCeiling(context.UnflushedWrites, key) != projectedCeiling)
                     return KeyValueStaticResponses.MustRetryResponse;
 
                 // In-memory revision archive does not reach as far back as snapshotTs.

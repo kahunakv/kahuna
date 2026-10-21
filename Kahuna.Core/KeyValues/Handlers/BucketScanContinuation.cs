@@ -67,7 +67,7 @@ internal sealed class BucketScanContinuation : ReadContinuation
     /// and answers MustRetry for one that is not resident, since nothing else can answer for it until the flush
     /// lands. Written in stage 2 before the ResumeRead message is sent, read on the actor thread in stage 3.
     /// </summary>
-    internal HashSet<string>? HistoryFencedKeys { get; set; }
+    internal Dictionary<string, long>? HistoryFencedKeys { get; set; }
 
     internal BucketScanContinuation(
         string prefix,
@@ -126,11 +126,12 @@ internal sealed class BucketScanContinuation : ReadContinuation
                 if (seenKeys.Contains(key))
                     continue;
 
-                // The projection could not answer for this row (a revision below its head is still queued for the
-                // writer) and no resident entry can: the page would be short the row. Answer MustRetry; the caller
-                // re-reads once the flush lands. A resident entry's archive holds the queued revisions, so the
-                // reconcile below serves it, or fences itself when the archive does not reach.
-                if (HistoryFencedKeys is { } fencedKeys && fencedKeys.Contains(key) && !context.Store.TryGetValue(key, out _))
+                // The projection could answer for this row only from below its queued revisions, and no resident
+                // entry can tell whether that is its as-of image: the page would be short the row, or stale by the
+                // queued revisions. Answer MustRetry; the caller re-reads once the flush lands. A resident entry's
+                // archive holds the queued revisions, so the reconcile below serves it, or the projection once the
+                // archive has shown every queued revision past the snapshot, or fences itself.
+                if (HistoryFencedKeys is { } fencedKeys && fencedKeys.ContainsKey(key) && !context.Store.TryGetValue(key, out _))
                 {
                     Resolve(KeyValueStaticResponses.MustRetryResponse);
                     return;
@@ -143,7 +144,7 @@ internal sealed class BucketScanContinuation : ReadContinuation
                     resident.Revision >= diskEntry.Revision)
                 {
                     result = EvaluateEntry(
-                        context, currentTime, transactionId, readTimestamp, key, resident, SnapshotProjections);
+                        context, currentTime, transactionId, readTimestamp, key, resident, SnapshotProjections, HistoryFencedKeys);
                 }
                 else if (string.Equals(KeyValueKeySpace.OfKey(key), scanKeySpace, StringComparison.Ordinal))
                 {
@@ -153,7 +154,7 @@ internal sealed class BucketScanContinuation : ReadContinuation
                     context.InsertStoreEntry(key, entry);
 
                     result = EvaluateEntry(
-                        context, currentTime, transactionId, readTimestamp, key, entry, SnapshotProjections);
+                        context, currentTime, transactionId, readTimestamp, key, entry, SnapshotProjections, HistoryFencedKeys);
                 }
                 else
                 {
@@ -283,6 +284,8 @@ internal sealed class BucketScanContinuation : ReadContinuation
     /// For snapshot scans: when the in-memory revision archive misses
     /// (<c>TryGetRevisionAtOrBefore</c> returns false), the method falls back to the stage-2
     /// disk projection for the key. Purely memory-only keys with no disk history remain omitted.
+    /// <paramref name="fencedKeys"/> names the keys whose projection was taken only from below their
+    /// queued revisions, with the ceiling it was taken at (<see cref="TryGetByBucketHandler.ProjectBucketPage"/>).
     /// </summary>
     internal static KeyValueResponse? EvaluateEntry(
         KeyValueContext context,
@@ -291,7 +294,8 @@ internal sealed class BucketScanContinuation : ReadContinuation
         HLCTimestamp readTimestamp,
         string key,
         KeyValueEntry entry,
-        Dictionary<string, ReadOnlyKeyValueEntry>? diskProjections = null)
+        Dictionary<string, ReadOnlyKeyValueEntry>? diskProjections = null,
+        Dictionary<string, long>? fencedKeys = null)
     {
         if (entry.ReplicationIntent is not null)
         {
@@ -364,6 +368,15 @@ internal sealed class BucketScanContinuation : ReadContinuation
                 // for the background writer and missing from the archive: the projection would be an
                 // older row than the committed answer. Fail the page closed until the flush lands.
                 if (UnflushedHistoryFence.HistoryMayLag(context.UnflushedWrites, key, entry.Revisions, entry.Revision - 1))
+                    return KeyValueStaticResponses.MustRetryResponse;
+
+                // Every revision queued now is in the archive and past the snapshot, so the row's as-of image is
+                // in the flushed history below them, which is where a fenced row's projection was taken from.
+                // That holds only while the queued revisions are the ones the projection was taken below: a
+                // flush that landed since moved the ceiling up, and a revision the projection never saw may have
+                // been trimmed from the archive meanwhile. Fail the page closed then; the retry projects again.
+                if (fencedKeys is not null && fencedKeys.TryGetValue(key, out long projectedCeiling)
+                    && UnflushedHistoryFence.FlushedHistoryCeiling(context.UnflushedWrites, key) != projectedCeiling)
                     return KeyValueStaticResponses.MustRetryResponse;
 
                 // In-memory revision archive does not reach as far back as readTimestamp.

@@ -563,6 +563,123 @@ public sealed class TestTryGetByBucketHandler : RaftTrackingTest
         finally { scheduler.Stop(); }
     }
 
+    /// <summary>
+    /// The stage-2 projection of a row with flushed history below its queued revisions keeps the backend's as-of
+    /// image of it and names the row as fenced with the ceiling the history is complete below; whether that image is
+    /// the row's as-of answer is for the merge, which can see the queued revisions in the resident archive.
+    /// </summary>
+    [Fact]
+    public void ProjectBucketPage_QueuedRevisionsAboveFlushedHistory_KeepsTheProjectionAndFencesTheRow()
+    {
+        HLCTimestamp flushedTs   = new(0, 1000, 0);
+        HLCTimestamp readTs      = new(0, 2000, 0);
+        HLCTimestamp thirdTs     = new(0, 2400, 0);
+        HLCTimestamp fourthTs    = new(0, 2500, 0);
+        HLCTimestamp currentTime = new(0, 3000, 0);
+
+        UnflushedKeyValueWritesIndex unflushed = new();
+        unflushed.Record("db/k2", "v3"u8.ToArray(), 3, HLCTimestamp.Zero, thirdTs, thirdTs, KeyValueState.Set, false);
+        unflushed.Record("db/k2", "v4"u8.ToArray(), 4, HLCTimestamp.Zero, fourthTs, fourthTs, KeyValueState.Set, false);
+
+        ReadOnlyKeyValueEntry k1      = new("v1"u8.ToArray(), 1, HLCTimestamp.Zero, flushedTs, flushedTs, KeyValueState.Set);
+        ReadOnlyKeyValueEntry head    = new("v4"u8.ToArray(), 4, HLCTimestamp.Zero, fourthTs, fourthTs, KeyValueState.Set);
+        ReadOnlyKeyValueEntry flushed = new("v2"u8.ToArray(), 2, HLCTimestamp.Zero, flushedTs, flushedTs, KeyValueState.Set);
+
+        (List<(string, ReadOnlyKeyValueEntry)> raw, Dictionary<string, ReadOnlyKeyValueEntry>? projections, Dictionary<string, long>? fenced) =
+            TryGetByBucketHandler.ProjectBucketPage([("db/k1", k1, k1), ("db/k2", head, flushed)], readTs, currentTime, unflushed);
+
+        Assert.Equal(["db/k1", "db/k2"], raw.Select(static i => i.Item1).ToList());
+        Assert.Equal(["db/k2"], fenced!.Keys.ToList());
+        Assert.Equal(2L, fenced["db/k2"]);
+        Assert.Equal(1L, projections!["db/k1"].Revision);
+        Assert.Equal(2L, projections["db/k2"].Revision);
+    }
+
+    /// <summary>
+    /// A resident row of this actor's own bucket committed several times since the snapshot, every one of those
+    /// revisions still queued: the archive, trimmed to them, holds nothing at or before the snapshot, and the
+    /// projection fences the row. Its as-of image is its last flushed revision, which the projection carries and the
+    /// merge serves once the archive has shown every queued revision past the snapshot.
+    /// </summary>
+    [Fact]
+    public async Task SnapshotBucketScan_ResidentRowWithEveryQueuedRevisionPastTheSnapshot_ServesItsLastFlushedRevision()
+    {
+        (RaftManager raft, FairReadScheduler scheduler, KahunaConfiguration config,
+            ILogger<IKahuna> logger) = CreateRaftAndConfig("bucket-queued-history-flushed-projection");
+
+        scheduler.Start();
+        try
+        {
+            HLCTimestamp flushedTs = new(0, 1000, 0);
+            HLCTimestamp readTs    = new(0, 2000, 0);
+            HLCTimestamp thirdTs   = new(0, 2400, 0);
+            HLCTimestamp fourthTs  = new(0, 2500, 0);
+            HLCTimestamp fifthTs   = new(0, 2600, 0);
+
+            MemoryPersistenceBackend memory = new();
+            memory.StoreKeyValues(
+            [
+                new PersistenceRequestItem(
+                    key: "db/k1",
+                    value: "v1"u8.ToArray(),
+                    revision: 1,
+                    expiresNode: 0, expiresPhysical: 0, expiresCounter: 0,
+                    lastUsedNode: 0, lastUsedPhysical: 1000, lastUsedCounter: 0,
+                    lastModifiedNode: 0, lastModifiedPhysical: 1000, lastModifiedCounter: 0,
+                    state: (int)KeyValueState.Set),
+                new PersistenceRequestItem(
+                    key: "db/k2",
+                    value: "v2"u8.ToArray(),
+                    revision: 2,
+                    expiresNode: 0, expiresPhysical: 0, expiresCounter: 0,
+                    lastUsedNode: 0, lastUsedPhysical: 1000, lastUsedCounter: 0,
+                    lastModifiedNode: 0, lastModifiedPhysical: 1000, lastModifiedCounter: 0,
+                    state: (int)KeyValueState.Set)
+            ]);
+
+            UnflushedKeyValueWritesIndex unflushed = new();
+            unflushed.Record("db/k2", "v3"u8.ToArray(), 3, HLCTimestamp.Zero, thirdTs, thirdTs, KeyValueState.Set, false);
+            unflushed.Record("db/k2", "v4"u8.ToArray(), 4, HLCTimestamp.Zero, fourthTs, fourthTs, KeyValueState.Set, false);
+            unflushed.Record("db/k2", "v5"u8.ToArray(), 5, HLCTimestamp.Zero, fifthTs, fifthTs, KeyValueState.Set, false);
+
+            UnflushedOverlayPersistenceBackend overlay = new(memory, unflushed, new UnflushedLockWritesIndex());
+
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
+            IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
+                actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
+                    "bucket-queued-history-flushed-projection-actor", null!, null!, overlay, raft,
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+
+            // The resident entry as the archive trim leaves it: the queued revisions are retained, the flushed one
+            // below them was trimmed.
+            KeyValueEntry resident = new()
+            {
+                Bucket = "db",
+                Value = "v5"u8.ToArray(),
+                Revision = 5,
+                FlushedRevision = 2,
+                LastModified = fifthTs,
+                LastUsed = fifthTs,
+                State = KeyValueState.Set,
+                Revisions = new()
+            };
+            resident.Revisions[3] = new KeyValueRevisionEntry("v3"u8.ToArray(), thirdTs, HLCTimestamp.Zero, KeyValueState.Set);
+            resident.Revisions[4] = new KeyValueRevisionEntry("v4"u8.ToArray(), fourthTs, HLCTimestamp.Zero, KeyValueState.Set);
+            ((KeyValueActor)actorRef.Runner.Actor!).GetContext().InsertStoreEntry("db/k2", resident);
+
+            KeyValueResponse? served = await actorRef.Ask(
+                MakeSnapshotBucketScan("db", readTs), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+            Assert.NotNull(served);
+            Assert.Equal(KeyValueResponseType.Get, served!.Type);
+            Assert.NotNull(served.Items);
+            Assert.Equal(["db/k1", "db/k2"], served.Items!.Select(static i => i.Item1).ToList());
+            Assert.Equal(2L, served.Items[1].Item2.Revision);
+            Assert.Equal("v2", Encoding.UTF8.GetString(served.Items[1].Item2.Value!));
+        }
+        finally { scheduler.Stop(); }
+    }
+
     private static KeyValueRequest MakeBucketScan(
         string prefix,
         KeyValueDurability durability = KeyValueDurability.Persistent)

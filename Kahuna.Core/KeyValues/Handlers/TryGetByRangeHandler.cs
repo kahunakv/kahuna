@@ -318,13 +318,19 @@ internal sealed class TryGetByRangeHandler : BaseHandler
     /// history is complete only below the oldest revision of the key still queued for the background
     /// writer (<see cref="UnflushedHistoryFence"/>). A row this projection drops (a history miss) or
     /// replaces with an older revision never reaches the stage-3 fence of the resident path, so the
-    /// projection applies the fence itself: a row with a queued revision below its head is left out of
-    /// the page and named in <see cref="RangeDiskPage.HistoryFencedKeys"/>. The merge then serves it from
-    /// its resident entry, whose archive holds the queued revisions, and answers MustRetry when it is
-    /// not resident, instead of serving a page that is short a row, or stale by one. A newly promoted
-    /// leader is where this shows: the rows it applied as a follower are not resident, so a snapshot
-    /// scan reads every one of them through this projection, and the youngest of them still have
-    /// their first revisions queued when a later commit moves the head past the snapshot.
+    /// projection applies the fence itself: a row with a queued revision below its head is named in
+    /// <see cref="RangeDiskPage.HistoryFencedKeys"/> with the ceiling it was projected at, and projected
+    /// only from the part of the history that is complete, below its oldest queued revision. The merge
+    /// serves such a row from its resident entry, whose archive holds the queued revisions, or from this
+    /// projection once that archive has shown none of them at or before the snapshot, and answers
+    /// MustRetry when the row is not resident, instead of serving a page that is short a row, or stale
+    /// by one. A newly promoted leader is where the non-resident case shows: the rows it applied as a
+    /// follower are not resident, so a snapshot scan reads every one of them through this projection,
+    /// and the youngest of them still have their first revisions queued when a later commit moves the
+    /// head past the snapshot. The resident case shows on any leader whose flusher is behind: a row
+    /// committed several times since the snapshot has its archive trimmed to the unflushed revisions and
+    /// the newest few, all past the snapshot, and only the flushed history below them holds its as-of
+    /// image.
     /// </para>
     /// </summary>
     internal static RangeDiskPage ProjectSnapshotPage(
@@ -347,7 +353,7 @@ internal sealed class TryGetByRangeHandler : BaseHandler
 
         int usableCount = rawPage.Count;
         List<(string, ReadOnlyKeyValueEntry)> projected = new(usableCount);
-        HashSet<string>? fencedKeys = null;
+        Dictionary<string, long>? fencedKeys = null;
         for (int i = 0; i < usableCount; i++)
         {
             // Stop projecting once the continuation is expired: each stale key costs a
@@ -365,18 +371,28 @@ internal sealed class TryGetByRangeHandler : BaseHandler
 
             // The history below the head is the only source this projection has for the row's as-of
             // image, and it is incomplete while a revision below the head is still queued for the writer:
-            // the read would answer with an older row, or with nothing for a key whose first revision is
-            // the queued one. Leave the row to the merge, which serves it from a resident entry or fails
-            // the page closed; the window is bounded by the flush cadence.
-            if (UnflushedHistoryFence.HistoryMayLag(unflushed, k, archive: null, e.Revision - 1))
+            // a read across the queued revisions would answer with an older row, or with nothing for a
+            // key whose first revision is the queued one. Such a row is named as fenced, and projected
+            // only from the part of the history that is complete, below its oldest queued revision. That
+            // projection is the row's as-of image exactly when every queued revision is past the
+            // snapshot, which only the resident archive can tell (it retains every unflushed revision):
+            // the merge serves the row from the archive, or from the projection once the archive has
+            // shown none of the queued revisions at or before the snapshot, and fails the page closed
+            // when neither can answer. The window is bounded by the flush cadence.
+            long historyCeiling = e.Revision - 1;
+            if (UnflushedHistoryFence.HistoryMayLag(unflushed, k, archive: null, historyCeiling, out long flushedCeiling))
             {
-                (fencedKeys ??= new(StringComparer.Ordinal)).Add(k);
-                continue;
+                (fencedKeys ??= new(StringComparer.Ordinal))[k] = flushedCeiling;
+                historyCeiling = flushedCeiling;
+
+                // Nothing of the key is flushed yet: its resident entry is its only source.
+                if (historyCeiling < 0)
+                    continue;
             }
 
             // A dropped row never reaches the stage-3 merge, so it is counted here: the merge counts only the
             // rows it receives.
-            KeyValueEntry? snap = backend.GetKeyValueRevisionAtOrBefore(k, e.Revision - 1, snapshotTs, ref tally);
+            KeyValueEntry? snap = backend.GetKeyValueRevisionAtOrBefore(k, historyCeiling, snapshotTs, ref tally);
             if (snap is null || snap.State is KeyValueState.Deleted or KeyValueState.Undefined
                 || (snap.Expires != HLCTimestamp.Zero && snap.Expires.CompareTo(currentTime) < 0))
             {
