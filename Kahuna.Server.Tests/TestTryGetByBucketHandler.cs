@@ -484,6 +484,85 @@ public sealed class TestTryGetByBucketHandler : RaftTrackingTest
         finally { scheduler.Stop(); }
     }
 
+    /// <summary>
+    /// A row of a key space this actor does not own (the scan prefix spans several) is served from the stage-2
+    /// as-of page alone, with no resident entry to fence it. When the row's first revision is still queued for the
+    /// background writer and a later commit moved its head past the snapshot, that page has no image for the key,
+    /// and serving it would leave the row out. The scan answers MustRetry until the flush lands, after which the
+    /// key is served at the revision the snapshot held.
+    /// </summary>
+    [Fact]
+    public async Task SnapshotBucketScan_QueuedFirstRevisionBelowAHeadPastTheSnapshot_RetriesUntilTheFlushLands()
+    {
+        (RaftManager raft, FairReadScheduler scheduler, KahunaConfiguration config,
+            ILogger<IKahuna> logger) = CreateRaftAndConfig("bucket-queued-history-fence");
+
+        scheduler.Start();
+        try
+        {
+            HLCTimestamp firstRevisionTs = new(0, 1500, 0);
+            HLCTimestamp readTs          = new(0, 2000, 0);
+            HLCTimestamp deleteTs        = new(0, 2500, 0);
+
+            MemoryPersistenceBackend memory = new();
+            memory.StoreKeyValues(
+            [
+                new PersistenceRequestItem(
+                    key: "db/k1",
+                    value: "v1"u8.ToArray(),
+                    revision: 1,
+                    expiresNode: 0, expiresPhysical: 0, expiresCounter: 0,
+                    lastUsedNode: 0, lastUsedPhysical: 1000, lastUsedCounter: 0,
+                    lastModifiedNode: 0, lastModifiedPhysical: 1000, lastModifiedCounter: 0,
+                    state: (int)KeyValueState.Set)
+            ]);
+
+            // db/k2: inserted before the snapshot and deleted after it, both still queued for the writer.
+            UnflushedKeyValueWritesIndex unflushed = new();
+            unflushed.Record("db/k2", "v2-v0"u8.ToArray(), 0, HLCTimestamp.Zero, firstRevisionTs, firstRevisionTs, KeyValueState.Set, false);
+            unflushed.Record("db/k2", null, 1, HLCTimestamp.Zero, deleteTs, deleteTs, KeyValueState.Deleted, false);
+
+            UnflushedOverlayPersistenceBackend overlay = new(memory, unflushed, new UnflushedLockWritesIndex());
+
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
+            IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
+                actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
+                    "bucket-queued-history-fence-actor", null!, null!, overlay, raft,
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+
+            // The prefix "d" spans the "db" key space, so its rows are foreign to this actor and never resident.
+            KeyValueResponse? fenced = await actorRef.Ask(
+                MakeSnapshotBucketScan("d", readTs), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+            Assert.NotNull(fenced);
+            Assert.Equal(KeyValueResponseType.MustRetry, fenced!.Type);
+
+            memory.StoreKeyValues(
+            [
+                new PersistenceRequestItem(
+                    key: "db/k2",
+                    value: "v2-v0"u8.ToArray(),
+                    revision: 0,
+                    expiresNode: 0, expiresPhysical: 0, expiresCounter: 0,
+                    lastUsedNode: 0, lastUsedPhysical: 1500, lastUsedCounter: 0,
+                    lastModifiedNode: 0, lastModifiedPhysical: 1500, lastModifiedCounter: 0,
+                    state: (int)KeyValueState.Set)
+            ]);
+            unflushed.RemoveFlushed("db/k2", 0, firstRevisionTs);
+
+            KeyValueResponse? served = await actorRef.Ask(
+                MakeSnapshotBucketScan("d", readTs), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+            Assert.NotNull(served);
+            Assert.Equal(KeyValueResponseType.Get, served!.Type);
+            Assert.NotNull(served.Items);
+            Assert.Equal(["db/k1", "db/k2"], served.Items!.Select(static i => i.Item1).ToList());
+            Assert.Equal(0L, served.Items[1].Item2.Revision);
+            Assert.Equal("v2-v0", Encoding.UTF8.GetString(served.Items[1].Item2.Value!));
+        }
+        finally { scheduler.Stop(); }
+    }
+
     private static KeyValueRequest MakeBucketScan(
         string prefix,
         KeyValueDurability durability = KeyValueDurability.Persistent)

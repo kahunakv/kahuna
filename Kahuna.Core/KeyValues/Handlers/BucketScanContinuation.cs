@@ -60,6 +60,15 @@ internal sealed class BucketScanContinuation : ReadContinuation
     /// </summary>
     internal Dictionary<string, ReadOnlyKeyValueEntry>? SnapshotProjections { get; set; }
 
+    /// <summary>
+    /// The disk keys whose as-of image the stage-2 projection could not take from the persisted history: their
+    /// head is past the snapshot and a revision below it is still queued for the background writer. Stage 3
+    /// serves such a key from its resident entry, whose archive holds the queued revisions (or fences itself),
+    /// and answers MustRetry for one that is not resident, since nothing else can answer for it until the flush
+    /// lands. Written in stage 2 before the ResumeRead message is sent, read on the actor thread in stage 3.
+    /// </summary>
+    internal HashSet<string>? HistoryFencedKeys { get; set; }
+
     internal BucketScanContinuation(
         string prefix,
         HLCTimestamp transactionId,
@@ -116,6 +125,16 @@ internal sealed class BucketScanContinuation : ReadContinuation
 
                 if (seenKeys.Contains(key))
                     continue;
+
+                // The projection could not answer for this row (a revision below its head is still queued for the
+                // writer) and no resident entry can: the page would be short the row. Answer MustRetry; the caller
+                // re-reads once the flush lands. A resident entry's archive holds the queued revisions, so the
+                // reconcile below serves it, or fences itself when the archive does not reach.
+                if (HistoryFencedKeys is { } fencedKeys && fencedKeys.Contains(key) && !context.Store.TryGetValue(key, out _))
+                {
+                    Resolve(KeyValueStaticResponses.MustRetryResponse);
+                    return;
+                }
 
                 // Reconcile: prefer the higher-revision entry between current store and disk.
                 // A write may have committed while the disk read was in flight.

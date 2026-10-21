@@ -182,7 +182,11 @@ internal sealed class TryGetByBucketHandler : BaseHandler
         // closure — capturing the request itself would read a cleared or re-rented message.
         string bucketKey = message.Key;
 
-        Task<(List<(string, ReadOnlyKeyValueEntry)>, Dictionary<string, ReadOnlyKeyValueEntry>?)> readTask;
+        // The production backend is the unflushed-writes overlay; its index says which keys still have a
+        // revision queued for the writer, which the as-of projection must not read around.
+        UnflushedKeyValueWritesIndex? unflushed = context.UnflushedWrites;
+
+        Task<(List<(string, ReadOnlyKeyValueEntry)>, Dictionary<string, ReadOnlyKeyValueEntry>?, HashSet<string>?)> readTask;
         try
         {
             // Route the disk scan to the FairReadScheduler partition that owns this data range,
@@ -201,19 +205,19 @@ internal sealed class TryGetByBucketHandler : BaseHandler
                     {
                         KeyValueScanMetrics.ScansAbandonedCancelled.Add(1);
                         return (new List<(string, ReadOnlyKeyValueEntry)>(),
-                            (Dictionary<string, ReadOnlyKeyValueEntry>?)null);
+                            (Dictionary<string, ReadOnlyKeyValueEntry>?)null, (HashSet<string>?)null);
                     }
 
                     if (!isSnapshotScan)
                         return (context.PersistenceBackend.GetKeyValueByPrefix(bucketKey),
-                            (Dictionary<string, ReadOnlyKeyValueEntry>?)null);
+                            (Dictionary<string, ReadOnlyKeyValueEntry>?)null, (HashSet<string>?)null);
 
                     // Snapshot scan: one backend pass resolves the raw head page and every key's
                     // as-of image together, instead of one revision-history read per stale key.
                     return ProjectBucketPage(
                         context.PersistenceBackend.GetKeyValueByPrefixAtOrBefore(
                             bucketKey, capturedReadTs, () => cont.Cancelled),
-                        capturedReadTs, currentTime);
+                        capturedReadTs, currentTime, unflushed);
                 });
         }
         catch (Exception ex)
@@ -231,7 +235,7 @@ internal sealed class TryGetByBucketHandler : BaseHandler
         _ = readTask.ContinueWith(t =>
         {
             if (!t.IsCompletedSuccessfully) cont.SetFaulted();
-            else (cont.ScanDiskResult, cont.SnapshotProjections) = t.Result;
+            else (cont.ScanDiskResult, cont.SnapshotProjections, cont.HistoryFencedKeys) = t.Result;
             actorContext.Self.Send(
                 new KeyValueRequest(KeyValueRequestType.ResumeRead) { Continuation = cont });
         }, TaskScheduler.Default);
@@ -252,15 +256,23 @@ internal sealed class TryGetByBucketHandler : BaseHandler
     ///   <item>Otherwise the as-of image is a historical revision; drop the key from projections
     ///   if there is none, or it is Deleted, Undefined, or expired.</item>
     /// </list>
+    /// The history can answer for such a key only below the oldest revision of it still queued for the
+    /// background writer (<see cref="UnflushedHistoryFence"/>): a queued revision the as-of image should
+    /// be is missing from it, and the projection would be an older row, or no row for a key whose first
+    /// revision is the queued one. Such a key gets no projection and is named in the returned set; stage 3
+    /// serves it from a resident entry or answers MustRetry (a row this actor does not own is served from
+    /// the projection alone, so nothing else could fence it).
     /// </summary>
-    internal static (List<(string, ReadOnlyKeyValueEntry)> Raw, Dictionary<string, ReadOnlyKeyValueEntry>? Projections)
+    internal static (List<(string, ReadOnlyKeyValueEntry)> Raw, Dictionary<string, ReadOnlyKeyValueEntry>? Projections, HashSet<string>? HistoryFencedKeys)
         ProjectBucketPage(
             List<(string Key, ReadOnlyKeyValueEntry Current, ReadOnlyKeyValueEntry? Snapshot)> asOfPage,
             HLCTimestamp readTimestamp,
-            HLCTimestamp currentTime)
+            HLCTimestamp currentTime,
+            UnflushedKeyValueWritesIndex? unflushed = null)
     {
         List<(string, ReadOnlyKeyValueEntry)> raw = new(asOfPage.Count);
         Dictionary<string, ReadOnlyKeyValueEntry> projections = new(asOfPage.Count);
+        HashSet<string>? fencedKeys = null;
 
         foreach ((string k, ReadOnlyKeyValueEntry current, ReadOnlyKeyValueEntry? snap) in asOfPage)
         {
@@ -274,7 +286,14 @@ internal sealed class TryGetByBucketHandler : BaseHandler
                 continue;
             }
 
-            // Head was written after the snapshot; the as-of image is a historical revision.
+            // Head was written after the snapshot; the as-of image is a historical revision, which is
+            // not complete while a revision below the head is still queued for the writer.
+            if (UnflushedHistoryFence.HistoryMayLag(unflushed, k, archive: null, current.Revision - 1))
+            {
+                (fencedKeys ??= new(StringComparer.Ordinal)).Add(k);
+                continue;
+            }
+
             if (snap is null || snap.State is KeyValueState.Deleted or KeyValueState.Undefined)
                 continue;
             if (snap.Expires != HLCTimestamp.Zero && snap.Expires.CompareTo(currentTime) < 0)
@@ -282,7 +301,7 @@ internal sealed class TryGetByBucketHandler : BaseHandler
             projections[k] = snap;
         }
 
-        return (raw, projections);
+        return (raw, projections, fencedKeys);
     }
 
     private static int EnsureLexicographicalOrder((string, ReadOnlyKeyValueEntry) x, (string, ReadOnlyKeyValueEntry) y)

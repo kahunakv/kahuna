@@ -287,7 +287,11 @@ internal sealed class TryGetByRangeHandler : BaseHandler
         List<(string, ReadOnlyKeyValueEntry)> rawPage =
             backend.GetKeyValueByRange(prefix, diskCursor, endKey, endInclusive, pageSize, ref tally);
 
-        return ProjectSnapshotPage(rawPage, pageSize, isSnapshotRead, snapshotTs, currentTime, backend, shouldAbort, tally);
+        // The production backend is the unflushed-writes overlay; its index says which keys still have a
+        // revision queued for the writer, which the as-of projection must not read around.
+        UnflushedKeyValueWritesIndex? unflushed = (backend as UnflushedOverlayPersistenceBackend)?.UnflushedWrites;
+
+        return ProjectSnapshotPage(rawPage, pageSize, isSnapshotRead, snapshotTs, currentTime, backend, shouldAbort, tally, unflushed);
     }
 
     /// <summary>
@@ -309,6 +313,19 @@ internal sealed class TryGetByRangeHandler : BaseHandler
     /// Runs on a scheduler thread: the per-key GetKeyValueRevisionAtOrBefore calls do disk I/O and
     /// must not block the actor mailbox. The one exception is a backend that serves reads from
     /// memory, whose lookups cost microseconds; the scan then runs this on the actor thread.
+    /// <para>
+    /// A row whose head is newer than the snapshot is answered from the persisted history, and the
+    /// history is complete only below the oldest revision of the key still queued for the background
+    /// writer (<see cref="UnflushedHistoryFence"/>). A row this projection drops (a history miss) or
+    /// replaces with an older revision never reaches the stage-3 fence of the resident path, so the
+    /// projection applies the fence itself: a row with a queued revision below its head is left out of
+    /// the page and named in <see cref="RangeDiskPage.HistoryFencedKeys"/>. The merge then serves it from
+    /// its resident entry, whose archive holds the queued revisions, and answers MustRetry when it is
+    /// not resident, instead of serving a page that is short a row, or stale by one. A newly promoted
+    /// leader is where this shows: the rows it applied as a follower are not resident, so a snapshot
+    /// scan reads every one of them through this projection, and the youngest of them still have
+    /// their first revisions queued when a later commit moves the head past the snapshot.
+    /// </para>
     /// </summary>
     internal static RangeDiskPage ProjectSnapshotPage(
         List<(string, ReadOnlyKeyValueEntry)> rawPage,
@@ -318,7 +335,8 @@ internal sealed class TryGetByRangeHandler : BaseHandler
         HLCTimestamp currentTime,
         IPersistenceBackend backend,
         Func<bool>? shouldAbort = null,
-        KeyValueScanTally tally = default)
+        KeyValueScanTally tally = default,
+        UnflushedKeyValueWritesIndex? unflushed = null)
     {
         // Derive raw pagination facts before any projection filtering.
         bool rawHasMore = rawPage.Count >= pageSize;
@@ -329,6 +347,7 @@ internal sealed class TryGetByRangeHandler : BaseHandler
 
         int usableCount = rawPage.Count;
         List<(string, ReadOnlyKeyValueEntry)> projected = new(usableCount);
+        HashSet<string>? fencedKeys = null;
         for (int i = 0; i < usableCount; i++)
         {
             // Stop projecting once the continuation is expired: each stale key costs a
@@ -341,6 +360,17 @@ internal sealed class TryGetByRangeHandler : BaseHandler
             if (e.LastModified.CompareTo(snapshotTs) <= 0)
             {
                 projected.Add((k, e));
+                continue;
+            }
+
+            // The history below the head is the only source this projection has for the row's as-of
+            // image, and it is incomplete while a revision below the head is still queued for the writer:
+            // the read would answer with an older row, or with nothing for a key whose first revision is
+            // the queued one. Leave the row to the merge, which serves it from a resident entry or fails
+            // the page closed; the window is bounded by the flush cadence.
+            if (UnflushedHistoryFence.HistoryMayLag(unflushed, k, archive: null, e.Revision - 1))
+            {
+                (fencedKeys ??= new(StringComparer.Ordinal)).Add(k);
                 continue;
             }
 
@@ -358,7 +388,7 @@ internal sealed class TryGetByRangeHandler : BaseHandler
             projected.Add((k, new ReadOnlyKeyValueEntry(
                 snap.Value, snap.Revision, snap.Expires, snap.LastUsed, snap.LastModified, snap.State)));
         }
-        return new RangeDiskPage(projected, rawHasMore, rawNextCursor, tally);
+        return new RangeDiskPage(projected, rawHasMore, rawNextCursor, tally, fencedKeys);
     }
 
     /// <summary>

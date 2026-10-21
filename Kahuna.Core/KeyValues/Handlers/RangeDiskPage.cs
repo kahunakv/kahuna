@@ -37,15 +37,27 @@ internal sealed class RangeDiskPage
     /// </summary>
     internal readonly KeyValueScanTally Tally;
 
+    /// <summary>
+    /// The keys of this page whose as-of image the projection could not take from the persisted history: their
+    /// head is past the snapshot and a revision below it is still queued for the background writer, so the
+    /// history read would have projected an older row, or no row, in its place. They are left out of
+    /// <see cref="Projected"/>. The merge serves such a key from its resident entry, whose archive holds the
+    /// queued revisions (or fences itself when it does not), and answers MustRetry for one that is not resident,
+    /// since nothing else can answer for it until the flush lands. Null when the projection fenced nothing.
+    /// </summary>
+    internal readonly HashSet<string>? HistoryFencedKeys;
+
     internal RangeDiskPage(
         List<(string, ReadOnlyKeyValueEntry)> projected,
         bool rawHasMore,
         string? rawNextCursor,
-        KeyValueScanTally tally = default)
+        KeyValueScanTally tally = default,
+        HashSet<string>? historyFencedKeys = null)
     {
         Projected = projected;
         RawHasMore = rawHasMore;
         RawNextCursor = rawNextCursor;
         Tally = tally;
+        HistoryFencedKeys = historyFencedKeys;
     }
 }

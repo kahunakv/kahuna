@@ -3,6 +3,7 @@ using System.Text;
 using Kahuna;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues;
+using Kahuna.Server.KeyValues.Handlers;
 using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.Locks.Data;
 using Kahuna.Server.Persistence;
@@ -882,6 +883,135 @@ public sealed class TestTryGetByRangeHandler : RaftTrackingTest
         req.EndKey = endKey;
         req.EndInclusive = endInclusive;
         return req;
+    }
+
+    // ── Queued history below a head past the snapshot: the projection fences itself ─────────
+
+    /// <summary>
+    /// A key this actor never held resident (a follower applies to the backend only, and its rows reach a
+    /// new leader this way) has its first revision still queued for the background writer when a later commit
+    /// moves its head past the snapshot. The as-of projection must then not answer from the persisted history,
+    /// which is missing the queued revision: it would drop the row, and the scan would count one row fewer than
+    /// the snapshot held. With no resident entry to answer for the key, the page answers MustRetry instead, and
+    /// once the flush lands the row is served.
+    /// </summary>
+    [Fact]
+    public async Task SnapshotRangeScan_QueuedFirstRevisionBelowAHeadPastTheSnapshot_RetriesUntilTheFlushLands()
+    {
+        (RaftManager raft, FairReadScheduler scheduler, KahunaConfiguration config,
+            ILogger<IKahuna> logger) = CreateRaftAndConfig("range-queued-history-fence");
+
+        scheduler.Start();
+        try
+        {
+            HLCTimestamp firstRevisionTs = new(0, 1500, 0);
+            HLCTimestamp snapshotTs      = new(0, 2000, 0);
+            HLCTimestamp deleteTs        = new(0, 2500, 0);
+
+            MemoryPersistenceBackend memory = new();
+            memory.StoreKeyValues(
+            [
+                FlushedRow("doc/a", "a-disk"),
+                FlushedRow("doc/c", "c-disk")
+            ]);
+
+            // doc/b: inserted before the snapshot and deleted after it, both still queued for the writer. The
+            // overlay shows the head (the tombstone) and the persisted history holds nothing for the key.
+            UnflushedKeyValueWritesIndex unflushed = new();
+            unflushed.Record("doc/b", Encoding.UTF8.GetBytes("b-v0"), 0, HLCTimestamp.Zero, firstRevisionTs, firstRevisionTs, KeyValueState.Set, false);
+            unflushed.Record("doc/b", null, 1, HLCTimestamp.Zero, deleteTs, deleteTs, KeyValueState.Deleted, false);
+
+            UnflushedOverlayPersistenceBackend overlay = new(memory, unflushed, new UnflushedLockWritesIndex());
+
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
+            IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
+                actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
+                    "range-queued-history-fence-actor", null!, null!, overlay, raft,
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger);
+
+            KeyValueResponse? fenced = await actorRef.Ask(
+                MakeSnapshotRangeScan("doc/", limit: 10, snapshotTs), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+            Assert.NotNull(fenced);
+            Assert.Equal(KeyValueResponseType.MustRetry, fenced!.Type);
+
+            // The flush of the first revision lands: the history can answer for the key below its queued head.
+            memory.StoreKeyValues(
+            [
+                new PersistenceRequestItem(
+                    key: "doc/b",
+                    value: Encoding.UTF8.GetBytes("b-v0"),
+                    revision: 0,
+                    expiresNode: 0, expiresPhysical: 0, expiresCounter: 0,
+                    lastUsedNode: 0, lastUsedPhysical: 1500, lastUsedCounter: 0,
+                    lastModifiedNode: 0, lastModifiedPhysical: 1500, lastModifiedCounter: 0,
+                    state: (int)KeyValueState.Set)
+            ]);
+            unflushed.RemoveFlushed("doc/b", 0, firstRevisionTs);
+
+            KeyValueResponse? served = await actorRef.Ask(
+                MakeSnapshotRangeScan("doc/", limit: 10, snapshotTs), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+            Assert.NotNull(served);
+            Assert.Equal(KeyValueResponseType.Get, served!.Type);
+            Assert.Equal(["doc/a", "doc/b", "doc/c"], served.RangeResult!.Items.Select(static i => i.Item1).ToList());
+            Assert.Equal(0L, served.RangeResult.Items[1].Item2.Revision);
+            Assert.Equal("b-v0", Encoding.UTF8.GetString(served.RangeResult.Items[1].Item2.Value!));
+            Assert.False(served.RangeResult.HasMore);
+        }
+        finally { scheduler.Stop(); }
+    }
+
+    /// <summary>
+    /// The stage-2 projection alone: a row whose head is past the snapshot and whose older revision is still
+    /// queued is left out of the page and named as fenced instead of being projected from the incomplete
+    /// history; a row whose only queued revision is the head itself is projected from the history as before.
+    /// </summary>
+    [Fact]
+    public void ProjectSnapshotPage_QueuedRevisionBelowTheHead_LeavesTheRowToTheMerge()
+    {
+        HLCTimestamp firstRevisionTs = new(0, 1500, 0);
+        HLCTimestamp snapshotTs      = new(0, 2000, 0);
+        HLCTimestamp deleteTs        = new(0, 2500, 0);
+        HLCTimestamp currentTime     = new(0, 3000, 0);
+
+        MemoryPersistenceBackend memory = new();
+        memory.StoreKeyValues([FlushedRow("doc/a", "a-disk")]);
+
+        UnflushedKeyValueWritesIndex unflushed = new();
+        unflushed.Record("doc/b", Encoding.UTF8.GetBytes("b-v0"), 0, HLCTimestamp.Zero, firstRevisionTs, firstRevisionTs, KeyValueState.Set, false);
+        unflushed.Record("doc/b", null, 1, HLCTimestamp.Zero, deleteTs, deleteTs, KeyValueState.Deleted, false);
+
+        UnflushedOverlayPersistenceBackend overlay = new(memory, unflushed, new UnflushedLockWritesIndex());
+
+        RangeDiskPage fenced = TryGetByRangeHandler.ReadDiskPage(
+            overlay, "doc/", "doc/", cursorRowExcluded: false, endKey: null, endInclusive: false, limit: 10,
+            isSnapshotRead: true, snapshotTs, currentTime, shouldAbort: null);
+
+        Assert.Equal(["doc/b"], fenced.HistoryFencedKeys!.ToList());
+        Assert.Equal(["doc/a"], fenced.Projected.Select(static i => i.Key).ToList());
+
+        memory.StoreKeyValues(
+        [
+            new PersistenceRequestItem(
+                key: "doc/b",
+                value: Encoding.UTF8.GetBytes("b-v0"),
+                revision: 0,
+                expiresNode: 0, expiresPhysical: 0, expiresCounter: 0,
+                lastUsedNode: 0, lastUsedPhysical: 1500, lastUsedCounter: 0,
+                lastModifiedNode: 0, lastModifiedPhysical: 1500, lastModifiedCounter: 0,
+                state: (int)KeyValueState.Set)
+        ]);
+        unflushed.RemoveFlushed("doc/b", 0, firstRevisionTs);
+
+        RangeDiskPage served = TryGetByRangeHandler.ReadDiskPage(
+            overlay, "doc/", "doc/", cursorRowExcluded: false, endKey: null, endInclusive: false, limit: 10,
+            isSnapshotRead: true, snapshotTs, currentTime, shouldAbort: null);
+
+        Assert.Null(served.HistoryFencedKeys);
+        Assert.Equal(["doc/a", "doc/b"], served.Projected.Select(static i => i.Key).ToList());
+        Assert.Equal(0L, served.Projected[1].Entry.Revision);
+        Assert.Equal(KeyValueState.Set, served.Projected[1].Entry.State);
     }
 
     private static KeyValueRequest MakeRangeScan(string prefix, int limit)

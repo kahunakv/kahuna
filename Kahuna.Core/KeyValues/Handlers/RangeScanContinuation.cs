@@ -259,7 +259,27 @@ internal sealed class RangeScanContinuation : ReadContinuation
             return KeyValueStaticResponses.MustRetryResponse;
 
         if (RangeScanPage is { } arrived)
+        {
             tally.Add(arrived.Tally);
+
+            // The projection left out the rows whose persisted history is still missing a queued revision (see
+            // TryGetByRangeHandler.ProjectSnapshotPage). A resident one is served by the merge below from its
+            // entry, whose archive holds the queued revisions or fences itself. One that is not resident has no
+            // other source: the page would be short that row, so answer MustRetry, and the scan loop re-reads the
+            // page from the same cursor once the flush lands.
+            if (arrived.HistoryFencedKeys is { } fencedKeys)
+            {
+                foreach (string fencedKey in fencedKeys)
+                {
+                    if (context.Store.TryGetValue(fencedKey, out _))
+                        continue;
+
+                    RangeScanPage = null;
+                    return new(KeyValueResponseType.MustRetry,
+                        new KeyValueGetByRangeResult(KeyValueResponseType.MustRetry, [], null, false, Observation));
+                }
+            }
+        }
 
         // RawHasMore and RawNextCursor come from the raw (unprojected) disk page; the
         // projected list may be smaller or empty if rows were filtered by snapshot projection.

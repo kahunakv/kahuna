@@ -142,6 +142,13 @@ cluster-minted timestamps.
 
 Persisted history may lag committed state. The archive retains unflushed revisions, and a disk
 fallback that could omit a queued revision answers `MustRetry` until flush progress makes it safe.
+This covers the rows a scan reads without a resident entry too: the off-actor as-of projection of a
+range or bucket page leaves out a row whose head is past `T` while a revision below it is still
+queued, instead of projecting it from the incomplete history (which would drop a row whose first
+revision is the queued one, or serve an older one); the merge then serves the row from its resident
+entry, and answers `MustRetry` for the page when the row is not resident. A newly promoted leader
+reads every row it applied as a follower this way, so a snapshot scan there during a burst of
+commits retries for one flush cadence rather than counting short.
 A retained floor-boundary revision is not treated as an authoritative answer for timestamps in a
 trimmed gap above it; those reads consult disk. These safeguards do not create history for
 `SetNoRevision` writes, which deliberately suppress revision storage. TTL filtering also uses the
