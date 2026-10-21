@@ -19,8 +19,8 @@ namespace Kahuna;
 /// A stopped node is cut off from the Raft transport and removed from the Kahuna transport, as if its
 /// host had crashed. A Kahuna call that another node forwards to it in that window fails with a
 /// <see cref="KahunaServerException"/>; the caller retries, and the retry routes to the new leader once
-/// one is elected. A restarted node starts with empty storage and log under the same endpoint and
-/// catches up from the others.
+/// one is elected. A restarted node comes back under the same endpoint: with memory storage it starts
+/// empty and catches up from the others, with a persistent store and log it replays its own.
 /// </para>
 /// <para>
 /// The members are not thread-safe against one another's lifecycle: stop, restart and dispose are
@@ -95,8 +95,9 @@ public sealed class EmbeddedKahunaCluster : IAsyncDisposable
     /// <para>
     /// Each member gets a copy of the base options with a distinct node id (1..N), node name
     /// (<c>{NodeName}-{id}</c>) and port (<c>Port + index</c>, or 7000 + index when the port is 0), so
-    /// every member has a distinct endpoint. Storage and write-ahead log must be <c>memory</c>: a
-    /// restarted member starts empty and catches up from the others.
+    /// every member has a distinct endpoint. With memory storage and log a restarted member starts
+    /// empty and catches up from the others; with a persistent store or log each member keeps its own
+    /// subdirectory of the base path and replays it on restart.
     /// </para>
     /// <para>
     /// Timings: keep the embedded defaults (100 ms heartbeat, 500 to 1500 ms election timeout). With
@@ -117,9 +118,17 @@ public sealed class EmbeddedKahunaCluster : IAsyncDisposable
         if (nodeCount < 1)
             throw new ArgumentOutOfRangeException(nameof(nodeCount), nodeCount, "An embedded cluster needs at least one node.");
 
-        if (baseOptions.Storage != "memory" || baseOptions.WalStorage != "memory")
+        // Persistent members keep their store and log across a restart, each under its own directory of
+        // the base path, so a restarted member replays its own log and rejoins the way a restarted process
+        // does. A member with memory storage restarts empty and catches up from the others.
+        if (baseOptions.Storage != "memory" && string.IsNullOrWhiteSpace(baseOptions.StoragePath))
             throw new ArgumentException(
-                "An in-memory embedded cluster needs Storage and WalStorage set to 'memory': a stopped member restarts empty and catches up from the others.",
+                $"Storage '{baseOptions.Storage}' needs {nameof(baseOptions.StoragePath)}: each member keeps its store under its own subdirectory of it.",
+                nameof(baseOptions));
+
+        if (baseOptions.WalStorage != "memory" && string.IsNullOrWhiteSpace(baseOptions.WalPath))
+            throw new ArgumentException(
+                $"WalStorage '{baseOptions.WalStorage}' needs {nameof(baseOptions.WalPath)}: each member keeps its log under its own subdirectory of it.",
                 nameof(baseOptions));
 
         if (baseOptions.JoinExistingSeeds is { Count: > 0 })
@@ -143,6 +152,22 @@ public sealed class EmbeddedKahunaCluster : IAsyncDisposable
             // directory is left for the node's own validation to refuse.
             if (!string.IsNullOrWhiteSpace(baseOptions.RaftSnapshotStagingDirectory))
                 options.RaftSnapshotStagingDirectory = Path.Combine(baseOptions.RaftSnapshotStagingDirectory, options.NodeName);
+
+            // A blank revision is minted afresh by every node construction, which would give a restarted
+            // member a new, empty store and log next to its old ones. Pin one per member instead.
+            if (baseOptions.Storage != "memory")
+            {
+                options.StoragePath = Directory.CreateDirectory(Path.Combine(baseOptions.StoragePath, options.NodeName)).FullName;
+                if (string.IsNullOrWhiteSpace(options.StorageRevision))
+                    options.StorageRevision = "member";
+            }
+
+            if (baseOptions.WalStorage != "memory")
+            {
+                options.WalPath = Directory.CreateDirectory(Path.Combine(baseOptions.WalPath, options.NodeName)).FullName;
+                if (string.IsNullOrWhiteSpace(options.WalRevision))
+                    options.WalRevision = "member";
+            }
 
             nodeOptions[i] = options;
         }
@@ -324,14 +349,20 @@ public sealed class EmbeddedKahunaCluster : IAsyncDisposable
     }
 
     /// <summary>
-    /// Starts a stopped member again under the same endpoint, with empty storage and log. It rejoins
-    /// through the static roster and catches up from the other members. Returns once the member has
-    /// started and sees a leader for every partition it hosts.
+    /// Starts a stopped member again under the same endpoint. A member with memory storage starts empty
+    /// and catches up from the others; a persistent member replays its own store and log. It rejoins
+    /// through the static roster. Returns once the member has started and sees a leader for every
+    /// partition it hosts, which can be long after the call when the cluster has no leader: the start
+    /// keeps waiting for one, and other members may be stopped or restarted meanwhile.
     /// </summary>
     public async Task RestartNodeAsync(int index, CancellationToken cancellationToken = default)
     {
         CheckIndex(index);
 
+        EmbeddedKahunaNode node;
+
+        // The lifecycle lock covers the membership change only, not the start: a start that waits for a
+        // leader may need another member stopped or restarted before it can finish.
         await lifecycle.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -340,28 +371,49 @@ public sealed class EmbeddedKahunaCluster : IAsyncDisposable
             if (nodes[index] is not null)
                 throw new InvalidOperationException($"Node {index} ({endpoints[index]}) is already running.");
 
-            EmbeddedKahunaNode node = BuildNode(index);
+            node = BuildNode(index);
             nodes[index] = node;
             PublishRoutes();
             raftTransport.HealPartition(endpoints[index]);
-
-            try
-            {
-                await node.StartAsync(cancellationToken).ConfigureAwait(false);
-            }
-            catch
-            {
-                raftTransport.PartitionNode(endpoints[index]);
-                nodes[index] = null;
-                PublishRoutes();
-                await node.DisposeAsync().ConfigureAwait(false);
-                throw;
-            }
         }
         finally
         {
             lifecycle.Release();
         }
+
+        try
+        {
+            await node.StartAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            await WithdrawFailedStartAsync(index, node).ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Takes a member whose start failed back out of the cluster, unless it was already stopped or the
+    /// cluster disposed meanwhile (then the node is gone already).
+    /// </summary>
+    private async Task WithdrawFailedStartAsync(int index, EmbeddedKahunaNode node)
+    {
+        await lifecycle.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (disposed || !ReferenceEquals(nodes[index], node))
+                return;
+
+            raftTransport.PartitionNode(endpoints[index]);
+            nodes[index] = null;
+            PublishRoutes();
+        }
+        finally
+        {
+            lifecycle.Release();
+        }
+
+        await node.DisposeAsync().ConfigureAwait(false);
     }
 
     public async ValueTask DisposeAsync()

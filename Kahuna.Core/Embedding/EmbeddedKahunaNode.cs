@@ -39,6 +39,15 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
 
     private bool disposed;
 
+    /// <summary>Ceiling on the start's wait for partition leaders; see <see cref="EmbeddedKahunaOptions.StartupLeaderWait"/>.</summary>
+    private readonly TimeSpan startupLeaderWait;
+
+    /// <summary>
+    /// Cancelled by <see cref="DisposeAsync"/>, so a start still waiting for a leader ends with the node
+    /// instead of polling a disposed Raft for good. <see cref="StartAsync"/> links it with the caller's token.
+    /// </summary>
+    private readonly CancellationTokenSource lifetime = new();
+
     /// <summary>
     /// Seed endpoints of a running cluster to join at <see cref="StartAsync"/> instead of
     /// bootstrapping; null for the ordinary static-roster boot. Cluster constructor only.
@@ -70,6 +79,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         ILogger<IRaft> raftLogger = loggerFactory.CreateLogger<IRaft>();
         ILogger<IKahuna> kahunaLogger = loggerFactory.CreateLogger<IKahuna>();
         nodeLogger = kahunaLogger;
+        startupLeaderWait = options.StartupLeaderWait;
 
         // This constructor forms its quorum from phantom witnesses; the only real node is this one.
         ConfigurationValidator.ValidateReplicaPlacement(options.ReplicationFactor, seedNodeCount: 1, raftLogger);
@@ -177,6 +187,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         ILogger<IRaft> raftLogger = loggerFactory.CreateLogger<IRaft>();
         ILogger<IKahuna> kahunaLogger = loggerFactory.CreateLogger<IKahuna>();
         nodeLogger = kahunaLogger;
+        startupLeaderWait = options.StartupLeaderWait;
 
         // The caller owns discovery here, so the seed node count is unknown at this layer.
         ConfigurationValidator.ValidateReplicaPlacement(options.ReplicationFactor, seedNodeCount: null, raftLogger);
@@ -248,7 +259,15 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
 
         started = true;
 
-        await Raft.WaitForLeader(0, cancellationToken).ConfigureAwait(false);
+        // Each Kommander wait bounds one election by its fixed budget; the start retries undecided
+        // rounds until a leader is known or the node is shut down (StartupLeaderWait). A node that
+        // gave up here exited the process in its embedders, and took with it the vote the surviving
+        // majority needed for the very election it was waiting on.
+        using CancellationTokenSource startCancellation =
+            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lifetime.Token);
+        CancellationToken startToken = startCancellation.Token;
+
+        await WaitForLeaderAtStartupAsync(0, startToken).ConfigureAwait(false);
 
         // Wait for a leader only on the partitions this node hosts. JoinCluster returns after the
         // first committed partition map has been applied, so the hosted set is known here — but a
@@ -264,7 +283,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
 
             try
             {
-                await Raft.WaitForLeader(partitionId, cancellationToken).ConfigureAwait(false);
+                await WaitForLeaderAtStartupAsync(partitionId, startToken).ConfigureAwait(false);
             }
             catch (PartitionNotHostedException)
             {
@@ -272,6 +291,19 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             }
         }
     }
+
+    /// <summary>
+    /// Waits for the leader of <paramref name="partitionId"/> for as long as the start allows: every
+    /// undecided Kommander round is logged and retried (see <see cref="StartupLeaderWait"/>). A disposal
+    /// of this node while the wait is pending surfaces as an <see cref="OperationCanceledException"/>.
+    /// </summary>
+    private ValueTask<string> WaitForLeaderAtStartupAsync(int partitionId, CancellationToken startToken) =>
+        StartupLeaderWait.WaitAsync(
+            token => Raft.WaitForLeader(partitionId, token),
+            partitionId,
+            startupLeaderWait,
+            nodeLogger,
+            startToken);
 
     public async Task<string> WaitForLeaderForKeyAsync(string key, CancellationToken cancellationToken = default)
     {
@@ -298,6 +330,10 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             return;
 
         disposed = true;
+
+        // A start still waiting for a leader ends now: the wait below would otherwise outlive the node,
+        // polling a disposed Raft. Its caller sees an OperationCanceledException.
+        lifetime.Cancel();
 
         if (started)
         {
@@ -373,6 +409,8 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         // closed. This node owns it; the WAL and backend only borrow it.
         sharedResources?.Dispose();
 #endif
+
+        lifetime.Dispose();
     }
 
     /// <summary>
@@ -740,6 +778,9 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
 
         if (options.InitialPartitions <= 0)
             throw new ArgumentException("InitialPartitions must be greater than zero.", nameof(options));
+
+        if (options.StartupLeaderWait != Timeout.InfiniteTimeSpan && options.StartupLeaderWait <= TimeSpan.Zero)
+            throw new ArgumentException("StartupLeaderWait must be positive, or Timeout.InfiniteTimeSpan to wait until the start is cancelled.", nameof(options));
 
 #if KAHUNA_THREAD_FREE
         // The thread-free (browser) build has only in-memory storage, and a partition executor on its

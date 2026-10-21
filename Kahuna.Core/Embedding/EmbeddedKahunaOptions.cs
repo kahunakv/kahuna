@@ -1148,6 +1148,17 @@ public sealed class EmbeddedKahunaOptions
     public TimeSpan JoinTimeout { get; set; } = TimeSpan.FromSeconds(60);
 
     /// <summary>
+    /// Ceiling on how long <see cref="EmbeddedKahunaNode.StartAsync"/> waits for a partition to elect a
+    /// leader before the start fails, or <see cref="Timeout.InfiniteTimeSpan"/> (the default) to wait until
+    /// the start is cancelled or the node disposed. Kommander bounds each election round by 10 s; a node
+    /// that restarts while its cluster is briefly without a leader (the leader died during the restore, a
+    /// split vote) must not treat that round as a verdict: it keeps waiting, logging each round, since a
+    /// node that exits also withdraws the vote the next election may need. Set a finite value only where a
+    /// supervisor is expected to restart the process instead.
+    /// </summary>
+    public TimeSpan StartupLeaderWait { get; set; } = Timeout.InfiniteTimeSpan;
+
+    /// <summary>
     /// How long a joining learner may make no catch-up progress before the join gives up.
     /// </summary>
     public TimeSpan JoinPromotionStallTimeout { get; set; } = TimeSpan.FromMinutes(5);
