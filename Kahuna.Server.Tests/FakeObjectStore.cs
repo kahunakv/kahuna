@@ -123,6 +123,14 @@ internal sealed class FakeObjectStore
 
     internal static string ManifestKey(Guid backupId) => backupId.ToString("N") + ManifestSuffix;
 
+    /// <summary>
+    /// A backup manifest lives at the top of the keyspace. A key under an artifact prefix can end in the same
+    /// suffix — every checkpoint carries a <c>checkpoint/checkpoint.manifest</c> sidecar — and is an artifact,
+    /// exactly as the local target's top-level-only scan treats it.
+    /// </summary>
+    internal static bool IsManifestKey(string key) =>
+        key.EndsWith(ManifestSuffix, StringComparison.Ordinal) && !key.Contains('/');
+
     internal static string ArtifactKey(Guid backupId, string relativePath) =>
         backupId.ToString("N") + "/" + relativePath;
 
@@ -154,7 +162,7 @@ internal sealed class FakeObjectManifestTarget(FakeObjectStore store) : IBackupS
         List<BackupManifest> result = [];
         foreach (string key in store.List(""))
         {
-            if (!key.EndsWith(FakeObjectStore.ManifestSuffix, StringComparison.Ordinal))
+            if (!FakeObjectStore.IsManifestKey(key))
                 continue;
             if (!store.TryGet(key, out byte[] bytes))
                 continue;
@@ -177,7 +185,7 @@ internal sealed class FakeObjectManifestTarget(FakeObjectStore store) : IBackupS
         List<(Guid, string)> corrupt = [];
         foreach (string key in store.List(""))
         {
-            if (!key.EndsWith(FakeObjectStore.ManifestSuffix, StringComparison.Ordinal))
+            if (!FakeObjectStore.IsManifestKey(key))
                 continue;
             if (!store.TryGet(key, out byte[] bytes))
                 continue;
@@ -199,7 +207,7 @@ internal sealed class FakeObjectManifestTarget(FakeObjectStore store) : IBackupS
         List<Guid> ids = [];
         foreach (string key in store.List(""))
         {
-            if (!key.EndsWith(FakeObjectStore.ManifestSuffix, StringComparison.Ordinal))
+            if (!FakeObjectStore.IsManifestKey(key))
                 continue;
             Guid id = ParseId(key);
             if (id != Guid.Empty)
@@ -398,7 +406,12 @@ internal sealed class FakeObjectArtifactStore(FakeObjectStore store, string scra
 
         public Task CommitAsync(CancellationToken ct = default)
         {
-            foreach (string file in Directory.EnumerateFiles(LocalPath, "*", SearchOption.AllDirectories))
+            // Directory enumeration order is the filesystem's, not a sorted one, and differs between hosts. Upload in
+            // ordinal order so an injected upload fault stops at the same file everywhere.
+            string[] files = Directory.GetFiles(LocalPath, "*", SearchOption.AllDirectories);
+            Array.Sort(files, StringComparer.Ordinal);
+
+            foreach (string file in files)
             {
                 ct.ThrowIfCancellationRequested();
                 string relative = Path.GetRelativePath(LocalPath, file).Replace(Path.DirectorySeparatorChar, '/');

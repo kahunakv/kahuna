@@ -364,7 +364,10 @@ public sealed class TestRangeLockProbeDecisionWindow
                 t2WriteType = setType;
 
                 if (setType == KeyValueResponseType.Set)
-                    (t2CommitType, _) = await kahuna.LocateAndCommitTransaction(t2, ct);
+                {
+                    (KeyValueResponseType commitResultType, _) = await kahuna.LocateAndCommitTransaction(t2, ct);
+                    t2CommitType = commitResultType;
+                }
             }
             else
             {

@@ -349,7 +349,7 @@ public sealed class TestCommitAdmission : BaseCluster
             await collector.WaitUntil(c => c.Watermarks().Count >= 3, timeoutMs: 15_000);
 
             collector.AssertWatermarksIncrease();
-            Assert.Empty(collector.Frames().Where(f => f.Type == KeyValueWatchFrameType.Event));
+            Assert.DoesNotContain(collector.Frames(), f => f.Type == KeyValueWatchFrameType.Event);
         });
     }
 
