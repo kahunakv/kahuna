@@ -5,6 +5,8 @@ using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Handlers;
 using Kahuna.Server.KeyValues.Ranges;
+using Kahuna.Server.KeyValues.Transactions;
+using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Locks.Data;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
@@ -693,6 +695,122 @@ public sealed class TestTryGetByBucketHandler : RaftTrackingTest
             KeyValueFlags.None, 0,
             HLCTimestamp.Zero,
             durability, 0, 0, default);
+    }
+
+    // ── Deferred settlement landing between the disk read and the merge ───────────────────
+
+    /// <summary>
+    /// A committed-but-unsettled move (one row deleted, another inserted) settles after the bucket's disk page was
+    /// read and before the merge overlays it: the page holds the deleted row and not the inserted one, and the
+    /// intents are gone. The overlay must work from the intents as they stood before the read, so the insert is
+    /// served and the delete is not resurrected (the bucket form of the range scan's between-pages settlement).
+    /// </summary>
+    [Fact]
+    public async Task SnapshotBucketScan_SettlementLandsAfterTheDiskRead_StillServesTheCommittedMove()
+    {
+        (RaftManager raft, FairReadScheduler scheduler, KahunaConfiguration config,
+            ILogger<IKahuna> logger) = CreateRaftAndConfig("bucket-settle-after-read");
+
+        scheduler.Start();
+        try
+        {
+            HLCTimestamp txId       = new(0, 100, 0);
+            HLCTimestamp commitTs   = new(0, 1500, 0);
+            HLCTimestamp snapshotTs = new(0, 2000, 0);
+
+            MemoryPersistenceBackend memory = new();
+            memory.StoreKeyValues([Row("data/a", "a-v1", 1, 1000, KeyValueState.Set), Row("data/x", "x-v1", 1, 1000, KeyValueState.Set)]);
+
+            PreparedIntentStore intents = new();
+            InjectCommittedIntent(intents, txId, "data/b", "b-v1", revision: 1, commitTs);
+            InjectCommittedIntent(intents, txId, "data/x", null, revision: 2, commitTs);
+
+            SettlementAfterReadBackend backend = new(memory, () =>
+            {
+                memory.StoreKeyValues(
+                [
+                    Row("data/b", "b-v1", 1, commitTs.L, KeyValueState.Set),
+                    Row("data/x", null, 2, commitTs.L, KeyValueState.Deleted)
+                ]);
+                intents.Apply(new RemoveIntentCommand(txId, 1, "data/b"));
+                intents.Apply(new RemoveIntentCommand(txId, 1, "data/x"));
+            });
+
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
+            IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
+                actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
+                    "bucket-settle-after-read-actor", null!, null!, backend, raft,
+                    raft.ReadScheduler, new KeySpaceRegistry(), new RangeMapStore(raft, null, null, logger), config, logger,
+                    null!, null!, intents, null!);
+
+            KeyValueResponse? resp = await actorRef.Ask(
+                MakeSnapshotBucketScan("data", snapshotTs), TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+
+            Assert.NotNull(resp);
+            Assert.Equal(KeyValueResponseType.Get, resp!.Type);
+            Assert.Equal(1, backend.Landed);
+            Assert.Equal(["data/a", "data/b"], resp.Items!.Select(static i => i.Item1).ToList());
+        }
+        finally { scheduler.Stop(); }
+    }
+
+    private static PersistenceRequestItem Row(string key, string? value, long revision, long physical, KeyValueState state) =>
+        new(
+            key: key,
+            value: value is null ? null : Encoding.UTF8.GetBytes(value),
+            revision: revision,
+            expiresNode: 0, expiresPhysical: 0, expiresCounter: 0,
+            lastUsedNode: 0, lastUsedPhysical: physical, lastUsedCounter: 0,
+            lastModifiedNode: 0, lastModifiedPhysical: physical, lastModifiedCounter: 0,
+            state: (int)state);
+
+    /// <summary>A prepared intent resolved committed and not yet settled; a null value is a committed delete.</summary>
+    private static void InjectCommittedIntent(
+        PreparedIntentStore store, HLCTimestamp transactionId, string key, string? value, long revision, HLCTimestamp commitTs)
+    {
+        store.Apply(new PrepareIntentCommand(new PreparedIntent(
+            TransactionId: transactionId, Epoch: 1, Key: key, ManifestHash: 0, RecordAnchorKey: key,
+            CommitTimestamp: commitTs,
+            State: value is null ? KeyValueState.Deleted : KeyValueState.Set,
+            Value: value is null ? null : Encoding.UTF8.GetBytes(value),
+            Bucket: "data", Revision: revision, Expires: HLCTimestamp.Zero, NoRevision: false,
+            BaseRevision: PreparedIntent.UnknownBaseRevision, BaseState: KeyValueState.Undefined,
+            RecoveryDeadline: new HLCTimestamp(0, long.MaxValue, 0), Resolution: PreparedIntentResolution.Pending)));
+        store.Apply(new ResolveIntentCommand(transactionId, 1, key, Commit: true));
+    }
+
+    /// <summary>
+    /// A backend that runs <paramref name="afterPageRead"/> once, right after the first prefix page was read and
+    /// before it is returned: a settlement that lands between the bucket scan's disk read and its merge. Reads are
+    /// not served from memory, so the scan detaches the read from the actor as the production backend does.
+    /// </summary>
+    private sealed class SettlementAfterReadBackend(MemoryPersistenceBackend inner, Action afterPageRead) : IPersistenceBackend
+    {
+        private int landed;
+
+        internal int Landed => landed;
+
+        public bool ServesReadsFromMemory => false;
+        public bool StoreKeyValues(List<PersistenceRequestItem> items) => inner.StoreKeyValues(items);
+        public bool StoreLocks(List<PersistenceRequestItem> items) => inner.StoreLocks(items);
+        public LockEntry? GetLock(string resource) => inner.GetLock(resource);
+        public KeyValueEntry? GetKeyValue(string keyName) => inner.GetKeyValue(keyName);
+        public KeyValueEntry? GetKeyValueRevision(string keyName, long revision) => inner.GetKeyValueRevision(keyName, revision);
+        public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) => inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);
+
+        public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName)
+        {
+            List<(string, ReadOnlyKeyValueEntry)> page = inner.GetKeyValueByPrefix(prefixKeyName);
+
+            if (Interlocked.Exchange(ref landed, 1) == 0)
+                afterPageRead();
+
+            return page;
+        }
+
+        public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit) => inner.GetKeyValueByRange(prefix, startKey, limit);
+        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, HLCTimestamp floorTimestamp, out RevisionPruneResult result) => inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, floorTimestamp, out result);
+        public Kahuna.Server.Persistence.Pitr.CheckpointResult CreateCheckpoint(string destinationPath, long appliedIndex, HLCTimestamp appliedTime) => inner.CreateCheckpoint(destinationPath, appliedIndex, appliedTime);
     }
 
     private static KeyValueRequest MakeSnapshotBucketScan(string prefix, HLCTimestamp readTimestamp)

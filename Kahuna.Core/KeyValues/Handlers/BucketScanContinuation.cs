@@ -44,6 +44,12 @@ internal sealed class BucketScanContinuation : ReadContinuation
     /// resolving a committed-but-unsettled remote-anchor intent so the overlay serves it instead of retrying.</summary>
     private readonly IReadOnlyDictionary<(HLCTimestamp TransactionId, long Epoch), TransactionDecision>? routedDecisions;
 
+    /// <summary>The prepared intents under the scan prefix as stage 1 captured them, before the disk read was
+    /// dispatched. The overlay at stage 3 folds the live set into them, each key's earliest capture kept: a
+    /// settlement that applies between the disk read and the merge removes an intent the page was read without
+    /// (see <c>RangeScanContinuation.capturedIntents</c>). Null off the durable path.</summary>
+    private readonly IReadOnlyList<PreparedIntent>? capturedIntents;
+
     /// <summary>
     /// Snapshot-projected disk rows resolved in stage 2. Populated only for snapshot scans
     /// (readTimestamp non-null); null for latest and transactional scans.
@@ -78,7 +84,8 @@ internal sealed class BucketScanContinuation : ReadContinuation
         HLCTimestamp currentTime,
         KeyValueReplyRef promise,
         (string, long, bool)? scanKey,
-        IReadOnlyDictionary<(HLCTimestamp TransactionId, long Epoch), TransactionDecision>? routedDecisions = null) : base(promise)
+        IReadOnlyDictionary<(HLCTimestamp TransactionId, long Epoch), TransactionDecision>? routedDecisions = null,
+        IReadOnlyList<PreparedIntent>? capturedIntents = null) : base(promise)
     {
         this.prefix = prefix;
         this.transactionId = transactionId;
@@ -88,6 +95,7 @@ internal sealed class BucketScanContinuation : ReadContinuation
         this.currentTime = currentTime;
         this.scanKey = scanKey;
         this.routedDecisions = routedDecisions;
+        this.capturedIntents = capturedIntents;
         scanKeySpace = KeyValueKeySpace.OfPrefix(prefix);
     }
 
@@ -188,7 +196,8 @@ internal sealed class BucketScanContinuation : ReadContinuation
         // Durable-intent bucket visibility: overlay prepared intents belonging to this bucket, so a committed
         // insert/override/delete not yet materialized is reflected exactly as it would be in the equivalent range
         // scan. No-op off the durable path.
-        (items, bool mustRetry) = OverlayBucketIntents(context, prefix, items, currentTime, readTimestamp, transactionId, routedDecisions, excludedHeads);
+        (items, bool mustRetry) = OverlayBucketIntents(
+            context, prefix, items, currentTime, readTimestamp, transactionId, routedDecisions, excludedHeads, capturedIntents);
         if (mustRetry)
         {
             Resolve(KeyValueStaticResponses.MustRetryResponse);
@@ -204,6 +213,8 @@ internal sealed class BucketScanContinuation : ReadContinuation
     /// undecided in-prefix intent makes the scan retry. A bucket scan has no pagination cursor, so the merge is
     /// invoked with the scan's result cap as the limit (no "more" signal) and its capped item list is returned.
     /// No-op (returns the page unchanged) when the intent store is empty or no intent falls under the prefix.
+    /// <paramref name="capturedIntents"/> are the prefix's intents as captured before the page was read, kept over
+    /// the live set for the keys they hold.
     /// </summary>
     internal static (List<(string, ReadOnlyKeyValueEntry)> Items, bool MustRetry) OverlayBucketIntents(
         KeyValueContext context,
@@ -213,12 +224,15 @@ internal sealed class BucketScanContinuation : ReadContinuation
         HLCTimestamp readTimestamp,
         HLCTimestamp transactionId,
         IReadOnlyDictionary<(HLCTimestamp TransactionId, long Epoch), TransactionDecision>? routedDecisions = null,
-        Dictionary<string, ExcludedHead>? excludedHeads = null)
+        Dictionary<string, ExcludedHead>? excludedHeads = null,
+        IReadOnlyList<PreparedIntent>? capturedIntents = null)
     {
         if (context.PreparedIntentStore is not { } intentStore)
             return (items, false);
 
         IReadOnlyList<PreparedIntent> bucketIntents = intentStore.SnapshotPrefix(prefix);
+        if (capturedIntents is { Count: > 0 })
+            bucketIntents = UnionCaptured(capturedIntents, bucketIntents);
         if (bucketIntents.Count == 0)
             return (items, false);
 
@@ -232,6 +246,28 @@ internal sealed class BucketScanContinuation : ReadContinuation
             i => DurableSnapshotSource.HeadSupersedesIntent(context, i, excludedHeads, readTimestamp.IsNull() ? HLCTimestamp.Zero : readTimestamp));
 
         return (merge.Items, merge.MustRetry);
+    }
+
+    /// <summary>The captured intents, then every live intent whose key none of them holds.</summary>
+    private static List<PreparedIntent> UnionCaptured(IReadOnlyList<PreparedIntent> captured, IReadOnlyList<PreparedIntent> live)
+    {
+        List<PreparedIntent> union = new(captured.Count + live.Count);
+        union.AddRange(captured);
+
+        if (live.Count == 0)
+            return union;
+
+        HashSet<string> keys = new(captured.Count, StringComparer.Ordinal);
+        foreach (PreparedIntent intent in captured)
+            keys.Add(intent.Key);
+
+        foreach (PreparedIntent intent in live)
+        {
+            if (keys.Add(intent.Key))
+                union.Add(intent);
+        }
+
+        return union;
     }
 
     /// <summary>

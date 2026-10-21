@@ -5,6 +5,8 @@ using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Handlers;
 using Kahuna.Server.KeyValues.Ranges;
+using Kahuna.Server.KeyValues.Transactions;
+using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Locks.Data;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
@@ -1269,6 +1271,262 @@ public sealed class TestTryGetByRangeHandler : RaftTrackingTest
             HLCTimestamp.Zero,
             KeyValueDurability.Ephemeral,
             0, 0, default);
+
+    // ── Deferred settlement landing between the pages of one scan ─────────────────────────
+
+    /// <summary>
+    /// A committed-but-unsettled move (one row deleted, another inserted) settles while a snapshot scan is between
+    /// two of its disk pages. The page holding the insert's position was read before the settlement, when the
+    /// intent was the only copy of the insert; the page holding the delete's position after it, from a base that
+    /// already carries the tombstone. The overlay must still inject the insert and not resurrect the delete. On a
+    /// newly promoted leader, where no write intent makes the page wait for the predecessor's late-settling
+    /// commits, a scan overlaid with the live intent window read after the settlement counted 499 of 500 rows a
+    /// second after a leader-balancer handover: the inserted row id sorted before the deleted one.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task SnapshotRangeScan_SettlementLandsBetweenPages_InsertSortsFirst_StillServesTheCommittedMove(bool servesReadsFromMemory)
+    {
+        (RaftManager raft, FairReadScheduler scheduler, KahunaConfiguration config,
+            ILogger<IKahuna> logger) = CreateRaftAndConfig("range-settle-between-pages-insert-first");
+
+        scheduler.Start();
+        try
+        {
+            HLCTimestamp txId       = new(0, 100, 0);
+            HLCTimestamp commitTs   = new(0, 1500, 0);
+            HLCTimestamp snapshotTs = new(0, 2000, 0);
+
+            // A page holds limit + 1 = 6 raw rows: the first is doc/a and five tombstones, so doc/x needs a second
+            // page. doc/b (the insert) has its position on the first page and is absent from the base until the
+            // settlement; doc/x (the delete) is live in the base until then.
+            MemoryPersistenceBackend memory = new();
+            memory.StoreKeyValues(
+            [
+                FlushedRow("doc/a", "a-v1"),
+                TombstoneRow("doc/c"), TombstoneRow("doc/d"), TombstoneRow("doc/e"), TombstoneRow("doc/f"), TombstoneRow("doc/g"),
+                FlushedRow("doc/x", "x-v1")
+            ]);
+
+            PreparedIntentStore intents = new();
+            InjectCommittedIntent(intents, txId, "doc/b", "b-v1", revision: 1, commitTs);
+            InjectCommittedIntent(intents, txId, "doc/x", null, revision: 2, commitTs);
+
+            // The settlement lands as the second page is read: the value and the tombstone reach the base and
+            // the intents are removed.
+            SettlementLandingBackend backend = new(memory, pageIndex: 1, servesReadsFromMemory, () =>
+            {
+                memory.StoreKeyValues(
+                [
+                    FlushedRow("doc/b", "b-v1", revision: 1, physical: commitTs.L),
+                    TombstoneRow("doc/x", revision: 2, physical: commitTs.L)
+                ]);
+                intents.Apply(new RemoveIntentCommand(txId, 1, "doc/b"));
+                intents.Apply(new RemoveIntentCommand(txId, 1, "doc/x"));
+            });
+
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
+            IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
+                SpawnWithIntents(actorSystem, "range-settle-between-pages-insert-first-actor", backend, raft, config, logger, intents);
+
+            KeyValueResponse? resp = await actorRef.Ask(
+                MakeSnapshotRangeScan("doc/", limit: 5, snapshotTs), TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+
+            Assert.NotNull(resp);
+            Assert.Equal(KeyValueResponseType.Get, resp!.Type);
+            Assert.Equal(1, backend.Landed);
+            Assert.Equal(["doc/a", "doc/b"], resp.RangeResult!.Items.Select(static i => i.Item1).ToList());
+            Assert.Equal("b-v1", Encoding.UTF8.GetString(resp.RangeResult.Items[1].Item2.Value!));
+        }
+        finally { scheduler.Stop(); }
+    }
+
+    /// <summary>
+    /// The same settlement with the delete's position on the page read before it and the insert's on the page
+    /// read after it: the deleted row was read live from the base, and the overlay must still remove it (the
+    /// mirror image of the short count — one row too many).
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task SnapshotRangeScan_SettlementLandsBetweenPages_DeleteSortsFirst_DoesNotResurrectTheDeletedRow(bool servesReadsFromMemory)
+    {
+        (RaftManager raft, FairReadScheduler scheduler, KahunaConfiguration config,
+            ILogger<IKahuna> logger) = CreateRaftAndConfig("range-settle-between-pages-delete-first");
+
+        scheduler.Start();
+        try
+        {
+            HLCTimestamp txId       = new(0, 100, 0);
+            HLCTimestamp commitTs   = new(0, 1500, 0);
+            HLCTimestamp snapshotTs = new(0, 2000, 0);
+
+            MemoryPersistenceBackend memory = new();
+            memory.StoreKeyValues(
+            [
+                FlushedRow("doc/a", "a-v1"),
+                FlushedRow("doc/b", "b-v1"),
+                TombstoneRow("doc/c"), TombstoneRow("doc/d"), TombstoneRow("doc/e"), TombstoneRow("doc/f"), TombstoneRow("doc/g")
+            ]);
+
+            PreparedIntentStore intents = new();
+            InjectCommittedIntent(intents, txId, "doc/b", null, revision: 2, commitTs);
+            InjectCommittedIntent(intents, txId, "doc/y", "y-v1", revision: 1, commitTs);
+
+            SettlementLandingBackend backend = new(memory, pageIndex: 1, servesReadsFromMemory, () =>
+            {
+                memory.StoreKeyValues(
+                [
+                    TombstoneRow("doc/b", revision: 2, physical: commitTs.L),
+                    FlushedRow("doc/y", "y-v1", revision: 1, physical: commitTs.L)
+                ]);
+                intents.Apply(new RemoveIntentCommand(txId, 1, "doc/b"));
+                intents.Apply(new RemoveIntentCommand(txId, 1, "doc/y"));
+            });
+
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
+            IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
+                SpawnWithIntents(actorSystem, "range-settle-between-pages-delete-first-actor", backend, raft, config, logger, intents);
+
+            KeyValueResponse? resp = await actorRef.Ask(
+                MakeSnapshotRangeScan("doc/", limit: 5, snapshotTs), TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+
+            Assert.NotNull(resp);
+            Assert.Equal(KeyValueResponseType.Get, resp!.Type);
+            Assert.Equal(1, backend.Landed);
+            Assert.Equal(["doc/a", "doc/y"], resp.RangeResult!.Items.Select(static i => i.Item1).ToList());
+        }
+        finally { scheduler.Stop(); }
+    }
+
+    /// <summary>
+    /// A snapshot scan keeps a committed intent under a head committed after the snapshot. The page's row for the
+    /// key comes from the history below that head, and when that history lacks the intent's revision the row is
+    /// older than the intent, which must override it. The head alone used to supersede the intent, and the older
+    /// row stood.
+    /// </summary>
+    [Fact]
+    public async Task SnapshotRangeScan_CommittedIntentUnderAHeadPastTheSnapshot_OverridesTheOlderProjection()
+    {
+        (RaftManager raft, FairReadScheduler scheduler, KahunaConfiguration config,
+            ILogger<IKahuna> logger) = CreateRaftAndConfig("range-intent-under-later-head");
+
+        scheduler.Start();
+        try
+        {
+            HLCTimestamp txId       = new(0, 100, 0);
+            HLCTimestamp firstTs    = new(0, 1000, 0);
+            HLCTimestamp commitTs   = new(0, 1500, 0);
+            HLCTimestamp snapshotTs = new(0, 2000, 0);
+            HLCTimestamp laterTs    = new(0, 2500, 0);
+
+            // The persisted history holds revisions 1 and 3; revision 2, the intent's, never reached it.
+            MemoryPersistenceBackend memory = new();
+            memory.StoreKeyValues([FlushedRow("doc/k", "k-v1", revision: 1, physical: firstTs.L)]);
+            memory.StoreKeyValues([FlushedRow("doc/k", "k-v3", revision: 3, physical: laterTs.L)]);
+
+            PreparedIntentStore intents = new();
+            InjectCommittedIntent(intents, txId, "doc/k", "k-v2", revision: 2, commitTs);
+
+            using IDisposable actorSystemLifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
+            IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> actorRef =
+                SpawnWithIntents(actorSystem, "range-intent-under-later-head-actor", memory, raft, config, logger, intents);
+
+            // Resident at the later head, with no archive: the as-of read falls back to the disk projection.
+            ((KeyValueActor)actorRef.Runner.Actor!).GetContext().InsertStoreEntry("doc/k", new KeyValueEntry
+            {
+                Bucket = "doc",
+                Value = Encoding.UTF8.GetBytes("k-v3"),
+                Revision = 3,
+                FlushedRevision = 3,
+                LastUsed = laterTs,
+                LastModified = laterTs,
+                State = KeyValueState.Set
+            });
+
+            KeyValueResponse? resp = await actorRef.Ask(
+                MakeSnapshotRangeScan("doc/", limit: 10, snapshotTs), TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+
+            Assert.NotNull(resp);
+            Assert.Equal(KeyValueResponseType.Get, resp!.Type);
+            (string key, ReadOnlyKeyValueEntry row) = Assert.Single(resp.RangeResult!.Items);
+            Assert.Equal("doc/k", key);
+            Assert.Equal(2L, row.Revision);
+            Assert.Equal("k-v2", Encoding.UTF8.GetString(row.Value!));
+        }
+        finally { scheduler.Stop(); }
+    }
+
+    private static PersistenceRequestItem TombstoneRow(string key, long revision = 1, long physical = 1000) =>
+        new(
+            key: key,
+            value: null,
+            revision: revision,
+            expiresNode: 0, expiresPhysical: 0, expiresCounter: 0,
+            lastUsedNode: 0, lastUsedPhysical: physical, lastUsedCounter: 0,
+            lastModifiedNode: 0, lastModifiedPhysical: physical, lastModifiedCounter: 0,
+            state: (int)KeyValueState.Deleted);
+
+    /// <summary>
+    /// Installs a prepared intent of <paramref name="transactionId"/> on <paramref name="key"/> and resolves it
+    /// committed without settling it: the window between the durable decision and the settlement. A null value is
+    /// a committed delete.
+    /// </summary>
+    private static void InjectCommittedIntent(
+        PreparedIntentStore store, HLCTimestamp transactionId, string key, string? value, long revision, HLCTimestamp commitTs)
+    {
+        store.Apply(new PrepareIntentCommand(new PreparedIntent(
+            TransactionId: transactionId, Epoch: 1, Key: key, ManifestHash: 0, RecordAnchorKey: key,
+            CommitTimestamp: commitTs,
+            State: value is null ? KeyValueState.Deleted : KeyValueState.Set,
+            Value: value is null ? null : Encoding.UTF8.GetBytes(value),
+            Bucket: "doc", Revision: revision, Expires: HLCTimestamp.Zero, NoRevision: false,
+            BaseRevision: PreparedIntent.UnknownBaseRevision, BaseState: KeyValueState.Undefined,
+            RecoveryDeadline: new HLCTimestamp(0, long.MaxValue, 0), Resolution: PreparedIntentResolution.Pending)));
+        store.Apply(new ResolveIntentCommand(transactionId, 1, key, Commit: true));
+    }
+
+    private static IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> SpawnWithIntents(
+        ActorSystem actorSystem, string name, IPersistenceBackend backend, RaftManager raft,
+        KahunaConfiguration config, ILogger<IKahuna> logger, PreparedIntentStore intents) =>
+        actorSystem.Spawn<KeyValueActor, KeyValueRequest, KeyValueResponse>(
+            name, null!, null!, backend, raft, raft.ReadScheduler, new KeySpaceRegistry(),
+            new RangeMapStore(raft, null, null, logger), config, logger,
+            null!, null!, intents, null!);
+
+    /// <summary>
+    /// A backend that runs <paramref name="onPageRead"/> once, as the page read numbered <paramref name="pageIndex"/>
+    /// (counted from zero) is issued and before it is served: a settlement that lands between two pages of one scan.
+    /// </summary>
+    private sealed class SettlementLandingBackend(
+        MemoryPersistenceBackend inner, int pageIndex, bool servesReadsFromMemory, Action onPageRead) : IPersistenceBackend
+    {
+        private int pagesRead;
+        private int landed;
+
+        internal int Landed => landed;
+
+        public bool ServesReadsFromMemory => servesReadsFromMemory;
+        public bool StoreKeyValues(List<PersistenceRequestItem> items) => inner.StoreKeyValues(items);
+        public bool StoreLocks(List<PersistenceRequestItem> items) => inner.StoreLocks(items);
+        public LockEntry? GetLock(string resource) => inner.GetLock(resource);
+        public KeyValueEntry? GetKeyValue(string keyName) => inner.GetKeyValue(keyName);
+        public KeyValueEntry? GetKeyValueRevision(string keyName, long revision) => inner.GetKeyValueRevision(keyName, revision);
+        public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) => inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);
+        public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName) => inner.GetKeyValueByPrefix(prefixKeyName);
+
+        public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit)
+        {
+            if (Interlocked.Increment(ref pagesRead) - 1 == pageIndex && Interlocked.Exchange(ref landed, 1) == 0)
+                onPageRead();
+
+            return inner.GetKeyValueByRange(prefix, startKey, limit);
+        }
+
+        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, HLCTimestamp floorTimestamp, out RevisionPruneResult result) => inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, floorTimestamp, out result);
+        public Kahuna.Server.Persistence.Pitr.CheckpointResult CreateCheckpoint(string destinationPath, long appliedIndex, HLCTimestamp appliedTime) => inner.CreateCheckpoint(destinationPath, appliedIndex, appliedTime);
+    }
 
     // ── Raft / config factory ─────────────────────────────────────────────────────────────
 

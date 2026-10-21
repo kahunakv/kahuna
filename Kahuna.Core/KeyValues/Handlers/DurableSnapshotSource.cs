@@ -110,13 +110,22 @@ internal static class DurableSnapshotSource
     /// page (<paramref name="excludedHeads"/>, a newer delete or an expired value that is not resident). See
     /// <see cref="PreparedIntentVisibility.IsReplacedByHead"/> for the equal-revision (extend) rule.
     /// <paramref name="readTimestamp"/> is the scan's snapshot, or <see cref="HLCTimestamp.Zero"/> for a latest scan.
+    /// <para>A snapshot scan is replaced only by a head it can see. A head committed after the snapshot does not
+    /// speak for the version at the snapshot — that is the intent, or a revision between the two — and the page's
+    /// own row for the key, when it holds one, is judged against the intent by revision in the merge: a newer row
+    /// the page took from the key's history stands, an older one the page read before the intent settled into the
+    /// base is overridden. A latest scan keeps the head's word, whatever its stamp.</para>
     /// </summary>
     public static bool HeadSupersedesIntent(
         KeyValueContext context, PreparedIntent intent, Dictionary<string, ExcludedHead>? excludedHeads, HLCTimestamp readTimestamp)
         => (context.Store.TryGetValue(intent.Key, out KeyValueEntry? entry)
-            && PreparedIntentVisibility.IsReplacedByHead(intent, entry.Revision, entry.LastModified, readTimestamp))
+            && VisibleHeadReplaces(intent, entry.Revision, entry.LastModified, readTimestamp))
            || (excludedHeads is not null && excludedHeads.TryGetValue(intent.Key, out ExcludedHead head)
-               && PreparedIntentVisibility.IsReplacedByHead(intent, head.Revision, head.LastModified, readTimestamp));
+               && VisibleHeadReplaces(intent, head.Revision, head.LastModified, readTimestamp));
+
+    private static bool VisibleHeadReplaces(PreparedIntent intent, long headRevision, HLCTimestamp headLastModified, HLCTimestamp readTimestamp)
+        => PreparedIntentVisibility.IsReplacedByHead(intent, headRevision, headLastModified, readTimestamp)
+           && (readTimestamp == HLCTimestamp.Zero || headLastModified <= readTimestamp);
 
     /// <summary>
     /// Records the head of a row a latest-read scan evaluated but left out of its page (a delete or an expired

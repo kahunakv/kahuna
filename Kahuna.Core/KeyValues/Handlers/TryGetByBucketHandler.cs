@@ -167,9 +167,13 @@ internal sealed class TryGetByBucketHandler : BaseHandler
             return KeyValueStaticResponses.WaitingForReplicationResponse;
         }
 
+        // The prefix's intents as they stand before the disk read: a settlement that lands between the read and
+        // the stage-3 merge removes an intent the page was read without (see BucketScanContinuation).
+        IReadOnlyList<Transactions.Data.PreparedIntent>? capturedIntents = context.PreparedIntentStore?.SnapshotPrefix(message.Key);
+
         BucketScanContinuation cont = new(
             message.Key, message.TransactionId, message.ReadTimestamp,
-            items, seenKeys, currentTime, promise, scanKey, message.ForeignScanDecisions);
+            items, seenKeys, currentTime, promise, scanKey, message.ForeignScanDecisions, capturedIntents);
         ArmReadDeadline(cont, currentTime);
         if (scanKey.HasValue)
             context.PendingReads[scanKey.Value] = cont;

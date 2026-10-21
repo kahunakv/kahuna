@@ -64,6 +64,23 @@ internal sealed class RangeScanContinuation : ReadContinuation
     /// after resolving a committed-but-unsettled remote-anchor intent so the overlay serves it instead of retrying.</summary>
     private readonly IReadOnlyDictionary<(HLCTimestamp TransactionId, long Epoch), TransactionDecision>? routedDecisions;
 
+    /// <summary>
+    /// The prepared intents of the positions still ahead of the merge, captured on the actor thread before every
+    /// disk page is read, keyed by key with the first capture of each key kept. A page is read off the actor and
+    /// merged on it later, and a settlement can apply in between: it lands the intent's committed value in the base
+    /// the pages are read from (the unflushed overlay at once, the resident entry through its coherence message)
+    /// and removes the intent. A page read before that settlement, overlaid at the end with the live intent window
+    /// read after it, saw neither the base nor the intent: a committed insert was missing from the scan, and a
+    /// committed delete stayed in it. The window where this shows is a leader that never staged the transaction —
+    /// a newly promoted one, whose predecessor's commits settle late through the handover — since the staging
+    /// leader holds a write intent on every such key that makes the page wait instead. Capturing before the read
+    /// keeps, for every position, an intent at least as old as the base that position was read from, so the final
+    /// overlay still carries what the base lacked; the merge judges a captured intent against the row the page
+    /// holds by revision, so a position consumed after the settlement stands on its own. Null until a capture
+    /// finds an intent; a scan that meets none pays one empty window descent per page.
+    /// </summary>
+    private Dictionary<string, PreparedIntent>? capturedIntents;
+
     // ── K-way merge state (mutable, actor-thread-only) ───────────────────────
 
     /// <summary>
@@ -221,6 +238,8 @@ internal sealed class RangeScanContinuation : ReadContinuation
     {
         while (true)
         {
+            CaptureIntentsAhead(context);
+
             RangeScanPage = ReadPage(context.PersistenceBackend, shouldAbort: null);
             KeyValueScanMetrics.PagesReadOnActor.Add(1);
 
@@ -524,8 +543,7 @@ internal sealed class RangeScanContinuation : ReadContinuation
             string? intentEnd = kvHasMore ? kvCeilingKey : memEnd;
             bool intentEndIncl = kvHasMore || memEndInclusive;
 
-            IReadOnlyList<PreparedIntent> ranged =
-                intentStore.SnapshotScanWindow(startKey ?? prefix, startInclusive || startKey is null, intentEnd, intentEndIncl);
+            IReadOnlyList<PreparedIntent> ranged = CollectPageIntents(intentStore, intentEnd, intentEndIncl);
             if (ranged.Count > 0)
             {
                 PreparedIntentScanMerge.ScanMergeResult merge = PreparedIntentScanMerge.Merge(
@@ -554,6 +572,8 @@ internal sealed class RangeScanContinuation : ReadContinuation
     /// </summary>
     internal void DispatchNextPage(KeyValueContext context)
     {
+        CaptureIntentsAhead(context);
+
         Task<RangeDiskPage> nextTask;
         try
         {
@@ -596,6 +616,66 @@ internal sealed class RangeScanContinuation : ReadContinuation
             else RangeScanPage = t.Result;
             self.Send(new KeyValueRequest(KeyValueRequestType.ResumeRead) { Continuation = this });
         }, TaskScheduler.Default);
+    }
+
+    // ── Prepared-intent capture (actor thread) ──────────────────────────────────
+
+    /// <summary>
+    /// Captures into <see cref="capturedIntents"/> the prepared intents of every position the merge has not
+    /// consumed yet: from the largest disk key merged so far (every key at or below it, from either source, is
+    /// consumed; a page's merge stops right after its last disk key) to the scan's end bound. Runs on the actor
+    /// thread before each disk page read, so a settlement that lands between this capture and the read is in
+    /// both the capture and the page, and one that landed before it is in the page.
+    /// </summary>
+    private void CaptureIntentsAhead(KeyValueContext context)
+    {
+        if (context.PreparedIntentStore is not { } intentStore)
+            return;
+
+        string from = lastDiskKeyMerged ?? startKey ?? prefix;
+        bool fromInclusive = lastDiskKeyMerged is null && (startKey is null || startInclusive);
+
+        IReadOnlyList<PreparedIntent> ahead = intentStore.SnapshotScanWindow(from, fromInclusive, memEnd, memEndInclusive);
+        if (ahead.Count == 0)
+            return;
+
+        capturedIntents ??= new(StringComparer.Ordinal);
+        foreach (PreparedIntent intent in ahead)
+            capturedIntents.TryAdd(intent.Key, intent);
+    }
+
+    /// <summary>
+    /// The intents the final overlay reconciles the page with: the page's live window (which adds the intents
+    /// prepared since the last capture) folded into the captured set, which then stands filtered to the page's
+    /// ceiling. A captured intent that settled meanwhile is still here — that is the point — and its decision is
+    /// read from the transaction record when its own resolution is still pending.
+    /// </summary>
+    private IReadOnlyList<PreparedIntent> CollectPageIntents(PreparedIntentStore intentStore, string? intentEnd, bool intentEndIncl)
+    {
+        IReadOnlyList<PreparedIntent> live =
+            intentStore.SnapshotScanWindow(startKey ?? prefix, startInclusive || startKey is null, intentEnd, intentEndIncl);
+
+        if (capturedIntents is null)
+            return live;
+
+        foreach (PreparedIntent intent in live)
+            capturedIntents.TryAdd(intent.Key, intent);
+
+        List<PreparedIntent> page = new(capturedIntents.Count);
+
+        foreach (PreparedIntent intent in capturedIntents.Values)
+        {
+            if (intentEnd is not null)
+            {
+                int cmp = string.CompareOrdinal(intent.Key, intentEnd);
+                if (cmp > 0 || (cmp == 0 && !intentEndIncl))
+                    continue;
+            }
+
+            page.Add(intent);
+        }
+
+        return page;
     }
 
     // ── Per-key evaluation (sync; mirrors TryGetByRangeHandler.Get without disk I/O) ──────
