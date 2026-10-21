@@ -422,15 +422,19 @@ a prepare and validation that consumed most of the margin — proposes an `Exten
 on the record, moving the deadline to now plus the frozen margin. The state machine accepts it only while
 the lease is still held (the attempt HLC has not passed the current deadline) and only forward; a
 terminal record rejects it. A renewal is sent only when less than half of the lease remains, and each
-attempt may renew at most `DurableDecisionDeadlineMaxExtensions` times. The recovery sweep reads the
+attempt may renew at most `DurableDecisionDeadlineMaxExtensions` times. The check runs between the prepare
+loop's rounds and, while a helping pass, a re-prepare or a late validation is in flight, every quarter of
+the lease in wall-clock time, so one long round cannot let the lease lapse. The recovery sweep reads the
 deadline off the record, so a renewed record waits. `kahuna.durable_tx.deadline_extensions{outcome}`
 counts renewals as `extended`, `record_terminal`, `unavailable`, `lapsed` or `budget_spent`.
 
 The prepare retry loop uses the same lease. The helping pass reports whether the holders of a refused key
-are decided or still undecided: decided holders are settlement lag, bounded by the (renewed) deadline, and
-a deadline that still arrives answers `MustRetry` with refusal class `SettlementLag` without recording an
-abort (`prepare_retry_loops{outcome=deadline_lapsed}`); an undecided holder is a live conflict, bounded by
-eight rounds, after which the abort is recorded with refusal class `PrepareExhausted` and a warning.
+are decided or still undecided: decided holders are settlement lag, bounded by the (renewed) deadline. A
+lease that still lapses with renewal on records the abort with class `RetryableFailure` and refusal class
+`SettlementLag`, naming the rounds, renewals and holders (`prepare_retry_loops{outcome=deadline_lapsed}`);
+with renewal off the attempt answers `MustRetry` with refusal class `SettlementLag` and leaves the
+conclusion to the record fence. An undecided holder is a live conflict, bounded by eight rounds, after
+which the abort is recorded with refusal class `PrepareExhausted` and a warning.
 
 ### Abort classification
 

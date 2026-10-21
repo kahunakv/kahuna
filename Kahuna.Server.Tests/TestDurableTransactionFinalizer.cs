@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Diagnostics.Metrics;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions;
@@ -25,6 +26,10 @@ public sealed class TestDurableTransactionFinalizer
     {
         // Predicate returning true for a (partitionId, logType) pair that should fail to replicate.
         public Func<int, string, bool>? Fail { get; set; }
+
+        // Wall-clock milliseconds a (partitionId, logType) replicate takes before it answers, so a test can make
+        // one step of the finalize outlast a lease measured by a real-time attempt clock. Null or 0: immediate.
+        public Func<int, string, int>? DelayMs { get; set; }
         public readonly ConcurrentQueue<(int Partition, string Type)> Calls = new();
 
         // The stores the seam applies to, mirroring the production scheduler-completion apply owner: this single
@@ -40,19 +45,23 @@ public sealed class TestDurableTransactionFinalizer
         // Marker log type recorded in Calls for a bundled anchor [init, prepare] submission.
         public const string BundleType = "bundle";
 
-        public Task<bool> Replicate(int partitionId, string logType, byte[] data, WriteAdmissionClass admissionClass, WriteSubmissionStage stage, CancellationToken ct)
+        public async Task<bool> Replicate(int partitionId, string logType, byte[] data, WriteAdmissionClass admissionClass, WriteSubmissionStage stage, CancellationToken ct)
         {
             Calls.Enqueue((partitionId, logType));
+
+            if (DelayMs?.Invoke(partitionId, logType) is > 0 and int delayMs)
+                await Task.Delay(delayMs, ct);
+
             if (Fail is not null && Fail(partitionId, logType))
-                return Task.FromResult(false);
+                return false;
 
             RaftLog log = new() { LogType = logType, LogData = data };
             if (logType == ReplicationTypes.TransactionRecord)
                 Records?.Replicate(partitionId, log);
             else if (logType == ReplicationTypes.PreparedIntent)
-                return Task.FromResult(Intents is null || Intents.ApplyDeltaAckPrepares(partitionId, log));
+                return Intents is null || Intents.ApplyDeltaAckPrepares(partitionId, log);
 
-            return Task.FromResult(true);
+            return true;
         }
 
         // Mirrors the production anchor bundle: the record init and the anchor prepare apply atomically in one
@@ -2002,6 +2011,100 @@ public sealed class TestDurableTransactionFinalizer
         Assert.True(outcome.LateCommitRejected);
         Assert.Equal(CommitRefusalClass.DecisionDeadline, outcome.Refusal);
         Assert.Equal(TransactionAbortClass.PresumedAbort, records.Get(txId, 1)!.AbortClass);
+    }
+
+    /// <summary>
+    /// One helping round outlasts the whole lease: the blocker's single materialization takes longer than the
+    /// frozen margin. The renewal between rounds would find the lease already lapsed; the renewal issued while the
+    /// round is in flight keeps it, and the commit lands past the frozen deadline inside the renewed one. The
+    /// attempt clock follows wall time, as it does on a node.
+    /// </summary>
+    [Fact]
+    public async Task Helping_OneRoundOutlastsTheLease_LeaseRenewedDuringTheRound_Commits()
+    {
+        HLCTimestamp blockerTx = Ts(500);
+        Seam seam = new();
+        TransactionRecordStore records = new();
+        PreparedIntentStore intents = new();
+        seam.Records = records;
+        seam.Intents = intents;
+        InstallCommittedBlocker(records, intents, blockerTx, "acct/2");
+
+        // Commit timestamp 1100, frozen deadline 3100: a lease of 2,000 ms, renewed once less than 1,000 ms remain,
+        // checked every 500 ms while a step is in flight. The materialization of the blocker takes 2,600 ms.
+        const long leaseMs = 2_000;
+        seam.DelayMs = (_, type) => type == ReplicationTypes.KeyValues ? 2_600 : 0;
+
+        Stopwatch clock = Stopwatch.StartNew();
+        DurableTransactionFinalizer finalizer = new(records, intents, seam.Replicate,
+            attemptClock: () => Ts(1100 + clock.ElapsedMilliseconds),
+            resolveDecidedBlockers: HelpingRecovery(records, intents, seam).TryResolveDecidedBlockersAsync,
+            maxDeadlineExtensions: 4);
+
+        using MetricCapture capture = new("outcome", "kahuna.durable_tx.deadline_extensions", "kahuna.durable_tx.prepare_retry_loops");
+
+        HLCTimestamp txId = Ts(1000);
+        DurableFinalizeInput input = Input(txId, 1, revision: 2, baseRevision: 1, (5, "acct/2")) with { DecisionDeadline = Ts(1100 + leaseMs) };
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(input, Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+        Assert.False(outcome.LateCommitRejected);
+        Assert.True(capture.Total("kahuna.durable_tx.deadline_extensions", "extended") >= 1);
+        Assert.Equal(0, capture.Total("kahuna.durable_tx.deadline_extensions", "lapsed"));
+        Assert.Equal(0, capture.Total("kahuna.durable_tx.prepare_retry_loops", "deadline_lapsed"));
+
+        TransactionRecord record = records.Get(txId, 1)!;
+        Assert.Equal(TransactionDecision.Commit, record.Decision);
+        Assert.True(record.DecisionDeadline > Ts(1100 + leaseMs), "the record's deadline must have moved past the frozen one");
+        Assert.True(record.DecidedAt > Ts(1100 + leaseMs), "the commit must have landed past the frozen deadline");
+        Assert.Null(intents.Get("acct/2"));
+    }
+
+    /// <summary>
+    /// With renewal on, a lease that still lapses is decided here as an abort that names the wait, instead of a
+    /// MustRetry that a same-identity retry could only have fenced into a presumed abort one round-trip later: the
+    /// record turns Abort with the retryable class, the refusal says settlement lag, and the blocker is left alone.
+    /// </summary>
+    [Fact]
+    public async Task Helping_LeaseLapsesWithRenewalOn_RecordsTheAbortAsSettlementLag()
+    {
+        HLCTimestamp blockerTx = Ts(500);
+        Seam seam = new();
+        TransactionRecordStore records = new();
+        seam.Records = records;
+        PreparedIntentStore intents = new();
+        seam.Intents = intents;
+        InstallCommittedBlocker(records, intents, blockerTx, "acct/2");
+
+        seam.Fail = (_, type) => type == ReplicationTypes.KeyValues;
+
+        // Two helping rounds inside the deadline, then the clock jumps past it before any renewal was due.
+        DurableTransactionFinalizer finalizer = new(records, intents, seam.Replicate,
+            attemptClock: Clock(2000, 2500, 9500),
+            resolveDecidedBlockers: HelpingRecovery(records, intents, seam).TryResolveDecidedBlockersAsync,
+            maxDeadlineExtensions: 4);
+
+        using MetricCapture capture = new("outcome", "kahuna.durable_tx.prepare_retry_loops", "kahuna.durable_tx.deadline_extensions");
+
+        HLCTimestamp txId = Ts(1000);
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(txId, 1, (5, "acct/2")), Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.Aborted, outcome.Result);
+        Assert.Equal(TransactionAbortClass.RetryableFailure, outcome.AbortClass);
+        Assert.Equal(CommitRefusalClass.SettlementLag, outcome.Refusal);
+        Assert.Contains("lease lapsed", outcome.Reason);
+        Assert.False(outcome.LateCommitRejected);
+
+        TransactionRecord record = records.Get(txId, 1)!;
+        Assert.Equal(TransactionDecision.Abort, record.Decision);
+        Assert.Equal(TransactionAbortClass.RetryableFailure, record.AbortClass);
+        Assert.True(capture.Total("kahuna.durable_tx.prepare_retry_loops", "deadline_lapsed") >= 1);
+        Assert.True(capture.Total("kahuna.durable_tx.deadline_extensions", "lapsed") >= 1);
+
+        PreparedIntent? holder = intents.Get("acct/2");
+        Assert.NotNull(holder);
+        Assert.Equal(blockerTx, holder!.TransactionId);
     }
 
     /// <summary>

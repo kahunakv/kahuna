@@ -107,6 +107,12 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     // never pays the extra record round, early enough that a renewal round trip lands before the lease lapses.
     private const int LeaseRenewalDivisor = 2;
 
+    // While a prepare-loop step is in flight, the lease is checked for renewal every quarter of the lease in
+    // wall-clock time, within these bounds: often enough that two checks fall inside the renewal window, rarely
+    // enough that a step which completes promptly never pays a check.
+    private const int MinLeaseKeeperCadenceMs = 10;
+    private const int MaxLeaseKeeperCadenceMs = 1_000;
+
     private readonly SemaphoreSlim localApplyGate;
 
     // True when this finalizer created its gate and must dispose it; false for a node-shared gate.
@@ -678,10 +684,11 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         // The helping pass reports what holds the refused keys, and that report picks the loop's bound:
         //  - every visible holder is a transaction whose record is already terminal: settlement lag. The wait is
         //    productive and finite — those intents settle, by this pass or by deferred settlement — so the loop
-        //    keeps helping until the decision deadline, renewing the record's deadline lease while it waits (see
-        //    RenewDeadlineLeaseAsync). If the deadline still arrives nothing is decided: the attempt answers
-        //    MustRetry and leaves its prepares for a same-identity retry, instead of recording an abort for a
-        //    healthy commit that only waited on a slow settlement.
+        //    keeps helping until the decision deadline, renewing the record's deadline lease while it waits:
+        //    between rounds here, and during a long helping pass or re-prepare in AwaitRenewingLeaseAsync. If the
+        //    lease still lapses, the attempt records an abort that names the wait when renewal is on (the lease
+        //    was held for as long as it could be), and answers MustRetry with its prepares installed when renewal
+        //    is off (see the decision below).
         //  - some holder is still undecided (a live coordinator inside its decision window), the pass could not
         //    look (helping unavailable, the partition led elsewhere, no attempt clock to measure the deadline), or
         //    no holder was visible for a key that keeps being refused: the loop is bounded by MaxPrepareRetries
@@ -708,10 +715,8 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         List<int> unacknowledged = new(input.Partitions.Count);
 
         // The decision-deadline lease of this attempt: the frozen deadline, renewed while the attempt is inside a
-        // productive wait. The frozen margin is the lease length.
-        HLCTimestamp deadline = input.DecisionDeadline;
-        long leaseMs = Math.Max(1, input.DecisionDeadline.L - input.CommitTimestamp.L);
-        int extensions = 0;
+        // productive wait, between rounds by this loop and during a long round by AwaitRenewingLeaseAsync.
+        DecisionDeadlineLease lease = new(input);
 
         while (!allPrepared && !cancellationToken.IsCancellationRequested)
         {
@@ -770,7 +775,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
                     }
 
                     helperCalls += helps.Length;
-                    foreach (BlockerHelpResult partitionHelp in await Task.WhenAll(helps).ConfigureAwait(false))
+                    foreach (BlockerHelpResult partitionHelp in await AwaitRenewingLeaseAsync(Task.WhenAll(helps), input, lease, opId, cancellationToken).ConfigureAwait(false))
                         help = help.Add(partitionHelp);
 
                     helped = help.Settled > 0;
@@ -788,6 +793,14 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
             lastHelp = help;
 
+            // A renewal issued while the helping pass ran can have found the record already terminal: this input
+            // decided elsewhere, and the record's outcome is the truth.
+            if (lease.RecordTerminal)
+            {
+                recordDecided = true;
+                break;
+            }
+
             // Settlement lag is bounded by the deadline lease; everything else by the round budget. Without an
             // attempt clock the deadline cannot be measured, so the round budget applies.
             bool settlementLag = help.Inspected && help.Undecided == 0 && help.Decided > 0 && attemptClock is not null;
@@ -795,17 +808,16 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             if (settlementLag)
             {
                 HLCTimestamp now = attemptClock!();
-                DeadlineLeaseState lease = await RenewDeadlineLeaseAsync(input, deadline, leaseMs, extensions, opId, now, cancellationToken).ConfigureAwait(false);
-                deadline = lease.Deadline;
-                extensions = lease.Extensions;
+                DeadlineLeaseState renewed = await RenewDeadlineLeaseAsync(input, lease.Deadline, lease.LeaseMs, lease.Extensions, opId, now, cancellationToken).ConfigureAwait(false);
+                lease.Apply(renewed);
 
-                if (lease.RecordTerminal)
+                if (renewed.RecordTerminal)
                 {
                     recordDecided = true;
                     break;
                 }
 
-                if (now >= deadline)
+                if (now >= lease.Deadline)
                 {
                     deadlineLapsed = true;
                     break;
@@ -841,12 +853,16 @@ internal sealed class DurableTransactionFinalizer : IDisposable
                 retryTasks[k] = ReplicatePrepareAsync(partition.PartitionId, prepareDeltas[i], partition.Intents[0].Key, partition.Generation, Writes.WriteSubmissionStage.RePrepare, cancellationToken);
             }
 
-            bool[] retryResults = await Task.WhenAll(retryTasks).ConfigureAwait(false);
+            bool[] retryResults = await AwaitRenewingLeaseAsync(Task.WhenAll(retryTasks), input, lease, opId, cancellationToken).ConfigureAwait(false);
             for (int k = 0; k < retryResults.Length; k++)
                 acknowledged[unacknowledged[k]] = retryResults[k];
 
             allPrepared = AllAcknowledged(acknowledged);
         }
+
+        // A renewal issued during the last re-prepare can have found the record terminal: conclude from the record.
+        if (lease.RecordTerminal)
+            recordDecided = true;
 
         DurableTransactionMetrics.FinalizePrepareRetries.Record(retryRounds);
 
@@ -873,21 +889,22 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         // decided is durable (the record is Undecided and the acknowledged intents stay recoverable), so a clean
         // retry from a fresh freeze is truthful; the abandoned-attempt fence covers a client that gives up instead.
         if (!allPrepared && rangeMoved && !staleBase && !identitySettled)
-            return Retry() with { DecisionDeadline = deadline };
+            return Retry() with { DecisionDeadline = lease.Deadline };
 
-        // Settlement lag outlived the deadline lease: nothing is decided, and recording an abort here would turn a
-        // healthy commit that only waited on a slow settlement into a lost transaction. The attempt answers
-        // MustRetry and leaves its prepares installed for a same-identity retry, which re-drives the same frozen
-        // input once the blockers have settled; the coordinator's fence covers a client that gives up instead.
-        if (!allPrepared && deadlineLapsed && !staleBase && !identitySettled)
+        // Settlement lag outlived the deadline with renewal off (a mixed-version rollout): nothing is decided, and
+        // the attempt answers MustRetry with its prepares installed, leaving the conclusion to a same-identity
+        // retry, the reaper or a rollback, each of which fences through the record. With renewal on the lease was
+        // held for as long as the attempt could hold it, so the lapse is decided below as an abort that names the
+        // wait, instead of a MustRetry whose retry could only be fenced past the deadline.
+        if (!allPrepared && deadlineLapsed && !staleBase && !identitySettled && maxDeadlineExtensions == 0)
         {
             logger?.LogWarning(
-                "Prepare of transaction {TransactionId} ({Intents} intents) waited on decided-but-unsettled predecessors until its decision deadline {Deadline} ({Rounds} rounds, {Extensions} lease renewals, {Decided} decided holders); answering MustRetry without an abort",
-                input.TransactionId, input.Manifest.Count, deadline, retryRounds, extensions, lastHelp.Decided);
+                "Prepare of transaction {TransactionId} ({Intents} intents) waited on decided-but-unsettled predecessors until its decision deadline {Deadline} ({Rounds} rounds, renewal off, {Decided} decided holders); answering MustRetry without an abort",
+                input.TransactionId, input.Manifest.Count, lease.Deadline, retryRounds, lastHelp.Decided);
 
             return Retry(CommitRefusalClass.SettlementLag,
                 $"Decided-but-unsettled predecessors still held {unacknowledged.Count} of {input.Partitions.Count} partitions at the decision deadline after {retryRounds} rounds")
-                with { DecisionDeadline = deadline };
+                with { DecisionDeadline = lease.Deadline };
         }
 
         // ── Post-prepare validation, only meaningful when everything is durable ──
@@ -902,7 +919,11 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             Task<TransactionAbortClass> readSetValidation = validateReadSet(cancellationToken);
             Task<bool>? replicaFenceConfirmation = confirmReplicaFence?.Invoke(input, cancellationToken);
 
-            validation = await readSetValidation.ConfigureAwait(false);
+            // An attempt that already waited in the retry loop keeps its lease alive through the validation too:
+            // a read set the size of the manifest it just prepared can outlast what remains of the lease.
+            validation = retryLoopEntered
+                ? await AwaitRenewingLeaseAsync(readSetValidation, input, lease, opId, cancellationToken).ConfigureAwait(false)
+                : await readSetValidation.ConfigureAwait(false);
             if (replicaFenceConfirmation is not null && !await replicaFenceConfirmation.ConfigureAwait(false) && validation == TransactionAbortClass.None)
                 validation = TransactionAbortClass.Conflict;
 
@@ -935,13 +956,9 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             // being presumed aborted for having been slow. A renewal the record refuses changes nothing: the
             // decision below is judged by the record either way.
             if (attemptClock is not null && maxDeadlineExtensions > 0)
-            {
-                DeadlineLeaseState lease = await RenewDeadlineLeaseAsync(input, deadline, leaseMs, extensions, opId, attemptClock(), cancellationToken).ConfigureAwait(false);
-                deadline = lease.Deadline;
-                extensions = lease.Extensions;
-            }
+                lease.Apply(await RenewDeadlineLeaseAsync(input, lease.Deadline, lease.LeaseMs, lease.Extensions, opId, attemptClock(), cancellationToken).ConfigureAwait(false));
 
-            outcome = await DecideAsync(input, commit: true, TransactionAbortClass.None, opId, cancellationToken, effectiveDeadline: deadline).ConfigureAwait(false);
+            outcome = await DecideAsync(input, commit: true, TransactionAbortClass.None, opId, cancellationToken, effectiveDeadline: lease.Deadline).ConfigureAwait(false);
         }
         else if (allPrepared && validation == TransactionAbortClass.RetryableFailure)
         {
@@ -974,6 +991,20 @@ internal sealed class DurableTransactionFinalizer : IDisposable
                 refusal = CommitRefusalClass.CommitTimestampOutsideWindow;
                 reason = $"The commit timestamp {input.CommitTimestamp} fell outside the commit admission window of a participant's log entry";
             }
+            else if (!allPrepared && deadlineLapsed)
+            {
+                // The lease was renewed for as long as the attempt could hold it and still lapsed: the wait on
+                // decided-but-unsettled predecessors outlived the whole renewal budget, or a renewal could not be
+                // replicated. Nothing is decided, so the attempt decides the abort itself and names the wait; a
+                // MustRetry here would only be fenced into a presumed abort by the next retry, one round later and
+                // without the cause.
+                refusal = CommitRefusalClass.SettlementLag;
+                reason = $"Decided-but-unsettled predecessors still held {unacknowledged.Count} of {input.Partitions.Count} partitions when the decision-deadline lease lapsed after {retryRounds} rounds and {lease.Extensions} renewals ({lastHelp.Decided} decided holders)";
+
+                logger?.LogWarning(
+                    "Prepare of transaction {TransactionId} ({Intents} intents) waited on decided-but-unsettled predecessors until its decision-deadline lease lapsed at {Deadline} ({Rounds} rounds, {Extensions} renewals of {MaxExtensions}, {Decided} decided holders); recording an abort",
+                    input.TransactionId, input.Manifest.Count, lease.Deadline, retryRounds, lease.Extensions, maxDeadlineExtensions, lastHelp.Decided);
+            }
             else if (!allPrepared)
             {
                 int refused = 0;
@@ -1004,7 +1035,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
         // The deadline in force when the attempt ended travels with the outcome, so a same-identity retry of an
         // unresolved attempt compares its clock against the deadline the record holds, not the frozen one.
-        outcome = outcome with { DecisionDeadline = deadline };
+        outcome = outcome with { DecisionDeadline = lease.Deadline };
 
         await FinishResolutionAsync(input, outcome, cancellationToken).ConfigureAwait(false);
 
@@ -1014,6 +1045,90 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     /// <summary>The deadline lease of a finalize attempt after a renewal attempt: the deadline now in force, how
     /// many renewals the attempt has used, and whether the renewal found the record already terminal.</summary>
     private readonly record struct DeadlineLeaseState(HLCTimestamp Deadline, int Extensions, bool RecordTerminal);
+
+    /// <summary>
+    /// The decision-deadline lease of one finalize attempt as the attempt knows it: the deadline the record holds,
+    /// how many renewals the attempt has used, and whether a renewal found the record already terminal. The frozen
+    /// margin is the lease length. One instance is shared by the prepare retry loop, the pre-decision renewal and
+    /// <see cref="AwaitRenewingLeaseAsync{T}"/>, so every renewal advances a single view. The sharing needs no lock:
+    /// the loop awaits the step the keeper runs inside, so no two renewals of one attempt ever run at once.
+    /// </summary>
+    private sealed class DecisionDeadlineLease
+    {
+        public HLCTimestamp Deadline;
+
+        public int Extensions;
+
+        public bool RecordTerminal;
+
+        public readonly long LeaseMs;
+
+        public DecisionDeadlineLease(DurableFinalizeInput input)
+        {
+            Deadline = input.DecisionDeadline;
+            LeaseMs = Math.Max(1, input.DecisionDeadline.L - input.CommitTimestamp.L);
+        }
+
+        public void Apply(DeadlineLeaseState renewed)
+        {
+            Deadline = renewed.Deadline;
+            Extensions = renewed.Extensions;
+            RecordTerminal |= renewed.RecordTerminal;
+        }
+    }
+
+    /// <summary>
+    /// Awaits one step of the prepare retry loop — a helping pass, a re-prepare, or the validation of an attempt
+    /// that already waited — and renews the decision-deadline lease while the step is in flight. The loop renews
+    /// between rounds, but a round is not bounded: a helping pass over thousands of intents, or a re-prepare that
+    /// queues behind a saturated partition, can outlast the half-lease the between-round renewal is timed for, and
+    /// the lease then lapsed in the middle of a wait that was productive. The cadence is a quarter of the lease in
+    /// wall-clock time, so a step that completes promptly never reads the attempt clock here, and a test's
+    /// fixed-sequence clock is consumed by the loop alone. A renewal that lapses, spends the budget or finds the
+    /// record terminal ends the cadence; the loop reads the lease after the step. The step itself is always
+    /// awaited to completion, whatever the renewal did.
+    /// </summary>
+    private async Task<T> AwaitRenewingLeaseAsync<T>(Task<T> step, DurableFinalizeInput input, DecisionDeadlineLease lease, HLCTimestamp opId, CancellationToken cancellationToken)
+    {
+        if (step.IsCompleted || attemptClock is null || maxDeadlineExtensions == 0 || lease.RecordTerminal || lease.Extensions >= maxDeadlineExtensions)
+            return await step.ConfigureAwait(false);
+
+        int cadenceMs = (int)Math.Clamp(lease.LeaseMs / (2L * LeaseRenewalDivisor), MinLeaseKeeperCadenceMs, MaxLeaseKeeperCadenceMs);
+
+        using CancellationTokenSource stepEnded = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        try
+        {
+            while (true)
+            {
+                Task tick = Task.Delay(cadenceMs, stepEnded.Token);
+                if (await Task.WhenAny(step, tick).ConfigureAwait(false) == step || cancellationToken.IsCancellationRequested)
+                    break;
+
+                HLCTimestamp now = attemptClock();
+                DeadlineLeaseState renewed;
+                try
+                {
+                    renewed = await RenewDeadlineLeaseAsync(input, lease.Deadline, lease.LeaseMs, lease.Extensions, opId, now, cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+
+                lease.Apply(renewed);
+
+                if (renewed.RecordTerminal || now > lease.Deadline || lease.Extensions >= maxDeadlineExtensions)
+                    break;
+            }
+        }
+        finally
+        {
+            // Releases the timer of a tick that is still pending when the step ends.
+            stepEnded.Cancel();
+        }
+
+        return await step.ConfigureAwait(false);
+    }
 
     /// <summary>
     /// Renews the record's decision-deadline lease when the attempt is alive, still holds it, and less than
