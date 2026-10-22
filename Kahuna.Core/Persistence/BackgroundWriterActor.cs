@@ -1831,6 +1831,17 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     /// <summary>
     /// Asserts the PITR WAL-retention floor on every partition this node hosts, on every flush tick.
     /// <para>
+    /// Only when backups are configured (<see cref="KahunaConfiguration.BackupDir"/> set, the same
+    /// predicate the configuration validator uses for "backups disabled entirely"). The floor exists
+    /// so that an incremental backup finds the WAL between two base snapshots; a node that takes no
+    /// backups has no base snapshot to replay from, so retained WAL serves no restore and only costs
+    /// the full ingest rate for <c>PitrWindow + BaseSnapshotInterval</c> on every node (measured at
+    /// ~300 MB/min per node on a 10k ops/s cluster, enough to exhaust a tmpfs data volume in minutes).
+    /// Without backups the log compacts to Kommander's checkpoint as it did before the floor was
+    /// asserted under load. <see cref="KahunaConfiguration.PitrWindow"/> keeps its other role, the
+    /// age bound of persisted revision retention, whether or not backups are on.
+    /// </para>
+    /// <para>
     /// The protected boundary is <c>now − PitrWindow − BaseSnapshotInterval</c>: WAL entries
     /// committed before that point are covered by at least one base snapshot and can be
     /// compacted. The floor is always a positive index: when the retained log is entirely newer
@@ -1864,6 +1875,10 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     private void UpdatePitrHorizon()
     {
         if (configuration.PitrWindow <= TimeSpan.Zero)
+            return;
+
+        // Backups disabled entirely: nothing can restore from the retained WAL, so retain nothing.
+        if (string.IsNullOrWhiteSpace(configuration.BackupDir))
             return;
 
         DateTime now = DateTime.UtcNow;

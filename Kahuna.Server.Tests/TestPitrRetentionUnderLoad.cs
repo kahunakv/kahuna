@@ -34,6 +34,9 @@ public sealed class TestPitrRetentionUnderLoad
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
+        string backupDir = Path.Combine(Path.GetTempPath(), "kahuna-pitr-retention-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(backupDir);
+
         await using EmbeddedKahunaNode node = new(new()
         {
             InitialPartitions = 1,
@@ -43,7 +46,9 @@ public sealed class TestPitrRetentionUnderLoad
             CheckpointInterval = TimeSpan.FromMilliseconds(250),
             CompactEveryOperations = 20,
             PitrWindow = PitrWindow,
-            BaseSnapshotInterval = BaseSnapshotInterval
+            BaseSnapshotInterval = BaseSnapshotInterval,
+            // The retention floor is asserted only when backups are configured.
+            BackupDir = backupDir
         }, loggerFactory);
 
         await node.StartAsync(ct);

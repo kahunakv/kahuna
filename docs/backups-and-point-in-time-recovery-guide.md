@@ -130,7 +130,10 @@ Two settings control this:
 > trimmed) once their effects are safely on disk — otherwise the log grows forever. But PITR needs the
 > log kept *longer*, back to the edge of the window. Kahuna continuously computes a **floor**: the
 > oldest log position that must survive, at roughly `now − PitrWindow − BaseSnapshotInterval`. The
-> consensus layer is told never to compact below that floor.
+> consensus layer is told never to compact below that floor. The floor is asserted only when backups
+> are configured (`BackupDir` set): without a base image there is nothing to replay the retained log
+> onto, and holding it would cost the full write rate of WAL on every node for `PitrWindow +
+> BaseSnapshotInterval`. A node without backups compacts to the consensus checkpoint as usual.
 
 > **Decision — bound recovery by time, and let one floor reconcile two opposite needs.** Kahuna is
 > tuned to *forget* aggressively (small memory, small log). PITR needs it to *remember*. Rather than
