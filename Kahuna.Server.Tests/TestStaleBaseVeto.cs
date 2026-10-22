@@ -283,8 +283,12 @@ public sealed class TestStaleBaseVeto
 
     /// <summary>
     /// The soak shape on a wired node: T's bundle committed and settled, a successor committed on top, and then
-    /// T's re-driven prepare applies through the real dispatcher path. The late counter — the loss witness —
-    /// must not move, no veto is sent, and no phantom intent is left for the recovery sweep.
+    /// T's re-driven prepare applies through the real dispatcher path. The veto hook — the only producer of the
+    /// sent and late counters — must not fire, and no phantom intent is left for the recovery sweep.
+    ///
+    /// <para>Witnessed on this node's hook, not on the process-wide counters: test collections run in parallel,
+    /// and any other test whose wired node refuses a stale-base prepare sends a real veto that moves those
+    /// counters in the same window.</para>
     /// </summary>
     [Fact]
     public async Task ReDrivenPrepare_AfterSettlement_IsNotCountedAsALateVeto()
@@ -333,16 +337,16 @@ public sealed class TestStaleBaseVeto
             new ResolveIntentCommand(successorTx, epoch, "veto/redrive", Commit: true),
             new RemoveIntentCommand(successorTx, epoch, "veto/redrive"))));
 
-        long sentBefore = DurableTransactionMetrics.StaleBaseVetoesSentCount;
-        long lateBefore = DurableTransactionMetrics.StaleBaseVetoesLateCount;
+        // Replace the wired hook with a recorder: the hook fires synchronously on the apply path, once per
+        // stale-flagged prepare, so a zero count after the apply returns proves no veto was dispatched.
+        List<(PreparedIntent Intent, long Head)> vetoes = [];
+        store.AttachStaleBaseVetoer((intent, head) => vetoes.Add((intent, head)));
 
         // The re-driven copy of T's prepare.
         Assert.False(store.ApplyDeltaAckPrepares(0, IntentLog(new PrepareIntentCommand(t))));
 
         Assert.Null(store.Get("veto/redrive"));
-        await Task.Delay(200, ct); // a detached veto, had one fired, would have been counted by now
-        Assert.Equal(sentBefore, DurableTransactionMetrics.StaleBaseVetoesSentCount);
-        Assert.Equal(lateBefore, DurableTransactionMetrics.StaleBaseVetoesLateCount);
+        Assert.Empty(vetoes);
         Assert.Equal(TransactionDecision.Commit, kahuna.DurableTransactionRecordStore.Get(tx, epoch)!.Decision);
     }
 

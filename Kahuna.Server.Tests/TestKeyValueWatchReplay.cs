@@ -432,10 +432,10 @@ public sealed class TestKeyValueWatchReplay
         await WaitUntilAsync(() => slow.Reads > 30);
 
         await watch.DisposeAsync();
-        await replay.WaitAsync(TimeSpan.FromSeconds(2));
+        await replay.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
 
         int readsAtEnd = slow.Reads;
-        await Task.Delay(200);
+        await Task.Delay(200, TestContext.Current.CancellationToken);
         Assert.Equal(readsAtEnd, slow.Reads);
         Assert.True(readsAtEnd < 150, $"the replay read {readsAtEnd} pages of 196 after its watch ended");
     }
