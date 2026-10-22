@@ -25,7 +25,7 @@ namespace Kahuna.Server.Tests;
 /// </summary>
 public sealed class TestHostedSetBackgroundGating
 {
-    private static KahunaConfiguration Config(TimeSpan pitrWindow = default) => ConfigurationValidator.Validate(new()
+    private static KahunaConfiguration Config(TimeSpan pitrWindow = default, bool backups = true) => ConfigurationValidator.Validate(new()
     {
         LocksWorkers = 1, KeyValueWorkers = 1, BackgroundWriterWorkers = 1, Storage = "memory",
         // Keep the periodic timer and the checkpoint path inert so the tests drive every
@@ -33,7 +33,10 @@ public sealed class TestHostedSetBackgroundGating
         DirtyObjectsWriterDelay = 600_000,
         CheckpointInterval = TimeSpan.FromHours(1),
         PitrWindow = pitrWindow,
-        BaseSnapshotInterval = pitrWindow == default ? default : TimeSpan.FromMinutes(1)
+        BaseSnapshotInterval = pitrWindow == default ? default : TimeSpan.FromMinutes(1),
+        // The horizon is asserted only when backups are configured; the writer never opens the
+        // directory, so any non-blank path stands for "backups on" here.
+        BackupDir = backups && pitrWindow != default ? "backups" : ""
     });
 
     private static TestBackupService.StubRaft MakeRaft(params int[] partitionIds) => new(
@@ -108,6 +111,24 @@ public sealed class TestHostedSetBackgroundGating
         await harness.Writer.Receive(new(BackgroundWriteType.Flush));
 
         Assert.Equal(2, raft.MinRetainIndexByPartition[1]);
+    }
+
+    [Fact]
+    public async Task PitrHorizon_BackupsNotConfigured_AssertsNoFloor()
+    {
+        // No backup directory means no base snapshot to restore from, so retained WAL would serve
+        // nothing and only grow with the ingest rate; the tick must leave Kommander's floor alone.
+        TestBackupService.StubRaft raft = MakeRaft(1);
+        long nowMs = (long)(DateTime.UtcNow - DateTime.UnixEpoch).TotalMilliseconds;
+        raft.WalAdapter.Write([(1, [
+            new RaftLog { Id = 1, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, nowMs, 0) },
+            new RaftLog { Id = 2, Type = RaftLogType.Committed, Time = new HLCTimestamp(0, nowMs, 0) }])]);
+
+        using WriterHarness harness = new(raft, Config(pitrWindow: TimeSpan.FromHours(1), backups: false));
+
+        await harness.Writer.Receive(new(BackgroundWriteType.Flush));
+
+        Assert.Empty(raft.MinRetainIndexByPartition);
     }
 
     [Fact]
