@@ -581,6 +581,14 @@ internal sealed partial class PreparedIntentStore
     /// <summary>Wires the watch broker (manager construction). Publishing runs on the apply path outside the gate.</summary>
     public void AttachWatchBroker(Watch.KeyValueWatchBroker broker) => watchBroker = broker;
 
+    // Fed with (partition, entry time, commit timestamp, admission lag) for every prepare applied or restored.
+    private Action<int, HLCTimestamp, HLCTimestamp, long>? onCommitApplied;
+
+    /// <summary>Wires the observer of every prepare's commit timestamp against its entry (manager construction);
+    /// see <see cref="Watch.PartitionHistoryBounds.ObserveCommit"/>. It runs on the apply path with no gate held
+    /// and must not re-enter the store.</summary>
+    public void AttachCommitObserver(Action<int, HLCTimestamp, HLCTimestamp, long> observer) => onCommitApplied = observer;
+
     // ── settled intents awaiting the flush of their materialized row ──────────────────────────────
     //
     // A by-reference materialization record carries no value: a replica applies it from the intent the record
@@ -1036,10 +1044,16 @@ internal sealed partial class PreparedIntentStore
         PreparedIntent? watchCommit = null;
         bool transactionDrained = false;
         bool watchTransactionEnd = false;
+        bool watchRelease = false;
         bool wedgeRepairDue = false;
         long wedgeBaseRevision = 0;
         long wedgeHeadRevision = 0;
         PreparedIntentApplyResult result;
+
+        // A prepare admitted with no bound can carry a commit far ahead of its entry; a watch resume must know (see
+        // PartitionHistoryBounds). Fed on every path, restart replay included, before any verdict.
+        if (command is PrepareIntentCommand observed)
+            onCommitApplied?.Invoke(partitionId, entryTime, observed.Intent.CommitTimestamp, observed.AdmissionLagMs);
 
         lock (applyGate)
         {
@@ -1179,6 +1193,16 @@ internal sealed partial class PreparedIntentStore
                         watchTransactionEnd = true;
                 }
 
+                // A pending intent that leaves pending live — committed, aborted or removed — releases the events a
+                // watch held behind its key (writes made outside a transaction that landed after the commit made the
+                // value visible). After the commit event above, so the intent's own revision goes first.
+                if (existing.IsPending
+                    && result.Outcome == TransactionApplyOutcome.Applied
+                    && result.Intent is not { IsPending: true }
+                    && !replay
+                    && window == HistoryWindow.Live)
+                    watchRelease = true;
+
                 // The removal of a resolved intent — commit or abort — is the settlement that opens the hole a
                 // re-driven prepare of this leg would fall into; remember the identity and key so that prepare is
                 // rejected instead.
@@ -1275,6 +1299,9 @@ internal sealed partial class PreparedIntentStore
 
         if (watchTransactionEnd && settledCommit is not null)
             watchBroker?.PublishTransactionEnd(partitionId, settledCommit.TransactionId, logIndex);
+
+        if (watchRelease)
+            watchBroker?.PublishIntentSettled(partitionId, key, logIndex);
 
         if (wedgeRepairDue)
             onFenceWedgeRepair?.Invoke(key, wedgeBaseRevision, wedgeHeadRevision);

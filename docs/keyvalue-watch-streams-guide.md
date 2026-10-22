@@ -48,10 +48,19 @@ event carries the new value only, not the value it replaced.
 - **Registration is synchronous.** When the call that opens the watch returns, the watch is registered on every
   partition of its scope. Every write committed after that produces an event, once the serving replica applied
   it.
-- **Delivery is at-least-once.** For one key, the first delivery of each revision arrives in revision order, and
-  the commit timestamps of one key increase with its revisions. A repeat of an older revision can arrive later
-  (a transaction re-driven after a failure can settle twice). A consumer drops an event whose revision is at or
-  below the last revision it holds for that key.
+- **Delivery is at-least-once.** For one key, the first delivery of each mutation arrives in commit order: every
+  mutation of a key has a later commit timestamp than the one before it. A repeat of an older mutation can arrive
+  later (a transaction re-driven after a failure can settle twice, or a resume replays it). A consumer keeps the
+  last event it applied for each key and drops an event that is not newer by `KeyValueWatchEvent.Supersedes`:
+  ordered by commit timestamp, then by revision. **The revision alone does not identify a mutation:** an extend
+  keeps the revision and moves the expiry, a set with no revision keeps it too, and a key re-created after its
+  tombstone was purged can start its revisions again.
+- **A write behind a pending transaction.** A durable transaction's value is visible at commit, but its event comes
+  when it settles. A write outside a transaction that lands in between is held behind the key until the
+  transaction's intent settles, so the transaction's event still arrives first. The held write follows that event
+  at once, so it can arrive before the transaction's `TransactionEnd`. A consumer that buffers a transaction until
+  its end applies the buffered transaction before a later event of one of its keys (or holds that event until the
+  end), so it never applies the newer value first.
 - **Across keys of one partition**, events arrive in the partition's log order. That order is not commit
   timestamp order: a durable transaction's event is sent when the transaction settles on the partition, which
   can come after later writes to other keys.
@@ -110,9 +119,20 @@ KeyValueWatchOpening opening = await kahuna.WatchKeyValues(
   the timestamp of its last event (events between two watermarks can arrive out of order).
 - Events between the cursor and the end of the replay can arrive again; the per-key rule above drops them.
 - The replay reads from the first entry at or after `cursor − 5 s`, which the window makes sufficient.
+- No event and no watermark at or below the cursor is delivered on the partition, from the replay or later live:
+  a replica behind the one the cursor came from does not send older events again.
 - A partition whose history the node cannot prove complete ends the watch with `HistoryUnavailable`: the window is
-  off, a snapshot install covers the cursor, or the log below the cursor was compacted. **The documented recovery
-  is a new snapshot**, then a new watch from the snapshot's timestamp. A client never hides it.
+  off, a snapshot install (or a PITR bootstrap seed) covers the cursor, the log below the cursor was compacted, or
+  the cursor is below the partition's unbounded commit ceiling (next paragraph). **The documented recovery is a
+  new snapshot**, then a new watch from the snapshot's timestamp. A client never hides it.
+
+**Entries from before the window.** An entry written with the window off (before it was turned on, or by a node
+with it off) has no upper bound: its commit can lead its entry time by more than 5 s, and a replay that starts at
+`cursor − 5 s` could miss it. Each partition keeps its *unbounded commit ceiling*, the highest such commit, durably
+and through snapshot installs. No watermark below the ceiling is sent, so every watermark a consumer holds is a
+cursor it can resume from; a cursor below the ceiling (for example a snapshot timestamp chosen by the consumer)
+answers `HistoryUnavailable`. After the window is turned on, the ceiling stops moving and the watermarks pass it as
+soon as the clock does.
 
 ## History holds
 
@@ -137,7 +157,8 @@ await client.ReleaseHistoryHolds([.. held.Holds.Select(h => h.HoldId)]);
 - **Bounds:** `HistoryHoldMaxLeaseMs` (default one day), `HistoryHoldMaxPerHolder` (4096) and
   `HistoryHoldMaxTotal` (65536). Past a bound an acquire answers `HistoryHoldLimitReached`.
 - **Availability, not safety.** A replica that compacted before it applied a hold answers `HistoryUnavailable`;
-  it never replays a gap.
+  it never replays a gap. Each replica keeps its log from the entry before the first one a replay from the held
+  timestamp reads, because the replay reads that entry as proof that no history is missing before its start.
 
 The surfaces are `IKahuna.HistoryHold`, the gRPC rpc `HistoryHold`, `POST /v1/kv/history-holds`, the client
 methods above, and the control commands below.
@@ -151,7 +172,7 @@ covered as possibly changed.
 
 | Terminal frame | Reason | Cause |
 |---|---|---|
-| `Lagged` | `Overflow` | The consumer fell a full capacity behind. The node dropped the buffered frames instead of buffering without limit. |
+| `Lagged` | `Overflow` | The consumer fell a full capacity behind, or past the watch's byte budget. The node dropped the buffered frames instead of buffering without limit. |
 | `Lagged` | `PartitionStateReplaced` | The serving replica installed a snapshot of the partition, or stopped hosting it. A snapshot carries no per-key events. |
 | `Lagged` | `ApplyDiscontinuity` | The serving replica failed to apply a committed entry, so it cannot prove that it reported every mutation. |
 | `Lagged` | `RangeMapChanged` | A split, a merge, or a key-range registration changed the partitions the scope covers. |
@@ -163,6 +184,18 @@ covered as possibly changed.
 
 The capacity is the number of frames a node buffers for one watch. The request sets it (`Capacity`); zero takes
 the node default of 4096 frames.
+
+**Node limits.** The node, not the caller, owns the resources a watch uses:
+
+| Setting (CLI) | Default | Past it |
+|---|---|---|
+| `WatchMaxCapacity` (`--watch-max-capacity`) | 65536 | A request that asks for more is refused `InvalidInput`. |
+| `WatchMaxBufferedBytes` (`--watch-max-buffered-bytes`) | 64 MiB | Keys and values one watch buffers; past it the watch ends with `Lagged(Overflow)`. |
+| `WatchMaxPerNode` (`--watch-max-per-node`) | 65536 | Open watches on the node; an open is refused `WatchLimitReached`. |
+| `WatchMaxPerCall` (`--watch-max-per-call`) | 1024 | Watches one gRPC call holds; an open is refused `WatchLimitReached`. |
+| `WatchMaxConcurrentReplays` (`--watch-max-concurrent-replays`) | 64 | Replays running at once (one per resumed partition); a resume is refused `MustRetry`. |
+
+A replay stops as soon as its watch ends.
 
 A watch on ephemeral keys is refused with `WatchUnsupportedOnEphemeral` on every surface. An ephemeral write never
 reaches Raft, so there is no replicated event to report. The refusal is permanent; a retry gets the same answer.
@@ -192,8 +225,9 @@ await using (watch)
 ```
 
 Refusals: `WatchUnsupportedOnEphemeral`, `DoesNotExist` (this node does not host a partition of the scope; the
-opening's `Routes` name the replicas of each partition), and `MustRetry` (the range map does not cover the scope
-yet, or kept changing while the watch registered).
+opening's `Routes` name the replicas of each partition), `InvalidInput` (a capacity above the node limit),
+`WatchLimitReached` (the node has its limit of open watches), and `MustRetry` (the range map does not cover the
+scope yet, kept changing while the watch registered, or the node runs its limit of replays).
 
 ## Client
 
@@ -214,11 +248,14 @@ await foreach (KeyValueWatchFrame frame in watch)
 The client works over both transports. Over gRPC each watch is one stream on the shared channel to its node; the
 channel opens more HTTP/2 connections when one connection reaches its stream limit.
 
-`KahunaWatch.Watermarks` holds the last watermark of each partition: the cursor to store. With
+`KahunaWatch.Watermarks` holds the last watermark of each partition **that the reader was handed**: it moves when
+the enumeration yields a progress frame, after every event before it. That is the cursor to store, together with
+the state the consumer built from those events. A watermark the client received but the reader has not reached yet
+never shows there, so a consumer that stops and resumes from it loses nothing. With
 `WatchKeyValues(request, autoResume: true)`, a node stream that ends with `Lagged` (overflow, a dropped
-connection, a shutdown, a replaced partition state, a failed apply) is reopened from those watermarks, on its node
-or on another replica, and the node replays what was missed: the consumer sees no lagged frame, but can see
-events again. A stream is resumed only when every one of its partitions has a watermark. `HistoryUnavailable`, a
+connection, a shutdown, a replaced partition state, a failed apply) is reopened from the watermarks the client
+received (the frames between those and the reader are still buffered), on its node or on another replica, and the
+node replays what was missed: the consumer sees no lagged frame, but can see events again. A stream is resumed only when every one of its partitions has a watermark. `HistoryUnavailable`, a
 refusal, a range-map change and a watermark violation still end the watch.
 
 **Replica placement.** When the replication factor is below the node count, one node can host only some
@@ -247,8 +284,10 @@ unique among the open watches of the call):
 4. Ending the request stream ends the call and closes every watch on it. So does a client that goes away, with a
    clean close or an aborted connection.
 
-A refused watch never ends the call: a malformed scope or a reused watch id gets `TYPE_INVALID_INPUT` for that
-id, and the other watches stay open. A retryable server failure while a watch opens is refused with
+A refused watch never ends the call: a malformed scope, a reused watch id or a capacity above the node limit gets
+`TYPE_INVALID_INPUT` for that id, an open past the call's limit of watches gets `TYPE_WATCH_LIMIT_REACHED`, and the
+other watches stay open. A response message packs frames up to 1 MiB (a single larger event goes alone); the .NET
+client accepts messages up to 64 MiB, and another client must accept at least the largest value it watches. A retryable server failure while a watch opens is refused with
 `TYPE_MUST_RETRY`; one that ends the whole call is reported as status `Unavailable`.
 
 An event's value is a proto3 `optional bytes` field: absent for no value, present and empty for zero bytes.
@@ -319,7 +358,7 @@ kahuna-cli> watch orders/ keys-only
 | `kahuna.kv.watch.frames_dropped_total` | Buffered frames dropped when a watch ended with `Lagged`. |
 | `kahuna.kv.watch.streams_lagged_total` | Watches ended with `Lagged`, by `reason`. |
 | `kahuna.kv.watch.refused_total` | Watch requests refused, by `type`. |
-| `kahuna.kv.watch.replays_total` | Resumes replayed per partition, by `outcome` (`replayed`, `history_unavailable`). |
+| `kahuna.kv.watch.replays_total` | Resumes replayed per partition, by `outcome` (`replayed`, `history_unavailable`, `cancelled`). |
 | `kahuna.kv.watch.watermark_lag_ms` | The largest gap on the node between a partition's newest entry and its last watermark. |
 | `kahuna.kv.watch.progress_ticks_total` | Idle-partition tick entries this node proposed. |
 | `kahuna.kv.commit_admission.refused_total` | Entries the admission window refused at apply on this node, by `kind` (`prepare`, `write`) and `bound` (`floor`: too old; `lead`: too far ahead). |
@@ -341,7 +380,12 @@ A change-data-capture consumer needs a complete, resumable feed. The flow:
 2. Read the snapshot at W.
 3. Open the watch from W (`ResumeFrom: W`).
 4. Release the snapshot hold.
-5. Store the watermarks as the consumer commits its progress, and renew the history holds forward to them.
+5. Store the watermarks (`KahunaWatch.Watermarks`) as the consumer commits its progress, and renew the history
+   holds forward to them.
+
+Keep the last event applied per key and drop events that do not supersede it (see "Delivery and ordering"): a
+replay can repeat events above the cursor. On a cluster that ran without the window, a snapshot timestamp below
+the partitions' unbounded commit ceilings answers `HistoryUnavailable`; take the snapshot at a later timestamp.
 
 **Commit timestamps.** A commit answers the transaction's commit timestamp, the one its writes carry and its watch
 events report (`TransactionCommitAnswer.CommitTimestamp`; the client's `KahunaTransactionSession.CommitWithTimestamp`).

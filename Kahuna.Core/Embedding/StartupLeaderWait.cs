@@ -63,7 +63,7 @@ internal static class StartupLeaderWait
             {
                 string leader = await waitForLeader(cancellationToken).ConfigureAwait(false);
 
-                if (undecidedRounds > 0)
+                if (undecidedRounds > 0 && logger.IsEnabled(LogLevel.Information))
                     logger.LogInformation(
                         "Startup: partition {PartitionId} has leader {Leader} after {ElapsedMs} ms and {Rounds} undecided round(s)",
                         partitionId, leader, Environment.TickCount64 - startedTicks, undecidedRounds);

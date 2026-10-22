@@ -89,10 +89,12 @@ public enum KeyValueWatchLagReason
 /// <summary>
 /// One committed mutation of a key, as a watch reports it.
 ///
-/// <para><b>Ordering and delivery.</b> Delivery is at-least-once. For one key, the first delivery of each
-/// revision arrives in revision order, and the commit timestamps of one key increase with its revisions. A
-/// repeat of an older revision can arrive later (a re-driven transaction that settles twice, for example), so
-/// a consumer drops an event whose revision is at or below the last revision it holds for that key. Across the
+/// <para><b>Ordering and delivery.</b> Delivery is at-least-once. For one key, the first delivery of each mutation
+/// arrives in commit order: every mutation of a key has a later commit timestamp than the one before it, an extend
+/// included (it keeps the revision). A repeat of an older mutation can arrive later (a re-driven transaction that
+/// settles twice, for example, or a resume), so a consumer keeps the last event it applied for each key and drops an
+/// event that does not <see cref="Supersedes(KeyValueWatchEvent?)"/> it. The revision alone does not identify a
+/// mutation: an extend keeps it, and so does a set with no revision. Across the
 /// keys of one partition, events arrive in the partition's log order, which is not commit-timestamp order:
 /// events between two <see cref="KeyValueWatchFrameType.Progress"/> frames can arrive out of commit-timestamp
 /// order. Across partitions no order is promised; the events of one transaction share a commit timestamp and a
@@ -155,6 +157,24 @@ public sealed class KeyValueWatchEvent
         TransactionId = transactionId;
         PartitionId = partitionId;
         Origin = origin;
+    }
+
+    /// <summary>
+    /// Whether this event is a later mutation of its key than <paramref name="last"/>, the last event the consumer
+    /// applied for the same key (null when it holds none). Ordered by commit timestamp, then by revision; a repeat of
+    /// an event already applied compares equal and is not newer.
+    /// </summary>
+    public bool Supersedes(KeyValueWatchEvent? last) =>
+        last is null || Supersedes(last.Revision, last.CommitTimestamp);
+
+    /// <summary>
+    /// Whether this event is a later mutation of its key than the one at <paramref name="revision"/> and
+    /// <paramref name="commitTimestamp"/> that the consumer applied last; see <see cref="Supersedes(KeyValueWatchEvent?)"/>.
+    /// </summary>
+    public bool Supersedes(long revision, HLCTimestamp commitTimestamp)
+    {
+        int byTime = CommitTimestamp.CompareTo(commitTimestamp);
+        return byTime > 0 || (byTime == 0 && Revision > revision);
     }
 }
 
@@ -257,8 +277,9 @@ public sealed class KeyValueWatchFrame
 /// the partition, else from <paramref name="ResumeFrom"/>; zero on both means live only. The cursor is the last
 /// progress watermark the consumer received for the partition (not the timestamp of its last event: between two
 /// watermarks events can arrive out of timestamp order). Events between the cursor and the end of the replay can be
-/// delivered again, so a consumer drops an event whose revision is at or below the last revision it holds for that
-/// key. A partition whose history below the cursor is gone ends the watch with
+/// delivered again, so a consumer drops an event that does not <see cref="KeyValueWatchEvent.Supersedes(KeyValueWatchEvent?)"/>
+/// the last one it holds for that key. No event and no watermark at or below the cursor is delivered on the partition.
+/// A partition whose history below the cursor is gone ends the watch with
 /// <see cref="KeyValueWatchFrameType.HistoryUnavailable"/>; the documented recovery is a new snapshot. A resume needs
 /// the commit admission window on every node.</para>
 /// </summary>

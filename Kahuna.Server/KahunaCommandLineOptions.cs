@@ -824,6 +824,21 @@ public sealed class KahunaCommandLineOptions
     [Option("history-hold-max-total", Required = false, HelpText = "Most history holds the cluster may hold. 0 means no bound. Default 65536.", Default = 65_536)]
     public int HistoryHoldMaxTotal { get; set; } = 65_536;
 
+    [Option("watch-max-capacity", Required = false, HelpText = "Largest frame capacity a key-value watch may ask for; a request above it is refused. Default 65536.", Default = 65_536)]
+    public int WatchMaxCapacity { get; set; } = 65_536;
+
+    [Option("watch-max-buffered-bytes", Required = false, HelpText = "Bytes of keys and values one key-value watch may buffer for a slow reader before it ends with an overflow. Default 67108864 (64 MiB).", Default = 64L * 1024 * 1024)]
+    public long WatchMaxBufferedBytes { get; set; } = 64L * 1024 * 1024;
+
+    [Option("watch-max-per-node", Required = false, HelpText = "Most key-value watches open on the node at once. 0 means no bound. Default 65536.", Default = 65_536)]
+    public int WatchMaxPerNode { get; set; } = 65_536;
+
+    [Option("watch-max-per-call", Required = false, HelpText = "Most watches one gRPC watch call may hold open. 0 means no bound. Default 1024.", Default = 1_024)]
+    public int WatchMaxPerCall { get; set; } = 1_024;
+
+    [Option("watch-max-concurrent-replays", Required = false, HelpText = "Most watch replays (one per resumed partition) the node runs at once; a resume beyond it is refused with a retry. 0 means no bound. Default 64.", Default = 64)]
+    public int WatchMaxConcurrentReplays { get; set; } = 64;
+
     [Option("transaction-origin-tags", Required = false, HelpText = "Keep the origin label a transaction names at start and write it into its prepared intents and watch events. Enable only when every node runs a version that reads it. Default off.")]
     public bool TransactionOriginTags { get; set; }
 

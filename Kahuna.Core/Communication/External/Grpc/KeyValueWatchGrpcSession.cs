@@ -24,14 +24,22 @@ namespace Kahuna.Communication.External.Grpc;
 /// with a typed refusal. A failure the shared classifier calls retryable is refused with
 /// <see cref="KeyValueResponseType.MustRetry"/> for that watch only; the other watches on the call stay open.</para>
 ///
+/// <para><b>Limits.</b> One call holds at most its limit of open watches (HTTP/2 stream limits do not count the
+/// watches of one call); an open beyond it is refused with <see cref="KeyValueResponseType.WatchLimitReached"/>. A
+/// response message carries frames up to <see cref="MaxResponseBytes"/> of serialized size (always at least one), so a
+/// burst of large values never builds a message a client cannot receive.</para>
+///
 /// <para><b>Lifetime.</b> The call ends when the client ends its request stream, when the client goes away
 /// (a clean close or an aborted connection), or when a write fails. In every case each watch the call opened is
 /// closed and unregistered before the call returns.</para>
 /// </summary>
 internal sealed class KeyValueWatchGrpcSession
 {
-    // Frames packed into one response message. Bounds the message size for a burst of small events.
+    // Frames packed into one response message: a burst of small events shares a message.
     private const int MaxFramesPerResponse = 256;
+
+    // Serialized bytes of the frames packed into one response message. A single larger frame goes alone.
+    internal const int MaxResponseBytes = 1024 * 1024;
 
     // Frames queued for the writer across every watch of the call.
     private const int OutboundCapacity = 1024;
@@ -39,6 +47,8 @@ internal sealed class KeyValueWatchGrpcSession
     private readonly IKahuna kahuna;
 
     private readonly ILogger logger;
+
+    private readonly int maxWatches;
 
     private readonly Dictionary<long, KeyValueWatch> watches = [];
 
@@ -53,10 +63,12 @@ internal sealed class KeyValueWatchGrpcSession
         SingleWriter = false
     });
 
-    public KeyValueWatchGrpcSession(IKahuna kahuna, ILogger logger)
+    /// <param name="maxWatches">The most watches the call may hold open at once; zero or less for no limit.</param>
+    public KeyValueWatchGrpcSession(IKahuna kahuna, ILogger logger, int maxWatches = 0)
     {
         this.kahuna = kahuna;
         this.logger = logger;
+        this.maxWatches = maxWatches;
     }
 
     public async Task RunAsync(
@@ -127,14 +139,24 @@ internal sealed class KeyValueWatchGrpcSession
         long watchId = request.WatchId;
 
         bool duplicate;
+        int open;
         lock (sync)
+        {
             duplicate = watches.ContainsKey(watchId);
+            open = watches.Count;
+        }
 
         KeyValueWatchScope? scope = KeyValueWatchWire.ScopeFromGrpc(request);
 
         if (watchId == 0 || duplicate || scope is null)
         {
             await Send(watchId, KeyValueWatchFrame.ForRefused(-1, KeyValueResponseType.InvalidInput), token).ConfigureAwait(false);
+            return;
+        }
+
+        if (maxWatches > 0 && open >= maxWatches)
+        {
+            await Send(watchId, KeyValueWatchFrame.ForRefused(-1, KeyValueResponseType.WatchLimitReached), token).ConfigureAwait(false);
             return;
         }
 
@@ -216,9 +238,20 @@ internal sealed class KeyValueWatchGrpcSession
             while (await reader.WaitToReadAsync(token).ConfigureAwait(false))
             {
                 GrpcWatchResponse response = new();
+                int bytes = 0;
 
-                while (response.Frames.Count < MaxFramesPerResponse && reader.TryRead(out GrpcWatchFrame? frame))
-                    response.Frames.Add(frame);
+                // Stop before a frame that would take the message past the byte bound; the next message starts
+                // with it.
+                while (response.Frames.Count < MaxFramesPerResponse && reader.TryPeek(out GrpcWatchFrame? next))
+                {
+                    int size = next.CalculateSize();
+                    if (response.Frames.Count > 0 && bytes + size > MaxResponseBytes)
+                        break;
+
+                    reader.TryRead(out _);
+                    response.Frames.Add(next);
+                    bytes += size;
+                }
 
                 await responses.WriteAsync(response, token).ConfigureAwait(false);
                 KeyValueWatchMetrics.RemoteFramesSent.Add(response.Frames.Count, Transport);

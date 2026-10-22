@@ -100,14 +100,19 @@ internal sealed class KeyValuesRuntime
     /// <summary>The node's open key-value watches. Published to by the replicator and the prepared-intent store
     /// on the apply path, and ended by the dispatcher and the state transfers when a partition loses
     /// continuity.</summary>
-    internal KeyValueWatchBroker WatchBroker { get; } = new();
+    internal KeyValueWatchBroker WatchBroker => watchBroker ??= new(Configuration.WatchMaxPerNode, Configuration.WatchMaxBufferedBytes);
+
+    // Created on first use, which is the manager builder's single-threaded construction (it needs the configuration,
+    // which an initializer cannot read).
+    private KeyValueWatchBroker? watchBroker;
 
     /// <summary>The per-partition progress watermark of the node's watches. Null while the commit admission window
     /// is off, in which case watches get no progress frames.</summary>
     internal KeyValueWatchWatermarks? WatchWatermarks { get; set; }
 
-    /// <summary>The highest index a snapshot installed per partition, which a watch resume must start above.</summary>
-    internal PartitionInstallBoundaries? InstallBoundaries { get; set; }
+    /// <summary>What a watch resume must know about each partition's history beyond the WAL: the install boundary and
+    /// the unbounded commit ceiling.</summary>
+    internal PartitionHistoryBounds? HistoryBounds { get; set; }
 
     /// <summary>The transactions whose range lock this node stopped honoring. Written by the key-value actors,
     /// read by the commit-time lock proof.</summary>

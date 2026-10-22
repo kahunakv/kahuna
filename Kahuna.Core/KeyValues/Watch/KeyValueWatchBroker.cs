@@ -32,14 +32,24 @@ internal sealed class KeyValueWatchBroker
     // (progress and events of one partition are published from its ordered apply), so a plain read is current.
     private readonly ConcurrentDictionary<int, HLCTimestamp> publishedWatermarks = new();
 
-    // Per partition, the watches that received at least one event of each transaction whose end has not been
-    // published yet, so the end goes to exactly those watches. Apply thread of the partition only; an entry is
-    // dropped when the end is published or the partition's watches end.
-    private readonly ConcurrentDictionary<int, Dictionary<HLCTimestamp, List<KeyValueWatch>>> openTransactions = new();
+    // Open watches on the node (a watch over three partitions counts once), against maxWatches.
+    private int openWatches;
 
-    /// <summary>Whether events of durable transactions are tracked for a <see cref="PublishTransactionEnd"/>. On
-    /// only while the commit admission window is on: the intent store counts a transaction's pending intents per
-    /// partition only then, so without it no end would ever be published and the tracking would only grow.</summary>
+    private readonly int maxWatches;
+
+    private readonly long maxBufferedBytes;
+
+    /// <param name="maxWatches">The most watches open on the node at once; zero or less for no limit.</param>
+    /// <param name="maxBufferedBytes">The byte budget of each watch's buffer; zero or less for the default.</param>
+    public KeyValueWatchBroker(int maxWatches = 0, long maxBufferedBytes = 0)
+    {
+        this.maxWatches = maxWatches;
+        this.maxBufferedBytes = maxBufferedBytes > 0 ? maxBufferedBytes : KeyValueWatch.DefaultMaxBufferedBytes;
+    }
+
+    /// <summary>Whether transaction ends are published (see <see cref="PublishTransactionEnd"/>). On only while the
+    /// commit admission window is on: the intent store counts a transaction's pending intents per partition only
+    /// then. A watch opened while it is on remembers the transactions it delivered an event of until their end.</summary>
     internal bool TracksTransactionEnds { get; set; }
 
     /// <summary>Whether any watch on the node covers <paramref name="partitionId"/>. One volatile read when the
@@ -54,12 +64,42 @@ internal sealed class KeyValueWatchBroker
     /// Opens a watch over <paramref name="partitions"/>. When this returns, every later publish on those
     /// partitions is matched against the watch. <paramref name="resolvedPartitions"/> is every partition the
     /// scope covers (see <see cref="KeyValueWatch.ResolvedPartitions"/>); null means <paramref name="partitions"/>.
+    /// Throws when the node's watch limit is reached; see <see cref="TryRegister"/>.
     /// </summary>
+    public KeyValueWatch Register(
+        KeyValueWatchScope scope,
+        bool keysOnly,
+        int capacity,
+        int[] partitions,
+        int[]? resolvedPartitions = null,
+        IReadOnlyCollection<int>? replayPartitions = null,
+        IReadOnlyDictionary<int, HLCTimestamp>? resumeCursors = null) =>
+        TryRegister(scope, keysOnly, capacity, partitions, resolvedPartitions, replayPartitions, resumeCursors)
+        ?? throw new InvalidOperationException("The node's watch limit is reached.");
+
+    /// <summary>
+    /// <see cref="Register"/>, or null when the node already has its limit of open watches.
     /// <para><paramref name="replayPartitions"/> names the partitions whose history a replay delivers before their
-    /// live frames: those frames are held back from this moment until <see cref="KeyValueWatch.CompleteReplay"/>.</para>
-    public KeyValueWatch Register(KeyValueWatchScope scope, bool keysOnly, int capacity, int[] partitions, int[]? resolvedPartitions = null, IReadOnlyCollection<int>? replayPartitions = null)
+    /// live frames: those frames are held back from this moment until <see cref="KeyValueWatch.CompleteReplay"/>.
+    /// <paramref name="resumeCursors"/> holds the cursor of each resumed partition, which the watch applies to every
+    /// frame it delivers there.</para>
+    /// </summary>
+    public KeyValueWatch? TryRegister(
+        KeyValueWatchScope scope,
+        bool keysOnly,
+        int capacity,
+        int[] partitions,
+        int[]? resolvedPartitions = null,
+        IReadOnlyCollection<int>? replayPartitions = null,
+        IReadOnlyDictionary<int, HLCTimestamp>? resumeCursors = null)
     {
-        KeyValueWatch watch = new(this, scope, keysOnly, capacity, partitions, resolvedPartitions ?? partitions, replayPartitions);
+        if (Interlocked.Increment(ref openWatches) > maxWatches && maxWatches > 0)
+        {
+            Interlocked.Decrement(ref openWatches);
+            return null;
+        }
+
+        KeyValueWatch watch = new(this, scope, keysOnly, capacity, partitions, resolvedPartitions ?? partitions, replayPartitions, resumeCursors, maxBufferedBytes, TracksTransactionEnds);
         KeyValueWatchMetrics.ActiveWatches.Add(1);
 
         lock (registrationLock)
@@ -79,9 +119,14 @@ internal sealed class KeyValueWatchBroker
         return watch;
     }
 
+    /// <summary>The number of watches open on the node.</summary>
+    public int OpenWatchCount => Volatile.Read(ref openWatches);
+
     /// <summary>Removes <paramref name="watch"/> from every partition it covers. Called once, by the watch's end.</summary>
     internal void Unregister(KeyValueWatch watch)
     {
+        Interlocked.Decrement(ref openWatches);
+
         lock (registrationLock)
         {
             int removed = 0;
@@ -100,7 +145,6 @@ internal sealed class KeyValueWatchBroker
                 if (current.Length == 1)
                 {
                     byPartition.TryRemove(partitionId, out _);
-                    openTransactions.TryRemove(partitionId, out _);
                     continue;
                 }
 
@@ -119,6 +163,8 @@ internal sealed class KeyValueWatchBroker
     /// <paramref name="key"/>. The caller has already applied the mutation to this replica's state. The value is
     /// shared with the event, never copied; a keys-only watch gets an event without it. <paramref name="logIndex"/> is
     /// the entry that carried the mutation, which a watch replaying the partition's history needs for its hand-over.
+    /// <paramref name="heldBehindPendingIntent"/> says the key still has a pending intent whose commit event has not
+    /// come: each watch holds the event behind it (see <see cref="PublishIntentSettled"/>).
     /// </summary>
     public void Publish(
         int partitionId,
@@ -130,7 +176,8 @@ internal sealed class KeyValueWatchBroker
         HLCTimestamp commitTimestamp,
         HLCTimestamp transactionId,
         long logIndex,
-        string? origin = null)
+        string? origin = null,
+        bool heldBehindPendingIntent = false)
     {
         if (Volatile.Read(ref registrations) == 0 || !byPartition.TryGetValue(partitionId, out KeyValueWatch[]? watches))
             return;
@@ -149,7 +196,7 @@ internal sealed class KeyValueWatchBroker
 
         KeyValueWatchFrame? withValue = null;
         KeyValueWatchFrame? keysOnly = null;
-        List<KeyValueWatch>? transactionWatches = null;
+        string? holdKey = heldBehindPendingIntent ? key : null;
 
         foreach (KeyValueWatch watch in watches)
         {
@@ -163,46 +210,43 @@ internal sealed class KeyValueWatchBroker
             else
                 frame = withValue ??= KeyValueWatchFrame.ForEvent(new(key, kind, eventValue, revision, expires, commitTimestamp, transactionId, partitionId, origin));
 
-            watch.Deliver(frame, logIndex);
+            watch.Deliver(frame, logIndex, holdKey);
             KeyValueWatchMetrics.EventsDelivered.Add(1);
-
-            if (TracksTransactionEnds && transactionId != HLCTimestamp.Zero)
-            {
-                transactionWatches ??= TransactionWatches(partitionId, transactionId);
-                if (!transactionWatches.Contains(watch))
-                    transactionWatches.Add(watch);
-            }
         }
-    }
-
-    private List<KeyValueWatch> TransactionWatches(int partitionId, HLCTimestamp transactionId)
-    {
-        Dictionary<HLCTimestamp, List<KeyValueWatch>> open = openTransactions.GetOrAdd(partitionId, static _ => new Dictionary<HLCTimestamp, List<KeyValueWatch>>());
-
-        if (!open.TryGetValue(transactionId, out List<KeyValueWatch>? list))
-        {
-            list = new List<KeyValueWatch>(1);
-            open[transactionId] = list;
-        }
-
-        return list;
     }
 
     /// <summary>
-    /// Tells every watch that received an event of <paramref name="transactionId"/> on <paramref name="partitionId"/>
-    /// that the transaction has no more events there: its last pending intent on the partition committed. Called from
-    /// the partition's ordered apply, after that intent's event.
+    /// Tells the watches on <paramref name="partitionId"/> that <paramref name="transactionId"/> has no more events
+    /// there: its last pending intent on the partition committed. Each watch delivers it only when it delivered an
+    /// event of the transaction, from the live stream or from a replay. Called from the partition's ordered apply,
+    /// after that intent's event.
     /// </summary>
     public void PublishTransactionEnd(int partitionId, HLCTimestamp transactionId, long logIndex)
     {
-        if (!openTransactions.TryGetValue(partitionId, out Dictionary<HLCTimestamp, List<KeyValueWatch>>? open)
-            || !open.Remove(transactionId, out List<KeyValueWatch>? watches))
+        if (Volatile.Read(ref registrations) == 0 || !byPartition.TryGetValue(partitionId, out KeyValueWatch[]? watches))
             return;
 
         KeyValueWatchFrame frame = KeyValueWatchFrame.ForTransactionEnd(partitionId, transactionId);
 
         foreach (KeyValueWatch watch in watches)
             watch.Deliver(frame, logIndex);
+    }
+
+    /// <summary>
+    /// Tells the watches on <paramref name="partitionId"/> that cover <paramref name="key"/> that the key's pending
+    /// intent left pending at the entry <paramref name="logIndex"/> (committed, aborted or removed): the events held
+    /// behind it follow. Called from the partition's ordered apply, after the intent's commit event, if any.
+    /// </summary>
+    public void PublishIntentSettled(int partitionId, string key, long logIndex)
+    {
+        if (Volatile.Read(ref registrations) == 0 || !byPartition.TryGetValue(partitionId, out KeyValueWatch[]? watches))
+            return;
+
+        foreach (KeyValueWatch watch in watches)
+        {
+            if (watch.Scope.Matches(key))
+                watch.Release(partitionId, key, logIndex);
+        }
     }
 
     /// <summary>
@@ -247,8 +291,6 @@ internal sealed class KeyValueWatchBroker
 
         foreach (KeyValueWatch watch in watches)
             watch.End(frame);
-
-        openTransactions.TryRemove(partitionId, out _);
     }
 
     /// <summary>Ends every open watch on the node with <see cref="KeyValueWatchFrameType.Lagged"/>.</summary>

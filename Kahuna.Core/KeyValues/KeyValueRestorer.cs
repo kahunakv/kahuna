@@ -35,6 +35,10 @@ internal sealed class KeyValueRestorer
 
     private readonly ILogger<IKahuna> logger;
 
+    /// <summary>Fed with every restored value write's commit against its entry, for watch resumes (manager
+    /// construction).</summary>
+    internal Watch.PartitionHistoryBounds? HistoryBounds { get; set; }
+
     // The node's prepared-intent store, restored from its own snapshot and from the replayed prepare deltas
     // that precede a by-reference materialization record in the same partition's log. Null (bare
     // direct-construction tests) makes every by-reference record a reported miss.
@@ -258,11 +262,12 @@ internal sealed class KeyValueRestorer
                 case KeyValueRecordKind.ValueMutation:
                     // The same verdict the live apply reached for this entry: a record the commit admission window
                     // refused never applied anywhere, so its replay installs nothing either.
-                    if (KeyValueReplicator.IsRefusedByAdmission(
-                            log,
-                            new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter),
-                            keyValueMessage.AdmissionLagMs))
+                    HLCTimestamp lastModified = new(keyValueMessage.LastModifiedNode, keyValueMessage.LastModifiedPhysical, keyValueMessage.LastModifiedCounter);
+
+                    if (KeyValueReplicator.IsRefusedByAdmission(log, lastModified, keyValueMessage.AdmissionLagMs))
                         return true;
+
+                    HistoryBounds?.ObserveCommit(partitionId, log.Time, lastModified, keyValueMessage.AdmissionLagMs);
 
                     (state, messageValue) = KeyValueMessageDecoder.Decode(keyValueMessage);
                     break;

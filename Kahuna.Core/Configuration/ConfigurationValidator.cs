@@ -165,6 +165,14 @@ public static class ConfigurationValidator
             throw new KahunaServerException(
                 "HistoryHoldMaxLeaseMs, HistoryHoldMaxPerHolder and HistoryHoldMaxTotal must not be negative (0 means no bound).");
 
+        if (configuration.WatchMaxCapacity <= 0 || configuration.WatchMaxBufferedBytes <= 0)
+            throw new KahunaServerException(
+                "WatchMaxCapacity and WatchMaxBufferedBytes must be greater than zero.");
+
+        if (configuration.WatchMaxPerNode < 0 || configuration.WatchMaxPerCall < 0 || configuration.WatchMaxConcurrentReplays < 0)
+            throw new KahunaServerException(
+                "WatchMaxPerNode, WatchMaxPerCall and WatchMaxConcurrentReplays must not be negative (0 means no bound).");
+
         if (configuration.DefaultAdmissionWaitMs <= 0)
             throw new KahunaServerException(
                 $"DefaultAdmissionWaitMs ({configuration.DefaultAdmissionWaitMs} ms) must be greater than zero; " +

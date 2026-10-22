@@ -1006,6 +1006,26 @@ public sealed class EmbeddedKahunaOptions
     /// <see cref="Server.Configuration.KahunaConfiguration.HistoryHoldMaxTotal"/>.</summary>
     public int HistoryHoldMaxTotal { get; set; } = 65_536;
 
+    /// <summary>The largest frame capacity a watch may ask for. See
+    /// <see cref="Server.Configuration.KahunaConfiguration.WatchMaxCapacity"/>.</summary>
+    public int WatchMaxCapacity { get; set; } = 65_536;
+
+    /// <summary>The bytes one watch may buffer. See
+    /// <see cref="Server.Configuration.KahunaConfiguration.WatchMaxBufferedBytes"/>.</summary>
+    public long WatchMaxBufferedBytes { get; set; } = 64L * 1024 * 1024;
+
+    /// <summary>The most watches open on the node; zero means no bound. See
+    /// <see cref="Server.Configuration.KahunaConfiguration.WatchMaxPerNode"/>.</summary>
+    public int WatchMaxPerNode { get; set; } = 65_536;
+
+    /// <summary>The most watches one gRPC watch call may hold; zero means no bound. See
+    /// <see cref="Server.Configuration.KahunaConfiguration.WatchMaxPerCall"/>.</summary>
+    public int WatchMaxPerCall { get; set; } = 1_024;
+
+    /// <summary>The most watch replays the node runs at once; zero means no bound. See
+    /// <see cref="Server.Configuration.KahunaConfiguration.WatchMaxConcurrentReplays"/>.</summary>
+    public int WatchMaxConcurrentReplays { get; set; } = 64;
+
     /// <summary>Keeps transaction origin labels and writes them into prepared intents. Turn it on only when every node
     /// reads them. See <see cref="Server.Configuration.KahunaConfiguration.TransactionOriginTags"/>.</summary>
     public bool TransactionOriginTags { get; set; }

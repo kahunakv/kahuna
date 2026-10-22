@@ -89,6 +89,10 @@ internal sealed class KeyValueReplicator
     // unit-test construction) publishes nothing.
     private readonly KeyValueWatchBroker? watchBroker;
 
+    /// <summary>Fed with every applied value write's commit against its entry, for watch resumes (manager
+    /// construction).</summary>
+    internal PartitionHistoryBounds? HistoryBounds { get; set; }
+
     public KeyValueReplicator(
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter,
         KeyValueActorRing persistentRouter,
@@ -1157,7 +1161,9 @@ internal sealed class KeyValueReplicator
     /// intent settles (and more than one producer can write it); a range move's copy repeats a mutation the
     /// source partition already reported; and history an installed snapshot already reflects was never this
     /// node's to report. The record type is read here, at the call site, because an extend reaches the apply as
-    /// a set at the same revision.
+    /// a set at the same revision. A key that still has a pending intent here had a durable transaction commit
+    /// over it whose event comes at the settle: the event is held behind that intent, so the transaction's
+    /// revision is delivered first.
     /// </summary>
     private void PublishDirectWrite(int partitionId, long logIndex, KeyValueRequestType type, in CommittedKeyValueMutation mutation, bool stateTransferCopy)
     {
@@ -1178,7 +1184,11 @@ internal sealed class KeyValueReplicator
             _ => KeyValueWatchEventKind.Set
         };
 
-        broker.Publish(partitionId, kind, mutation.Key, mutation.Value, mutation.Revision, mutation.Expires, mutation.LastModified, HLCTimestamp.Zero, logIndex);
+        bool behindPendingIntent = preparedIntentStore?.Get(mutation.Key) is { IsPending: true };
+
+        broker.Publish(
+            partitionId, kind, mutation.Key, mutation.Value, mutation.Revision, mutation.Expires, mutation.LastModified, HLCTimestamp.Zero, logIndex,
+            heldBehindPendingIntent: behindPendingIntent);
     }
 
     /// <summary>
@@ -1224,6 +1234,8 @@ internal sealed class KeyValueReplicator
                 if (IsRefusedByAdmission(log, proposed.LastModified, proposal.AdmissionLagMs))
                     return true;
 
+                HistoryBounds?.ObserveCommit(partitionId, log.Time, proposed.LastModified, proposal.AdmissionLagMs);
+
                 ApplyLoggedMutation(
                     partitionId, log.Id, proposed,
                     witnessBelowHead: proposedType != KeyValueRequestType.TryExtend,
@@ -1249,6 +1261,8 @@ internal sealed class KeyValueReplicator
 
                     if (IsRefusedByAdmission(log, mutation.LastModified, keyValueMessage.AdmissionLagMs))
                         return true;
+
+                    HistoryBounds?.ObserveCommit(partitionId, log.Time, mutation.LastModified, keyValueMessage.AdmissionLagMs);
 
                     // An extend only refreshes the expiry of a value already applied, so it runs neither witness.
                     // A delete runs the below-head witness only; the same-revision value comparison is for sets.

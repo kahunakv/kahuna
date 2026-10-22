@@ -154,7 +154,9 @@ public sealed class TestHistoryHolds : BaseCluster
             }
 
             KahunaManager metaLeader = await MetaLeader(nodes, ct);
-            Assert.Equal(1, await metaLeader.KeyValues.PurgeHistoryHoldsAsync(ct));
+            // The node's reaper purges on its own timer, so it can take the hold first; either purge removes it.
+            int purged = await metaLeader.KeyValues.PurgeHistoryHoldsAsync(ct);
+            Assert.True(purged == 1 || !metaLeader.KeyValues.HistoryHoldStoreForTests.Holds.ContainsKey(hold.HoldId), $"the purge removed {purged} holds and left the retired partition's hold");
 
             foreach (KahunaManager node in nodes)
             {

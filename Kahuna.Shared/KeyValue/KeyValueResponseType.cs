@@ -110,4 +110,11 @@ public enum KeyValueResponseType
     /// longer needs, or raise the bound.
     /// </summary>
     HistoryHoldLimitReached = 110,
+
+    /// <summary>
+    /// A watch was refused because a node limit was reached: the node already has its maximum number of open
+    /// watches, or the gRPC call already holds its maximum. Nothing was registered. Close watches that are no
+    /// longer needed, open the watch on another call or node, or raise the limit.
+    /// </summary>
+    WatchLimitReached = 111,
 }

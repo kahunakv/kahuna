@@ -213,7 +213,8 @@ internal sealed class BackupFacade : IDisposable
         TimeSpan pitrWindow,
         TimeSpan baseSnapshotInterval,
         Func<Task> flushPersistenceAsync,
-        ILogger<IKahuna> logger)
+        ILogger<IKahuna> logger,
+        Action<int, long>? recordSeedBoundary = null)
     {
         try
         {
@@ -233,7 +234,7 @@ internal sealed class BackupFacade : IDisposable
             await flushPersistenceAsync().ConfigureAwait(false);
             await BootstrapHelper.BootstrapNodeAsync(
                 chain, storage.Artifacts, targetTime, persistenceBackend, walAdapter, pitrWindow, DateTime.UtcNow,
-                baseSnapshotInterval, macKey, configuration.BackupClusterId).ConfigureAwait(false);
+                baseSnapshotInterval, macKey, configuration.BackupClusterId, recordSeedBoundary).ConfigureAwait(false);
         }
         catch (Exception ex) when (ShouldMap(ex))
         {

@@ -270,6 +270,7 @@ internal sealed class KeyValueReplicationDispatcher
         finally
         {
             EndApply(progress, log.Id);
+            runtime.HistoryBounds?.FlushIfDue();
         }
     }
 
@@ -382,6 +383,7 @@ internal sealed class KeyValueReplicationDispatcher
         finally
         {
             EndApply(progress, log.Id);
+            runtime.HistoryBounds?.FlushIfDue();
         }
     }
 

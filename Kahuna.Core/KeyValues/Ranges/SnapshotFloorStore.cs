@@ -39,10 +39,14 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// from purge for a startup grace window, so a holder can renew after full-cluster downtime longer
 /// than its lease. Lease comparisons always use the cluster HLC, never wall-clock time.</para>
 ///
-/// <para><b>Single writer.</b> <see cref="AcquireAsync"/>, <see cref="RenewAsync"/>, and
-/// <see cref="ReleaseAsync"/> are the only mutators, each serialized by
-/// <see cref="mutateGate"/> locally and by the meta Raft log globally. Followers and restore
-/// replays call <see cref="Replicate"/> / <see cref="Restore"/>.</para>
+/// <para><b>Single writer.</b> The ordered apply (<see cref="Replicate"/> / <see cref="Restore"/>, and
+/// the meta state transfer) is the only writer of the registry. <see cref="AcquireAsync"/>,
+/// <see cref="RenewAsync"/>, <see cref="ReleaseAsync"/> and <see cref="PurgeExpiredHoldsAsync"/> only
+/// propose: each confirms meta-partition leadership first, so the applied registry it decides on
+/// covers every committed entry, proposes a delta, and waits until this node's apply reaches the
+/// proposed entry. They never install a registry of their own, which could replace entries the
+/// apply installed while the proposal was in flight. They are serialized by <see cref="mutateGate"/>
+/// locally and by the meta Raft log globally.</para>
 /// </summary>
 internal sealed class SnapshotFloorStore : IDisposable
 {
@@ -64,9 +68,9 @@ internal sealed class SnapshotFloorStore : IDisposable
     private readonly ObservableGauge<long> effectiveFloorMsGauge;
 
     /// <summary>
-    /// The committed hold registry. Written only inside <see cref="AcquireAsync"/>,
-    /// <see cref="RenewAsync"/>, <see cref="ReleaseAsync"/>, or <see cref="Apply"/>;
-    /// read lock-free by <see cref="GetEffectiveFloor"/> and the hold introspection path.
+    /// The committed hold registry. Written only by <see cref="Apply"/> and the meta state
+    /// transfer (<see cref="CommitState"/>); read lock-free by <see cref="GetEffectiveFloor"/> and
+    /// the hold introspection path.
     /// </summary>
     private volatile IReadOnlyDictionary<string, SnapshotHold> holds =
         new Dictionary<string, SnapshotHold>(StringComparer.Ordinal);
@@ -88,6 +92,16 @@ internal sealed class SnapshotFloorStore : IDisposable
 
     /// <summary>HLC deadline of the startup grace window; Zero when no window was armed.</summary>
     private HLCTimestamp startupGraceDeadline;
+
+    // The highest meta-log index this store applied, and the signal its waiters park on (replaced on every apply).
+    private long appliedIndex;
+
+    private TaskCompletionSource appliedSignal = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    // How long a mutation waits for its own entry to apply here before it answers anyway: the entry is committed, so
+    // the answer is right, only this node's registry is behind. An acquire that cannot see its hold applied fails
+    // closed instead, because it cannot prove a local prune honors the hold.
+    private static readonly TimeSpan ApplyWaitLimit = TimeSpan.FromSeconds(5);
 
     /// <summary>
     /// Serializes a hold mutation's in-memory commit against the open/close of a prune-delete
@@ -372,46 +386,34 @@ internal sealed class SnapshotFloorStore : IDisposable
         await mutateGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            // Confirmed leadership waits for the applied frontier to cover the commit frontier, so
+            // the registry read below includes every committed purge, release and acquire.
+            // Answering with the SAME holdId for a lapsed hold is a revival: it asserts the hold
+            // was registered continuously, i.e. no prune ever passed its timestamp, which only a
+            // fully-applied registry proves. Anything unconfirmed fails closed.
+            if (!await raft.ConfirmLeadershipIfHosted(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false))
+                return (KeyValueResponseType.MustRetry, string.Empty, HLCTimestamp.Zero);
+
             HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
             // Check for an existing hold with the same (holderId, timestamp) — idempotent acquire.
             SnapshotHold? existing = FindExistingHold(holderId, timestamp);
-
-            if (existing is not null && !existing.IsLive(now))
-            {
-                // Answering with the SAME holdId for a lapsed hold is a revival: it asserts the
-                // hold was registered continuously, i.e. no prune ever passed its timestamp.
-                // That assertion is only provable against a fully-applied registry — a fresh
-                // leader that has not applied an inherited purge would resurrect a hold whose
-                // protection pruning already ended. Confirmed leadership waits for the applied
-                // frontier to cover the commit frontier; anything unconfirmed fails closed.
-                if (!await raft.ConfirmLeadershipIfHosted(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false))
-                    return (KeyValueResponseType.MustRetry, string.Empty, HLCTimestamp.Zero);
-
-                // Re-read: the awaited confirmation may have applied a committed purge or
-                // release. A vanished match simply degrades to a fresh acquire below.
-                now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
-                existing = FindExistingHold(holderId, timestamp);
-            }
 
             HLCTimestamp expiry = AddMs(now, leaseMs);
 
             string holdId = existing?.HoldId ?? Guid.NewGuid().ToString("N");
 
             SnapshotHold hold = new(holdId, holderId, timestamp, expiry);
-            Dictionary<string, SnapshotHold> next = new(holds, StringComparer.Ordinal);
-            next[holdId] = hold;
 
-            (bool ok, bool pruneSafe) = await ReplicateAcquiredHoldAsync(
-                UpsertDelta(hold), next, pruneGenAtStart, ct).ConfigureAwait(false);
-            if (!ok)
+            if (!await ReplicateAsync(UpsertDelta(hold), ct).ConfigureAwait(false))
                 return (KeyValueResponseType.MustRetry, string.Empty, HLCTimestamp.Zero);
 
-            // The hold is committed and durable, but a prune delete overlapped this acquire. The
-            // boundary it was meant to protect may already be gone, so the acquire must not report
-            // success. The committed hold now protects the timestamp for every future prune, and a
-            // retry (idempotent by holderId+timestamp) succeeds once no delete overlaps it.
-            if (!pruneSafe)
+            // The hold is committed and durable, but either this node's registry does not show it
+            // yet or a prune delete overlapped this acquire. The boundary it was meant to protect
+            // may already be gone, so the acquire must not report success. The committed hold
+            // protects the timestamp for every future prune once applied, and a retry (idempotent
+            // by holderId+timestamp) succeeds once no delete overlaps it.
+            if (!IsAppliedAndPruneSafe(holdId, pruneGenAtStart))
                 return (KeyValueResponseType.MustRetry, string.Empty, HLCTimestamp.Zero);
 
             return (KeyValueResponseType.Set, holdId, expiry);
@@ -443,36 +445,24 @@ internal sealed class SnapshotFloorStore : IDisposable
         await mutateGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            // "Still registered" must be proven against a fully-applied registry: a fresh leader
+            // that has not applied an inherited purge would see a ghost of a hold whose protection
+            // pruning already ended, and reviving it would report a guarantee the data no longer
+            // meets. Confirmed leadership waits for the applied frontier to cover the commit
+            // frontier, so the read below is authoritative: still present ⇒ never purged ⇒ no
+            // prune anywhere passed the held timestamp.
+            if (!await raft.ConfirmLeadershipIfHosted(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false))
+                return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero);
+
             if (!holds.TryGetValue(holdId, out SnapshotHold? hold))
                 return (KeyValueResponseType.DoesNotExist, HLCTimestamp.Zero);
 
             HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
-
-            if (!hold.IsLive(now))
-            {
-                // Revival. "Still registered" must be proven against a fully-applied registry:
-                // a fresh leader that has not applied an inherited purge would see a ghost of a
-                // hold whose protection pruning already ended, and reviving it would report a
-                // guarantee the data no longer meets. Confirmed leadership waits for the applied
-                // frontier to cover the commit frontier, so the re-read below is authoritative:
-                // still present ⇒ never purged ⇒ no prune anywhere passed the held timestamp.
-                if (!await raft.ConfirmLeadershipIfHosted(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false))
-                    return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero);
-
-                if (!holds.TryGetValue(holdId, out hold))
-                    return (KeyValueResponseType.DoesNotExist, HLCTimestamp.Zero);
-
-                now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
-            }
-
             HLCTimestamp expiry = AddMs(now, leaseMs);
 
             SnapshotHold renewed = hold with { LeaseExpiry = expiry };
-            Dictionary<string, SnapshotHold> next = new(holds, StringComparer.Ordinal);
-            next[holdId] = renewed;
 
-            bool ok = await ReplicateDeltaAsync(UpsertDelta(renewed), next, ct).ConfigureAwait(false);
-            if (!ok)
+            if (!await ReplicateAsync(UpsertDelta(renewed), ct).ConfigureAwait(false))
                 return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero);
 
             return (KeyValueResponseType.Set, expiry);
@@ -495,13 +485,14 @@ internal sealed class SnapshotFloorStore : IDisposable
         await mutateGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            // A stale registry could answer DoesNotExist for a hold an inherited entry registered.
+            if (!await raft.ConfirmLeadershipIfHosted(RangeMapStore.MetaPartitionId, ct).ConfigureAwait(false))
+                return KeyValueResponseType.MustRetry;
+
             if (!holds.ContainsKey(holdId))
                 return KeyValueResponseType.DoesNotExist;
 
-            Dictionary<string, SnapshotHold> next = new(holds, StringComparer.Ordinal);
-            next.Remove(holdId);
-
-            bool ok = await ReplicateDeltaAsync(RemoveDelta(holdId), next, ct).ConfigureAwait(false);
+            bool ok = await ReplicateAsync(RemoveDelta(holdId), ct).ConfigureAwait(false);
             return ok ? KeyValueResponseType.Deleted : KeyValueResponseType.MustRetry;
         }
         finally
@@ -540,9 +531,16 @@ internal sealed class SnapshotFloorStore : IDisposable
             // holdId, so re-delivery of the same entry — or replay of the tail above an installed
             // snapshot — converges. Raft applies committed entries in order, so an upsert cannot
             // resurrect a hold a later remove already deleted.
-            Dictionary<string, SnapshotHold> next = new(holds, StringComparer.Ordinal);
-            ApplyDeltaEntries(next, delta);
-            CommitInMemory(next);
+            // The read of the current registry and the swap share the lock, so a concurrent state
+            // transfer cannot slip between them.
+            lock (pruneCommitLock)
+            {
+                Dictionary<string, SnapshotHold> next = new(holds, StringComparer.Ordinal);
+                ApplyDeltaEntries(next, delta);
+                CommitInMemoryLocked(next);
+            }
+
+            NoteApplied(log.Id);
             return true;
         }
         catch (Exception ex)
@@ -585,33 +583,9 @@ internal sealed class SnapshotFloorStore : IDisposable
         return delta;
     }
 
-    // Caller holds mutateGate. Replicates the delta, then eagerly commits the already-computed
-    // resulting registry so the leader reads its own writes without waiting for the commit echo.
-    private async Task<bool> ReplicateDeltaAsync(
-        SnapshotFloorDeltaMessage delta, Dictionary<string, SnapshotHold> next, CancellationToken ct)
-    {
-        if (!await ReplicateOnlyAsync(delta, ct).ConfigureAwait(false))
-            return false;
-
-        CommitInMemory(next);
-        return true;
-    }
-
-    // Caller holds mutateGate. Replicates and commits a newly-acquired hold, additionally reporting
-    // whether the commit is safe against concurrent pruning: false when a prune-delete window
-    // opened, closed, or was open across [pruneGenAtStart .. commit], because that delete's floor
-    // was sampled without this hold.
-    private async Task<(bool Replicated, bool PruneSafe)> ReplicateAcquiredHoldAsync(
-        SnapshotFloorDeltaMessage delta, Dictionary<string, SnapshotHold> next, long pruneGenAtStart, CancellationToken ct)
-    {
-        if (!await ReplicateOnlyAsync(delta, ct).ConfigureAwait(false))
-            return (false, false);
-
-        bool pruneSafe = CommitInMemory(next, pruneGenAtStart);
-        return (true, pruneSafe);
-    }
-
-    private async Task<bool> ReplicateOnlyAsync(SnapshotFloorDeltaMessage delta, CancellationToken ct)
+    // Caller holds mutateGate. Proposes one delta and waits until this node's apply reaches it, so
+    // the caller's answer and this node's registry agree when it returns.
+    private async Task<bool> ReplicateAsync(SnapshotFloorDeltaMessage delta, CancellationToken ct)
     {
         byte[] data = ReplicationSerializer.Serialize(delta);
 
@@ -630,31 +604,73 @@ internal sealed class SnapshotFloorStore : IDisposable
             return false;
         }
 
+        await WaitForApplyAsync(result.LogIndex, ct).ConfigureAwait(false);
         return true;
     }
 
+    private void NoteApplied(long logIndex)
+    {
+        long current = Volatile.Read(ref appliedIndex);
+        while (logIndex > current)
+        {
+            long seen = Interlocked.CompareExchange(ref appliedIndex, logIndex, current);
+            if (seen == current)
+                break;
+
+            current = seen;
+        }
+
+        Interlocked.Exchange(ref appliedSignal, new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously)).TrySetResult();
+    }
+
+    private async Task WaitForApplyAsync(long logIndex, CancellationToken ct)
+    {
+        long deadline = Environment.TickCount64 + (long)ApplyWaitLimit.TotalMilliseconds;
+
+        while (Volatile.Read(ref appliedIndex) < logIndex)
+        {
+            Task signal = Volatile.Read(ref appliedSignal).Task;
+            if (Volatile.Read(ref appliedIndex) >= logIndex)
+                return;
+
+            long left = deadline - Environment.TickCount64;
+            if (left <= 0)
+            {
+                logger.LogWarning("Snapshot-floor entry {LogIndex} committed but did not apply on this node within {Limit}", logIndex, ApplyWaitLimit);
+                return;
+            }
+
+            try
+            {
+                await signal.WaitAsync(TimeSpan.FromMilliseconds(left), ct).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+            }
+        }
+    }
+
+    // Whether the applied registry holds holdId and no prune-delete window opened, closed, or was
+    // open since pruneGenAtStart. Checked under the same lock as the apply's swap and
+    // BeginPrune's floor sample, so the ordering an acquire observes is exactly the ordering
+    // pruning observes: every prune that opens after this check samples a floor that includes
+    // the hold.
+    private bool IsAppliedAndPruneSafe(string holdId, long pruneGenAtStart)
+    {
+        lock (pruneCommitLock)
+        {
+            long genNow = pruneDeleteGen;
+            return holds.ContainsKey(holdId) && genNow == pruneGenAtStart && (genNow & 1L) == 0L;
+        }
+    }
+
     // Installs the resulting registry: swaps the volatile map, rebuilds the floor cache, and
-    // persists the full set to disk. Idempotent — safe to run for both the eager leader commit
-    // and the ordered echo.
+    // persists the full set to disk. Called by the ordered apply and the meta state transfer only.
     // Runs under pruneCommitLock so the swap is ordered against BeginPrune's floor sample.
     private void CommitInMemory(Dictionary<string, SnapshotHold> next)
     {
         lock (pruneCommitLock)
             CommitInMemoryLocked(next);
-    }
-
-    // Commits like CommitInMemory and returns whether the commit was free of any overlapping
-    // prune-delete window since pruneGenAtStart. The check runs under the same lock as the swap, so
-    // the ordering an acquire observes is exactly the ordering pruning observes.
-    private bool CommitInMemory(Dictionary<string, SnapshotHold> next, long pruneGenAtStart)
-    {
-        lock (pruneCommitLock)
-        {
-            CommitInMemoryLocked(next);
-            long genNow = pruneDeleteGen;
-            // Safe only if no window opened/closed (generation unchanged) and none is open now.
-            return genNow == pruneGenAtStart && (genNow & 1L) == 0L;
-        }
     }
 
     private void CommitInMemoryLocked(Dictionary<string, SnapshotHold> next)
@@ -832,11 +848,7 @@ internal sealed class SnapshotFloorStore : IDisposable
             if (expired is null)
                 return 0;
 
-            Dictionary<string, SnapshotHold> next = new(holds, StringComparer.Ordinal);
-            foreach (string id in expired)
-                next.Remove(id);
-
-            bool ok = await ReplicateDeltaAsync(RemoveDelta(expired), next, ct).ConfigureAwait(false);
+            bool ok = await ReplicateAsync(RemoveDelta(expired), ct).ConfigureAwait(false);
             if (!ok)
             {
                 logger.LogWarning(

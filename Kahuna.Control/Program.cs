@@ -328,6 +328,8 @@ if (IsSingleCommand(opts))
     }
 }
 
+await ChameleonBanner.ShowOnce();
+
 await InteractiveConsole.Run(connection, opts);
 return;
 

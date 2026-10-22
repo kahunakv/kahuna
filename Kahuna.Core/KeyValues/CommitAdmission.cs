@@ -67,6 +67,12 @@ internal static class CommitAdmission
         return CommitAdmissionVerdict.Admitted;
     }
 
+    /// <summary>Whether an entry admitted with no bound (<paramref name="lagMs"/> zero) carries a commit at or above
+    /// its time plus <see cref="MaxClockLeadMs"/>: the one shape of entry a replay that starts at
+    /// <c>W − MaxClockLeadMs</c> cannot rely on (see <see cref="Watch.PartitionHistoryBounds"/>).</summary>
+    public static bool IsUnboundedLead(HLCTimestamp entryTime, HLCTimestamp commitTimestamp, long lagMs) =>
+        lagMs <= 0 && entryTime != HLCTimestamp.Zero && commitTimestamp >= entryTime + MaxClockLeadMs;
+
     /// <summary>The lowest commit timestamp an entry at <paramref name="entryTime"/> can no longer admit: every
     /// admitted commit is strictly above it.</summary>
     public static HLCTimestamp Floor(HLCTimestamp entryTime, long lagMs) =>

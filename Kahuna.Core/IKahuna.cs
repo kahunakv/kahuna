@@ -750,9 +750,12 @@ public interface IKahuna
     ///
     /// <para>Refusals: <see cref="KeyValueResponseType.WatchUnsupportedOnEphemeral"/> (permanent),
     /// <see cref="KeyValueResponseType.DoesNotExist"/> (this node hosts no replica of a covered partition; the
-    /// opening's routes name the replicas of each covered partition) and <see cref="KeyValueResponseType.MustRetry"/>
-    /// (the range map does not cover the scope yet, kept changing, or no longer covers a partition the request
-    /// named in <see cref="KeyValueWatchRequest.Partitions"/>).</para>
+    /// opening's routes name the replicas of each covered partition), <see cref="KeyValueResponseType.InvalidInput"/>
+    /// (a capacity above the node's limit), <see cref="KeyValueResponseType.WatchLimitReached"/> (the node has its
+    /// limit of open watches) and <see cref="KeyValueResponseType.MustRetry"/> (the range map does not cover the scope
+    /// yet, kept changing, or no longer covers a partition the request named in
+    /// <see cref="KeyValueWatchRequest.Partitions"/>; or the request resumes and the node runs its limit of
+    /// replays).</para>
     /// </summary>
     public Task<KeyValueWatchOpening> WatchKeyValues(KeyValueWatchRequest request, CancellationToken ct);
 

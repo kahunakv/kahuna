@@ -1471,6 +1471,9 @@ internal sealed class GrpcBatcher
         };
     }
 
+    // The largest message a shared channel accepts from a node (64 MiB).
+    internal const int MaxReceiveMessageBytes = 64 * 1024 * 1024;
+
     private static GrpcChannel CreateChannelInternal(string url, KahunaOptions? opts)
     {
         SslClientAuthenticationOptions sslOptions = new()
@@ -1504,7 +1507,11 @@ internal sealed class GrpcBatcher
         return GrpcChannel.ForAddress(url, new()
         {
             HttpHandler = handler,
-            ServiceConfig = new() { MethodConfigs = { defaultMethodConfig } }
+            ServiceConfig = new() { MethodConfigs = { defaultMethodConfig } },
+            // Above the 4 MiB default: a value written over REST is not bound by the gRPC request limit, and a read
+            // or a watch event that carries it must still arrive. A watch response packs frames up to 1 MiB, so
+            // only a single large value comes near this.
+            MaxReceiveMessageSize = MaxReceiveMessageBytes
         });
     }
 }

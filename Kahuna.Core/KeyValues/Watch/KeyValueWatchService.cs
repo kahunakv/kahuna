@@ -50,13 +50,16 @@ internal sealed class KeyValueWatchService
 
     private readonly KeyValueWatchReplayer? replayer;
 
+    private readonly int maxCapacity;
+
     public KeyValueWatchService(
         KeyValueWatchBroker broker,
         IRaft raft,
         RangeMapStore rangeMapStore,
         KeySpaceRegistry keySpaceRegistry,
         ClientEndpointAdvertiser advertiser,
-        KeyValueWatchReplayer? replayer = null)
+        KeyValueWatchReplayer? replayer = null,
+        int maxCapacity = 0)
     {
         this.broker = broker;
         this.raft = raft;
@@ -64,6 +67,7 @@ internal sealed class KeyValueWatchService
         this.keySpaceRegistry = keySpaceRegistry;
         this.advertiser = advertiser;
         this.replayer = replayer;
+        this.maxCapacity = maxCapacity > 0 ? maxCapacity : int.MaxValue;
         dataPartitionRouter = new DataPartitionRouter(raft);
     }
 
@@ -72,10 +76,14 @@ internal sealed class KeyValueWatchService
     /// request covers before this returns. Refusals:
     /// <list type="bullet">
     /// <item><see cref="KeyValueResponseType.WatchUnsupportedOnEphemeral"/>: the request names ephemeral keys.</item>
+    /// <item><see cref="KeyValueResponseType.InvalidInput"/>: the request asks for a capacity above the node's
+    /// limit, or a negative one.</item>
+    /// <item><see cref="KeyValueResponseType.WatchLimitReached"/>: the node already has its limit of open watches.</item>
     /// <item><see cref="KeyValueResponseType.DoesNotExist"/>: this node is not a replica of a partition the request
     /// covers. The opening's routes name the replicas of each covered partition.</item>
     /// <item><see cref="KeyValueResponseType.MustRetry"/>: the range map has no descriptor for part of the scope yet,
-    /// kept changing during the registration, or no longer covers a partition the request named.</item>
+    /// kept changing during the registration, or no longer covers a partition the request named; or the node runs its
+    /// limit of replays and the request resumes.</item>
     /// </list>
     /// </summary>
     public KeyValueWatchOpening Watch(KeyValueWatchRequest request)
@@ -83,7 +91,11 @@ internal sealed class KeyValueWatchService
         if (request.Durability != KeyValueDurability.Persistent)
             return Refuse(KeyValueResponseType.WatchUnsupportedOnEphemeral);
 
-        int capacity = request.Capacity > 0 ? request.Capacity : DefaultCapacity;
+        // The node owns the buffer: a caller cannot make it larger than the limit.
+        if (request.Capacity < 0 || request.Capacity > maxCapacity)
+            return Refuse(KeyValueResponseType.InvalidInput);
+
+        int capacity = request.Capacity > 0 ? request.Capacity : Math.Min(DefaultCapacity, maxCapacity);
 
         for (int attempt = 0; attempt < MaxRegistrationAttempts; attempt++)
         {
@@ -104,16 +116,32 @@ internal sealed class KeyValueWatchService
             }
 
             List<int>? replay = null;
+            Dictionary<int, Kommander.Time.HLCTimestamp>? cursors = null;
             if (request.Resumes)
             {
                 foreach (int partitionId in partitions)
                 {
-                    if (request.ResumeCursorOf(partitionId) != Kommander.Time.HLCTimestamp.Zero)
-                        (replay ??= []).Add(partitionId);
+                    Kommander.Time.HLCTimestamp cursor = request.ResumeCursorOf(partitionId);
+                    if (cursor == Kommander.Time.HLCTimestamp.Zero)
+                        continue;
+
+                    (replay ??= []).Add(partitionId);
+                    (cursors ??= [])[partitionId] = cursor;
                 }
             }
 
-            KeyValueWatch watch = broker.Register(request.Scope, request.KeysOnly, capacity, partitions, resolved, replay);
+            // One replay slot per resumed partition, taken before the registration so a refusal leaves nothing behind.
+            if (replay is not null && replayer is not null && !replayer.TryReserveSlots(replay.Count))
+                return Refuse(KeyValueResponseType.MustRetry);
+
+            KeyValueWatch? registered = broker.TryRegister(request.Scope, request.KeysOnly, capacity, partitions, resolved, replay, cursors);
+            if (registered is not { } watch)
+            {
+                if (replay is not null)
+                    replayer?.ReleaseSlots(replay.Count);
+
+                return Refuse(KeyValueResponseType.WatchLimitReached);
+            }
 
             // A range-map entry applied between the resolution and the registration re-checked every watch
             // except this one. Re-resolve against the map now in force; a watch registered on the old
@@ -128,13 +156,16 @@ internal sealed class KeyValueWatchService
                         watch.End(KeyValueWatchFrame.ForHistoryUnavailable(replay[0]));
                     else
                         foreach (int partitionId in replay)
-                            replayer.Start(watch, partitionId, request.ResumeCursorOf(partitionId), broker.TracksTransactionEnds);
+                            _ = replayer.Start(watch, partitionId, request.ResumeCursorOf(partitionId));
                 }
 
                 return new(KeyValueResponseType.Get, watch);
             }
 
             watch.End(null);
+
+            if (replay is not null)
+                replayer?.ReleaseSlots(replay.Count);
         }
 
         return Refuse(KeyValueResponseType.MustRetry);

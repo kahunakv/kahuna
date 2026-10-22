@@ -1199,4 +1199,98 @@ public sealed class TestSnapshotFloorStore : RaftTrackingTest
             Assert.DoesNotContain(sentinel, newObservations);
         }
     }
+
+    // ── Proposals against applies that land while they are in flight ─────────────────────────
+
+    private static readonly HLCTimestamp FarLease = new(1, long.MaxValue / 2, 0);
+
+    private static RaftLog FloorLog(long id, byte[] data) =>
+        new() { Id = id, LogType = ReplicationTypes.SnapshotFloor, LogData = data };
+
+    private static byte[] UpsertPayload(string holdId, string holderId, long timestampPhysical)
+    {
+        SnapshotFloorDeltaMessage delta = new();
+        delta.Entries.Add(new SnapshotFloorDeltaEntry
+        {
+            Hold = new SnapshotHoldMessage
+            {
+                HoldId = holdId, HolderId = holderId, TimestampNode = 1, TimestampPhysical = timestampPhysical,
+                LeaseExpiryNode = FarLease.N, LeaseExpiryPhysical = FarLease.L
+            }
+        });
+        return ReplicationSerializer.Serialize(delta);
+    }
+
+    private static byte[] RemovePayload(string holdId)
+    {
+        SnapshotFloorDeltaMessage delta = new();
+        delta.Entries.Add(new SnapshotFloorDeltaEntry { Remove = true, Hold = new SnapshotHoldMessage { HoldId = holdId } });
+        return ReplicationSerializer.Serialize(delta);
+    }
+
+    [Fact]
+    public async Task Acquire_NeverOverwritesAHoldAppliedWhileItWasInFlight()
+    {
+        ProposeOutcomeStubRaft raft = new();
+        using SnapshotFloorStore store = new(raft, null, null, kahunaLogger);
+
+        // The acquire's own entry applies, and then another node's acquire applies after it.
+        raft.BeforeProposeReturn = data =>
+        {
+            Assert.True(store.Replicate(RangeMapStore.MetaPartitionId, FloorLog(1, data)));
+            Assert.True(store.Replicate(RangeMapStore.MetaPartitionId, FloorLog(2, UpsertPayload("newer", "other", 5_000))));
+            return Task.CompletedTask;
+        };
+
+        (KeyValueResponseType type, string holdId, _) = await store.AcquireAsync("first", new(1, 10_000, 0), 30_000, CancellationToken.None);
+
+        Assert.Equal(KeyValueResponseType.Set, type);
+        Assert.Equal(2, store.Holds.Count);
+        Assert.True(store.Holds.ContainsKey(holdId));
+        Assert.True(store.Holds.ContainsKey("newer"));
+
+        // The newer, lower hold protects its timestamp.
+        Assert.Equal(new HLCTimestamp(1, 5_000, 0), store.GetProtectiveFloor());
+    }
+
+    [Fact]
+    public async Task Renew_NeverResurrectsAHoldRemovedWhileItWasInFlight()
+    {
+        ProposeOutcomeStubRaft raft = new();
+        using SnapshotFloorStore store = new(raft, null, null, kahunaLogger);
+
+        Assert.True(InjectHolds(store,
+        [
+            new SnapshotHold("a", "holder-a", new(1, 10_000, 0), FarLease),
+            new SnapshotHold("b", "holder-b", new(1, 5_000, 0), FarLease)
+        ]));
+
+        // The renew's own entry applies, and then a release of the other hold applies after it.
+        raft.BeforeProposeReturn = data =>
+        {
+            Assert.True(store.Replicate(RangeMapStore.MetaPartitionId, FloorLog(1, data)));
+            Assert.True(store.Replicate(RangeMapStore.MetaPartitionId, FloorLog(2, RemovePayload("b"))));
+            return Task.CompletedTask;
+        };
+
+        (KeyValueResponseType type, _) = await store.RenewAsync("a", 30_000, CancellationToken.None);
+
+        Assert.Equal(KeyValueResponseType.Set, type);
+        Assert.False(store.Holds.ContainsKey("b"));
+        Assert.Equal(new HLCTimestamp(1, 10_000, 0), store.GetProtectiveFloor());
+    }
+
+    [Fact]
+    public async Task Acquire_WhoseHoldNeverAppliesHere_FailsClosed()
+    {
+        // The entry commits, but this node's apply never reaches it: no local prune is proven to honor the hold.
+        ProposeOutcomeStubRaft raft = new();
+        using SnapshotFloorStore store = new(raft, null, null, kahunaLogger);
+
+        (KeyValueResponseType type, _, _) = await store.AcquireAsync("first", new(1, 10_000, 0), 30_000, CancellationToken.None);
+
+        Assert.Equal(KeyValueResponseType.MustRetry, type);
+        Assert.Empty(store.Holds);
+        Assert.Equal(1, raft.ProposeCalls);
+    }
 }

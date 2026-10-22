@@ -19,6 +19,10 @@ namespace Kahuna.Server.KeyValues.Watch;
 /// only how many commits the window refuses, never whether W holds. A stuck pending intent holds W back for as long
 /// as it stays pending; the oldest-pending-intent metric shows it.</para>
 ///
+/// <para><b>Below the unbounded commit ceiling, no watermark.</b> An entry admitted with no bound can carry a commit
+/// a replay from a lower cursor would skip (see <see cref="PartitionHistoryBounds"/>). A watermark is a resume cursor,
+/// so none below the partition's ceiling is sent: every watermark a consumer holds is one it can resume from.</para>
+///
 /// <para><b>Order.</b> Kommander applies one partition's entries one at a time, so the progress frames and the
 /// events of a partition are published from the same thread in log order: a watch never receives a watermark
 /// before an event it covers. Frames are sent at most every <see cref="MinProgressIntervalMs"/> per partition;
@@ -47,14 +51,17 @@ internal sealed class KeyValueWatchWatermarks : IDisposable
 
     private readonly long lagMs;
 
+    private readonly PartitionHistoryBounds? historyBounds;
+
     // The gauges read this node's state, so they live on a meter owned by the node and disposed with it.
     private readonly Meter gaugeMeter = new("Kahuna", "1.0");
 
-    public KeyValueWatchWatermarks(KeyValueWatchBroker broker, PreparedIntentStore intents, long lagMs)
+    public KeyValueWatchWatermarks(KeyValueWatchBroker broker, PreparedIntentStore intents, long lagMs, PartitionHistoryBounds? historyBounds = null)
     {
         this.broker = broker;
         this.intents = intents;
         this.lagMs = lagMs;
+        this.historyBounds = historyBounds;
 
         gaugeMeter.CreateObservableGauge(
             "kahuna.kv.watch.watermark_lag_ms",
@@ -92,7 +99,12 @@ internal sealed class KeyValueWatchWatermarks : IDisposable
         if (now - progress.LastPublishTicks < MinProgressIntervalMs)
             return;
 
-        if (broker.PublishProgress(partitionId, WatermarkAt(partitionId, entryTime), logIndex))
+        HLCTimestamp watermark = WatermarkAt(partitionId, entryTime);
+
+        if (historyBounds is not null && watermark < historyBounds.UnboundedCeiling(partitionId))
+            return;
+
+        if (broker.PublishProgress(partitionId, watermark, logIndex))
             progress.LastPublishTicks = now;
     }
 

@@ -9,6 +9,12 @@ package Kahuna.Server.Replication.Protos;
 message PartitionStateHeader {
   int32 partitionId = 1;
   int64 upToIndex = 2;
+  // The exporter's unbounded commit ceiling for the partition: the highest commit timestamp of an entry admitted
+  // with no upper bound whose commit leads its entry time by the bound or more. Zero when none. The importer keeps
+  // it, so a watch resume below it is refused there too.
+  int32 unboundedCeilingNode = 3;
+  int64 unboundedCeilingPhysical = 4;
+  uint32 unboundedCeilingCounter = 5;
 }
 
 // One persistent lock in a whole-partition snapshot. Carries every field needed to reconstruct

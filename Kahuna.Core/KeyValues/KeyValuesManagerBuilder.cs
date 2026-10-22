@@ -546,22 +546,29 @@ internal sealed class KeyValuesManagerBuilder
         // change can move a watched scope to other partitions: either way a watch cannot continue as it was.
         KeyValueWatchBroker watchBroker = runtime.WatchBroker;
         partitionStateTransfer.AddStateReplacedObserver(partitionId => watchBroker.EndPartition(partitionId, KeyValueWatchLagReason.PartitionStateReplaced));
-        // A resume replays the retained log; a snapshot install leaves no per-entry history below its boundary, so the
-        // boundary is recorded (durably) for the replay to refuse.
-        PartitionInstallBoundaries installBoundaries = new(configuration.StoragePath, configuration.StorageRevision, logger);
-        partitionStateTransfer.AddInstalledThroughObserver(installBoundaries.Record);
-        runtime.InstallBoundaries = installBoundaries;
+        // A resume replays the retained log. A snapshot install leaves no per-entry history below its boundary, and an
+        // entry admitted with no bound can carry a commit the replay start does not cover: both are recorded (durably)
+        // for the replay to refuse. Every apply and restore of a value write or a prepare feeds the second.
+        PartitionHistoryBounds historyBounds = new(configuration.StoragePath, configuration.StorageRevision, logger);
+        historyBounds.AttachLogEnd(partitionId => raft.WalAdapter.GetMaxLog(partitionId));
+        partitionStateTransfer.AttachHistoryBounds(historyBounds.RecordInstall, historyBounds.UnboundedCeiling);
+        replicator.HistoryBounds = historyBounds;
+        restorer.HistoryBounds = historyBounds;
+        preparedIntentStore.AttachCommitObserver(historyBounds.ObserveCommit);
+        runtime.HistoryBounds = historyBounds;
 
-        KeyValueWatchReplayer replayer = new(raft, replicationDispatcher.LiveIndex, installBoundaries, configuration.CommitAdmissionLagMs > 0, logger);
+        KeyValueWatchReplayer replayer = new(
+            raft, replicationDispatcher.LiveIndex, historyBounds, configuration.CommitAdmissionLagMs > 0, logger,
+            configuration.WatchMaxConcurrentReplays);
 
-        watchService = new(watchBroker, raft, rangeMapStore, keySpaceRegistry, ClientEndpointAdvertiserFactory.Create(raft, configuration), replayer);
+        watchService = new(watchBroker, raft, rangeMapStore, keySpaceRegistry, ClientEndpointAdvertiserFactory.Create(raft, configuration), replayer, configuration.WatchMaxCapacity);
         replicationDispatcher.RangeMapApplied = watchService.OnRangeMapApplied;
 
         // Progress watermarks exist only under the commit admission window: without it a low commit timestamp can
         // reach a partition's log after higher ones, and no watermark would hold.
         if (configuration.CommitAdmissionLagMs > 0)
         {
-            runtime.WatchWatermarks = new KeyValueWatchWatermarks(watchBroker, preparedIntentStore, configuration.CommitAdmissionLagMs);
+            runtime.WatchWatermarks = new KeyValueWatchWatermarks(watchBroker, preparedIntentStore, configuration.CommitAdmissionLagMs, historyBounds);
             watchBroker.TracksTransactionEnds = true;
 
             actorSystem.Spawn<WatchProgressTickActor, WatchProgressTickRequest>(

@@ -71,6 +71,10 @@ internal static class BootstrapHelper
     /// index, and a foreign chain's indexes describe another cluster's log. A manifest with no cluster id
     /// (taken before an id was configured) is accepted, as everywhere else in the catalog.
     /// </param>
+    /// <param name="recordSeedBoundary">
+    /// Called with each seeded partition and its checkpoint index, after the WAL boundary landed. The seeded state
+    /// has no per-entry history below that index, which a watch resume must know; a throw fails the bootstrap.
+    /// </param>
     /// <returns>Statistics from the WAL segment replay phase.</returns>
     /// <exception cref="BackupDriverException">
     /// Thrown when <paramref name="targetTime"/> is outside the PITR window or the chain is invalid.
@@ -87,7 +91,8 @@ internal static class BootstrapHelper
         DateTime nowUtc,
         TimeSpan baseSnapshotInterval = default,
         byte[]? manifestMacKey = null,
-        string? clusterId = null)
+        string? clusterId = null,
+        Action<int, long>? recordSeedBoundary = null)
     {
         targetTime = ValidateChainForSeed(chain, targetTime, manifestMacKey, clusterId);
         EnsureWithinPitrWindow(targetTime, pitrWindow, nowUtc, baseSnapshotInterval);
@@ -97,7 +102,7 @@ internal static class BootstrapHelper
 
         // Pin the WAL adapter at the per-partition applied high-water mark so the Raft
         // layer presents this node at the correct index when it joins.
-        SeedWalCheckpoints(chain, targetTime, backend, walAdapter);
+        SeedWalCheckpoints(chain, targetTime, backend, walAdapter, recordSeedBoundary);
 
         return restoreResult;
     }
@@ -221,7 +226,8 @@ internal static class BootstrapHelper
         IReadOnlyList<BackupManifest> chain,
         HLCTimestamp targetTime,
         IPersistenceBackend backend,
-        IWAL walAdapter)
+        IWAL walAdapter,
+        Action<int, long>? recordSeedBoundary)
     {
         // Per-partition: the highest ToIndex/ToTerm where ToHlc ≤ targetTime.
         Dictionary<int, (long index, HLCTimestamp hlc, long term)> safeWater = [];
@@ -294,6 +300,10 @@ internal static class BootstrapHelper
             // restart replay window from the lower of the two. Never lowered: a floor the store already
             // vouched for stays.
             floors.Add((partitionId, Math.Max(backend.GetDurabilityFloor(partitionId), index)));
+
+            // The checkpoint row stands in for every entry below it, so a replay must not take it as proof of
+            // history: the index is recorded as the partition's install boundary.
+            recordSeedBoundary?.Invoke(partitionId, index);
         }
 
         // Stored after every WAL boundary landed, so a failure between the two leaves the floor stale-low

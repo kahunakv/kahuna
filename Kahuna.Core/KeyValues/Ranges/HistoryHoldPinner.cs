@@ -5,15 +5,16 @@ using Nixie;
 using Kommander;
 using Kommander.Time;
 
-using Kahuna.Server.Persistence.Pitr;
+using Kahuna.Server.KeyValues.Watch;
 
 namespace Kahuna.Server.KeyValues.Ranges;
 
 /// <summary>
 /// Keeps this replica's WAL retained for the history holds of the partitions it hosts. For each hosted data partition
-/// that has a registered hold, the pinner keeps exactly one Kommander retention hold at the first committed index whose
-/// entry time is at or after the lowest held timestamp minus <see cref="CommitAdmission.MaxClockLeadMs"/>: every event
-/// with a commit timestamp above a held timestamp W comes from an entry whose time is above <c>W − MaxClockLeadMs</c>.
+/// that has a registered hold, the pinner keeps exactly one Kommander retention hold at the lowest index a resume from
+/// the lowest held timestamp reads (<see cref="IndexFor"/>): every event with a commit timestamp above a held timestamp
+/// W comes from an entry whose time is above <c>W − MaxClockLeadMs</c>, and the replay also reads the entry before the
+/// first such entry.
 ///
 /// <para><b>Order.</b> A new handle is acquired before the old one is disposed, so the pin never drops in between.
 /// Kommander composes retention holds by minimum, so this pin never weakens a backup's or the PITR horizon's.</para>
@@ -131,19 +132,18 @@ internal sealed class HistoryHoldPinner : IDisposable
     }
 
     /// <summary>
-    /// The first committed index a resume from <paramref name="timestamp"/> can need on this replica: the first entry
-    /// whose time is at or after <c>timestamp − MaxClockLeadMs</c>, or the next index when every retained entry is
-    /// older than that.
+    /// The lowest index a resume from <paramref name="timestamp"/> reads on this replica: the entry before the replay's
+    /// first index (<see cref="KeyValueWatchReplayer.FirstReplayIndex"/>), which the replay reads as proof that it did
+    /// not start after missing history; or, when every retained entry is older than the replay start, the last entry,
+    /// which an empty replay reads for the same proof.
     /// </summary>
     internal long IndexFor(int partitionId, HLCTimestamp timestamp)
     {
-        HLCTimestamp start = new(timestamp.N, timestamp.L - CommitAdmission.MaxClockLeadMs, timestamp.C);
+        long first = KeyValueWatchReplayer.FirstReplayIndex(raft.WalAdapter, partitionId, timestamp);
+        if (first > 0)
+            return Math.Max(1, first - 1);
 
-        long index = LogTimeIndex.FirstIndexAtOrAfter(raft.WalAdapter, partitionId, start);
-        if (index > 0)
-            return index;
-
-        return Math.Max(1, raft.WalAdapter.GetMaxLog(partitionId) + 1);
+        return Math.Max(1, raft.WalAdapter.GetMaxLog(partitionId));
     }
 
     private void Unpin(int partitionId)

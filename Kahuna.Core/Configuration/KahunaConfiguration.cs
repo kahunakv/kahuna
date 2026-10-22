@@ -957,6 +957,27 @@ public sealed class KahunaConfiguration
     /// <summary>The most history holds the cluster's registry may hold. Zero means no bound. Defaults to 65536.</summary>
     public int HistoryHoldMaxTotal { get; set; } = 65_536;
 
+    /// <summary>The largest frame capacity a key-value watch may ask for. A request above it is refused as invalid,
+    /// so a caller cannot make the node buffer without bound. Defaults to 65536.</summary>
+    public int WatchMaxCapacity { get; set; } = 65_536;
+
+    /// <summary>The bytes of keys and values one key-value watch may buffer for a slow reader (live frames, frames
+    /// held back during a replay, and frames held behind a pending intent). A watch over it ends with an overflow.
+    /// Defaults to 64 MiB.</summary>
+    public long WatchMaxBufferedBytes { get; set; } = 64L * 1024 * 1024;
+
+    /// <summary>The most key-value watches open on the node at once, over every surface. Zero means no bound.
+    /// Defaults to 65536.</summary>
+    public int WatchMaxPerNode { get; set; } = 65_536;
+
+    /// <summary>The most watches one gRPC watch call may hold open at once (one call carries many watches, which
+    /// HTTP/2 stream limits do not count). Zero means no bound. Defaults to 1024.</summary>
+    public int WatchMaxPerCall { get; set; } = 1_024;
+
+    /// <summary>The most watch replays (one per resumed partition) the node runs at once. A resume that finds no
+    /// free slot is refused with a retry. Zero means no bound. Defaults to 64.</summary>
+    public int WatchMaxConcurrentReplays { get; set; } = 64;
+
     /// <summary>
     /// Keeps the origin label a transaction names at start (what produced its writes) and writes it into every
     /// prepared intent of the transaction, so watch events carry it. Off by default: an older node skips the field,

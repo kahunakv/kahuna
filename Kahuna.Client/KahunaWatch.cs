@@ -22,9 +22,10 @@ namespace Kahuna.Client;
 /// <see cref="KahunaClient.WatchKeyValues"/> returns it. A write committed after that call returned produces an
 /// event, once the serving replica applied it.</para>
 ///
-/// <para><b>Delivery.</b> Delivery is at-least-once. For one key, the first delivery of each revision arrives in
-/// revision order, but a repeat of an older revision can arrive later, so a consumer drops an event whose revision
-/// is at or below the last revision it holds for that key. Across keys no order is promised, and events of
+/// <para><b>Delivery.</b> Delivery is at-least-once. For one key, the first delivery of each mutation arrives in
+/// order, but a repeat of an older one can arrive later, so a consumer drops an event that
+/// <see cref="KeyValueWatchEvent.Supersedes"/> does not report newer than the last event it holds for that key (an
+/// extend keeps the revision, so the revision alone is not enough). Across keys no order is promised, and events of
 /// different partitions can interleave in any order.</para>
 ///
 /// <para><b>Endings.</b> The stream ends with one terminal frame and nothing after it:
@@ -40,8 +41,10 @@ namespace Kahuna.Client;
 /// the node count), the watch runs on several nodes, each limited to the partitions it hosts. A terminal frame from
 /// any of them ends the whole watch and closes the others.</para>
 ///
-/// <para><b>Resume.</b> The watch keeps the last progress watermark of each partition (<see cref="Watermarks"/>);
-/// a consumer that stores it can open a later watch from it (<see cref="KeyValueWatchRequest.ResumeFrom"/>). With
+/// <para><b>Resume.</b> The watch keeps the last progress watermark of each partition the reader was handed
+/// (<see cref="Watermarks"/>): every event below it was handed to the reader before it. A consumer stores it together
+/// with the state it built from those events, and opens a later watch from it
+/// (<see cref="KeyValueWatchRequest.ResumeFrom"/>). With
 /// automatic resume on, a node stream that ends with <see cref="KeyValueWatchFrameType.Lagged"/> (overflow, a dropped
 /// connection, a shutdown, a replaced partition state, a failed apply) is reopened from those watermarks, and the node
 /// replays what was missed: the consumer sees no lagged frame, but can see events again. A stream is resumed only when
@@ -72,7 +75,12 @@ public sealed class KahunaWatch : IAsyncEnumerable<KeyValueWatchFrame>, IAsyncDi
 
     private readonly KahunaWatchResumer? resumer;
 
+    // The last watermark the reader was handed per partition: the public checkpoint.
     private readonly ConcurrentDictionary<int, HLCTimestamp> watermarks = new();
+
+    // The last watermark a node stream delivered per partition, ahead of what the reader took: the automatic resume
+    // reopens from it, because the frames between the two are still in the merge buffer and survive the resume.
+    private readonly ConcurrentDictionary<int, HLCTimestamp> received = new();
 
     private KeyValueWatchFrame? terminal;
 
@@ -97,9 +105,10 @@ public sealed class KahunaWatch : IAsyncEnumerable<KeyValueWatchFrame>, IAsyncDi
     /// <summary>The nodes that serve the watch.</summary>
     public IReadOnlyList<string> Endpoints { get; }
 
-    /// <summary>The last progress watermark received for each partition: no event at or below it arrives later on
-    /// that partition. The resume cursor of the partition. Empty while the nodes send no progress (the commit
-    /// admission window is off).</summary>
+    /// <summary>The last progress watermark the reader was handed for each partition: no event at or below it arrives
+    /// later on that partition, and every earlier one was handed to the reader first. The resume cursor of the
+    /// partition, once the consumer processed what it read. Empty until the reader takes a progress frame, and while
+    /// the nodes send none (the commit admission window is off).</summary>
     public IReadOnlyDictionary<int, HLCTimestamp> Watermarks => new Dictionary<int, HLCTimestamp>(watermarks);
 
     /// <summary>
@@ -113,7 +122,13 @@ public sealed class KahunaWatch : IAsyncEnumerable<KeyValueWatchFrame>, IAsyncDi
         while (await reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
         {
             while (reader.TryRead(out KeyValueWatchFrame? frame))
+            {
+                // Advanced here, not when the frame arrived: the frames before it were handed to the reader already.
+                if (frame.Type == KeyValueWatchFrameType.Progress)
+                    Advance(watermarks, frame);
+
                 yield return frame;
+            }
         }
 
         KeyValueWatchFrame? end = Volatile.Read(ref terminal);
@@ -162,7 +177,7 @@ public sealed class KahunaWatch : IAsyncEnumerable<KeyValueWatchFrame>, IAsyncDi
                     consecutiveResumes = 0;
 
                     if (frame.Type == KeyValueWatchFrameType.Progress)
-                        watermarks.AddOrUpdate(frame.PartitionId, frame.Timestamp, (_, known) => frame.Timestamp > known ? frame.Timestamp : known);
+                        Advance(received, frame);
 
                     await merged.Writer.WriteAsync(frame, stop.Token).ConfigureAwait(false);
                 }
@@ -216,6 +231,9 @@ public sealed class KahunaWatch : IAsyncEnumerable<KeyValueWatchFrame>, IAsyncDi
             or KeyValueWatchLagReason.PartitionStateReplaced
             or KeyValueWatchLagReason.ApplyDiscontinuity;
 
+    private static void Advance(ConcurrentDictionary<int, HLCTimestamp> cursors, KeyValueWatchFrame progress) =>
+        cursors.AddOrUpdate(progress.PartitionId, progress.Timestamp, (_, known) => progress.Timestamp > known ? progress.Timestamp : known);
+
     // Every partition of the stream needs a cursor: one with none could have events the consumer never received,
     // below any timestamp the client could pick.
     private bool TryCursors(IReadOnlyList<int> partitions, out Dictionary<int, HLCTimestamp> cursors)
@@ -224,7 +242,7 @@ public sealed class KahunaWatch : IAsyncEnumerable<KeyValueWatchFrame>, IAsyncDi
 
         foreach (int partitionId in partitions)
         {
-            if (!watermarks.TryGetValue(partitionId, out HLCTimestamp cursor))
+            if (!received.TryGetValue(partitionId, out HLCTimestamp cursor))
                 return false;
 
             cursors[partitionId] = cursor;

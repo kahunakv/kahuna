@@ -689,7 +689,11 @@ internal sealed partial class KeyValuesManager : IDisposable
     internal void SignalHistoryHoldPinner() => runtime.HistoryHoldPinnerActor?.Send(new HistoryHoldPinnerRequest());
 
     /// <summary>The install boundaries a watch resume must start above. Test access.</summary>
-    internal Watch.PartitionInstallBoundaries InstallBoundariesForTests => runtime.InstallBoundaries!;
+    internal Watch.PartitionHistoryBounds HistoryBoundsForTests => runtime.HistoryBounds!;
+
+    /// <summary>Records that a PITR bootstrap seeded <paramref name="partitionId"/> through
+    /// <paramref name="index"/>: a watch resume must not replay across it. Durable when it returns.</summary>
+    internal void RecordSeedBoundary(int partitionId, long index) => runtime.HistoryBounds?.Record(partitionId, index);
 
     /// <summary>The history hold registry. Test access.</summary>
     internal HistoryHoldStore HistoryHoldStoreForTests => runtime.HistoryHoldStore;
@@ -729,6 +733,7 @@ internal sealed partial class KeyValuesManager : IDisposable
         rangeSplitTrigger?.Dispose();
         durableGaugeMeter.Dispose();
         runtime.WatchWatermarks?.Dispose();
+        runtime.HistoryBounds?.Flush();
         runtime.HistoryHoldPinner?.Dispose();
         runtime.HistoryHoldStore.Dispose();
         admissionGaugeMeter.Dispose();

@@ -24,7 +24,7 @@ public sealed partial class KahunaManager
         // see BackupFacade.BootstrapAsync and BootstrapHelper.BootstrapNodeAsync.
         BackupFacade.BootstrapAsync(
             configuration, backupDir, leafBackupId, targetTime, persistenceBackend, walAdapter,
-            pitrWindow, baseSnapshotInterval, FlushPersistenceAsync, logger);
+            pitrWindow, baseSnapshotInterval, FlushPersistenceAsync, logger, keyValues.RecordSeedBoundary);
 
     // ── Backup / PITR ──────────────────────────────────────────────────────────────────────
 

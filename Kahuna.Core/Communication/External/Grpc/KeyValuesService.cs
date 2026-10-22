@@ -15,6 +15,7 @@ using Grpc.Core;
 using Kahuna.Communication.External.Grpc.KeyValues;
 using Kahuna.Server.Communication.Internode.Grpc;
 using Kahuna.Server.Communication;
+using Kahuna.Server.Configuration;
 using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions;
@@ -45,6 +46,11 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     private readonly KeyValueClientBatcher clientBatcher;
     
     private readonly KeyValueServerBatcher serverBatcher;
+
+    // The most watches one Watch call may hold open; zero for no limit.
+    private readonly int maxWatchesPerCall;
+
+    private static readonly KahunaConfiguration DefaultConfiguration = new();
     
     /// <summary>
     /// Constructor
@@ -52,11 +58,13 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <param name="keyValues"></param>
     /// <param name="gate"></param>
     /// <param name="logger"></param>
-    public KeyValuesService(IKahuna keyValues, NodeTransportGate gate, ILogger<IKahuna> logger)
+    /// <param name="configuration">The node's configuration, for the watch limits; null takes the defaults.</param>
+    public KeyValuesService(IKahuna keyValues, NodeTransportGate gate, ILogger<IKahuna> logger, KahunaConfiguration? configuration = null)
     {
         this.keyValues = keyValues;
         this.gate = gate;
         this.logger = logger;
+        maxWatchesPerCall = (configuration ?? DefaultConfiguration).WatchMaxPerCall;
         
         clientBatcher = new(this, logger);
         serverBatcher = new(this, logger);
@@ -2534,7 +2542,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     {
         try
         {
-            await new KeyValueWatchGrpcSession(keyValues, logger).RunAsync(requestStream, responseStream, context.CancellationToken);
+            await new KeyValueWatchGrpcSession(keyValues, logger, maxWatchesPerCall).RunAsync(requestStream, responseStream, context.CancellationToken);
         }
         catch (Exception ex) when (RetryableFailureClassifier.IsRetryable(ex) && !context.CancellationToken.IsCancellationRequested)
         {

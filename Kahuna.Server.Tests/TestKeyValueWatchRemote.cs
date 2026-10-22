@@ -11,6 +11,7 @@ using Kahuna.Communication.External.Rest;
 using Kahuna.Server.Communication;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues.Watch;
+using Kahuna.Shared.Communication.Grpc;
 using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
 using Kommander;
@@ -340,6 +341,77 @@ public sealed class TestKeyValueWatchRemote : BaseCluster
         }
     }
 
+    [Fact]
+    public async Task Grpc_BurstOfLargeValues_ReachesTheClient()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using HostedNode host = await HostedNode.StartAsync(loggerFactory, ct);
+        await using KahunaWatch watch = await host.Client("grpc").WatchKeyValues(new(KeyValueWatchScope.ForPrefix("burst|")), ct);
+
+        // 256 values of 128 KiB: 32 MiB in one burst, far above one message a client accepts by default.
+        int partition = watch.Partitions[0];
+        byte[] value = new byte[128 * 1024];
+        for (int i = 0; i < 256; i++)
+            host.Broker.Publish(partition, KeyValueWatchEventKind.Set, "burst|" + i, value, 1, HLCTimestamp.Zero, new(1, 10_000 + i, 0), HLCTimestamp.Zero, i + 1);
+
+        Assert.Equal(256, (await ReadEvents(watch, 256, ct)).Count);
+    }
+
+    [Fact]
+    public async Task Grpc_BurstOfLargeValues_FitsTheDefaultReceiveLimit()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using HostedNode host = await HostedNode.StartAsync(loggerFactory, ct);
+
+        // A plain channel keeps the 4 MiB default receive limit: only the server's bound on a message keeps it whole.
+        using var call = host.GrpcClient().Watch(cancellationToken: ct);
+        await call.RequestStream.WriteAsync(Open(1, "burst|"), ct);
+        WatchFrameReader reader = new(call.ResponseStream);
+        await reader.Read(1, ct);
+
+        int partition = host.Broker.OpenWatches()[0].Partitions[0];
+        byte[] value = new byte[128 * 1024];
+        for (int i = 0; i < 256; i++)
+            host.Broker.Publish(partition, KeyValueWatchEventKind.Set, "burst|" + i, value, 1, HLCTimestamp.Zero, new(1, 10_000 + i, 0), HLCTimestamp.Zero, i + 1);
+
+        Assert.Equal(256, (await reader.Read(256, ct)).Count);
+    }
+
+    [Fact]
+    public async Task Grpc_CapacityAboveTheNodeLimit_IsRefusedAsInvalid()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using HostedNode host = await HostedNode.StartAsync(loggerFactory, ct);
+
+        using var call = host.GrpcClient().Watch(cancellationToken: ct);
+        GrpcWatchRequest request = Open(1, "capacity|");
+        request.Capacity = int.MaxValue;
+        await call.RequestStream.WriteAsync(request, ct);
+
+        KeyValueWatchFrame answer = KeyValueWatchWire.FromGrpc((await new WatchFrameReader(call.ResponseStream).Read(1, ct))[0]);
+        Assert.Equal(KeyValueWatchFrameType.Refused, answer.Type);
+        Assert.Equal(KeyValueResponseType.InvalidInput, answer.Refusal);
+        Assert.Equal(0, host.OpenWatches);
+    }
+
+    [Fact]
+    public async Task Grpc_OneCall_HoldsAtMostItsLimitOfWatches()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using HostedNode host = await HostedNode.StartAsync(loggerFactory, ct, new KahunaConfiguration { WatchMaxPerCall = 2 });
+
+        using var call = host.GrpcClient().Watch(cancellationToken: ct);
+        WatchFrameReader reader = new(call.ResponseStream);
+
+        for (long id = 1; id <= 3; id++)
+            await call.RequestStream.WriteAsync(Open(id, $"limit{id}|"), ct);
+
+        List<KeyValueWatchFrame> answers = (await reader.Read(3, ct)).ConvertAll(KeyValueWatchWire.FromGrpc);
+        Assert.Equal(2, answers.Count(a => a.Type == KeyValueWatchFrameType.Opened));
+        Assert.Single(answers, a => a.Type == KeyValueWatchFrameType.Refused && a.Refusal == KeyValueResponseType.WatchLimitReached);
+        Assert.Equal(2, host.OpenWatches);
+    }
+
     private static GrpcWatchRequest Open(long watchId, string prefix) => new()
     {
         Type = GrpcWatchRequestType.WatchRequestOpen,
@@ -447,7 +519,7 @@ public sealed class TestKeyValueWatchRemote : BaseCluster
         /// <summary>Open watches on the node, each counted once whatever partitions it covers.</summary>
         public int OpenWatches => Broker.OpenWatches().Count;
 
-        public static async Task<HostedNode> StartAsync(ILoggerFactory loggerFactory, CancellationToken ct)
+        public static async Task<HostedNode> StartAsync(ILoggerFactory loggerFactory, CancellationToken ct, KahunaConfiguration? serverConfiguration = null)
         {
             EmbeddedKahunaNode node = new(new() { Storage = "memory", WalStorage = "memory", InitialPartitions = 2 }, loggerFactory);
             await node.StartAsync(ct);
@@ -459,7 +531,7 @@ public sealed class TestKeyValueWatchRemote : BaseCluster
             builder.Logging.ClearProviders();
             builder.Services.AddSingleton(node.Kahuna);
             builder.Services.AddSingleton(node.Raft);
-            builder.Services.AddSingleton(new KahunaConfiguration());
+            builder.Services.AddSingleton(serverConfiguration ?? new KahunaConfiguration());
             builder.Services.AddSingleton(NodeTransportGate.Disabled);
             builder.Services.AddSingleton<ILogger<IKahuna>>(NullLogger<IKahuna>.Instance);
             builder.Services.AddGrpc(static options => options.EnableDetailedErrors = true);

@@ -19,6 +19,10 @@ namespace Kahuna.Server.Tests;
 /// </summary>
 internal sealed class ProposeOutcomeStubRaft : IRaft
 {
+    /// <summary>Runs after a single-payload propose is recorded and before it answers, with its payload: a test can
+    /// apply entries here to model applies that land while the proposal is in flight.</summary>
+    public Func<byte[], Task>? BeforeProposeReturn { get; set; }
+
     public string LocalEndpoint { get; set; } = "node1:2070";
 
     public string LeaderEndpoint { get; set; } = "node2:2070";
@@ -44,7 +48,7 @@ internal sealed class ProposeOutcomeStubRaft : IRaft
 
     private bool lastVerdict;
 
-    public Task<RaftReplicationResult> ReplicateLogs(int partitionId, string type, byte[] data, bool autoCommit = true, long expectedGeneration = 0, long expectedTerm = 0, CancellationToken cancellationToken = default)
+    public async Task<RaftReplicationResult> ReplicateLogs(int partitionId, string type, byte[] data, bool autoCommit = true, long expectedGeneration = 0, long expectedTerm = 0, CancellationToken cancellationToken = default)
     {
         ProposedPayloads.Add(data);
 
@@ -54,7 +58,10 @@ internal sealed class ProposeOutcomeStubRaft : IRaft
         RaftOperationStatus status = lastProposeStatus;
         bool success = status == RaftOperationStatus.Success;
 
-        return Task.FromResult(new RaftReplicationResult(success, status, success ? new HLCTimestamp(1, 1, 1) : HLCTimestamp.Zero, success ? ProposeCalls : -1));
+        if (BeforeProposeReturn is not null)
+            await BeforeProposeReturn(data);
+
+        return new RaftReplicationResult(success, status, success ? new HLCTimestamp(1, 1, 1) : HLCTimestamp.Zero, success ? ProposeCalls : -1);
     }
 
     public async ValueTask<bool> ConfirmLocalApplicationAsync(int partitionId, CancellationToken cancellationToken = default)
@@ -118,7 +125,7 @@ internal sealed class ProposeOutcomeStubRaft : IRaft
     public Task<(bool success, RaftOperationStatus status, long commitLogId)> RollbackLogs(int partitionId, HLCTimestamp ticketId, CancellationToken cancellationToken = default) => throw new NotImplementedException();
     public void SetMinRetainIndex(int partitionId, long index) => throw new NotImplementedException();
     public IDisposable AcquireRetentionHold(int partitionId, long index) => throw new NotImplementedException();
-    public int GetLocalNodeId() => throw new NotImplementedException();
+    public int GetLocalNodeId() => 1;
     public string GetLocalNodeName() => throw new NotImplementedException();
     public ValueTask<long?> GetFollowerLagAsync(int partitionId, string followerEndpoint) => throw new NotImplementedException();
     public ValueTask<string> WaitForLeaderStableAsync(int partitionId, TimeSpan minStableFor, CancellationToken cancellationToken = default) => throw new NotImplementedException();
@@ -164,7 +171,7 @@ internal sealed class ProposeOutcomeStubRaft : IRaft
     public IWAL WalAdapter => throw new NotImplementedException();
     public ICommunication Communication => throw new NotImplementedException();
     public IDiscovery Discovery => throw new NotImplementedException();
-    public HybridLogicalClock HybridLogicalClock => throw new NotImplementedException();
+    public HybridLogicalClock HybridLogicalClock { get; } = new();
     public IRaftReadScheduler ReadScheduler => throw new NotImplementedException();
     public IRaftWalScheduler WalScheduler => throw new NotImplementedException();
 

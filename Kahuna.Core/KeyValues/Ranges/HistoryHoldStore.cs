@@ -38,9 +38,13 @@ internal readonly record struct HistoryHoldLimits(int MaxLeaseMs, int MaxHoldsPe
 /// id ever used, and Kommander keeps a floor of the highest id ever created), so the id alone identifies one
 /// incarnation. The reaper purges the holds of a partition that is retired or no longer exists.</para>
 ///
-/// <para><b>Single writer.</b> <see cref="AcquireAsync"/>, <see cref="RenewAsync"/>, <see cref="ReleaseAsync"/> and
-/// <see cref="PurgeAsync"/> are the only mutators, serialized by <see cref="mutateGate"/> locally and by the meta Raft
-/// log globally. Followers and restore replays call <see cref="Replicate"/> / <see cref="Restore"/>.</para>
+/// <para><b>Single writer.</b> The ordered apply (<see cref="Replicate"/> / <see cref="Restore"/>, and the meta state
+/// transfer) is the only writer of the registry. <see cref="AcquireAsync"/>, <see cref="RenewAsync"/>,
+/// <see cref="ReleaseAsync"/> and <see cref="PurgeAsync"/> only propose: each confirms meta-partition leadership first,
+/// so the applied registry it decides on covers every committed entry, proposes a delta, and waits until this node's
+/// apply reaches the proposed entry. They never install a registry of their own, which could replace entries the
+/// apply installed while the proposal was in flight. They are serialized by <see cref="mutateGate"/> locally and by
+/// the meta Raft log globally.</para>
 /// </summary>
 internal sealed class HistoryHoldStore : IDisposable
 {
@@ -82,6 +86,15 @@ internal sealed class HistoryHoldStore : IDisposable
 
     // Whether a partition still exists and is not retired, for the purge. Attached once the range map exists.
     private Func<int, bool>? partitionLive;
+
+    // The highest meta-log index this store applied, and the signal its waiters park on (replaced on every apply).
+    private long appliedIndex;
+
+    private TaskCompletionSource appliedSignal = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    // How long a mutation waits for its own entry to apply here before it answers anyway: the entry is committed, so
+    // the answer is right, only this node's registry is behind.
+    private static readonly TimeSpan ApplyWaitLimit = TimeSpan.FromSeconds(5);
 
     public HistoryHoldStore(IRaft raft, string? storagePath, string? storageRevision, ILogger<IKahuna> logger, HistoryHoldLimits limits, TimeSpan startupGraceWindow = default)
     {
@@ -182,10 +195,14 @@ internal sealed class HistoryHoldStore : IDisposable
         await mutateGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            // Confirmed leadership waits for the applied frontier to reach the commit frontier: the registry read below
+            // includes every committed purge, release and acquire, so a lapsed hold is revived only while registered.
+            if (!await ConfirmLeadership(ct).ConfigureAwait(false))
+                return HistoryHoldAnswer.Refused(KeyValueResponseType.MustRetry);
+
             HLCTimestamp now = Now();
 
             List<HistoryHold?> existing = new(partitions.Count);
-            bool revives = false;
 
             foreach (int partitionId in partitions.Distinct())
             {
@@ -193,20 +210,7 @@ internal sealed class HistoryHoldStore : IDisposable
                 if (match is not null && timestamp < match.Timestamp)
                     return HistoryHoldAnswer.Refused(KeyValueResponseType.InvalidInput);
 
-                revives |= match is not null && !match.IsLive(now);
                 existing.Add(match);
-            }
-
-            if (revives)
-            {
-                if (!await ConfirmLeadership(ct).ConfigureAwait(false))
-                    return HistoryHoldAnswer.Refused(KeyValueResponseType.MustRetry);
-
-                // The confirmation may have applied a committed purge or release: re-read.
-                now = Now();
-                existing.Clear();
-                foreach (int partitionId in partitions.Distinct())
-                    existing.Add(Find(holderId, partitionId));
             }
 
             int fresh = existing.Count(e => e is null);
@@ -228,7 +232,6 @@ internal sealed class HistoryHoldStore : IDisposable
             }
 
             HLCTimestamp expiry = AddMs(now, leaseMs);
-            Dictionary<string, HistoryHold> next = new(holds, StringComparer.Ordinal);
             HistoryHoldDeltaMessage delta = new();
             List<HistoryHoldInfo> touched = new(existing.Count);
 
@@ -238,7 +241,6 @@ internal sealed class HistoryHoldStore : IDisposable
                 HistoryHold? match = existing[index++];
                 HistoryHold hold = new(match?.HoldId ?? Guid.NewGuid().ToString("N"), holderId, partitionId, timestamp, expiry);
 
-                next[hold.HoldId] = hold;
                 delta.Entries.Add(new HistoryHoldDeltaEntry { Remove = false, Hold = ToMessage(hold) });
                 touched.Add(ToInfo(hold));
             }
@@ -246,7 +248,6 @@ internal sealed class HistoryHoldStore : IDisposable
             if (!await ReplicateAsync(delta, ct).ConfigureAwait(false))
                 return HistoryHoldAnswer.Refused(KeyValueResponseType.MustRetry);
 
-            Commit(next);
             return new(KeyValueResponseType.Set, touched);
         }
         finally
@@ -268,50 +269,34 @@ internal sealed class HistoryHoldStore : IDisposable
         await mutateGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            HLCTimestamp now = Now();
-            bool revives = false;
+            // Still registered must be proven against a fully applied registry: confirmed leadership waits for the
+            // applied frontier to reach the commit frontier, so the read below is authoritative.
+            if (!await ConfirmLeadership(ct).ConfigureAwait(false))
+                return HistoryHoldAnswer.Refused(KeyValueResponseType.MustRetry);
+
+            IReadOnlyDictionary<string, HistoryHold> current = holds;
 
             foreach (string holdId in holdIds)
             {
-                if (!holds.TryGetValue(holdId, out HistoryHold? hold))
+                if (!current.TryGetValue(holdId, out HistoryHold? hold))
                     return HistoryHoldAnswer.Refused(KeyValueResponseType.DoesNotExist);
 
                 if (timestamp != HLCTimestamp.Zero && timestamp < hold.Timestamp)
                     return HistoryHoldAnswer.Refused(KeyValueResponseType.InvalidInput);
-
-                revives |= !hold.IsLive(now);
             }
 
-            if (revives)
-            {
-                // Still registered must be proven against a fully applied registry: confirmed leadership waits for the
-                // applied frontier to reach the commit frontier, so the re-read below is authoritative.
-                if (!await ConfirmLeadership(ct).ConfigureAwait(false))
-                    return HistoryHoldAnswer.Refused(KeyValueResponseType.MustRetry);
-
-                foreach (string holdId in holdIds)
-                {
-                    if (!holds.ContainsKey(holdId))
-                        return HistoryHoldAnswer.Refused(KeyValueResponseType.DoesNotExist);
-                }
-
-                now = Now();
-            }
-
-            HLCTimestamp expiry = AddMs(now, leaseMs);
-            Dictionary<string, HistoryHold> next = new(holds, StringComparer.Ordinal);
+            HLCTimestamp expiry = AddMs(Now(), leaseMs);
             HistoryHoldDeltaMessage delta = new();
             List<HistoryHoldInfo> touched = new(holdIds.Count);
 
             foreach (string holdId in holdIds.Distinct(StringComparer.Ordinal))
             {
-                HistoryHold renewed = holds[holdId] with
+                HistoryHold renewed = current[holdId] with
                 {
                     LeaseExpiry = expiry,
-                    Timestamp = timestamp == HLCTimestamp.Zero ? holds[holdId].Timestamp : timestamp
+                    Timestamp = timestamp == HLCTimestamp.Zero ? current[holdId].Timestamp : timestamp
                 };
 
-                next[holdId] = renewed;
                 delta.Entries.Add(new HistoryHoldDeltaEntry { Remove = false, Hold = ToMessage(renewed) });
                 touched.Add(ToInfo(renewed));
             }
@@ -319,7 +304,6 @@ internal sealed class HistoryHoldStore : IDisposable
             if (!await ReplicateAsync(delta, ct).ConfigureAwait(false))
                 return HistoryHoldAnswer.Refused(KeyValueResponseType.MustRetry);
 
-            Commit(next);
             return new(KeyValueResponseType.Set, touched);
         }
         finally
@@ -338,29 +322,29 @@ internal sealed class HistoryHoldStore : IDisposable
         await mutateGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            if (!await ConfirmLeadership(ct).ConfigureAwait(false))
+                return HistoryHoldAnswer.Refused(KeyValueResponseType.MustRetry);
+
+            IReadOnlyDictionary<string, HistoryHold> current = holds;
+
             List<HistoryHold> found = [];
             foreach (string holdId in holdIds.Distinct(StringComparer.Ordinal))
             {
-                if (holds.TryGetValue(holdId, out HistoryHold? hold))
+                if (current.TryGetValue(holdId, out HistoryHold? hold))
                     found.Add(hold);
             }
 
             if (found.Count == 0)
                 return HistoryHoldAnswer.Refused(KeyValueResponseType.DoesNotExist);
 
-            Dictionary<string, HistoryHold> next = new(holds, StringComparer.Ordinal);
             HistoryHoldDeltaMessage delta = new();
 
             foreach (HistoryHold hold in found)
-            {
-                next.Remove(hold.HoldId);
                 delta.Entries.Add(new HistoryHoldDeltaEntry { Remove = true, Hold = new HistoryHoldMessage { HoldId = hold.HoldId } });
-            }
 
             if (!await ReplicateAsync(delta, ct).ConfigureAwait(false))
                 return HistoryHoldAnswer.Refused(KeyValueResponseType.MustRetry);
 
-            Commit(next);
             return new(KeyValueResponseType.Deleted, found.ConvertAll(ToInfo));
         }
         finally
@@ -412,22 +396,16 @@ internal sealed class HistoryHoldStore : IDisposable
             if (expired.Count == 0 && gone.Count == 0)
                 return 0;
 
-            Dictionary<string, HistoryHold> next = new(holds, StringComparer.Ordinal);
             HistoryHoldDeltaMessage delta = new();
 
             foreach (HistoryHold hold in expired.Concat(gone))
-            {
-                next.Remove(hold.HoldId);
                 delta.Entries.Add(new HistoryHoldDeltaEntry { Remove = true, Hold = new HistoryHoldMessage { HoldId = hold.HoldId } });
-            }
 
             if (!await ReplicateAsync(delta, ct).ConfigureAwait(false))
             {
                 logger.LogWarning("Failed to replicate the purge of {Count} history hold(s)", delta.Entries.Count);
                 return 0;
             }
-
-            Commit(next);
 
             if (expired.Count > 0)
                 Purged.Add(expired.Count, new KeyValuePair<string, object?>("reason", "expired"));
@@ -473,6 +451,7 @@ internal sealed class HistoryHoldStore : IDisposable
             }
 
             Commit(next);
+            NoteApplied(log.Id);
             return true;
         }
         catch (Exception ex)
@@ -508,6 +487,8 @@ internal sealed class HistoryHoldStore : IDisposable
         }
     }
 
+    // Proposes one delta and waits until this node's apply reaches it, so the caller's answer and this node's registry
+    // agree when it returns.
     private async Task<bool> ReplicateAsync(HistoryHoldDeltaMessage delta, CancellationToken ct)
     {
         RaftReplicationResult result = await raft.ReplicateLogs(
@@ -522,7 +503,50 @@ internal sealed class HistoryHoldStore : IDisposable
             return false;
         }
 
+        await WaitForApplyAsync(result.LogIndex, ct).ConfigureAwait(false);
         return true;
+    }
+
+    private void NoteApplied(long logIndex)
+    {
+        long current = Volatile.Read(ref appliedIndex);
+        while (logIndex > current)
+        {
+            long seen = Interlocked.CompareExchange(ref appliedIndex, logIndex, current);
+            if (seen == current)
+                break;
+
+            current = seen;
+        }
+
+        Interlocked.Exchange(ref appliedSignal, new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously)).TrySetResult();
+    }
+
+    private async Task WaitForApplyAsync(long logIndex, CancellationToken ct)
+    {
+        long deadline = Environment.TickCount64 + (long)ApplyWaitLimit.TotalMilliseconds;
+
+        while (Volatile.Read(ref appliedIndex) < logIndex)
+        {
+            Task signal = Volatile.Read(ref appliedSignal).Task;
+            if (Volatile.Read(ref appliedIndex) >= logIndex)
+                return;
+
+            long left = deadline - Environment.TickCount64;
+            if (left <= 0)
+            {
+                logger.LogWarning("History hold entry {LogIndex} committed but did not apply on this node within {Limit}", logIndex, ApplyWaitLimit);
+                return;
+            }
+
+            try
+            {
+                await signal.WaitAsync(TimeSpan.FromMilliseconds(left), ct).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+            }
+        }
     }
 
     private Task<bool> ConfirmLeadership(CancellationToken ct) =>

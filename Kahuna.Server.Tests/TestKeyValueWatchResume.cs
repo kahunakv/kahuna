@@ -80,7 +80,7 @@ public sealed class TestKeyValueWatchResume : BaseCluster
             Assert.Equal(["v4", "v5", "v6"], values);
             Assert.All(resumed.Frames().Where(f => f.Event is not null), f => Assert.True(f.Event!.CommitTimestamp > cursor));
             Assert.DoesNotContain(resumed.Frames(), f => f.IsTerminal);
-            resumed.AssertRevisionsNeverGoBack(key);
+            resumed.AssertMutationsInOrder(key);
         });
     }
 
@@ -121,7 +121,7 @@ public sealed class TestKeyValueWatchResume : BaseCluster
                 Assert.Contains(i.ToString(), delivered);
 
             Assert.DoesNotContain(resumed.Frames(), f => f.IsTerminal);
-            resumed.AssertRevisionsNeverGoBack(key);
+            resumed.AssertMutationsInOrder(key);
         });
     }
 
@@ -175,7 +175,7 @@ public sealed class TestKeyValueWatchResume : BaseCluster
             await SetValue(nodes[0], group + "k", "v", ct);
             int partitionId = nodes[0].KeyValues.LocateDurablePartition(group + "k").PartitionId;
 
-            nodes[1].KeyValues.InstallBoundariesForTests.Record(partitionId, long.MaxValue / 2);
+            nodes[1].KeyValues.HistoryBoundsForTests.Record(partitionId, long.MaxValue / 2);
 
             await using FrameCollector resumed = await Open(nodes[1], new(KeyValueWatchScope.ForPrefix(group), ResumeFrom: new HLCTimestamp(1, 1, 0)), ct);
             KeyValueWatchFrame end = await resumed.WaitForEnd();
@@ -305,6 +305,93 @@ public sealed class TestKeyValueWatchResume : BaseCluster
             TryDeleteDir(storagePath);
             TryDeleteDir(walPath);
         }
+    }
+
+    [Fact]
+    public async Task ClientWatermarks_AdvanceOnlyPastFramesTheReaderTook()
+    {
+        await WithCluster(1_000, async (nodes, ct) =>
+        {
+            string group = $"cursor{Guid.NewGuid():N}|";
+            Dictionary<string, IKahuna> urls = new() { ["node"] = nodes[0] };
+            KahunaClient client = new(["node"], communication: new InProcessKahunaCommunication(urls));
+            await using KahunaWatch watch = await client.WatchKeyValues(new(KeyValueWatchScope.ForPrefix(group)), ct);
+
+            await SetValue(nodes[0], group + "k", "unread", ct);
+
+            // Progress arrives at the client, but the reader has not taken the event before it: no checkpoint yet.
+            await Task.Delay(2_500, ct);
+            Assert.Empty(watch.Watermarks);
+
+            // Reading through the first progress frame hands the event over first, then the checkpoint moves.
+            bool sawEvent = false;
+            await foreach (KeyValueWatchFrame frame in watch.WithCancellation(ct))
+            {
+                if (frame.Event?.Key == group + "k")
+                    sawEvent = true;
+
+                if (frame.Type == KeyValueWatchFrameType.Progress)
+                {
+                    Assert.True(sawEvent, "a progress frame came before the event below it");
+                    Assert.Equal(frame.Timestamp, watch.Watermarks[frame.PartitionId]);
+                    break;
+                }
+            }
+        });
+    }
+
+    [Fact]
+    public async Task LiveTail_DeliversNothingAtOrBelowTheCursor()
+    {
+        await WithCluster(1_000, async (nodes, ct) =>
+        {
+            string group = $"future{Guid.NewGuid():N}|";
+            await SetValue(nodes[0], group + "seed", "seed", ct);
+
+            // A cursor ahead of this replica: the consumer already holds everything up to it (from another replica).
+            HLCTimestamp cursor = new(1, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 3_000, 0);
+            await using FrameCollector watch = await Open(nodes[0], new(KeyValueWatchScope.ForPrefix(group), ResumeFrom: cursor), ct);
+
+            await WaitUntilAsync(() => !watch.IsReplaying());
+            await SetValue(nodes[0], group + "k", "below-cursor", ct);
+            await Task.Delay(500, ct);
+
+            Assert.DoesNotContain(watch.Frames(), f => f.Event is { } e && e.CommitTimestamp <= cursor);
+            Assert.DoesNotContain(watch.Frames(), f => f.Type == KeyValueWatchFrameType.Progress && f.Timestamp <= cursor);
+        });
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public async Task DirectWrite_AfterADeferredCommit_ArrivesAfterTheCommitEvent(int watchOn)
+    {
+        await WithCluster(1_000, async (nodes, ct) =>
+        {
+            string group = $"order{Guid.NewGuid():N}|";
+            string key = group + "k";
+            await using FrameCollector watch = await Open(nodes[watchOn], new(KeyValueWatchScope.ForKey(key)), ct);
+
+            // The transaction commits (its value is visible) but its settle waits; a write outside a transaction then
+            // lands over the committed value before the settle reports the commit.
+            using ResolutionGate gate = new(nodes[0]);
+            KeyValueTransactionResult committed = await RetryOnMustRetry(nodes[0], Encoding.UTF8.GetBytes("BEGIN SET @k 'first' COMMIT END"), null, [new KeyValueParameter { Key = "@k", Value = key }]);
+            Assert.Equal(KeyValueResponseType.Set, committed.Type);
+
+            await SetValue(nodes[0], key, "second", ct);
+
+            // Held behind the pending intent until it settles.
+            await Task.Delay(300, ct);
+            Assert.Empty(watch.Events(key));
+
+            gate.Dispose();
+            await watch.WaitUntil(c => c.Events(key).Count >= 2);
+
+            List<KeyValueWatchEvent> events = watch.Events(key);
+            Assert.Equal("first", Encoding.UTF8.GetString(events[0].Value!));
+            Assert.Equal("second", Encoding.UTF8.GetString(events[1].Value!));
+            watch.AssertMutationsInOrder(key);
+        });
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────────
@@ -437,21 +524,24 @@ public sealed class TestKeyValueWatchResume : BaseCluster
             return frames.First(f => f.IsTerminal);
         }
 
-        /// <summary>The first delivery of each revision of a key arrives in revision order.</summary>
-        public void AssertRevisionsNeverGoBack(string key)
+        /// <summary>The first delivery of each mutation of a key arrives in commit order; a repeat is ignored.</summary>
+        public void AssertMutationsInOrder(string key)
         {
-            long highest = long.MinValue;
-            HashSet<long> seen = [];
+            KeyValueWatchEvent? last = null;
+            HashSet<(long, HLCTimestamp)> seen = [];
 
             foreach (KeyValueWatchEvent e in Events(key))
             {
-                if (!seen.Add(e.Revision))
+                if (!seen.Add((e.Revision, e.CommitTimestamp)))
                     continue;
 
-                Assert.True(e.Revision > highest, $"revision {e.Revision} first arrived after revision {highest}");
-                highest = e.Revision;
+                Assert.True(e.Supersedes(last), $"revision {e.Revision} at {e.CommitTimestamp} first arrived after revision {last?.Revision} at {last?.CommitTimestamp}");
+                last = e;
             }
         }
+
+        /// <summary>Whether the watch still replays any partition.</summary>
+        public bool IsReplaying() => watch.Partitions.Any(watch.IsReplaying);
 
         public async ValueTask DisposeAsync()
         {

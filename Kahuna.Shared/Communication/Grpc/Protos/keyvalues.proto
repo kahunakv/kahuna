@@ -1904,6 +1904,8 @@ enum GrpcKeyValueResponseType {
   // exists to report. The refusal is permanent: a retry gets the same answer.
   TYPE_WATCH_UNSUPPORTED_ON_EPHEMERAL = 109;
   TYPE_HISTORY_HOLD_LIMIT_REACHED = 110;
+  // A watch was refused because the node, or the gRPC call, already holds its maximum number of open watches.
+  TYPE_WATCH_LIMIT_REACHED = 111;
 }
 
 enum GrpcKeyValueDurability {

@@ -113,6 +113,23 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
     /// <summary>Registers an installed-boundary observer; see <see cref="installedThroughObservers"/>.</summary>
     internal void AddInstalledThroughObserver(Action<int, long> observer) => installedThroughObservers.Add(observer);
 
+    // Records an install's boundary and the exporter's unbounded commit ceiling durably. Runs before the install
+    // clears its incomplete marker: a failure leaves the install incomplete for the sender to drive again, so no
+    // install can succeed without its record.
+    private Action<int, long, HLCTimestamp>? installRecorder;
+
+    // The exporter's unbounded commit ceiling of a partition, written into the snapshot header.
+    private Func<int, HLCTimestamp>? unboundedCeilingOf;
+
+    /// <summary>Wires the watch-resume history of the partitions (manager construction): the importer records each
+    /// install with <paramref name="recorder"/> before it reports success, and the exporter writes
+    /// <paramref name="ceilingOf"/> into the header.</summary>
+    internal void AttachHistoryBounds(Action<int, long, HLCTimestamp> recorder, Func<int, HLCTimestamp> ceilingOf)
+    {
+        installRecorder = recorder;
+        unboundedCeilingOf = ceilingOf;
+    }
+
     /// <summary>
     /// Callbacks told that a partition's state on this node was replaced without per-key log entries: an install
     /// rewrote its rows from a snapshot, or an un-host purge deleted them. Nothing on the apply path reports such
@@ -216,7 +233,16 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
             // the intent capture so that it also covers every row write the captured ledger accounts for.
             await drainPersistence().ConfigureAwait(false);
 
-            new PartitionStateHeader { PartitionId = partitionId, UpToIndex = upToIndex }.WriteDelimitedTo(stream);
+            HLCTimestamp ceiling = unboundedCeilingOf?.Invoke(partitionId) ?? HLCTimestamp.Zero;
+
+            new PartitionStateHeader
+            {
+                PartitionId = partitionId,
+                UpToIndex = upToIndex,
+                UnboundedCeilingNode = ceiling.N,
+                UnboundedCeilingPhysical = ceiling.L,
+                UnboundedCeilingCounter = ceiling.C
+            }.WriteDelimitedTo(stream);
 
             await foreach (IReadOnlyList<(string Key, ReadOnlyKeyValueEntry Entry)> page in
                 enumerator.EnumerateKeyValuesAsync(partitionId, PageSize, ct).ConfigureAwait(false))
@@ -532,6 +558,12 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
             // node must not serve the partition.
             foreach (Func<int, Task> hook in residentStateInvalidationHooks)
                 await hook(partitionId).ConfigureAwait(false);
+
+            // Durable before the marker clears: a watch resume must never treat the replaced history as complete.
+            installRecorder?.Invoke(
+                partitionId,
+                header.UpToIndex,
+                new HLCTimestamp(header.UnboundedCeilingNode, header.UnboundedCeilingPhysical, header.UnboundedCeilingCounter));
 
             ClearInstallIncomplete(partitionId);
 
