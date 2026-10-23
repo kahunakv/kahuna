@@ -1,4 +1,4 @@
-using Kahuna.Server.Persistence.Backend;
+using Kahuna.Server.Persistence.Providers;
 
 namespace Kahuna.Server.Persistence.Pitr;
 
@@ -19,31 +19,24 @@ internal static class CheckpointComposer
     /// <paramref name="targetDir"/>, and raises the target's sidecar index to the source's when it is higher
     /// (the sidecar index is the largest committed index the image holds; both sides share the cut).
     /// </summary>
-    /// <param name="storageType">The storage engine both checkpoints were written by.</param>
+    /// <param name="storageType">The storage engine both checkpoints were written by, one of Kahuna's own.</param>
     /// <param name="targetRevision">The storage revision the target's files are named with (SQLite).</param>
     internal static void MergeInto(
-        string storageType, string targetRevision, string targetDir, string sourceDir, CancellationToken ct)
+        string storageType, string targetRevision, string targetDir, string sourceDir, CancellationToken ct) =>
+        MergeInto(StorageProviders.CreateDefault().FindBackend(storageType), storageType, targetRevision, targetDir, sourceDir, ct);
+
+    /// <summary>
+    /// The form of <see cref="MergeInto(string, string, string, string, CancellationToken)"/> for the engine
+    /// <paramref name="provider"/>, or null when <paramref name="storageType"/> is not registered.
+    /// </summary>
+    internal static void MergeInto(
+        IPersistenceBackendProvider? provider, string storageType, string targetRevision, string targetDir, string sourceDir, CancellationToken ct)
     {
-        switch (storageType)
-        {
-#if !KAHUNA_THREAD_FREE
-            // The thread-free (browser) build has no RocksDB or SQLite backend.
-            case "rocksdb":
-                RocksDbPersistenceBackend.MergeCheckpointInto(targetDir, sourceDir, ct);
-                break;
+        if (provider is null)
+            throw new BackupDriverException(
+                $"Checkpoints of the '{storageType}' storage engine cannot be merged into one cluster-wide image: no such engine is registered.");
 
-            case "sqlite":
-                SqlitePersistenceBackend.MergeCheckpointInto(targetDir, targetRevision, sourceDir, ct);
-                break;
-#endif
-            case "memory" or "":
-                MemoryPersistenceBackend.MergeCheckpointInto(targetDir, sourceDir, ct);
-                break;
-
-            default:
-                throw new BackupDriverException(
-                    $"Checkpoints of the '{storageType}' storage engine cannot be merged into one cluster-wide image.");
-        }
+        provider.MergeCheckpointInto(targetDir, targetRevision, sourceDir, ct);
 
         CheckpointManifest target = CheckpointManifest.ReadFrom(targetDir);
         CheckpointManifest source = CheckpointManifest.ReadFrom(sourceDir);
@@ -52,20 +45,9 @@ internal static class CheckpointComposer
     }
 
     /// <summary>
-    /// Renames a checkpoint written by another node so its files carry <paramref name="revision"/>. Only SQLite
-    /// names its files after the storage revision; the other engines keep it out of the checkpoint entirely.
+    /// Renames a checkpoint written by another node so its files carry <paramref name="revision"/>, for an engine
+    /// that names its files after the storage revision (SQLite); the others keep it out of the checkpoint.
     /// </summary>
-    internal static void AdoptRevision(string storageType, string revision, string checkpointDir)
-    {
-        if (storageType != "sqlite")
-            return;
-
-        foreach (string file in Directory.GetFiles(checkpointDir, "kahuna*_*.db"))
-        {
-            string name = Path.GetFileName(file);
-            string renamed = name[..(name.IndexOf('_') + 1)] + revision + ".db";
-            if (!string.Equals(name, renamed, StringComparison.Ordinal))
-                File.Move(file, Path.Combine(checkpointDir, renamed));
-        }
-    }
+    internal static void AdoptRevision(IPersistenceBackendProvider? provider, string revision, string checkpointDir) =>
+        provider?.AdoptRevision(checkpointDir, revision);
 }

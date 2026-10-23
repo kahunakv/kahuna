@@ -165,6 +165,11 @@ discovery, so a node that was not asked to load an extension runs none of that c
 Each loaded file is logged with its path and the SHA-256 of its bytes, so an operator can confirm
 every node loaded the same artifact.
 
+The same flag loads storage engines (see the storage engines guide), and one assembly may publish
+both. Dependencies that the server does not have itself are loaded from the assembly's directory,
+as its `.deps.json` lists them, so publish an extension with `dotnet publish` and point the flag at
+the assembly in the output.
+
 ### Registration rules
 
 `Register(name, function, minArgs, maxArgs)` validates when the node starts, never at script time:

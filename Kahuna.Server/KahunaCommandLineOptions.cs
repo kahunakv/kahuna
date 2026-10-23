@@ -62,7 +62,7 @@ public sealed class KahunaCommandLineOptions
     [Option("disable-published-head-reads", Required = false, HelpText = "Send every point get through the key-value actor instead of serving a quiet resident key from the actor's published head record")]
     public bool DisablePublishedHeadReads { get; set; }
 
-    [Option("storage", Required = false, HelpText = "Storage (rocksdb, sqlite, memory)", Default = "rocksdb")]
+    [Option("storage", Required = false, HelpText = "Storage (rocksdb, sqlite, memory, or a type a host registers)", Default = "rocksdb")]
     public string Storage { get; set; } = "";
     
     [Option("storage-path", Required = false, HelpText = "Storage path")]
@@ -71,7 +71,7 @@ public sealed class KahunaCommandLineOptions
     [Option("storage-revision", Required = false, HelpText = "Storage revision")]
     public string StorageRevision{ get; set; } = "";
     
-    [Option("wal-storage", Required = false, HelpText = "WAL storage (rocksdb, sqlite, memory)", Default = "rocksdb")]
+    [Option("wal-storage", Required = false, HelpText = "WAL storage (rocksdb, sqlite, memory, or a type a host registers)", Default = "rocksdb")]
     public string WalStorage { get; set; } = "";
     
     [Option("wal-path", Required = false, HelpText = "WAL path")]
@@ -617,7 +617,7 @@ public sealed class KahunaCommandLineOptions
     // assembly runs in this process with the node's privileges and nothing sandboxes it, so loading
     // one is an explicit decision the operator makes on the command line, and the startup log records
     // the SHA-256 of every file loaded.
-    [Option("extension-assembly", Required = false, HelpText = "Path to an assembly publishing user-defined script functions through IKahunaFunctionProvider. Repeatable. Every node of a cluster must load the same set, because the functions are not replicated. An extension assembly is fully trusted code: it runs in the server process with the server's privileges")]
+    [Option("extension-assembly", Required = false, HelpText = "Path to an assembly publishing user-defined script functions through IKahunaFunctionProvider, or storage engines for --storage and --wal-storage through IPersistenceBackendProvider and IWalProvider. Repeatable. Every node of a cluster must load the same set, because the functions are not replicated. Dependencies are loaded from the assembly's directory. An extension assembly is fully trusted code: it runs in the server process with the server's privileges")]
     public IEnumerable<string>? ExtensionAssemblies { get; set; }
 
     [Option("function-slow-warn-ms", Required = false, HelpText = "Log a warning when a user-defined script function takes longer than this many milliseconds. The call is synchronous and blocks a request path while the transaction holds its locks. 0 disables the warning", Default = 50)]

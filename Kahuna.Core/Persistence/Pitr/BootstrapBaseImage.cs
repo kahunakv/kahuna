@@ -3,6 +3,8 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Kommander.Time;
 
+using Kahuna.Server.Persistence.Providers;
+
 namespace Kahuna.Server.Persistence.Pitr;
 
 /// <summary>What a node started with <c>--pitr-bootstrap-from</c> does once its base image step is settled.</summary>
@@ -102,7 +104,8 @@ internal sealed record BootstrapBaseImageRequest(
     byte[]? ManifestMacKey,
     string? ClusterId,
     bool FallbackToJoin,
-    long ThrottleBytesPerSec);
+    long ThrottleBytesPerSec,
+    StorageProviders? StorageProviders = null);
 
 /// <summary>
 /// Puts the full backup's checkpoint into the node's storage path before the persistence backend opens, the
@@ -145,9 +148,10 @@ internal static class BootstrapBaseImage
 
     internal static async Task<PitrBootstrapPlan> PrepareAsync(BootstrapBaseImageRequest request, CancellationToken ct = default)
     {
-        if (request.Storage is not ("rocksdb" or "sqlite"))
+        IPersistenceBackendProvider? provider = (request.StorageProviders ?? StorageProviders.CreateDefault()).FindBackend(request.Storage);
+        if (provider is not { KeepsDataOnDisk: true })
             throw new BackupDriverException(
-                $"A PITR bootstrap needs a storage backend that keeps its data on disk (rocksdb or sqlite); the node " +
+                $"A PITR bootstrap needs a storage backend that keeps its data on disk; the node " +
                 $"is configured with '{request.Storage}'.");
 
         if (string.IsNullOrWhiteSpace(request.StoragePath))
@@ -198,7 +202,7 @@ internal static class BootstrapBaseImage
         // start that stopped before its publish.
         DeleteDirectoryIfExists(Path.Combine(root, StagingDirectoryName));
 
-        if (HasBackendData(root, request.Storage, request.StorageRevision))
+        if (provider.HasData(root, request.StorageRevision))
             return new(PitrBootstrapAction.Skip, null, root, resumed: false,
                 "the store already holds data, so it belongs to a node that ran; it is never overwritten");
 
@@ -266,7 +270,7 @@ internal static class BootstrapBaseImage
 
             ct.ThrowIfCancellationRequested();
 
-            Publish(root, payload, new BootstrapSeedMarker
+            Publish(root, payload, provider, new BootstrapSeedMarker
             {
                 State = BootstrapSeedState.Publishing,
                 LeafBackupId = leaf.BackupId,
@@ -391,33 +395,23 @@ internal static class BootstrapBaseImage
     /// True when the files the backend opens already exist. Other content of the storage path (a filesystem's
     /// <c>lost+found</c>, the data of another revision) is not this store and does not stop a seed.
     /// </summary>
-    internal static bool HasBackendData(string root, string storage, string storageRevision)
-    {
-        if (storage == "rocksdb")
-        {
-            string dbPath = Path.Combine(root, storageRevision);
-            return File.Exists(dbPath) || (Directory.Exists(dbPath) && Directory.EnumerateFileSystemEntries(dbPath).Any());
-        }
-
-        return Directory.EnumerateFiles(root, SqliteFilePattern(storageRevision)).Any();
-    }
-
-    // The SQLite backend opens kahuna{shard}_{revision}.db; the pattern also matches its -wal and -shm files.
-    private static string SqliteFilePattern(string storageRevision) => $"kahuna*_{storageRevision}.db*";
+    internal static bool HasBackendData(string root, string storage, string storageRevision, StorageProviders? providers = null) =>
+        (providers ?? StorageProviders.CreateDefault()).GetBackend(storage).HasData(root, storageRevision);
 
     /// <summary>
     /// Moves the verified payload into the storage path under the protection of the marker. The marker names
     /// every entry before the first move, so a crash during the moves leaves enough to remove them.
     /// </summary>
-    private static void Publish(string root, string payload, BootstrapSeedMarker marker)
+    private static void Publish(string root, string payload, IPersistenceBackendProvider provider, BootstrapSeedMarker marker)
     {
         List<(string Source, string Target, bool IsDirectory)> moves = [];
 
-        if (marker.Storage == "rocksdb")
+        string dataDirectory = Path.GetFullPath(provider.DataDirectory(root, marker.StorageRevision));
+        if (!string.Equals(dataDirectory, root, StringComparison.Ordinal))
         {
-            // One directory: the rename is the publish.
-            moves.Add((payload, Path.Combine(root, marker.StorageRevision), true));
-            marker.Entries.Add(marker.StorageRevision);
+            // A store in its own directory under the root: the rename is the publish.
+            moves.Add((payload, dataDirectory, true));
+            marker.Entries.Add(Path.GetRelativePath(root, dataDirectory));
         }
         else
         {

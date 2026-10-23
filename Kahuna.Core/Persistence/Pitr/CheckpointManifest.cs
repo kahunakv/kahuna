@@ -24,13 +24,13 @@ public sealed record CheckpointManifest(
     public static CheckpointManifest From(long appliedIndex, HLCTimestamp appliedTime) =>
         new(appliedIndex, appliedTime.N, appliedTime.L, appliedTime.C);
 
-    internal void WriteTo(string checkpointPath)
+    public void WriteTo(string checkpointPath)
     {
         string file = Path.Combine(checkpointPath, FileName);
         File.WriteAllText(file, JsonSerializer.Serialize(this, PitrJsonContext.Default.CheckpointManifest));
     }
 
-    internal static CheckpointManifest ReadFrom(string checkpointPath)
+    public static CheckpointManifest ReadFrom(string checkpointPath)
     {
         string file = Path.Combine(checkpointPath, FileName);
         string json = File.ReadAllText(file);

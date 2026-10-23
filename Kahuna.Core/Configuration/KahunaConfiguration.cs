@@ -1,5 +1,6 @@
 
 using Kahuna.Server.Persistence.Pitr;
+using Kahuna.Server.Persistence.Providers;
 
 namespace Kahuna.Server.Configuration;
 
@@ -143,6 +144,12 @@ public sealed class KahunaConfiguration
     public string StoragePath { get; set; } = "";
     
     public string StorageRevision { get; set; } = "";
+
+    /// <summary>
+    /// The storage engines this node can open, by type name: <see cref="Storage"/> names one of its
+    /// persistence backends. Kahuna's own engines by default; a host registers others before the node starts.
+    /// </summary>
+    public StorageProviders StorageProviders { get; set; } = StorageProviders.CreateDefault();
 
     /// <summary>
     /// When true (default), the RocksDB KV/locks backend reads SSTs with direct I/O, bypassing the OS

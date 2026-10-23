@@ -10,6 +10,8 @@ using Kahuna.Server.Persistence.Backend;
 using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
 
+using Kahuna.Server.Persistence.Providers;
+
 namespace Kahuna.Server.Persistence.Pitr;
 
 /// <summary>
@@ -87,6 +89,7 @@ internal sealed class BackupFacade : IDisposable
             macKeyFile: configuration.BackupMacKeyFile,
             liveStoragePath: configuration.StoragePath,
             restoreRoot: configuration.RestoreRoot,
+            storageProviders: configuration.StorageProviders,
             // Composable WAL retention hold (Kommander) — keeps a captured incremental prefix from
             // being compacted mid-read; composes with the periodic horizon floor via minimum.
             acquireRetentionHold: raft.AcquireRetentionHold,
@@ -288,7 +291,8 @@ internal sealed class BackupFacade : IDisposable
                 BackupService.LoadMacKey(configuration.BackupMacKeyFile),
                 configuration.BackupClusterId,
                 fallbackToJoin,
-                configuration.BackupRestoreThrottleBytesPerSec), ct).ConfigureAwait(false);
+                configuration.BackupRestoreThrottleBytesPerSec,
+                configuration.StorageProviders), ct).ConfigureAwait(false);
         }
         catch (Exception ex) when (ShouldMap(ex))
         {
@@ -364,22 +368,22 @@ internal sealed class BackupFacade : IDisposable
 
     /// <summary>
     /// Staging on the store's filesystem for a local target, used when the backup directory is on another one.
-    /// Only RocksDB benefits: its checkpoint hard-links the live files where the filesystem allows it, while
-    /// SQLite and the memory backend write a full copy wherever the checkpoint goes, so staging them near the
-    /// store would only move that write onto the disk the commits use.
+    /// Only an engine whose checkpoint links the live files benefits (RocksDB hard-links them where the
+    /// filesystem allows it); one that writes a full copy wherever the checkpoint goes would only move that
+    /// write onto the disk the commits use. The provider says which (<see cref="IPersistenceBackendProvider.StagesLiveCheckpointsInStore"/>).
     /// <para>The staging root is under the storage path, which belongs to this one store. A directory that
     /// several nodes can share, such as the scratch directory, is not used: each node's leftover sweep would
     /// see the others' staging trees as debris.</para>
     /// </summary>
     private static LiveCheckpointStaging? CreateLiveCheckpointStaging(KahunaConfiguration configuration, ILogger? logger)
     {
-        if (!string.Equals(configuration.Storage, "rocksdb", StringComparison.Ordinal) ||
+        if (configuration.StorageProviders.FindBackend(configuration.Storage) is not { StagesLiveCheckpointsInStore: true } provider ||
             string.IsNullOrWhiteSpace(configuration.StoragePath))
             return null;
 
         return new LiveCheckpointStaging(
             configuration.StoragePath,
-            Path.Combine(configuration.StoragePath, configuration.StorageRevision),
+            provider.DataDirectory(configuration.StoragePath, configuration.StorageRevision),
             [Path.Combine(configuration.StoragePath, LiveCheckpointStagingDirectoryName)],
             Math.Max(0, configuration.BackupCaptureThrottleBytesPerSec),
             logger);

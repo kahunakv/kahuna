@@ -120,13 +120,17 @@ public sealed class EmbeddedKahunaCluster : IAsyncDisposable
 
         // Persistent members keep their store and log across a restart, each under its own directory of
         // the base path, so a restarted member replays its own log and rejoins the way a restarted process
-        // does. A member with memory storage restarts empty and catches up from the others.
-        if (baseOptions.Storage != "memory" && string.IsNullOrWhiteSpace(baseOptions.StoragePath))
+        // does. A member with memory storage restarts empty and catches up from the others. A type that is
+        // not registered counts as on disk here; the node refuses it when it starts.
+        bool storageOnDisk = baseOptions.StorageProviders.FindBackend(baseOptions.Storage)?.KeepsDataOnDisk ?? true;
+        bool walOnDisk = baseOptions.StorageProviders.FindWal(baseOptions.WalStorage)?.KeepsDataOnDisk ?? true;
+
+        if (storageOnDisk && string.IsNullOrWhiteSpace(baseOptions.StoragePath))
             throw new ArgumentException(
                 $"Storage '{baseOptions.Storage}' needs {nameof(baseOptions.StoragePath)}: each member keeps its store under its own subdirectory of it.",
                 nameof(baseOptions));
 
-        if (baseOptions.WalStorage != "memory" && string.IsNullOrWhiteSpace(baseOptions.WalPath))
+        if (walOnDisk && string.IsNullOrWhiteSpace(baseOptions.WalPath))
             throw new ArgumentException(
                 $"WalStorage '{baseOptions.WalStorage}' needs {nameof(baseOptions.WalPath)}: each member keeps its log under its own subdirectory of it.",
                 nameof(baseOptions));
@@ -155,14 +159,14 @@ public sealed class EmbeddedKahunaCluster : IAsyncDisposable
 
             // A blank revision is minted afresh by every node construction, which would give a restarted
             // member a new, empty store and log next to its old ones. Pin one per member instead.
-            if (baseOptions.Storage != "memory")
+            if (storageOnDisk)
             {
                 options.StoragePath = Directory.CreateDirectory(Path.Combine(baseOptions.StoragePath, options.NodeName)).FullName;
                 if (string.IsNullOrWhiteSpace(options.StorageRevision))
                     options.StorageRevision = "member";
             }
 
-            if (baseOptions.WalStorage != "memory")
+            if (walOnDisk)
             {
                 options.WalPath = Directory.CreateDirectory(Path.Combine(baseOptions.WalPath, options.NodeName)).FullName;
                 if (string.IsNullOrWhiteSpace(options.WalRevision))

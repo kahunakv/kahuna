@@ -1629,7 +1629,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 return false;
 
             iterator.Seek(target);
-            KeyValueScanMetrics.RevisionRunSeeks.Add(1);
+            PersistenceBackendMetrics.RecordRevisionRunSeek();
             return true;
         }
         finally
@@ -2652,10 +2652,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
 
         result.Sort(static (a, b) => string.CompareOrdinal(a.Item1, b.Item1));
 
-        KeyValueScanMetrics.SnapshotPrefixRowsExamined.Add(rowsExamined);
-        KeyValueScanMetrics.SnapshotPrefixEntriesReturned.Add(result.Count);
-        if (aborted)
-            KeyValueScanMetrics.ScansAbandonedCancelled.Add(1);
+        PersistenceBackendMetrics.RecordSnapshotPrefixScan(rowsExamined, result.Count, aborted);
 
         // Loud amplification signal: a scan that examines far more physical rows than it returns
         // is paying for revision history, and that cost grows with chain depth. Surfacing it here

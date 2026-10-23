@@ -28,6 +28,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Kahuna.TestExtension", "Kah
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Kahuna.Client.AspNetCore", "Kahuna.Client.AspNetCore\Kahuna.Client.AspNetCore.csproj", "{99FA98A3-9285-40C1-82AD-833CAE401FF0}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Kahuna.TestStorageExtension", "Kahuna.TestStorageExtension\Kahuna.TestStorageExtension.csproj", "{77D7F5C2-54FC-4007-856F-C2D0E12E25CE}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Kahuna.TestStorageExtension.Store", "Kahuna.TestStorageExtension.Store\Kahuna.TestStorageExtension.Store.csproj", "{FE87615A-6523-4894-98F6-E4358BBEB812}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -182,6 +186,30 @@ Global
 		{99FA98A3-9285-40C1-82AD-833CAE401FF0}.Release|x64.Build.0 = Release|Any CPU
 		{99FA98A3-9285-40C1-82AD-833CAE401FF0}.Release|x86.ActiveCfg = Release|Any CPU
 		{99FA98A3-9285-40C1-82AD-833CAE401FF0}.Release|x86.Build.0 = Release|Any CPU
+		{77D7F5C2-54FC-4007-856F-C2D0E12E25CE}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{77D7F5C2-54FC-4007-856F-C2D0E12E25CE}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{77D7F5C2-54FC-4007-856F-C2D0E12E25CE}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{77D7F5C2-54FC-4007-856F-C2D0E12E25CE}.Debug|x64.Build.0 = Debug|Any CPU
+		{77D7F5C2-54FC-4007-856F-C2D0E12E25CE}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{77D7F5C2-54FC-4007-856F-C2D0E12E25CE}.Debug|x86.Build.0 = Debug|Any CPU
+		{77D7F5C2-54FC-4007-856F-C2D0E12E25CE}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{77D7F5C2-54FC-4007-856F-C2D0E12E25CE}.Release|Any CPU.Build.0 = Release|Any CPU
+		{77D7F5C2-54FC-4007-856F-C2D0E12E25CE}.Release|x64.ActiveCfg = Release|Any CPU
+		{77D7F5C2-54FC-4007-856F-C2D0E12E25CE}.Release|x64.Build.0 = Release|Any CPU
+		{77D7F5C2-54FC-4007-856F-C2D0E12E25CE}.Release|x86.ActiveCfg = Release|Any CPU
+		{77D7F5C2-54FC-4007-856F-C2D0E12E25CE}.Release|x86.Build.0 = Release|Any CPU
+		{FE87615A-6523-4894-98F6-E4358BBEB812}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{FE87615A-6523-4894-98F6-E4358BBEB812}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{FE87615A-6523-4894-98F6-E4358BBEB812}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{FE87615A-6523-4894-98F6-E4358BBEB812}.Debug|x64.Build.0 = Debug|Any CPU
+		{FE87615A-6523-4894-98F6-E4358BBEB812}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{FE87615A-6523-4894-98F6-E4358BBEB812}.Debug|x86.Build.0 = Debug|Any CPU
+		{FE87615A-6523-4894-98F6-E4358BBEB812}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{FE87615A-6523-4894-98F6-E4358BBEB812}.Release|Any CPU.Build.0 = Release|Any CPU
+		{FE87615A-6523-4894-98F6-E4358BBEB812}.Release|x64.ActiveCfg = Release|Any CPU
+		{FE87615A-6523-4894-98F6-E4358BBEB812}.Release|x64.Build.0 = Release|Any CPU
+		{FE87615A-6523-4894-98F6-E4358BBEB812}.Release|x86.ActiveCfg = Release|Any CPU
+		{FE87615A-6523-4894-98F6-E4358BBEB812}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

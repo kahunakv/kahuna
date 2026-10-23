@@ -659,11 +659,11 @@ internal sealed partial class BackupService
                     ct: ct).ConfigureAwait(false);
 
                 if (!parts[0].Assignment.IsLocal)
-                    CheckpointComposer.AdoptRevision(_storageType, _storageRevision, staging.LocalPath);
+                    CheckpointComposer.AdoptRevision(_storageProvider, _storageRevision, staging.LocalPath);
 
                 for (int i = 1; i < parts.Count; i++)
                     CheckpointComposer.MergeInto(
-                        _storageType, _storageRevision, staging.LocalPath,
+                        _storageProvider, _storageType, _storageRevision, staging.LocalPath,
                         Path.Combine(workRoot, parts[i].Manifest.BackupId.ToString("N"), LocalDirectoryArtifactStore.CheckpointDirectoryName),
                         ct);
 

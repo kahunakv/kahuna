@@ -10,6 +10,8 @@ using Kommander.System;
 using Kommander.Time;
 using Microsoft.Extensions.Logging;
 
+using Kahuna.Server.Persistence.Providers;
+
 namespace Kahuna.Server.Persistence.Pitr;
 
 /// <summary>
@@ -25,6 +27,13 @@ internal sealed partial class BackupService : IDisposable
     private readonly IRaft _raft;
     private readonly string _backupDir;
     private readonly string _storageType;
+
+    // The engine of _storageType: how a restore lays out and opens a checkpoint, and how shares merge. Null
+    // when the type is not registered; a backup still runs, and a restore or a merge refuses.
+    private readonly IPersistenceBackendProvider? _storageProvider;
+
+    private IPersistenceBackendProvider StorageProvider =>
+        _storageProvider ?? throw new BackupDriverException($"The '{_storageType}' storage engine is not registered on this node.");
     private readonly string _storageRevision;
     private readonly string? _clusterId;
     private readonly byte[]? _macKey;
@@ -64,6 +73,7 @@ internal sealed partial class BackupService : IDisposable
         string? macKeyFile = null,
         string? liveStoragePath = null,
         string? restoreRoot = null,
+        StorageProviders? storageProviders = null,
         Func<int, long, IDisposable>? acquireRetentionHold = null,
         BackupDriver.AcquireSnapshotHoldDelegate? acquireSnapshotHold = null,
         BackupDriver.ReleaseSnapshotHoldDelegate? releaseSnapshotHold = null,
@@ -88,6 +98,7 @@ internal sealed partial class BackupService : IDisposable
         _raft = raft;
         _backupDir = backupDir;
         _storageType = storageType;
+        _storageProvider = (storageProviders ?? StorageProviders.CreateDefault()).FindBackend(storageType);
         _storageRevision = storageRevision;
         _clusterId = string.IsNullOrWhiteSpace(clusterId) ? null : clusterId;
         _macKey = LoadMacKey(macKeyFile);
@@ -742,11 +753,9 @@ internal sealed partial class BackupService : IDisposable
         {
             ct.ThrowIfCancellationRequested();
 
-            // RocksDB opens at {dir}/{revision}/ (revision is a subdir). SQLite embeds the revision
-            // in the filename, so files live directly in {dir}/. Copy the checkpoint accordingly.
-            string checkpointDest = _storageType == "rocksdb" && !string.IsNullOrEmpty(_storageRevision)
-                ? Path.Combine(staging, _storageRevision)
-                : staging;
+            // The engine says where its files live under the directory it opens: RocksDB in
+            // {dir}/{revision}/, SQLite directly in {dir}/ with the revision in the file names.
+            string checkpointDest = StorageProvider.DataDirectory(staging, _storageRevision);
 
             Directory.CreateDirectory(checkpointDest);
 
@@ -778,7 +787,7 @@ internal sealed partial class BackupService : IDisposable
                 // For memory backends, StoreKeyValues only updates the in-memory object; the files in
                 // staging are still the Full backup's state. Flush the merged result back to disk so a
                 // subsequent OpenCheckpoint(staging) sees all applied entries.
-                if (_storageType is "memory" or "" && result.EntriesApplied > 0)
+                if (!StorageProvider.KeepsDataOnDisk && result.EntriesApplied > 0)
                 {
                     string mergeTmp = staging + ".merge_" + Guid.NewGuid().ToString("N")[..8];
                     targetBackend.CreateCheckpoint(mergeTmp, result.LastAppliedIndex, result.LastAppliedTime);
@@ -984,15 +993,8 @@ internal sealed partial class BackupService : IDisposable
 
     // ── helpers ───────────────────────────────────────────────────────────────────────────────
 
-    private IPersistenceBackend OpenBackendAt(string path) => _storageType switch
-    {
-#if !KAHUNA_THREAD_FREE
-        // The thread-free (browser) build has no RocksDB or SQLite backend.
-        "rocksdb" => new RocksDbPersistenceBackend(path, _storageRevision),
-        "sqlite"  => new SqlitePersistenceBackend(path, _storageRevision, _logger),
-#endif
-        _         => MemoryPersistenceBackend.OpenCheckpoint(path)
-    };
+    private IPersistenceBackend OpenBackendAt(string path) =>
+        StorageProvider.OpenAt(path, _storageRevision, _logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
 
     private const int CopyBufferSize = 1 << 20; // 1 MiB streamed copy chunks — bounded memory per file
 

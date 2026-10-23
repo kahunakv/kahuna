@@ -26,6 +26,7 @@ using Kommander.Communication.Grpc;
 using Kommander.Communication.Rest;
 
 using Microsoft.AspNetCore.Server.Kestrel.Core;
+using Kahuna.Server.Persistence.Providers;
 
 StartupBanner.Print();
 
@@ -50,15 +51,30 @@ if (string.IsNullOrEmpty(opts.RaftNodeName))
 // over the same gRPC/REST surface as a clustered node.
 bool standalone = opts.InitialCluster is null || !opts.InitialCluster.Any();
 
+// The storage engines both node shapes open, by --storage and --wal-storage type.
+StorageProviders storageProviders = StorageProviders.CreateDefault();
+
+// Extension assemblies are loaded once, here, before either node shape is built and before the storage
+// paths are resolved, since an extension's storage engine decides whether its path is needed. Both shapes
+// then share the one function registry and the one set of storage engines, so a standalone node and a
+// clustered node cannot end up with different ones from the same command line. Any failure throws and
+// the node does not start: a node that came up missing one function would answer scripts that call it
+// with Errored while its peers answered normally, which is the hardest kind of failure to diagnose in a
+// cluster.
+Kahuna.Extensibility.KahunaFunctionRegistry extensionFunctions = ExtensionAssemblyLoader.Load(
+    opts.ExtensionAssemblies,
+    LoggerFactory.Create(logging => logging.AddConsole()).CreateLogger("Kahuna.Extensions"),
+    storageProviders);
+
 // An unset storage/WAL path would reach the backend as "", which composes to "/{revision}" — an
 // absolute path at the root of the filesystem rather than anything the user owns. Resolve both to a
 // concrete per-user directory here, once, before either the standalone or cluster branch reads them,
 // so the two branches cannot drift. An explicitly configured path is kept verbatim, so the container
 // entrypoint and the cluster run scripts are unaffected.
-if (!DataPathResolver.IsInMemory(opts.Storage))
+if (storageProviders.FindBackend(opts.Storage)?.KeepsDataOnDisk ?? !DataPathResolver.IsInMemory(opts.Storage))
     opts.StoragePath = DataPathResolver.ResolveStoragePath(opts.StoragePath);
 
-if (!DataPathResolver.IsInMemory(opts.WalStorage))
+if (storageProviders.FindWal(opts.WalStorage)?.KeepsDataOnDisk ?? !DataPathResolver.IsInMemory(opts.WalStorage))
     opts.WalPath = DataPathResolver.ResolveWalPath(opts.WalPath);
 
 // A server's storage identity must be stable across restarts. Left unset it reaches the embedded
@@ -66,14 +82,6 @@ if (!DataPathResolver.IsInMemory(opts.WalStorage))
 // there, silent data loss here.
 opts.StorageRevision = DataPathResolver.ResolveStorageRevision(opts.StorageRevision);
 
-// Extension assemblies are loaded once, here, before either node shape is built. Both shapes then
-// share the one registry, so a standalone node and a clustered node cannot end up with different
-// function sets from the same command line. Any failure throws and the node does not start: a node
-// that came up missing one function would answer scripts that call it with Errored while its peers
-// answered normally, which is the hardest kind of failure to diagnose in a cluster.
-Kahuna.Extensibility.KahunaFunctionRegistry extensionFunctions = ExtensionAssemblyLoader.Load(
-    opts.ExtensionAssemblies,
-    LoggerFactory.Create(logging => logging.AddConsole()).CreateLogger("Kahuna.Extensions"));
 
 bool httpsConfigured = ConfigurationValidator.ShouldBindHttps(opts.HttpsCertificate, opts.HttpsPorts);
 
@@ -89,7 +97,7 @@ bool bindPlaintextListeners = NodeTransportSecurityPolicy.ShouldBindPlaintextLis
 if (standalone)
 {
     builder.Services.AddSingleton<EmbeddedKahunaNode>(services =>
-        new EmbeddedKahunaNode(EmbeddedOptionsFactory.CreateEmbeddedOptions(opts, transportSecurity, extensionFunctions), services.GetRequiredService<ILoggerFactory>()));
+        new EmbeddedKahunaNode(EmbeddedOptionsFactory.CreateEmbeddedOptions(opts, transportSecurity, extensionFunctions, storageProviders), services.GetRequiredService<ILoggerFactory>()));
 
     builder.Services.AddSingleton<IRaft>(services => services.GetRequiredService<EmbeddedKahunaNode>().Raft);
     builder.Services.AddSingleton<IKahuna>(services => services.GetRequiredService<EmbeddedKahunaNode>().Kahuna);
@@ -135,13 +143,15 @@ else
         // mapping is how a flag ends up honoured in standalone mode and ignored in a cluster.
         RocksDbWalTuning walTuning = RaftWalTuningFactory.Build(EmbeddedOptionsFactory.CreateEmbeddedOptions(opts));
 
-        IWAL walAdapter = opts.WalStorage switch
+        IWAL walAdapter = storageProviders.GetWal(opts.WalStorage).Open(new WalContext
         {
-            "rocksdb" => new RocksDbWAL(path: opts.WalPath, revision: opts.WalRevision, logger, syncWrites: walSyncWrites, sharedResources: sharedResources, tuning: walTuning),
-            "sqlite" => new SqliteWAL(path: opts.WalPath, revision: opts.WalRevision, logger, syncWrites: walSyncWrites),
-            "memory" => new InMemoryWAL(logger),
-            _ => throw new KahunaServerException("Invalid WAL storage")
-        };
+            Path = opts.WalPath,
+            Revision = opts.WalRevision,
+            SyncWrites = walSyncWrites,
+            Logger = logger,
+            SharedResources = sharedResources,
+            RocksDbTuning = walTuning,
+        });
 
         return new RaftManager(
             configuration,
@@ -269,7 +279,7 @@ ThreadPool.SetMinThreads(256, 128);
 
 // One mapping for both node shapes: the clustered node runs on this configuration, and the standalone
 // node's embedded engine builds its own from the same mapping.
-KahunaConfiguration kahunaConfiguration = ServerConfigurationFactory.Create(opts, extensionFunctions);
+KahunaConfiguration kahunaConfiguration = ServerConfigurationFactory.Create(opts, extensionFunctions, storageProviders);
 
 // Process-wide, and this host runs exactly one node: with hints off a served request pays neither
 // the ambient write nor the capture object, so the switch actually removes the cost rather than

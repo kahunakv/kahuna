@@ -1,4 +1,5 @@
 using Kahuna.Server.Configuration;
+using Kahuna.Server.Persistence.Providers;
 
 namespace Kahuna.Server;
 
@@ -18,7 +19,8 @@ public static class ServerConfigurationFactory
     /// <param name="functions">The user-defined script functions loaded from the extension assemblies.</param>
     public static KahunaConfiguration Create(
         KahunaCommandLineOptions opts,
-        Kahuna.Extensibility.KahunaFunctionRegistry? functions = null)
+        Kahuna.Extensibility.KahunaFunctionRegistry? functions = null,
+        StorageProviders? storageProviders = null)
     {
         // The validator replaces a non-positive retention with a built-in value, which suits an embedding host
         // that leaves the field unset. A server flag that is set to 0 is a mistake, so refuse it here.
@@ -27,7 +29,7 @@ public static class ServerConfigurationFactory
                 $"--revisions-to-cache must be at least 1, got {opts.RevisionsToKeepCached}.");
 
         KahunaConfiguration configuration = EmbeddedKahunaNode.BuildKahunaConfiguration(
-            EmbeddedOptionsFactory.CreateEmbeddedOptions(opts, transportSecurity: null, functions),
+            EmbeddedOptionsFactory.CreateEmbeddedOptions(opts, transportSecurity: null, functions, storageProviders),
             singleProcessRaftGroup: false);
 
         // Server-only: the listener certificate, the inter-node transport, and what this node tells clients in

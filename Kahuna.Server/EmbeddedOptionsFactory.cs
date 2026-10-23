@@ -1,6 +1,7 @@
 
 using Kahuna.Server.Configuration;
 using Kommander;
+using Kahuna.Server.Persistence.Providers;
 
 namespace Kahuna.Server;
 
@@ -29,9 +30,11 @@ public static class EmbeddedOptionsFactory
     public static EmbeddedKahunaOptions CreateEmbeddedOptions(
         KahunaCommandLineOptions opts,
         RaftTransportSecurityOptions? transportSecurity = null,
-        Kahuna.Extensibility.KahunaFunctionRegistry? functions = null) => new()
+        Kahuna.Extensibility.KahunaFunctionRegistry? functions = null,
+        StorageProviders? storageProviders = null) => new()
     {
         TransportSecurity = transportSecurity,
+        StorageProviders = storageProviders ?? StorageProviders.CreateDefault(),
         Functions = functions ?? new(),
         FunctionSlowWarnMs = opts.FunctionSlowWarnMs,
         NodeName = opts.RaftNodeName,

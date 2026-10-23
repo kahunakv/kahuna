@@ -37,6 +37,10 @@ Kahuna.Microbenchmarks/bin
 Kahuna.Server.Tests/TestResults/
 Kahuna.TestExtension/bin
 Kahuna.TestExtension/obj
+Kahuna.TestStorageExtension/obj
+Kahuna.TestStorageExtension/bin
+Kahuna.TestStorageExtension.Store/obj
+Kahuna.TestStorageExtension.Store/bin
 Kahuna.Client.AspNetCore/bin
 Kahuna.Client.AspNetCore/obj
 Radline/Radline/obj

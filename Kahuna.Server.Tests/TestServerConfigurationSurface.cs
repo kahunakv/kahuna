@@ -174,6 +174,16 @@ public sealed class TestServerConfigurationSurface
             if (property.PropertyType == typeof(Kahuna.Extensibility.KahunaFunctionRegistry))
                 continue;
 
+            // The same for the storage engines: compare what is registered, not the instance.
+            if (property.PropertyType == typeof(Kahuna.Server.Persistence.Providers.StorageProviders))
+            {
+                if (!server.StorageProviders.BackendTypes.SequenceEqual(embedded.StorageProviders.BackendTypes)
+                    || !server.StorageProviders.WalTypes.SequenceEqual(embedded.StorageProviders.WalTypes))
+                    differences.Add($"{property.Name}: the registered storage types differ");
+
+                continue;
+            }
+
             if (!Equals(property.GetValue(server), property.GetValue(embedded)))
                 differences.Add($"{property.Name}: server={property.GetValue(server)} embedded={property.GetValue(embedded)}");
         }

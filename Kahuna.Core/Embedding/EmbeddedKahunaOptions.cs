@@ -1,5 +1,6 @@
 using Kommander;
 using Kahuna.Server.Persistence.Pitr;
+using Kahuna.Server.Persistence.Providers;
 using Writes = Kahuna.Server.KeyValues.Writes;
 
 namespace Kahuna;
@@ -33,7 +34,8 @@ public sealed class EmbeddedKahunaOptions
     public int InitialPartitions { get; set; } = 1;
 
     /// <summary>
-    /// Persistence backend for locks, key-values, and sequences. Supported values: memory, sqlite, rocksdb.
+    /// Persistence backend for locks, key-values, and sequences: memory, sqlite, rocksdb, or another
+    /// type registered in <see cref="StorageProviders"/>.
     /// </summary>
     public string Storage { get; set; } = "memory";
 
@@ -42,9 +44,15 @@ public sealed class EmbeddedKahunaOptions
     public string StorageRevision { get; set; } = "";
 
     /// <summary>
-    /// Raft WAL backend. Supported values: memory, sqlite, rocksdb.
+    /// Raft WAL backend: memory, sqlite, rocksdb, or another type registered in <see cref="StorageProviders"/>.
     /// </summary>
     public string WalStorage { get; set; } = "memory";
+
+    /// <summary>
+    /// The storage engines the node can open, by type name, for <see cref="Storage"/> and <see cref="WalStorage"/>.
+    /// Kahuna's own engines by default; register others before the node is constructed.
+    /// </summary>
+    public StorageProviders StorageProviders { get; set; } = StorageProviders.CreateDefault();
 
     public string WalPath { get; set; } = "";
 

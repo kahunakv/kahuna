@@ -161,7 +161,7 @@ public sealed class TestUserFunctionExtensionAssembly
     {
         KahunaServerException ex = Assert.Throws<KahunaServerException>(() => ExtensionAssemblyLoader.Load([AssemblyWithoutAProvider()], NullLogger.Instance));
 
-        Assert.Contains("publishes no functions", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("publishes nothing", ex.Message, StringComparison.Ordinal);
         Assert.Contains(nameof(IKahunaFunctionProvider), ex.Message, StringComparison.Ordinal);
     }
 

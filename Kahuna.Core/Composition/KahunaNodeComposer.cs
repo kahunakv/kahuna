@@ -9,6 +9,7 @@ using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.KeyValues.Transactions;
+using Kahuna.Server.Persistence.Providers;
 using Kahuna.Server.Locks;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
@@ -38,26 +39,29 @@ internal static class KahunaNodeComposer
     /// a read that missed the live one would answer DoesNotExist for a durably committed key.
     /// </summary>
 #if KAHUNA_THREAD_FREE
-    // The thread-free (browser) build has only the in-memory backend: RocksDB and SQLite need native
-    // libraries that the browser does not have.
+    // The thread-free (browser) build registers only the in-memory backend: RocksDB and SQLite need
+    // native libraries that the browser does not have.
     internal static IPersistenceBackend CreateBackend(KahunaConfiguration configuration)
     {
-        return configuration.Storage switch
+        return configuration.StorageProviders.GetBackend(configuration.Storage).Open(new PersistenceBackendContext
         {
-            "memory" => new MemoryPersistenceBackend(),
-            _ => throw new KahunaServerException("Invalid storage type for the thread-free build (only 'memory' is supported): " + configuration.Storage)
-        };
+            StoragePath = configuration.StoragePath,
+            StorageRevision = configuration.StorageRevision,
+            Configuration = configuration,
+            Logger = NullLogger.Instance,
+        });
     }
 #else
     internal static IPersistenceBackend CreateBackend(KahunaConfiguration configuration, ILogger<IKahuna> logger, RocksDbSharedResources? sharedResources)
     {
-        return configuration.Storage switch
+        return configuration.StorageProviders.GetBackend(configuration.Storage).Open(new PersistenceBackendContext
         {
-            "rocksdb" => new RocksDbPersistenceBackend(configuration.StoragePath, configuration.StorageRevision, sharedResources, configuration.RocksDbDirectReads, configuration.RocksDbStatistics, logger, configuration.BackupCaptureThrottleBytesPerSec),
-            "sqlite" => new SqlitePersistenceBackend(configuration.StoragePath, configuration.StorageRevision, logger),
-            "memory" => new MemoryPersistenceBackend(),
-            _ => throw new KahunaServerException("Invalid storage type: " + configuration.Storage)
-        };
+            StoragePath = configuration.StoragePath,
+            StorageRevision = configuration.StorageRevision,
+            Configuration = configuration,
+            Logger = logger,
+            SharedResources = sharedResources,
+        });
     }
 #endif
 

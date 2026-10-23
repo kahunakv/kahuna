@@ -38,6 +38,8 @@
            It is not referenced for compilation: the loader must find its provider by reflection,
            exactly as it would for an assembly the server has never seen. -->
       <ProjectReference Include="..\Kahuna.TestExtension\Kahuna.TestExtension.csproj" ReferenceOutputAssembly="false" />
+      <!-- The same for the storage-engine loader tests; its private dependency stays in its own directory. -->
+      <ProjectReference Include="..\Kahuna.TestStorageExtension\Kahuna.TestStorageExtension.csproj" ReferenceOutputAssembly="false" />
     </ItemGroup>
 
     <ItemGroup>

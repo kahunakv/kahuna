@@ -7,6 +7,7 @@ using Kommander.WAL;
 using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues.Logging;
+using Kahuna.Server.Persistence.Providers;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Nixie;
@@ -436,34 +437,30 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
 #endif
 
 #if KAHUNA_THREAD_FREE
-    // The thread-free (browser) build has only the in-memory WAL: Kommander's browser assembly has no
+    // The thread-free (browser) build registers only the in-memory WAL: Kommander's browser assembly has no
     // RocksDB or SQLite WAL.
     private static IWAL CreateWal(EmbeddedKahunaOptions options, ILogger<IRaft> logger)
     {
-        return options.WalStorage switch
+        return options.StorageProviders.GetWal(options.WalStorage).Open(new WalContext
         {
-            "memory" => new InMemoryWAL(logger),
-            _ => throw new KahunaServerException("Invalid WAL storage type for the thread-free build (only 'memory' is supported): " + options.WalStorage)
-        };
+            Path = options.WalPath,
+            Revision = string.IsNullOrWhiteSpace(options.WalRevision) ? Guid.NewGuid().ToString() : options.WalRevision,
+            SyncWrites = options.WalSyncWrites,
+            Logger = logger,
+        });
     }
 #else
     private static IWAL CreateWal(EmbeddedKahunaOptions options, ILogger<IRaft> logger, RocksDbSharedResources? sharedResources)
     {
-        string revision = string.IsNullOrWhiteSpace(options.WalRevision) ? Guid.NewGuid().ToString() : options.WalRevision;
-
-        return options.WalStorage switch
+        return options.StorageProviders.GetWal(options.WalStorage).Open(new WalContext
         {
-            "memory" => new InMemoryWAL(logger),
-            "sqlite" => new SqliteWAL(options.WalPath, revision, logger, syncWrites: options.WalSyncWrites),
-            "rocksdb" => new RocksDbWAL(
-                options.WalPath,
-                revision,
-                logger,
-                syncWrites: options.WalSyncWrites,
-                sharedResources: sharedResources,
-                tuning: RaftWalTuningFactory.Build(options)),
-            _ => throw new KahunaServerException("Invalid WAL storage type: " + options.WalStorage)
-        };
+            Path = options.WalPath,
+            Revision = string.IsNullOrWhiteSpace(options.WalRevision) ? Guid.NewGuid().ToString() : options.WalRevision,
+            SyncWrites = options.WalSyncWrites,
+            Logger = logger,
+            SharedResources = sharedResources,
+            RocksDbTuning = RaftWalTuningFactory.Build(options),
+        });
     }
 #endif
 
@@ -541,6 +538,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             BackendWriteIOThreads = options.BackendWriteIOThreads,
             BackendReadQueueDepth = options.BackendReadQueueDepth,
             Storage = options.Storage,
+            StorageProviders = options.StorageProviders,
             StoragePath = options.StoragePath,
             StorageRevision = string.IsNullOrWhiteSpace(options.StorageRevision) ? Guid.NewGuid().ToString() : options.StorageRevision,
             RocksDbDirectReads = options.RocksDbDirectReads,
@@ -763,7 +761,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         if (options.RaftSnapshotStagingDirectory is not null)
             return options.RaftSnapshotStagingDirectory;
 
-        if (options.Storage is not ("rocksdb" or "sqlite") || string.IsNullOrWhiteSpace(options.StoragePath))
+        if (options.StorageProviders.FindBackend(options.Storage) is not { KeepsDataOnDisk: true } || string.IsNullOrWhiteSpace(options.StoragePath))
             return null;
 
         string revision = string.IsNullOrWhiteSpace(options.StorageRevision) ? Guid.NewGuid().ToString() : options.StorageRevision;
@@ -876,13 +874,13 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
 
     private static void EnsureStorageDirectories(EmbeddedKahunaOptions options)
     {
-        EnsureDirectory(options.Storage, options.StoragePath);
-        EnsureDirectory(options.WalStorage, options.WalPath);
+        EnsureDirectory(options.StorageProviders.FindBackend(options.Storage)?.KeepsDataOnDisk == true, options.StoragePath);
+        EnsureDirectory(options.StorageProviders.FindWal(options.WalStorage)?.KeepsDataOnDisk == true, options.WalPath);
     }
 
-    private static void EnsureDirectory(string storage, string path)
+    private static void EnsureDirectory(bool keepsDataOnDisk, string path)
     {
-        if (storage is not ("rocksdb" or "sqlite") || string.IsNullOrWhiteSpace(path))
+        if (!keepsDataOnDisk || string.IsNullOrWhiteSpace(path))
             return;
 
         Directory.CreateDirectory(path);
