@@ -11,7 +11,7 @@ namespace Kahuna.Server.Persistence.Backend;
 /// Defines an interface for persistence backend implementations, providing methods
 /// for storing and retrieving locks and key-value pairs from a persistent storage system.
 /// </summary>
-internal interface IPersistenceBackend
+public interface IPersistenceBackend
 {
     public bool StoreLocks(List<PersistenceRequestItem> items);
 
@@ -78,9 +78,9 @@ internal interface IPersistenceBackend
     /// </summary>
     public bool ServesReadsFromMemory => false;
 
-    public LockEntry? GetLock(string resource);
+    public LockRow? GetLock(string resource);
 
-    public KeyValueEntry? GetKeyValue(string keyName);
+    public ReadOnlyKeyValueEntry? GetKeyValue(string keyName);
 
     /// <summary>
     /// Batched point lookup: returns one current-revision entry (or <c>null</c>) per key,
@@ -90,9 +90,9 @@ internal interface IPersistenceBackend
     /// the whole batch in one storage call. Used by the backend read scheduler to compress a
     /// drained burst of independent point reads into a single backend call.
     /// </summary>
-    public KeyValueEntry?[] GetKeyValues(string[] keyNames)
+    public ReadOnlyKeyValueEntry?[] GetKeyValues(string[] keyNames)
     {
-        KeyValueEntry?[] results = new KeyValueEntry?[keyNames.Length];
+        ReadOnlyKeyValueEntry?[] results = new ReadOnlyKeyValueEntry?[keyNames.Length];
 
         for (int i = 0; i < keyNames.Length; i++)
             results[i] = GetKeyValue(keyNames[i]);
@@ -101,21 +101,21 @@ internal interface IPersistenceBackend
     }
 
 
-    public KeyValueEntry? GetKeyValueRevision(string keyName, long revision);
+    public ReadOnlyKeyValueEntry? GetKeyValueRevision(string keyName, long revision);
 
     /// <summary>
     /// Returns the highest-revision entry for <paramref name="keyName"/> where
     /// <c>revision ≤ maxRevision</c> and <c>LastModified ≤ readTimestamp</c>,
     /// or <c>null</c> when no such retained revision exists.
     /// </summary>
-    public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp);
+    public ReadOnlyKeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp);
 
     /// <summary>
     /// <see cref="GetKeyValueRevisionAtOrBefore(string, long, HLCTimestamp)"/> that also adds the
     /// revision-history rows it read to <paramref name="tally"/>. The default cannot see rows and adds one
     /// per call; backends that read revision rows one by one override it with the exact count.
     /// </summary>
-    public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp, ref KeyValueScanTally tally)
+    public ReadOnlyKeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp, ref KeyValueScanTally tally)
     {
         tally.RevisionRowsExamined++;
         return GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);
@@ -136,14 +136,14 @@ internal interface IPersistenceBackend
     /// </summary>
     public KeyValueHydration GetKeyValueWithRecentRevisions(string keyName, int recentRevisions)
     {
-        KeyValueEntry? head = GetKeyValue(keyName);
+        ReadOnlyKeyValueEntry? head = GetKeyValue(keyName);
         if (head is null || recentRevisions <= 0 || head.Revision <= 0)
             return new KeyValueHydration(head, []);
 
-        List<KeyValueEntry> recent = new(Math.Min(recentRevisions, (int)Math.Min(int.MaxValue, head.Revision)));
+        List<ReadOnlyKeyValueEntry> recent = new(Math.Min(recentRevisions, (int)Math.Min(int.MaxValue, head.Revision)));
         for (long revision = head.Revision - 1; revision >= 0 && head.Revision - revision <= recentRevisions; revision--)
         {
-            KeyValueEntry? row = GetKeyValueRevision(keyName, revision);
+            ReadOnlyKeyValueEntry? row = GetKeyValueRevision(keyName, revision);
             if (row is not null)
                 recent.Add(row);
         }
@@ -192,15 +192,14 @@ internal interface IPersistenceBackend
                 continue;
             }
 
-            KeyValueEntry? snapshot = GetKeyValueRevisionAtOrBefore(key, entry.Revision - 1, readTimestamp);
+            ReadOnlyKeyValueEntry? snapshot = GetKeyValueRevisionAtOrBefore(key, entry.Revision - 1, readTimestamp);
             if (snapshot is null || snapshot.State is KeyValueState.Undefined)
             {
                 result.Add((key, entry, null));
                 continue;
             }
 
-            result.Add((key, entry, new(snapshot.Value, snapshot.Revision,
-                snapshot.Expires, snapshot.LastUsed, snapshot.LastModified, snapshot.State)));
+            result.Add((key, entry, snapshot));
         }
 
         return result;

@@ -774,9 +774,9 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
     /// </summary>
     /// <param name="resource">The resource for which the lock data will be queried. This is used to identify the corresponding database shard.</param>
     /// <returns>
-    /// A <see cref="LockEntry"/> instance representing the acquired lock context or null if the lock could not be acquired.
+    /// A <see cref="LockRow"/> instance representing the acquired lock context or null if the lock could not be acquired.
     /// </returns>
-    public LockEntry? GetLock(string resource)
+    public LockRow? GetLock(string resource)
     {
         try
         {
@@ -800,27 +800,25 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                 using SqliteDataReader reader = command.ExecuteReader();
 
                 while (reader.Read())
-                    return new()
-                    {
-                        Owner = reader.IsDBNull(0) ? null : (byte[])reader[0],
-                        Expires = new(
+                    return new(
+                        reader.IsDBNull(0) ? null : (byte[])reader[0],
+                        reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
+                        new(
                             reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
                             reader.IsDBNull(2) ? 0 : reader.GetInt64(2), 
                             reader.IsDBNull(3) ? 0 : (uint)reader.GetInt64(3)
                         ),
-                        LastUsed = new(
+                        new(
                             reader.IsDBNull(4) ? 0 : reader.GetInt32(4),
                             reader.IsDBNull(5) ? 0 : reader.GetInt64(5), 
                             reader.IsDBNull(6) ? 0 : (uint)reader.GetInt64(6)
                         ),
-                        LastModified = new(
+                        new(
                             reader.IsDBNull(7) ? 0 : reader.GetInt32(7),
                             reader.IsDBNull(8) ? 0 : reader.GetInt64(8), 
                             reader.IsDBNull(9) ? 0 : (uint)reader.GetInt64(9)
                         ),
-                        FencingToken = reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
-                        State = reader.IsDBNull(11) ? LockState.Locked : (LockState)reader.GetInt32(11)
-                    };
+                        reader.IsDBNull(11) ? LockState.Locked : (LockState)reader.GetInt32(11));
             }
             finally
             {
@@ -839,8 +837,8 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
     /// Retrieves the key-value context associated with the specified key name.
     /// </summary>
     /// <param name="keyName">The name of the key for which to retrieve the associated KeyValueContext.</param>
-    /// <returns>An instance of <see cref="KeyValueEntry"/> if the key exists, or null if no context is found.</returns>
-    public KeyValueEntry? GetKeyValue(string keyName)
+    /// <returns>An instance of <see cref="ReadOnlyKeyValueEntry"/> if the key exists, or null if no context is found.</returns>
+    public ReadOnlyKeyValueEntry? GetKeyValue(string keyName)
     {
         try
         {
@@ -866,27 +864,25 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                 using SqliteDataReader reader = command.ExecuteReader();
 
                 while (reader.Read())
-                    return new()
-                    {
-                        Value = reader.IsDBNull(0) ? null : (byte[])reader[0],
-                        Expires = new(
+                    return new(
+                        reader.IsDBNull(0) ? null : (byte[])reader[0],
+                        reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
+                        new(
                             reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
                             reader.IsDBNull(2) ? 0 : reader.GetInt64(2), 
                             reader.IsDBNull(3) ? 0 : (uint)reader.GetInt64(3)
                         ),
-                        LastUsed = new(
+                        new(
                             reader.IsDBNull(4) ? 0 : reader.GetInt32(4),
                             reader.IsDBNull(5) ? 0 : reader.GetInt64(5), 
                             reader.IsDBNull(6) ? 0 : (uint)reader.GetInt64(6)
                         ),
-                        LastModified = new(
+                        new(
                             reader.IsDBNull(7) ? 0 : reader.GetInt32(7),
                             reader.IsDBNull(8) ? 0 : reader.GetInt64(8), 
                             reader.IsDBNull(9) ? 0 : (uint)reader.GetInt64(9)
                         ),
-                        Revision = reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
-                        State = reader.IsDBNull(11) ? KeyValueState.Undefined : (KeyValueState)reader.GetInt32(11)
-                    };
+                        reader.IsDBNull(11) ? KeyValueState.Undefined : (KeyValueState)reader.GetInt32(11));
             }
             finally
             {
@@ -907,10 +903,10 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
     /// <param name="keyName">The name of the key to retrieve the context for.</param>
     /// <param name="revision">The specific revision of the key-value pair to retrieve.</param>
     /// <returns>
-    /// A <see cref="KeyValueEntry"/> representing the key-value pair context for the specified key and revision,
+    /// A <see cref="ReadOnlyKeyValueEntry"/> representing the key-value pair context for the specified key and revision,
     /// or null if the key or specific revision does not exist.
     /// </returns>
-    public KeyValueEntry? GetKeyValueRevision(string keyName, long revision)
+    public ReadOnlyKeyValueEntry? GetKeyValueRevision(string keyName, long revision)
     {
         try
         {
@@ -935,27 +931,25 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                 using SqliteDataReader reader = command.ExecuteReader();
 
                 while (reader.Read())
-                    return new()
-                    {
-                        Value = reader.IsDBNull(0) ? null : (byte[])reader[0],
-                        Expires = new(
+                    return new(
+                        reader.IsDBNull(0) ? null : (byte[])reader[0],
+                        reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
+                        new(
                             reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
                             reader.IsDBNull(2) ? 0 : reader.GetInt64(2), 
                             reader.IsDBNull(3) ? 0 : (uint)reader.GetInt64(3)
                         ),
-                        LastUsed = new(
+                        new(
                             reader.IsDBNull(4) ? 0 : reader.GetInt32(4),
                             reader.IsDBNull(5) ? 0 : reader.GetInt64(5), 
                             reader.IsDBNull(6) ? 0 : (uint)reader.GetInt64(6)
                         ),
-                        LastModified = new(
+                        new(
                             reader.IsDBNull(7) ? 0 : reader.GetInt32(7),
                             reader.IsDBNull(8) ? 0 : reader.GetInt64(8), 
                             reader.IsDBNull(9) ? 0 : (uint)reader.GetInt64(9)
                         ),
-                        Revision = reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
-                        State = reader.IsDBNull(11) ? KeyValueState.Undefined : (KeyValueState)reader.GetInt32(11)
-                    };
+                        reader.IsDBNull(11) ? KeyValueState.Undefined : (KeyValueState)reader.GetInt32(11));
             }
             finally
             {
@@ -970,7 +964,7 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
         return null;
     }
 
-    public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp)
+    public ReadOnlyKeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp)
     {
         try
         {
@@ -1007,27 +1001,25 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                 using SqliteDataReader reader = command.ExecuteReader();
 
                 while (reader.Read())
-                    return new()
-                    {
-                        Value = reader.IsDBNull(0) ? null : (byte[])reader[0],
-                        Expires = new(
+                    return new(
+                        reader.IsDBNull(0) ? null : (byte[])reader[0],
+                        reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
+                        new(
                             reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
                             reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
                             reader.IsDBNull(3) ? 0 : (uint)reader.GetInt64(3)
                         ),
-                        LastUsed = new(
+                        new(
                             reader.IsDBNull(4) ? 0 : reader.GetInt32(4),
                             reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
                             reader.IsDBNull(6) ? 0 : (uint)reader.GetInt64(6)
                         ),
-                        LastModified = new(
+                        new(
                             reader.IsDBNull(7) ? 0 : reader.GetInt32(7),
                             reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
                             reader.IsDBNull(9) ? 0 : (uint)reader.GetInt64(9)
                         ),
-                        Revision = reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
-                        State = reader.IsDBNull(11) ? KeyValueState.Undefined : (KeyValueState)reader.GetInt32(11)
-                    };
+                        reader.IsDBNull(11) ? KeyValueState.Undefined : (KeyValueState)reader.GetInt32(11));
             }
             finally
             {
@@ -1266,27 +1258,25 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
             ORDER BY resource
             LIMIT @limit
             """,
-            static reader => (reader.IsDBNull(0) ? "" : reader.GetString(0), new LockEntry
-            {
-                Owner = reader.IsDBNull(1) ? null : (byte[])reader[1],
-                Expires = new(
+            static reader => (reader.IsDBNull(0) ? "" : reader.GetString(0), new LockRow(
+                reader.IsDBNull(1) ? null : (byte[])reader[1],
+                reader.IsDBNull(11) ? 0 : reader.GetInt64(11),
+                new(
                     reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
                     reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
                     reader.IsDBNull(4) ? 0 : (uint)reader.GetInt64(4)
                 ),
-                LastUsed = new(
+                new(
                     reader.IsDBNull(5) ? 0 : reader.GetInt32(5),
                     reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
                     reader.IsDBNull(7) ? 0 : (uint)reader.GetInt64(7)
                 ),
-                LastModified = new(
+                new(
                     reader.IsDBNull(8) ? 0 : reader.GetInt32(8),
                     reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
                     reader.IsDBNull(10) ? 0 : (uint)reader.GetInt64(10)
                 ),
-                FencingToken = reader.IsDBNull(11) ? 0 : reader.GetInt64(11),
-                State = reader.IsDBNull(12) ? LockState.Locked : (LockState)reader.GetInt32(12)
-            }),
+                reader.IsDBNull(12) ? LockState.Locked : (LockState)reader.GetInt32(12))),
             static page => new LockScanPage(page.Items, page.NextCursor));
 
     /// <summary>

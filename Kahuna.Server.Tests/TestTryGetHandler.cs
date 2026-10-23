@@ -785,20 +785,20 @@ public sealed class TestTryGetHandler : RaftTrackingTest
             this.revisionValue = revisionValue;
         }
 
-        public KeyValueEntry? GetKeyValue(string keyName) => null;
+        public ReadOnlyKeyValueEntry? GetKeyValue(string keyName) => null;
 
-        public KeyValueEntry? GetKeyValueRevision(string keyName, long revision)
+        public ReadOnlyKeyValueEntry? GetKeyValueRevision(string keyName, long revision)
         {
             gate.Wait();
             if (revision == targetRevision)
-                return new() { Value = revisionValue, Revision = revision, State = KeyValueState.Set };
+                return new(revisionValue, revision, HLCTimestamp.Zero, HLCTimestamp.Zero, HLCTimestamp.Zero, KeyValueState.Set);
             return null;
         }
 
         public bool StoreLocks(List<PersistenceRequestItem> items) => inner.StoreLocks(items);
         public bool StoreKeyValues(List<PersistenceRequestItem> items) => inner.StoreKeyValues(items);
-        public Kahuna.Server.Locks.Data.LockEntry? GetLock(string resource) => inner.GetLock(resource);
-        public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) =>
+        public Kahuna.Server.Locks.Data.LockRow? GetLock(string resource) => inner.GetLock(resource);
+        public ReadOnlyKeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) =>
             inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName) => inner.GetKeyValueByPrefix(prefixKeyName);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit) =>
@@ -847,19 +847,19 @@ public sealed class TestTryGetHandler : RaftTrackingTest
             this.revisionValue = revisionValue;
         }
 
-        public KeyValueEntry? GetKeyValue(string keyName) => null;
+        public ReadOnlyKeyValueEntry? GetKeyValue(string keyName) => null;
 
-        public KeyValueEntry? GetKeyValueRevision(string keyName, long revision)
+        public ReadOnlyKeyValueEntry? GetKeyValueRevision(string keyName, long revision)
         {
             if (revision == targetRevision && revisionValue is not null)
-                return new() { Value = revisionValue, Revision = revision, State = KeyValueState.Set };
+                return new(revisionValue, revision, HLCTimestamp.Zero, HLCTimestamp.Zero, HLCTimestamp.Zero, KeyValueState.Set);
             return null;
         }
 
         public bool StoreLocks(List<PersistenceRequestItem> items) => inner.StoreLocks(items);
         public bool StoreKeyValues(List<PersistenceRequestItem> items) => inner.StoreKeyValues(items);
-        public Kahuna.Server.Locks.Data.LockEntry? GetLock(string resource) => inner.GetLock(resource);
-        public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) =>
+        public Kahuna.Server.Locks.Data.LockRow? GetLock(string resource) => inner.GetLock(resource);
+        public ReadOnlyKeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) =>
             inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName) => inner.GetKeyValueByPrefix(prefixKeyName);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit) =>
@@ -893,24 +893,24 @@ public sealed class TestTryGetHandler : RaftTrackingTest
             this.revisionValue = revisionValue;
         }
 
-        public KeyValueEntry? GetKeyValue(string keyName)
+        public ReadOnlyKeyValueEntry? GetKeyValue(string keyName)
         {
             gate.Wait();
-            return new() { Value = latestValue, Revision = 1, State = KeyValueState.Set };
+            return new(latestValue, 1, HLCTimestamp.Zero, HLCTimestamp.Zero, HLCTimestamp.Zero, KeyValueState.Set);
         }
 
-        public KeyValueEntry? GetKeyValueRevision(string keyName, long rev)
+        public ReadOnlyKeyValueEntry? GetKeyValueRevision(string keyName, long rev)
         {
             gate.Wait();
             if (rev == revision)
-                return new() { Value = revisionValue, Revision = rev, State = KeyValueState.Set };
+                return new(revisionValue, rev, HLCTimestamp.Zero, HLCTimestamp.Zero, HLCTimestamp.Zero, KeyValueState.Set);
             return null;
         }
 
         public bool StoreLocks(List<PersistenceRequestItem> items) => inner.StoreLocks(items);
         public bool StoreKeyValues(List<PersistenceRequestItem> items) => inner.StoreKeyValues(items);
-        public Kahuna.Server.Locks.Data.LockEntry? GetLock(string resource) => inner.GetLock(resource);
-        public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) =>
+        public Kahuna.Server.Locks.Data.LockRow? GetLock(string resource) => inner.GetLock(resource);
+        public ReadOnlyKeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) =>
             inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName) => inner.GetKeyValueByPrefix(prefixKeyName);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit) =>
@@ -936,7 +936,7 @@ public sealed class TestTryGetHandler : RaftTrackingTest
 
         internal CountingBlockingBackend(SemaphoreSlim gate) => this.gate = gate;
 
-        public KeyValueEntry? GetKeyValue(string keyName)
+        public ReadOnlyKeyValueEntry? GetKeyValue(string keyName)
         {
             Interlocked.Increment(ref readCount);
             gate.Wait();
@@ -945,9 +945,9 @@ public sealed class TestTryGetHandler : RaftTrackingTest
 
         public bool StoreLocks(List<PersistenceRequestItem> items) => inner.StoreLocks(items);
         public bool StoreKeyValues(List<PersistenceRequestItem> items) => inner.StoreKeyValues(items);
-        public Kahuna.Server.Locks.Data.LockEntry? GetLock(string resource) => inner.GetLock(resource);
-        public KeyValueEntry? GetKeyValueRevision(string keyName, long revision) => inner.GetKeyValueRevision(keyName, revision);
-        public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) =>
+        public Kahuna.Server.Locks.Data.LockRow? GetLock(string resource) => inner.GetLock(resource);
+        public ReadOnlyKeyValueEntry? GetKeyValueRevision(string keyName, long revision) => inner.GetKeyValueRevision(keyName, revision);
+        public ReadOnlyKeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) =>
             inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName) => inner.GetKeyValueByPrefix(prefixKeyName);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit) =>
@@ -968,14 +968,14 @@ public sealed class TestTryGetHandler : RaftTrackingTest
     {
         private readonly MemoryPersistenceBackend inner = new();
 
-        public KeyValueEntry? GetKeyValue(string keyName) =>
+        public ReadOnlyKeyValueEntry? GetKeyValue(string keyName) =>
             throw new IOException("simulated backend read failure");
 
         public bool StoreLocks(List<PersistenceRequestItem> items) => inner.StoreLocks(items);
         public bool StoreKeyValues(List<PersistenceRequestItem> items) => inner.StoreKeyValues(items);
-        public Kahuna.Server.Locks.Data.LockEntry? GetLock(string resource) => inner.GetLock(resource);
-        public KeyValueEntry? GetKeyValueRevision(string keyName, long revision) => inner.GetKeyValueRevision(keyName, revision);
-        public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) =>
+        public Kahuna.Server.Locks.Data.LockRow? GetLock(string resource) => inner.GetLock(resource);
+        public ReadOnlyKeyValueEntry? GetKeyValueRevision(string keyName, long revision) => inner.GetKeyValueRevision(keyName, revision);
+        public ReadOnlyKeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) =>
             inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName) => inner.GetKeyValueByPrefix(prefixKeyName);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit) =>

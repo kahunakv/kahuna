@@ -8,7 +8,7 @@ namespace Kahuna.Server.Persistence.Pitr;
 /// Callers use <see cref="Manifest"/> to record which WAL index the image corresponds to
 /// so the restore path knows where to start replaying.
 /// </summary>
-internal sealed record CheckpointResult(
+public sealed record CheckpointResult(
     string CheckpointPath,
     CheckpointManifest Manifest)
 {

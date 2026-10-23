@@ -240,7 +240,7 @@ public sealed class TestRevisionRunSeek : RaftTrackingTest
         StoreDeepKey(backend, "acct/0001", 40);
 
         // As-of read below the head must still walk/probe the revision rows the scan skips.
-        KeyValueEntry? snapshot = backend.GetKeyValueRevisionAtOrBefore("acct/0001", 39, new HLCTimestamp(0, 17_500, 0));
+        ReadOnlyKeyValueEntry? snapshot = backend.GetKeyValueRevisionAtOrBefore("acct/0001", 39, new HLCTimestamp(0, 17_500, 0));
 
         Assert.NotNull(snapshot);
         Assert.Equal(17, snapshot!.Revision);

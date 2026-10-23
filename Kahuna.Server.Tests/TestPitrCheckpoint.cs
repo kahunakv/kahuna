@@ -386,7 +386,7 @@ public sealed class TestPitrCheckpoint : IDisposable
         Assert.NotNull(r.GetKeyValue("keep"));
         Assert.Null(r.GetKeyValue("future"));
 
-        KeyValueEntry? updated = r.GetKeyValue("updated");
+        ReadOnlyKeyValueEntry? updated = r.GetKeyValue("updated");
         Assert.NotNull(updated);
         Assert.Equal(1, updated!.Revision);        // rolled back to the pre-cut revision
         Assert.Equal((byte)1, updated.Value![0]);
@@ -413,7 +413,7 @@ public sealed class TestPitrCheckpoint : IDisposable
         Assert.NotNull(r.GetKeyValue("keep"));
         Assert.Null(r.GetKeyValue("future"));
 
-        KeyValueEntry? updated = r.GetKeyValue("updated");
+        ReadOnlyKeyValueEntry? updated = r.GetKeyValue("updated");
         Assert.NotNull(updated);
         Assert.Equal(1, updated!.Revision);        // ~CURRENT reset to the pre-cut revision
         Assert.Equal((byte)1, updated.Value![0]);
@@ -630,7 +630,7 @@ public sealed class TestPitrCheckpoint : IDisposable
         using RocksDbPersistenceBackend r = new(baseDir, "cp");
         for (int i = 0; i < n; i++)
         {
-            KeyValueEntry? e = r.GetKeyValue($"k/{i:D5}");
+            ReadOnlyKeyValueEntry? e = r.GetKeyValue($"k/{i:D5}");
             Assert.NotNull(e);
             Assert.Equal(1, e!.Revision);                 // rolled back to the pre-cut revision
             Assert.Equal((byte)(i & 0xFF), e.Value![0]);

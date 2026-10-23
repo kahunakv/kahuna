@@ -59,7 +59,7 @@ internal sealed class PointReadContinuation : ReadContinuation
         if (Faulted)
             return KeyValueStaticResponses.MustRetryResponse;
 
-        KeyValueEntry? disk = DiskResult;
+        ReadOnlyKeyValueEntry? disk = DiskResult;
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock
             .TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
 
@@ -86,10 +86,11 @@ internal sealed class PointReadContinuation : ReadContinuation
         if (disk is null)
             return KeyValueStaticResponses.DoesNotExistContextResponse;
 
-        disk.FlushedRevision = disk.Revision;
-        disk.LastUsed = currentTime;
-        context.InsertStoreEntry(key, disk);
-        return ToResponse(disk, currentTime);
+        KeyValueEntry installed = KeyValueEntry.FromRow(disk);
+        installed.FlushedRevision = installed.Revision;
+        installed.LastUsed = currentTime;
+        context.InsertStoreEntry(key, installed);
+        return ToResponse(installed, currentTime);
     }
 
     private KeyValueResponse ToResponse(KeyValueEntry e, HLCTimestamp currentTime)

@@ -151,7 +151,7 @@ public sealed class TestCoordinatedBackupUnderReplicationFactor : BaseCluster, I
     {
         foreach ((string key, string value) in expected)
         {
-            KeyValueEntry? entry = backend.GetKeyValue(key);
+            ReadOnlyKeyValueEntry? entry = backend.GetKeyValue(key);
             Assert.True(entry is not null, $"{key} is missing");
             Assert.Equal(value, Encoding.UTF8.GetString(entry.Value!));
         }

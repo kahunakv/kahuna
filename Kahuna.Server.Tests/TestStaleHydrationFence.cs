@@ -138,13 +138,13 @@ public sealed class TestStaleHydrationFence : RaftTrackingTest
         KeyValueContext context = BuildContext("stale-hyd-current", store);
 
         Assert.False(BaseHandler.HydratedRowProvablyStale(context, "k/current",
-            new KeyValueEntry { Revision = 6, State = KeyValueState.Set }));
+            new KeyValueEntry { Revision = 6, State = KeyValueState.Set }.ToRow()));
         Assert.False(BaseHandler.HydratedRowProvablyStale(context, "k/current",
-            new KeyValueEntry { Revision = 7, State = KeyValueState.Set }));
+            new KeyValueEntry { Revision = 7, State = KeyValueState.Set }.ToRow()));
 
         // No remembered head: absence is not proof of staleness.
         Assert.False(BaseHandler.HydratedRowProvablyStale(context, "k/unknown",
-            new KeyValueEntry { Revision = 1, State = KeyValueState.Set }));
+            new KeyValueEntry { Revision = 1, State = KeyValueState.Set }.ToRow()));
         Assert.False(BaseHandler.HydratedRowProvablyStale(context, "k/unknown", null));
     }
 
@@ -161,7 +161,7 @@ public sealed class TestStaleHydrationFence : RaftTrackingTest
         long refusedBefore = DurableTransactionMetrics.StaleHydrationsRefusedCount;
 
         Assert.True(BaseHandler.HydratedRowProvablyStale(context, "k/stale",
-            new KeyValueEntry { Revision = 3, State = KeyValueState.Set }));
+            new KeyValueEntry { Revision = 3, State = KeyValueState.Set }.ToRow()));
 
         Assert.True(DurableTransactionMetrics.StaleHydrationsRefusedCount >= refusedBefore + 1);
         Assert.Contains(("k/stale", 3L, 6L), repairs);
@@ -195,7 +195,7 @@ public sealed class TestStaleHydrationFence : RaftTrackingTest
         KeyValueContext context = BuildContext("stale-hyd-nostore", intentStore: null);
 
         Assert.False(BaseHandler.HydratedRowProvablyStale(context, "k/any",
-            new KeyValueEntry { Revision = 0, State = KeyValueState.Set }));
+            new KeyValueEntry { Revision = 0, State = KeyValueState.Set }.ToRow()));
         Assert.False(BaseHandler.HydratedRowProvablyStale(context, "k/any", null));
     }
 }

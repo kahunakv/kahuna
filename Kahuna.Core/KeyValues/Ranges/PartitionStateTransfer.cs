@@ -250,7 +250,7 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
 
             KvStateMachineTransfer.WritePage(stream, [], hasMore: false);
 
-            await foreach (IReadOnlyList<(string Resource, LockEntry Entry)> lockPage in
+            await foreach (IReadOnlyList<(string Resource, LockRow Entry)> lockPage in
                 enumerator.EnumerateLocksAsync(partitionId, PageSize, ct).ConfigureAwait(false))
                 WriteLockPage(stream, lockPage, hasMore: true);
 
@@ -978,7 +978,7 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
                 throw new KahunaServerException($"Failed to remove partition #{partitionId} key-value rows during install/purge.");
         }
 
-        await foreach (IReadOnlyList<(string Resource, LockEntry Entry)> page in
+        await foreach (IReadOnlyList<(string Resource, LockRow Entry)> page in
             enumerator.EnumerateLocksAsync(partitionId, PageSize, ct).ConfigureAwait(false))
         {
             if (proceed is not null && !proceed())
@@ -1048,11 +1048,11 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
         return message;
     }
 
-    private static void WriteLockPage(Stream stream, IReadOnlyList<(string Resource, LockEntry Entry)> items, bool hasMore)
+    private static void WriteLockPage(Stream stream, IReadOnlyList<(string Resource, LockRow Entry)> items, bool hasMore)
     {
         PartitionStateLockPage page = new() { HasMore = hasMore };
 
-        foreach ((string resource, LockEntry entry) in items)
+        foreach ((string resource, LockRow entry) in items)
         {
             PartitionStateLockEntry message = new()
             {

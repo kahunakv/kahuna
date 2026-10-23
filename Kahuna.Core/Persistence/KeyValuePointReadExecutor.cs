@@ -29,7 +29,7 @@ namespace Kahuna.Server.Persistence;
 /// scheduler.
 /// </para>
 /// </summary>
-internal sealed class KeyValuePointReadExecutor : IReadBatchExecutor<string, KeyValueEntry?>
+internal sealed class KeyValuePointReadExecutor : IReadBatchExecutor<string, ReadOnlyKeyValueEntry?>
 {
     private static readonly ConditionalWeakTable<IPersistenceBackend, KeyValuePointReadExecutor> instances = new();
 
@@ -50,7 +50,7 @@ internal sealed class KeyValuePointReadExecutor : IReadBatchExecutor<string, Key
     }
 
     /// <inheritdoc/>
-    public KeyValueEntry?[] ExecuteBatch(string[] args)
+    public ReadOnlyKeyValueEntry?[] ExecuteBatch(string[] args)
     {
         return backend.GetKeyValues(args);
     }

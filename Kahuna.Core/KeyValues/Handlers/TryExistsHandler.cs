@@ -297,7 +297,7 @@ internal sealed class TryExistsHandler : BaseHandler
             context.PendingReads[pointKey] = cont;
             int partitionId = ResolvePartition(message.Key);
 
-            Task<KeyValueEntry?> readTask;
+            Task<ReadOnlyKeyValueEntry?> readTask;
             try
             {
                 readTask = context.BackendReadScheduler.EnqueueBatchableTask(
@@ -417,7 +417,7 @@ internal sealed class TryExistsHandler : BaseHandler
         string key = message.Key;
         long compareRevision = message.CompareRevision;
 
-        Task<KeyValueEntry?> readTask;
+        Task<ReadOnlyKeyValueEntry?> readTask;
         try
         {
             readTask = context.BackendReadScheduler.EnqueueTask(

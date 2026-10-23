@@ -22,7 +22,7 @@ namespace Kahuna.Server.Persistence.Backend;
 /// </remarks>
 internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposable
 {
-    private readonly ConcurrentDictionary<string, LockEntry> locks = new();
+    private readonly ConcurrentDictionary<string, LockRow> locks = new();
 
     // SortedList gives array-backed ordered keys — binary-search for range start, then
     // iterate forward. Not thread-safe; guarded by kvLock.
@@ -32,7 +32,7 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
     //   Point reads (GetKeyValue): now take kvLock (were lock-free). In practice reads are
     //     serialized through ReadScheduler.EnqueueTask anyway, so contention is bounded; in
     //     a true in-memory production deployment this would be a read-scalability narrowing.
-    private readonly SortedList<string, KeyValueEntry> keyValues = new(StringComparer.Ordinal);
+    private readonly SortedList<string, ReadOnlyKeyValueEntry> keyValues = new(StringComparer.Ordinal);
 
     private readonly Lock kvLock = new();
 
@@ -42,7 +42,7 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
     /// </summary>
     public bool ServesReadsFromMemory => true;
 
-    private readonly ConcurrentDictionary<string, ConcurrentDictionary<long, KeyValueEntry>> keyValueRevisions = new();
+    private readonly ConcurrentDictionary<string, ConcurrentDictionary<long, ReadOnlyKeyValueEntry>> keyValueRevisions = new();
 
     /// <summary>
     /// Per-key provenance for no-revision writes: the earliest and latest HLC at which the key was
@@ -88,27 +88,13 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
     {
         foreach (ref readonly PersistenceRequestItem item in CollectionsMarshal.AsSpan(items))
         {
-            if (locks.TryGetValue(item.Key, out LockEntry? lockContext))
-            {
-                lockContext.Owner = item.Value;
-                lockContext.Expires = new(item.ExpiresNode, item.ExpiresPhysical, item.ExpiresCounter);
-                lockContext.FencingToken = item.Revision;
-                lockContext.LastUsed = new(item.LastUsedNode, item.LastUsedPhysical, item.LastUsedCounter);
-                lockContext.LastModified = new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter);
-                lockContext.State = (LockState)item.State;
-            }
-            else
-            {
-                locks.TryAdd(item.Key, new()
-                {
-                    Owner = item.Value,
-                    FencingToken = item.Revision,
-                    Expires = new(item.ExpiresNode, item.ExpiresPhysical, item.ExpiresCounter),
-                    LastUsed = new(item.LastUsedNode, item.LastUsedPhysical, item.LastUsedCounter),
-                    LastModified = new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter),
-                    State = (LockState)item.State
-                });
-            }
+            locks[item.Key] = new(
+                item.Value,
+                item.Revision,
+                new(item.ExpiresNode, item.ExpiresPhysical, item.ExpiresCounter),
+                new(item.LastUsedNode, item.LastUsedPhysical, item.LastUsedCounter),
+                new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter),
+                (LockState)item.State);
         }
 
         return true;
@@ -128,7 +114,7 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
             {
                 HLCTimestamp itemModified = new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter);
 
-                if (keyValues.TryGetValue(item.Key, out KeyValueEntry? existing))
+                if (keyValues.TryGetValue(item.Key, out ReadOnlyKeyValueEntry? existing))
                 {
                     // The current row only ever advances by (revision, commit HLC): the same committed
                     // mutation is queued independently by the owning actor and the Raft consumer, so a
@@ -138,27 +124,10 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
                         || (item.Revision == existing.Revision && itemModified > existing.LastModified);
 
                     if (advances)
-                    {
-                        existing.Value = item.Value;
-                        existing.Expires = new(item.ExpiresNode, item.ExpiresPhysical, item.ExpiresCounter);
-                        existing.Revision = item.Revision;
-                        existing.LastUsed = new(item.LastUsedNode, item.LastUsedPhysical, item.LastUsedCounter);
-                        existing.LastModified = itemModified;
-                        existing.State = (KeyValueState)item.State;
-                    }
+                        keyValues[item.Key] = Row(in item, itemModified);
                 }
                 else
-                {
-                    keyValues.Add(item.Key, new()
-                    {
-                        Value = item.Value,
-                        Revision = item.Revision,
-                        Expires = new(item.ExpiresNode, item.ExpiresPhysical, item.ExpiresCounter),
-                        LastUsed = new(item.LastUsedNode, item.LastUsedPhysical, item.LastUsedCounter),
-                        LastModified = itemModified,
-                        State = (KeyValueState)item.State
-                    });
-                }
+                    keyValues.Add(item.Key, Row(in item, itemModified));
 
                 // Record no-revision provenance: the earliest/latest HLC this key was written without
                 // retaining history. Used by the as-of checkpoint to fail closed when a cut's boundary
@@ -174,30 +143,20 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
                         noRevisionWrites[item.Key] = (writeHlc, writeHlc);
                 }
 
-                // Store an independent snapshot per revision — NOT a reference to the shared current
-                // entry, which is mutated in place on every later write (that aliasing would make all
-                // revisions report the latest values, breaking historical/snapshot reads).
+                // Store a row per revision, for historical and snapshot reads.
                 // Skipped for no-revision writes; only keyValues (the current-value store) is updated.
                 // Delete and extend records legitimately reuse a revision number with a newer commit
                 // HLC, so the row only ever advances by commit HLC — a delayed older same-revision
                 // duplicate must not regress it.
                 if (!item.NoRevision)
                 {
-                    ConcurrentDictionary<long, KeyValueEntry> revisions = keyValueRevisions.GetOrAdd(item.Key, _ => new());
+                    ConcurrentDictionary<long, ReadOnlyKeyValueEntry> revisions = keyValueRevisions.GetOrAdd(item.Key, _ => new());
 
-                    if (revisions.TryGetValue(item.Revision, out KeyValueEntry? existingRevision)
+                    if (revisions.TryGetValue(item.Revision, out ReadOnlyKeyValueEntry? existingRevision)
                         && !(itemModified > existingRevision.LastModified))
                         continue;
 
-                    revisions[item.Revision] = new()
-                    {
-                        Value = item.Value,
-                        Revision = item.Revision,
-                        Expires = new(item.ExpiresNode, item.ExpiresPhysical, item.ExpiresCounter),
-                        LastUsed = new(item.LastUsedNode, item.LastUsedPhysical, item.LastUsedCounter),
-                        LastModified = new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter),
-                        State = (KeyValueState)item.State
-                    };
+                    revisions[item.Revision] = Row(in item, itemModified);
                 }
             }
         }
@@ -205,41 +164,51 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
         return true;
     }
 
-    public LockEntry? GetLock(string resource)
+    // Rows are immutable, so the current row and every revision are separate objects, and a reader
+    // can keep one without seeing a later write.
+    private static ReadOnlyKeyValueEntry Row(in PersistenceRequestItem item, HLCTimestamp lastModified) =>
+        new(item.Value,
+            item.Revision,
+            new(item.ExpiresNode, item.ExpiresPhysical, item.ExpiresCounter),
+            new(item.LastUsedNode, item.LastUsedPhysical, item.LastUsedCounter),
+            lastModified,
+            (KeyValueState)item.State);
+
+    public LockRow? GetLock(string resource)
     {
         return locks.GetValueOrDefault(resource);
     }
 
-    public KeyValueEntry? GetKeyValue(string keyName)
+    public ReadOnlyKeyValueEntry? GetKeyValue(string keyName)
     {
         lock (kvLock)
         {
-            keyValues.TryGetValue(keyName, out KeyValueEntry? entry);
+            keyValues.TryGetValue(keyName, out ReadOnlyKeyValueEntry? entry);
             return entry;
         }
     }
 
-    public KeyValueEntry? GetKeyValueRevision(string keyName, long revision)
+    public ReadOnlyKeyValueEntry? GetKeyValueRevision(string keyName, long revision)
     {
-        if (keyValueRevisions.TryGetValue(keyName, out ConcurrentDictionary<long, KeyValueEntry>? revisions) &&
-            revisions.TryGetValue(revision, out KeyValueEntry? entry))
+        if (keyValueRevisions.TryGetValue(keyName, out ConcurrentDictionary<long, ReadOnlyKeyValueEntry>? revisions) &&
+            revisions.TryGetValue(revision, out ReadOnlyKeyValueEntry? entry))
             return entry;
 
         return null;
     }
 
-    public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp)
+    public ReadOnlyKeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp)
     {
-        if (!keyValueRevisions.TryGetValue(keyName, out ConcurrentDictionary<long, KeyValueEntry>? revisions))
+        if (!keyValueRevisions.TryGetValue(keyName, out ConcurrentDictionary<long, ReadOnlyKeyValueEntry>? revisions))
             return null;
 
-        KeyValueEntry? best = null;
+        ReadOnlyKeyValueEntry? best = null;
         long bestRevision = -1;
 
-        foreach (KeyValuePair<long, KeyValueEntry> kv in revisions)
+        foreach (KeyValuePair<long, ReadOnlyKeyValueEntry> kv in revisions)
         {
             long rev = kv.Key;
-            KeyValueEntry entry = kv.Value;
+            ReadOnlyKeyValueEntry entry = kv.Value;
 
             if (rev <= maxRevision && entry.LastModified.CompareTo(readTimestamp) <= 0 && rev > bestRevision)
             {
@@ -272,7 +241,7 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
                 if (!key.StartsWith(prefixKeyName, StringComparison.Ordinal))
                     break;
 
-                KeyValueEntry value = keyValues.Values[i];
+                ReadOnlyKeyValueEntry value = keyValues.Values[i];
                 items.Add((key, new(
                     value.Value,
                     value.Revision,
@@ -333,7 +302,7 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
                 if (!key.StartsWith(prefix, StringComparison.Ordinal))
                     break;
 
-                KeyValueEntry value = keyValues.Values[i];
+                ReadOnlyKeyValueEntry value = keyValues.Values[i];
                 items.Add((key, new(
                     value.Value,
                     value.Revision,
@@ -370,7 +339,7 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
 
             for (int i = start; i < keys.Count && items.Count < limit; i++)
             {
-                KeyValueEntry value = keyValues.Values[i];
+                ReadOnlyKeyValueEntry value = keyValues.Values[i];
                 items.Add((keys[i], new(
                     value.Value,
                     value.Revision,
@@ -395,7 +364,7 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
         List<string> resources = [.. locks.Keys];
         resources.Sort(StringComparer.Ordinal);
 
-        List<(string, LockEntry)> items = [];
+        List<(string, LockRow)> items = [];
 
         foreach (string resource in resources)
         {
@@ -406,7 +375,7 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
                 continue;
 
             // A concurrently removed resource is simply skipped.
-            if (locks.TryGetValue(resource, out LockEntry? entry))
+            if (locks.TryGetValue(resource, out LockRow? entry))
                 items.Add((resource, entry));
         }
 
@@ -478,7 +447,7 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
         lock (kvLock)
         {
             kvEntries = new(keyValues.Count);
-            foreach (KeyValuePair<string, KeyValueEntry> kv in keyValues)
+            foreach (KeyValuePair<string, ReadOnlyKeyValueEntry> kv in keyValues)
                 kvEntries.Add(ToCheckpointEntry(kv.Key, kv.Value));
         }
 
@@ -514,7 +483,7 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
         lock (kvLock)
         {
             kvEntries = new(keyValues.Count);
-            foreach (KeyValuePair<string, KeyValueEntry> kv in keyValues)
+            foreach (KeyValuePair<string, ReadOnlyKeyValueEntry> kv in keyValues)
             {
                 // A refused key is left out before the boundary checks: its history is another node's to
                 // reconstruct, so an unreconstructable boundary here must not fail this image.
@@ -534,7 +503,7 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
                 // The current value is after the cut. The boundary is the newest write at or before
                 // the cut — a retained revision if one exists, but possibly an overwritten
                 // no-revision value that left no history row.
-                KeyValueEntry? boundary = GetKeyValueRevisionAtOrBefore(kv.Key, long.MaxValue, cut);
+                ReadOnlyKeyValueEntry? boundary = GetKeyValueRevisionAtOrBefore(kv.Key, long.MaxValue, cut);
                 HLCTimestamp boundaryHlc = boundary?.LastModified ?? HLCTimestamp.Zero;
 
                 // Fail closed when a no-revision write at or before the cut is newer than the newest
@@ -560,7 +529,7 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
         return WriteCheckpoint(destinationPath, appliedIndex, cut, kvEntries, includeLocks: false);
     }
 
-    private static MemoryCheckpointEntry ToCheckpointEntry(string key, KeyValueEntry e) => new()
+    private static MemoryCheckpointEntry ToCheckpointEntry(string key, ReadOnlyKeyValueEntry e) => new()
     {
         Key = key,
         Value = e.Value,
@@ -587,11 +556,11 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
         try
         {
             List<MemoryCheckpointLockEntry> lockEntries = [];
-            foreach (KeyValuePair<string, LockEntry> kv in locks)
+            foreach (KeyValuePair<string, LockRow> kv in locks)
             {
                 if (!includeLocks)
                     break;
-                LockEntry l = kv.Value;
+                LockRow l = kv.Value;
                 lockEntries.Add(new()
                 {
                     Resource = kv.Key,

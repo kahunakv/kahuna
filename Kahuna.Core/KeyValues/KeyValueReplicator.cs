@@ -51,14 +51,14 @@ internal sealed class KeyValueReplicator
     // Performs the authoritative backend point read for a key OFF the owning actor, so the actor's message
     // loop never awaits queued I/O. Consulted by ApplyDurableCommit when the target actor answers that the
     // key is not resident; null (bare unit-test construction) keeps the un-hydrated single-ask behavior.
-    private readonly Func<int, string, Task<KeyValueEntry?>>? hydrateFromBackend;
+    private readonly Func<int, string, Task<ReadOnlyKeyValueEntry?>>? hydrateFromBackend;
 
     // Reads one exact retained revision for a key OFF the owning actor, on the same queued read
     // scheduler. Consulted by the coherence reconcile when the durable current row is below the
     // committed head: the head revision's history row normally still exists even when the current
     // marker regressed, so the head can be recovered locally and re-promoted. Null (bare unit-test
     // construction) keeps the log-only below-head behavior.
-    private readonly Func<int, string, long, Task<KeyValueEntry?>>? hydrateRevisionFromBackend;
+    private readonly Func<int, string, long, Task<ReadOnlyKeyValueEntry?>>? hydrateRevisionFromBackend;
 
     private readonly ILogger<IKahuna> logger;
 
@@ -103,8 +103,8 @@ internal sealed class KeyValueReplicator
         ILogger<IKahuna> logger,
         UnflushedKeyValueWritesIndex? unflushedWrites = null,
         PartitionDurabilityTracker? durabilityTracker = null,
-        Func<int, string, Task<KeyValueEntry?>>? hydrateFromBackend = null,
-        Func<int, string, long, Task<KeyValueEntry?>>? hydrateRevisionFromBackend = null,
+        Func<int, string, Task<ReadOnlyKeyValueEntry?>>? hydrateFromBackend = null,
+        Func<int, string, long, Task<ReadOnlyKeyValueEntry?>>? hydrateRevisionFromBackend = null,
         Func<HLCTimestamp, long, bool>? transactionLocallyAborted = null,
         Func<string, long>? committedHeadRevisionProbe = null,
         Transactions.PreparedIntentStore? preparedIntentStore = null,
@@ -295,7 +295,7 @@ internal sealed class KeyValueReplicator
         ReadOnlyKeyValueEntry? persisted;
         try
         {
-            KeyValueEntry? row = await hydrateFromBackend(partitionId, intent.Key).ConfigureAwait(false);
+            ReadOnlyKeyValueEntry? row = await hydrateFromBackend(partitionId, intent.Key).ConfigureAwait(false);
             persisted = row is null
                 ? null
                 : new ReadOnlyKeyValueEntry(row.Value, row.Revision, row.Expires, row.LastUsed, row.LastModified, row.State);
@@ -378,7 +378,7 @@ internal sealed class KeyValueReplicator
     /// </summary>
     public void ScheduleCoherenceReconcile(int partitionId, string key, long committedHeadRevision)
     {
-        Func<int, string, Task<KeyValueEntry?>>? hydrate = hydrateFromBackend;
+        Func<int, string, Task<ReadOnlyKeyValueEntry?>>? hydrate = hydrateFromBackend;
         if (hydrate is null)
             return;
 
@@ -386,7 +386,7 @@ internal sealed class KeyValueReplicator
         {
             try
             {
-                KeyValueEntry? row = await hydrate(partitionId, key).ConfigureAwait(false);
+                ReadOnlyKeyValueEntry? row = await hydrate(partitionId, key).ConfigureAwait(false);
 
                 // A local current row below the committed head means the durable current marker
                 // regressed, or the head commit's flush was lost after its overlay entry was removed.
@@ -446,10 +446,10 @@ internal sealed class KeyValueReplicator
     /// authoritative remote copy), or the original row when another recovery for the key is already
     /// in flight.
     /// </summary>
-    private async Task<KeyValueEntry?> RecoverCommittedHeadFromHistoryAsync(
-        int partitionId, string key, long committedHeadRevision, KeyValueEntry? currentRow)
+    private async Task<ReadOnlyKeyValueEntry?> RecoverCommittedHeadFromHistoryAsync(
+        int partitionId, string key, long committedHeadRevision, ReadOnlyKeyValueEntry? currentRow)
     {
-        Func<int, string, long, Task<KeyValueEntry?>>? hydrateRevision = hydrateRevisionFromBackend;
+        Func<int, string, long, Task<ReadOnlyKeyValueEntry?>>? hydrateRevision = hydrateRevisionFromBackend;
 
         if (hydrateRevision is null)
         {
@@ -462,7 +462,7 @@ internal sealed class KeyValueReplicator
 
         try
         {
-            KeyValueEntry? recovered = await hydrateRevision(partitionId, key, committedHeadRevision).ConfigureAwait(false);
+            ReadOnlyKeyValueEntry? recovered = await hydrateRevision(partitionId, key, committedHeadRevision).ConfigureAwait(false);
 
             if (recovered is null)
             {
@@ -506,7 +506,7 @@ internal sealed class KeyValueReplicator
     /// made a 46-minute wedge diagnosable only by inference — say it plainly; the settle-time repair
     /// owns re-driving the full mutation, and this alarm firing means that repair did not land either.
     /// </summary>
-    private void LogCannotHeal(string key, long committedHeadRevision, KeyValueEntry? currentRow) =>
+    private void LogCannotHeal(string key, long committedHeadRevision, ReadOnlyKeyValueEntry? currentRow) =>
         logger.LogError(
             "Coherence reconcile for key {Key} cannot heal: the local durable row is at revision {LocalRevision} but the committed head is {HeadRevision} and no retained history for the head exists on this node",
             key, currentRow?.Revision ?? -1, committedHeadRevision);
@@ -724,13 +724,13 @@ internal sealed class KeyValueReplicator
             && pending.Revision >= intent.Revision)
             return true;
 
-        Func<int, string, Task<KeyValueEntry?>>? hydrate = hydrateFromBackend;
+        Func<int, string, Task<ReadOnlyKeyValueEntry?>>? hydrate = hydrateFromBackend;
         if (hydrate is null)
             return false;
 
         try
         {
-            KeyValueEntry? row = await hydrate(partitionId, intent.Key).ConfigureAwait(false);
+            ReadOnlyKeyValueEntry? row = await hydrate(partitionId, intent.Key).ConfigureAwait(false);
             return row is not null && row.Revision >= intent.Revision;
         }
         catch
@@ -1077,7 +1077,7 @@ internal sealed class KeyValueReplicator
     private void VerifyMaterializationMiss(
         int partitionId, long logIndex, HLCTimestamp transactionId, long epoch, string key, long revision)
     {
-        Func<int, string, Task<KeyValueEntry?>>? hydrate = hydrateFromBackend;
+        Func<int, string, Task<ReadOnlyKeyValueEntry?>>? hydrate = hydrateFromBackend;
 
         if (hydrate is null)
         {
@@ -1089,7 +1089,7 @@ internal sealed class KeyValueReplicator
         {
             try
             {
-                KeyValueEntry? row = await hydrate(partitionId, key).ConfigureAwait(false);
+                ReadOnlyKeyValueEntry? row = await hydrate(partitionId, key).ConfigureAwait(false);
                 if (row is not null && row.Revision >= revision)
                     return;
             }

@@ -30,7 +30,7 @@ public sealed class TestNoRevisionWrites
         return dir;
     }
 
-    private static string ValueOf(KeyValueEntry? entry) => Encoding.UTF8.GetString(entry!.Value!);
+    private static string ValueOf(ReadOnlyKeyValueEntry? entry) => Encoding.UTF8.GetString(entry!.Value!);
 
     /// <summary>
     /// A no-revision SET writes only the current value: the latest GET reflects it, but no
@@ -45,7 +45,7 @@ public sealed class TestNoRevisionWrites
         backend.StoreKeyValues([Item("k", 1, 200, noRevision: true)]);
 
         // Current value reflects the latest (no-revision) write and the counter advanced to 1.
-        KeyValueEntry? current = backend.GetKeyValue("k");
+        ReadOnlyKeyValueEntry? current = backend.GetKeyValue("k");
         Assert.NotNull(current);
         Assert.Equal(1, current!.Revision);
         Assert.Equal("v1", ValueOf(current));
@@ -54,7 +54,7 @@ public sealed class TestNoRevisionWrites
         Assert.Null(backend.GetKeyValueRevision("k", 1));
 
         // The earlier normal write's revision row is untouched.
-        KeyValueEntry? rev0 = backend.GetKeyValueRevision("k", 0);
+        ReadOnlyKeyValueEntry? rev0 = backend.GetKeyValueRevision("k", 0);
         Assert.NotNull(rev0);
         Assert.Equal("v0", ValueOf(rev0));
     }

@@ -121,11 +121,11 @@ public sealed class TestCoherenceHeadRecovery : RaftTrackingTest
             KeyValueReplicator replicator = new(
                 writer, null!, raft, null!, null!, null!, NullLogger<IKahuna>.Instance,
                 unflushedWrites: overlay,
-                hydrateFromBackend: (_, _) => Task.FromResult<KeyValueEntry?>(staleCurrentRow),
+                hydrateFromBackend: (_, _) => Task.FromResult<ReadOnlyKeyValueEntry?>(staleCurrentRow?.ToRow()),
                 hydrateRevisionFromBackend: (_, _, revision) =>
                 {
                     Interlocked.Increment(ref historyReads);
-                    return Task.FromResult<KeyValueEntry?>(revision == 311 ? retainedHead : null);
+                    return Task.FromResult<ReadOnlyKeyValueEntry?>((revision == 311 ? retainedHead : null)?.ToRow());
                 });
 
             replicator.ScheduleCoherenceReconcile(0, "wedge/k", committedHeadRevision: 311);
@@ -141,7 +141,7 @@ public sealed class TestCoherenceHeadRecovery : RaftTrackingTest
             await FlushAndAwait(writer);
 
             Assert.False(overlay.TryGet("wedge/k", out _));
-            KeyValueEntry? durable = inner.GetKeyValue("wedge/k");
+            ReadOnlyKeyValueEntry? durable = inner.GetKeyValue("wedge/k");
             Assert.NotNull(durable);
             Assert.Equal(311, durable!.Revision);
             Assert.Equal("head"u8.ToArray(), durable.Value);
@@ -164,11 +164,11 @@ public sealed class TestCoherenceHeadRecovery : RaftTrackingTest
         KeyValueReplicator replicator = new(
             null!, null!, null!, null!, null!, null!, NullLogger<IKahuna>.Instance,
             unflushedWrites: overlay,
-            hydrateFromBackend: (_, _) => Task.FromResult<KeyValueEntry?>(staleCurrentRow),
+            hydrateFromBackend: (_, _) => Task.FromResult<ReadOnlyKeyValueEntry?>(staleCurrentRow?.ToRow()),
             hydrateRevisionFromBackend: (_, _, _) =>
             {
                 Interlocked.Increment(ref historyReads);
-                return Task.FromResult<KeyValueEntry?>(null);
+                return Task.FromResult<ReadOnlyKeyValueEntry?>(null);
             });
 
         replicator.ScheduleCoherenceReconcile(0, "wedge/missing", committedHeadRevision: 311);
@@ -194,12 +194,12 @@ public sealed class TestCoherenceHeadRecovery : RaftTrackingTest
             hydrateFromBackend: (_, _) =>
             {
                 Interlocked.Increment(ref currentReads);
-                return Task.FromResult<KeyValueEntry?>(headCurrentRow);
+                return Task.FromResult<ReadOnlyKeyValueEntry?>(headCurrentRow?.ToRow());
             },
             hydrateRevisionFromBackend: (_, _, _) =>
             {
                 Interlocked.Increment(ref historyReads);
-                return Task.FromResult<KeyValueEntry?>(null);
+                return Task.FromResult<ReadOnlyKeyValueEntry?>(null);
             });
 
         replicator.ScheduleCoherenceReconcile(0, "healthy/k", committedHeadRevision: 311);
@@ -275,10 +275,10 @@ public sealed class TestCoherenceHeadRecovery : RaftTrackingTest
         }
 
         public bool StoreLocks(List<PersistenceRequestItem> items) => inner.StoreLocks(items);
-        public LockEntry? GetLock(string resource) => inner.GetLock(resource);
-        public KeyValueEntry? GetKeyValue(string keyName) => inner.GetKeyValue(keyName);
-        public KeyValueEntry? GetKeyValueRevision(string keyName, long revision) => inner.GetKeyValueRevision(keyName, revision);
-        public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) => inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);
+        public LockRow? GetLock(string resource) => inner.GetLock(resource);
+        public ReadOnlyKeyValueEntry? GetKeyValue(string keyName) => inner.GetKeyValue(keyName);
+        public ReadOnlyKeyValueEntry? GetKeyValueRevision(string keyName, long revision) => inner.GetKeyValueRevision(keyName, revision);
+        public ReadOnlyKeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) => inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName) => inner.GetKeyValueByPrefix(prefixKeyName);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit) => inner.GetKeyValueByRange(prefix, startKey, limit);
         public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, HLCTimestamp floorTimestamp, out RevisionPruneResult result) => inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, floorTimestamp, out result);

@@ -110,11 +110,11 @@ public sealed class TestPartitionDataEnumerator
     private static async Task<List<string>> CollectLocks(PartitionDataEnumerator enumerator, int partitionId, int pageSize)
     {
         List<string> resources = [];
-        await foreach (IReadOnlyList<(string Resource, LockEntry Entry)> page in
+        await foreach (IReadOnlyList<(string Resource, LockRow Entry)> page in
             enumerator.EnumerateLocksAsync(partitionId, pageSize, TestContext.Current.CancellationToken))
         {
             Assert.NotEmpty(page);
-            foreach ((string resource, LockEntry entry) in page)
+            foreach ((string resource, LockRow entry) in page)
             {
                 Assert.NotNull(entry);
                 resources.Add(resource);

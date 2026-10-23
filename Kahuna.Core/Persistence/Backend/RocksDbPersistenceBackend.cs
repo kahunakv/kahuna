@@ -1887,10 +1887,10 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// </summary>
     /// <param name="resource">The unique identifier of the resource for which the lock context is being retrieved.</param>
     /// <returns>
-    /// A <see cref="LockEntry"/> instance containing details about the lock if it exists;
+    /// A <see cref="LockRow"/> instance containing details about the lock if it exists;
     /// otherwise, null if no lock is associated with the specified resource.
     /// </returns>
-    public LockEntry? GetLock(string resource)
+    public LockRow? GetLock(string resource)
     {
         EnterDbFence();
         try
@@ -1904,7 +1904,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     }
 
     // Must run under the swap fence (EnterDbFence).
-    private LockEntry? GetLockFenced(string resource)
+    private LockRow? GetLockFenced(string resource)
     {
         int keyLen = Encoding.UTF8.GetByteCount(resource);
         int totalLen = keyLen + CurrentMarkerUtf8.Length;
@@ -1934,15 +1934,13 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             else
                 owner = message.Owner.ToByteArray();
 
-            return new()
-            {
-                Owner = owner,
-                FencingToken = message.FencingToken,
-                Expires = new(message.ExpiresNode, message.ExpiresPhysical, message.ExpiresCounter),
-                LastUsed = new(message.LastUsedNode, message.LastUsedPhysical, message.LastUsedCounter),
-                LastModified = new(message.LastModifiedNode, message.LastModifiedPhysical, message.LastModifiedCounter),
-                State = (LockState)message.State
-            };
+            return new(
+                owner,
+                message.FencingToken,
+                new(message.ExpiresNode, message.ExpiresPhysical, message.ExpiresCounter),
+                new(message.LastUsedNode, message.LastUsedPhysical, message.LastUsedCounter),
+                new(message.LastModifiedNode, message.LastModifiedPhysical, message.LastModifiedCounter),
+                (LockState)message.State);
         }
         finally
         {
@@ -1957,10 +1955,10 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// </summary>
     /// <param name="keyName">The name of the key to retrieve the associated key-value context.</param>
     /// <returns>
-    /// A <see cref="KeyValueEntry"/> object containing the value, revision, expiration details, and other metadata
+    /// A <see cref="ReadOnlyKeyValueEntry"/> object containing the value, revision, expiration details, and other metadata
     /// associated with the key, or null if the key does not exist.
     /// </returns>
-    public KeyValueEntry? GetKeyValue(string keyName)
+    public ReadOnlyKeyValueEntry? GetKeyValue(string keyName)
     {
         EnterDbFence();
         try
@@ -1974,7 +1972,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     }
 
     // Must run under the swap fence (EnterDbFence).
-    private KeyValueEntry? GetKeyValueFenced(string keyName)
+    private ReadOnlyKeyValueEntry? GetKeyValueFenced(string keyName)
     {
         int keyLen = Encoding.UTF8.GetByteCount(keyName);
         int totalLen = keyLen + CurrentMarkerUtf8.Length;
@@ -2004,10 +2002,10 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
 
     /// <summary>
     /// Decodes a serialized current-marker row from the keys column family into a
-    /// <see cref="KeyValueEntry"/>. Shared by <see cref="GetKeyValue"/> and
+    /// <see cref="ReadOnlyKeyValueEntry"/>. Shared by <see cref="GetKeyValue"/> and
     /// <see cref="GetKeyValues"/> so single and batched point reads cannot drift.
     /// </summary>
-    private static KeyValueEntry DecodeCurrentKeyValue(byte[] value)
+    private static ReadOnlyKeyValueEntry DecodeCurrentKeyValue(byte[] value)
     {
         RocksDbKeyValueMessage message = UnserializeKeyValueMessageThreadCached(value);
 
@@ -2016,15 +2014,13 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         // NULL), and a reopen must not be the step that quietly merges them.
         byte[]? messageValue = ByteStringPayload.GetArrayOrNull(message.HasValue, message.Value);
 
-        return new()
-        {
-            Value = messageValue,
-            Revision = message.Revision,
-            Expires = new(message.ExpiresNode, message.ExpiresPhysical, message.ExpiresCounter),
-            LastUsed = new(message.LastUsedNode, message.LastUsedPhysical, message.LastUsedCounter),
-            LastModified = new(message.LastModifiedNode, message.LastModifiedPhysical, message.LastModifiedCounter),
-            State = (KeyValueState)message.State,
-        };
+        return new(
+            messageValue,
+            message.Revision,
+            new(message.ExpiresNode, message.ExpiresPhysical, message.ExpiresCounter),
+            new(message.LastUsedNode, message.LastUsedPhysical, message.LastUsedCounter),
+            new(message.LastModifiedNode, message.LastModifiedPhysical, message.LastModifiedCounter),
+            (KeyValueState)message.State);
     }
 
     /// <summary>
@@ -2033,7 +2029,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// RocksDB), instead of N individual <c>Get</c>s. Results are index-aligned; a missing key
     /// yields <c>null</c> at its slot.
     /// </summary>
-    public KeyValueEntry?[] GetKeyValues(string[] keyNames)
+    public ReadOnlyKeyValueEntry?[] GetKeyValues(string[] keyNames)
     {
         EnterDbFence();
         try
@@ -2047,7 +2043,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     }
 
     // Must run under the swap fence (EnterDbFence).
-    private KeyValueEntry?[] GetKeyValuesFenced(string[] keyNames)
+    private ReadOnlyKeyValueEntry?[] GetKeyValuesFenced(string[] keyNames)
     {
         byte[][] keys = new byte[keyNames.Length][];
 
@@ -2070,7 +2066,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         // null Value.
         KeyValuePair<byte[], byte[]>[] values = db.MultiGet(keys, families);
 
-        KeyValueEntry?[] results = new KeyValueEntry?[keyNames.Length];
+        ReadOnlyKeyValueEntry?[] results = new ReadOnlyKeyValueEntry?[keyNames.Length];
 
         for (int i = 0; i < values.Length; i++)
         {
@@ -2087,10 +2083,10 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// <param name="keyName">The name of the key to retrieve.</param>
     /// <param name="revision">The specific revision number of the key to retrieve.</param>
     /// <returns>
-    /// A <see cref="KeyValueEntry"/> object containing the key-value pair metadata and value,
+    /// A <see cref="ReadOnlyKeyValueEntry"/> object containing the key-value pair metadata and value,
     /// or <c>null</c> if the key or revision is not found.
     /// </returns>
-    public KeyValueEntry? GetKeyValueRevision(string keyName, long revision)
+    public ReadOnlyKeyValueEntry? GetKeyValueRevision(string keyName, long revision)
     {
         EnterDbFence();
         try
@@ -2104,7 +2100,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     }
 
     // Must run under the swap fence (EnterDbFence).
-    private KeyValueEntry? GetKeyValueRevisionFenced(string keyName, long revision)
+    private ReadOnlyKeyValueEntry? GetKeyValueRevisionFenced(string keyName, long revision)
     {
         int keyLen = Encoding.UTF8.GetByteCount(keyName);
         int maxLen = keyLen + 21; // '~'(1) + up to 20 decimal digits
@@ -2134,21 +2130,19 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     }
 
     /// <summary>Decodes one <c>keyName~{revision}</c> row. Shared by the exact-revision read and the batched revision probe.</summary>
-    private static KeyValueEntry DecodeRevisionRow(ReadOnlySpan<byte> value)
+    private static ReadOnlyKeyValueEntry DecodeRevisionRow(ReadOnlySpan<byte> value)
     {
         RocksDbKeyValueMessage message = UnserializeKeyValueMessageThreadCached(value);
 
         byte[]? messageValue = ByteStringPayload.GetArrayOrNull(message.HasValue, message.Value);
 
-        return new()
-        {
-            Value = messageValue,
-            Revision = message.Revision,
-            Expires = new(message.ExpiresNode, message.ExpiresPhysical, message.ExpiresCounter),
-            LastUsed = new(message.LastUsedNode, message.LastUsedPhysical, message.LastUsedCounter),
-            LastModified = new(message.LastModifiedNode, message.LastModifiedPhysical, message.LastModifiedCounter),
-            State = (KeyValueState)message.State,
-        };
+        return new(
+            messageValue,
+            message.Revision,
+            new(message.ExpiresNode, message.ExpiresPhysical, message.ExpiresCounter),
+            new(message.LastUsedNode, message.LastUsedPhysical, message.LastUsedCounter),
+            new(message.LastModifiedNode, message.LastModifiedPhysical, message.LastModifiedCounter),
+            (KeyValueState)message.State);
     }
 
     /// <summary>
@@ -2157,7 +2151,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// keys are what the whole-key bloom filter answers, so an absent revision costs a filter probe
     /// per SST rather than a block read. Must run under the swap fence.
     /// </summary>
-    private KeyValueEntry?[] GetKeyValueRevisionsFenced(string keyName, ReadOnlySpan<long> revisions)
+    private ReadOnlyKeyValueEntry?[] GetKeyValueRevisionsFenced(string keyName, ReadOnlySpan<long> revisions)
     {
         int keyLen = Encoding.UTF8.GetByteCount(keyName);
         byte[][] keys = new byte[revisions.Length][];
@@ -2180,7 +2174,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
 
         KeyValuePair<byte[], byte[]>[] values = db.MultiGet(keys, families);
 
-        KeyValueEntry?[] results = new KeyValueEntry?[revisions.Length];
+        ReadOnlyKeyValueEntry?[] results = new ReadOnlyKeyValueEntry?[revisions.Length];
         for (int i = 0; i < values.Length; i++)
         {
             if (values[i].Value is not null)
@@ -2208,7 +2202,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         EnterDbFence();
         try
         {
-            KeyValueEntry? head = GetKeyValueFenced(keyName);
+            ReadOnlyKeyValueEntry? head = GetKeyValueFenced(keyName);
             if (head is null || recentRevisions <= 0 || head.Revision <= 0)
                 return new KeyValueHydration(head, []);
 
@@ -2217,10 +2211,10 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             for (int i = 0; i < count; i++)
                 revisions[i] = head.Revision - 1 - i;
 
-            KeyValueEntry?[] rows = GetKeyValueRevisionsFenced(keyName, revisions);
+            ReadOnlyKeyValueEntry?[] rows = GetKeyValueRevisionsFenced(keyName, revisions);
 
-            List<KeyValueEntry> recent = new(count);
-            foreach (KeyValueEntry? row in rows)
+            List<ReadOnlyKeyValueEntry> recent = new(count);
+            foreach (ReadOnlyKeyValueEntry? row in rows)
                 if (row is not null)
                     recent.Add(row);
 
@@ -2238,7 +2232,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// qualifying retained revision exists. Probes exact revision keys downward from
     /// <paramref name="maxRevision"/> first and walks the key's revision rows only past the probe window.
     /// </summary>
-    public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp)
+    public ReadOnlyKeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp)
     {
         KeyValueScanTally discarded = default;
         return GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp, ref discarded);
@@ -2249,7 +2243,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// <paramref name="tally"/>, every revision row of <paramref name="keyName"/> it read: the rows the probe
     /// found and the rows the backstop walk stepped over.
     /// </summary>
-    public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp, ref KeyValueScanTally tally)
+    public ReadOnlyKeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp, ref KeyValueScanTally tally)
     {
         EnterDbFence();
         try
@@ -2276,7 +2270,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     // walk, when still needed, runs with its ceiling lowered to lowestProbed - 1 and finds exactly what
     // the unprobed version would have. A batch with no rows at all means the chain ended or has a hole
     // (pruning, a head jump); the walk resolves both, so the probe stops there rather than guessing.
-    private KeyValueEntry? GetKeyValueRevisionAtOrBeforeFenced(string keyName, long maxRevision, HLCTimestamp readTimestamp, ref KeyValueScanTally tally)
+    private ReadOnlyKeyValueEntry? GetKeyValueRevisionAtOrBeforeFenced(string keyName, long maxRevision, HLCTimestamp readTimestamp, ref KeyValueScanTally tally)
     {
         if (maxRevision < 0)
             return null;
@@ -2295,12 +2289,12 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 while (count < RevisionProbeBatch && next >= 0)
                     probe[count++] = next--;
 
-                KeyValueEntry?[] rows = GetKeyValueRevisionsFenced(keyName, probe[..count]);
+                ReadOnlyKeyValueEntry?[] rows = GetKeyValueRevisionsFenced(keyName, probe[..count]);
 
                 bool anyPresent = false;
                 for (int i = 0; i < count; i++)
                 {
-                    KeyValueEntry? row = rows[i];
+                    ReadOnlyKeyValueEntry? row = rows[i];
                     if (row is null)
                         continue;
 
@@ -2325,7 +2319,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
 
     // Forward scan over every revision row of keyName — the pre-probe algorithm, kept as the exact
     // backstop for snapshots older than the probe window and for chains with holes. O(revisions).
-    private KeyValueEntry? WalkRevisionAtOrBeforeFenced(string keyName, long maxRevision, HLCTimestamp readTimestamp, ref KeyValueScanTally tally)
+    private ReadOnlyKeyValueEntry? WalkRevisionAtOrBeforeFenced(string keyName, long maxRevision, HLCTimestamp readTimestamp, ref KeyValueScanTally tally)
     {
         int keyLen = Encoding.UTF8.GetByteCount(keyName);
         int prefixLen = keyLen + 1; // keyName + '~'
@@ -2344,7 +2338,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             using Iterator? iterator = db.NewIterator(cf: columnFamilyKeys);
             iterator.Seek(prefixBuffer);
 
-            KeyValueEntry? best = null;
+            ReadOnlyKeyValueEntry? best = null;
             long bestRevision = -1;
 
             // One parse shell serves every row of the scan; fields are copied out per row.
@@ -2388,15 +2382,13 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                     {
                         byte[]? messageValue = ByteStringPayload.GetArrayOrNull(message.HasValue, message.Value);
 
-                        best = new()
-                        {
-                            Value = messageValue,
-                            Revision = message.Revision,
-                            Expires = new(message.ExpiresNode, message.ExpiresPhysical, message.ExpiresCounter),
-                            LastUsed = new(message.LastUsedNode, message.LastUsedPhysical, message.LastUsedCounter),
-                            LastModified = lastModified,
-                            State = (KeyValueState)message.State,
-                        };
+                        best = new(
+                            messageValue,
+                            message.Revision,
+                            new(message.ExpiresNode, message.ExpiresPhysical, message.ExpiresCounter),
+                            new(message.LastUsedNode, message.LastUsedPhysical, message.LastUsedCounter),
+                            lastModified,
+                            (KeyValueState)message.State);
                         bestRevision = revision;
                     }
                 }
@@ -3125,7 +3117,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     // Must run under the swap fence (EnterDbFence).
     private LockScanPage ScanLocksFenced(string? cursor, int limit)
     {
-        List<(string, LockEntry)> items = [];
+        List<(string, LockRow)> items = [];
 
         using Iterator iterator = db.NewIterator(readOptions: ScanReadOptions, cf: columnFamilyLocks);
 
@@ -3160,15 +3152,13 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             else
                 owner = message.Owner.ToByteArray();
 
-            items.Add((resource, new()
-            {
-                Owner = owner,
-                FencingToken = message.FencingToken,
-                Expires = new(message.ExpiresNode, message.ExpiresPhysical, message.ExpiresCounter),
-                LastUsed = new(message.LastUsedNode, message.LastUsedPhysical, message.LastUsedCounter),
-                LastModified = new(message.LastModifiedNode, message.LastModifiedPhysical, message.LastModifiedCounter),
-                State = (LockState)message.State
-            }));
+            items.Add((resource, new(
+                owner,
+                message.FencingToken,
+                new(message.ExpiresNode, message.ExpiresPhysical, message.ExpiresCounter),
+                new(message.LastUsedNode, message.LastUsedPhysical, message.LastUsedCounter),
+                new(message.LastModifiedNode, message.LastModifiedPhysical, message.LastModifiedCounter),
+                (LockState)message.State)));
 
             iterator.Next();
         }

@@ -47,7 +47,7 @@ internal sealed class SnapshotReadContinuation : ReadContinuation
     internal KeyValueHydration? Hydration { get; private set; }
 
     /// <summary>Stage-2 as-of answer from the persisted history; meaningful only when <see cref="AsOfConsulted"/>.</summary>
-    internal KeyValueEntry? AsOf { get; private set; }
+    internal ReadOnlyKeyValueEntry? AsOf { get; private set; }
 
     /// <summary>True when stage 2 consulted the persisted revision history (so a null <see cref="AsOf"/> means "no such revision").</summary>
     internal bool AsOfConsulted { get; private set; }
@@ -91,13 +91,13 @@ internal sealed class SnapshotReadContinuation : ReadContinuation
         KeyValueHydration hydration = backend.GetKeyValueWithRecentRevisions(key, recentRevisions);
         Hydration = hydration;
 
-        KeyValueEntry? head = hydration.Head;
+        ReadOnlyKeyValueEntry? head = hydration.Head;
         if (head is null || head.LastModified.CompareTo(readTimestamp) <= 0)
             return; // the head is the snapshot's answer
 
         // Newest first: the first archived revision at-or-before the timestamp is the answer and will
         // be served from the archive at stage 3.
-        foreach (KeyValueEntry row in hydration.RecentRevisions)
+        foreach (ReadOnlyKeyValueEntry row in hydration.RecentRevisions)
             if (row.LastModified.CompareTo(readTimestamp) <= 0)
                 return;
 
@@ -162,7 +162,7 @@ internal sealed class SnapshotReadContinuation : ReadContinuation
                 return KeyValueStaticResponses.DoesNotExistContextResponse;
             }
 
-            entry = hydration.Head;
+            entry = KeyValueEntry.FromRow(hydration.Head);
             entry.FlushedRevision = entry.Revision;
             entry.LastUsed = currentTime;
             context.InsertStoreEntry(key, entry);
@@ -212,7 +212,7 @@ internal sealed class SnapshotReadContinuation : ReadContinuation
 
     private KeyValueResponse FromPersistedHistory(HLCTimestamp currentTime)
     {
-        KeyValueEntry? asOf = AsOf;
+        ReadOnlyKeyValueEntry? asOf = AsOf;
         if (asOf is null)
             return KeyValueStaticResponses.DoesNotExistContextResponse;
 
@@ -224,7 +224,7 @@ internal sealed class SnapshotReadContinuation : ReadContinuation
     /// budget the way <c>BaseHandler.ApplyCommittedHead</c> does. Must run after
     /// <see cref="KeyValueContext.InsertStoreEntry"/> so the entry's byte estimate is initialised.
     /// </summary>
-    private static void ArchiveRecentRevisions(KeyValueContext context, KeyValueEntry entry, List<KeyValueEntry> recent)
+    private static void ArchiveRecentRevisions(KeyValueContext context, KeyValueEntry entry, List<ReadOnlyKeyValueEntry> recent)
     {
         if (recent.Count == 0)
             return;
@@ -237,7 +237,7 @@ internal sealed class SnapshotReadContinuation : ReadContinuation
         // walk it from the end.
         for (int i = recent.Count - 1; i >= 0; i--)
         {
-            KeyValueEntry row = recent[i];
+            ReadOnlyKeyValueEntry row = recent[i];
             if (row.Revision < 0 || row.Revision >= entry.Revision || entry.Revisions.ContainsKey(row.Revision))
                 continue;
 

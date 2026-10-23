@@ -96,7 +96,7 @@ internal sealed class ProbeManyContinuation : ReadContinuation
 
         if (latestKeys is not null)
         {
-            KeyValueEntry?[] rows = pointReads.ExecuteBatch([.. latestKeys]);
+            ReadOnlyKeyValueEntry?[] rows = pointReads.ExecuteBatch([.. latestKeys]);
 
             if (rows.Length != latestKeys.Count)
                 throw new InvalidOperationException($"Batched point read returned {rows.Length} rows for {latestKeys.Count} keys.");

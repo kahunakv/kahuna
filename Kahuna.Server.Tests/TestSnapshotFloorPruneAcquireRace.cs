@@ -55,7 +55,7 @@ public sealed class TestSnapshotFloorPruneAcquireRace : RaftTrackingTest
         private readonly ConcurrentDictionary<string, ConcurrentDictionary<long, KeyValueEntry>> revisions = new();
 
         public bool StoreLocks(List<PersistenceRequestItem> _) => true;
-        public LockEntry? GetLock(string _) => null;
+        public LockRow? GetLock(string _) => null;
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string _) => [];
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string _, string? __, int ___) => [];
         public CheckpointResult CreateCheckpoint(string d, long _, HLCTimestamp __) => new(d, null!);
@@ -80,13 +80,13 @@ public sealed class TestSnapshotFloorPruneAcquireRace : RaftTrackingTest
             return true;
         }
 
-        public KeyValueEntry? GetKeyValue(string key) => current.GetValueOrDefault(key);
+        public ReadOnlyKeyValueEntry? GetKeyValue(string key) => current.GetValueOrDefault(key)?.ToRow();
 
-        public KeyValueEntry? GetKeyValueRevision(string key, long revision) =>
+        public ReadOnlyKeyValueEntry? GetKeyValueRevision(string key, long revision) =>
             revisions.TryGetValue(key, out ConcurrentDictionary<long, KeyValueEntry>? r) &&
-            r.TryGetValue(revision, out KeyValueEntry? e) ? e : null;
+            r.TryGetValue(revision, out KeyValueEntry? e) ? e.ToRow() : null;
 
-        public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string key, long maxRevision, HLCTimestamp ts)
+        public ReadOnlyKeyValueEntry? GetKeyValueRevisionAtOrBefore(string key, long maxRevision, HLCTimestamp ts)
         {
             if (!revisions.TryGetValue(key, out ConcurrentDictionary<long, KeyValueEntry>? r))
                 return null;
@@ -95,7 +95,7 @@ public sealed class TestSnapshotFloorPruneAcquireRace : RaftTrackingTest
                 if (e.Revision <= maxRevision && e.LastModified.CompareTo(ts) <= 0 &&
                     (best is null || e.Revision > best.Revision))
                     best = e;
-            return best;
+            return best?.ToRow();
         }
 
         public bool PruneKeyValueRevisions(
@@ -296,7 +296,7 @@ public sealed class TestSnapshotFloorPruneAcquireRace : RaftTrackingTest
 
             // Both revisions are now in the backend (stored before the hook fired).
             // Read T1 — the LastModified of revision 1 — to anchor the hold.
-            KeyValueEntry? rev1 = backend.GetKeyValueRevision(key, 1);
+            ReadOnlyKeyValueEntry? rev1 = backend.GetKeyValueRevision(key, 1);
             Assert.NotNull(rev1);
             HLCTimestamp t1 = rev1.LastModified;
 
@@ -492,7 +492,7 @@ public sealed class TestSnapshotFloorPruneAcquireRace : RaftTrackingTest
 
             // Both revisions are persisted by now (stored before the prune step). Acquire a hold at
             // revision 1's timestamp while the delete window is open — it must fail closed.
-            KeyValueEntry? rev1 = backend.GetKeyValueRevision(key, 1);
+            ReadOnlyKeyValueEntry? rev1 = backend.GetKeyValueRevision(key, 1);
             Assert.NotNull(rev1);
             HLCTimestamp t1 = rev1.LastModified;
 
@@ -552,7 +552,7 @@ public sealed class TestSnapshotFloorPruneAcquireRace : RaftTrackingTest
             // Persist the writes without pruning (per-write cleanup is off; FlushAndNotify never sweeps).
             // Capture revision 1's timestamp now, before the periodic sweep can prune it.
             await kahuna.FlushPersistenceAsync();
-            KeyValueEntry? rev1 = backend.GetKeyValueRevision(key, 1);
+            ReadOnlyKeyValueEntry? rev1 = backend.GetKeyValueRevision(key, 1);
             Assert.NotNull(rev1);
             HLCTimestamp t1 = rev1.LastModified;
 

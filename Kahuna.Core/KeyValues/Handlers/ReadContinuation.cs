@@ -74,7 +74,7 @@ internal abstract class ReadContinuation
     /// The raw result from the backend read (stage 2). Set by the stage-2 callback before
     /// the ResumeRead message is dispatched; null means the key was not found on disk.
     /// </summary>
-    internal KeyValueEntry? DiskResult { get; set; }
+    internal ReadOnlyKeyValueEntry? DiskResult { get; set; }
 
     /// <summary>
     /// The raw result list from a scan backend read (stage 2). Used by bucket and prefix-from-disk

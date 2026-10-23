@@ -105,10 +105,7 @@ public sealed class TestReadContinuationLifecycle : RaftTrackingTest
 
         // Late completion: the backend read finally finishes and dispatches ResumeRead. It must be
         // dropped — running Execute now would populate the cache for a read the callers already retried.
-        cont.DiskResult = new KeyValueEntry
-        {
-            Value = [9], State = KeyValueState.Set, Revision = 5, FlushedRevision = 5, Expires = HLCTimestamp.Zero
-        };
+        cont.DiskResult = new ReadOnlyKeyValueEntry([9], 5, HLCTimestamp.Zero, HLCTimestamp.Zero, HLCTimestamp.Zero, KeyValueState.Set);
         ResumeReadHandler resume = new(context);
         resume.Execute(new KeyValueRequest(KeyValueRequestType.ResumeRead) { Continuation = cont });
 

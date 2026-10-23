@@ -113,10 +113,10 @@ public sealed class TestCheckpointCadence
 
         public bool StoreKeyValues(List<PersistenceRequestItem> items) => !RejectKeyValues && inner.StoreKeyValues(items);
         public bool StoreLocks(List<PersistenceRequestItem> items) => inner.StoreLocks(items);
-        public LockEntry? GetLock(string resource) => inner.GetLock(resource);
-        public KeyValueEntry? GetKeyValue(string keyName) => inner.GetKeyValue(keyName);
-        public KeyValueEntry? GetKeyValueRevision(string keyName, long revision) => inner.GetKeyValueRevision(keyName, revision);
-        public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) =>
+        public LockRow? GetLock(string resource) => inner.GetLock(resource);
+        public ReadOnlyKeyValueEntry? GetKeyValue(string keyName) => inner.GetKeyValue(keyName);
+        public ReadOnlyKeyValueEntry? GetKeyValueRevision(string keyName, long revision) => inner.GetKeyValueRevision(keyName, revision);
+        public ReadOnlyKeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) =>
             inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName) => inner.GetKeyValueByPrefix(prefixKeyName);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit) =>
@@ -219,10 +219,10 @@ public sealed class TestCheckpointCadence
         public bool StoreKeyValues(List<PersistenceRequestItem> items) =>
             ThrowOnKeyValues ? throw new InvalidOperationException("simulated storage write failure (disk full)") : inner.StoreKeyValues(items);
         public bool StoreLocks(List<PersistenceRequestItem> items) => inner.StoreLocks(items);
-        public LockEntry? GetLock(string resource) => inner.GetLock(resource);
-        public KeyValueEntry? GetKeyValue(string keyName) => inner.GetKeyValue(keyName);
-        public KeyValueEntry? GetKeyValueRevision(string keyName, long revision) => inner.GetKeyValueRevision(keyName, revision);
-        public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) =>
+        public LockRow? GetLock(string resource) => inner.GetLock(resource);
+        public ReadOnlyKeyValueEntry? GetKeyValue(string keyName) => inner.GetKeyValue(keyName);
+        public ReadOnlyKeyValueEntry? GetKeyValueRevision(string keyName, long revision) => inner.GetKeyValueRevision(keyName, revision);
+        public ReadOnlyKeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) =>
             inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName) => inner.GetKeyValueByPrefix(prefixKeyName);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit) =>

@@ -209,7 +209,7 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
     /// <returns></returns>
     private async ValueTask<LockResponse> TryLockLoad(LockRequest message)
     {
-        LockEntry? entry = await backendReadScheduler.EnqueueTask(message.PartitionId, () => persistenceBackend.GetLock(message.Resource));
+        LockEntry? entry = LockEntry.FromRow(await backendReadScheduler.EnqueueTask(message.PartitionId, () => persistenceBackend.GetLock(message.Resource)));
 
         // A brand-new entry must carry a real last-used stamp from the start: its grant proposal is
         // in flight until the commit completes, and the periodic collect sweep evicts anything whose
@@ -490,7 +490,7 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
     /// <returns></returns>
     private async Task<LockEntry?> LoadLockEntry(string resource)
     {
-        LockEntry? entry = await backendReadScheduler.EnqueueTask(dataPartitionRouter.Locate(resource), () => persistenceBackend.GetLock(resource));
+        LockEntry? entry = LockEntry.FromRow(await backendReadScheduler.EnqueueTask(dataPartitionRouter.Locate(resource), () => persistenceBackend.GetLock(resource)));
         if (entry is not null)
         {
             entry.LastUsed = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());

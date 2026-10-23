@@ -59,7 +59,7 @@ public sealed class TestBackupCaptureThrottle : IDisposable
         using RocksDbPersistenceBackend image = new(Path.Combine(_tempRoot, "budget"), "cp");
         for (int i = 0; i < 200; i++)
         {
-            KeyValueEntry? entry = image.GetKeyValue($"k/{i:D4}");
+            ReadOnlyKeyValueEntry? entry = image.GetKeyValue($"k/{i:D4}");
             Assert.NotNull(entry);
             Assert.Equal(1, entry!.Revision);
             Assert.Equal(64, entry.Value!.Length);

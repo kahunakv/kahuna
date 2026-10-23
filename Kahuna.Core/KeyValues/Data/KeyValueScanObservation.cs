@@ -67,13 +67,22 @@ public readonly record struct KeyValueScanObservation(
 /// <see cref="KeyValueScanObservation"/>. Owned by one thread at a time: the actor turn that runs the page,
 /// or the scheduler thread that runs one disk read. It is never shared between threads while it is written.
 /// </summary>
-internal struct KeyValueScanTally
+public struct KeyValueScanTally
 {
-    public long EntriesInspected;
-    public long DeadEntriesSkipped;
-    public long RevisionRowsExamined;
-    public long RevisionRunSeeks;
-    public long IntentsMerged;
+    /// <summary>Rows the scan looked at.</summary>
+    public long EntriesInspected { get; set; }
+
+    /// <summary>Rows skipped as deleted, expired or undefined.</summary>
+    public long DeadEntriesSkipped { get; set; }
+
+    /// <summary>Revision-history rows read to answer an as-of read.</summary>
+    public long RevisionRowsExamined { get; set; }
+
+    /// <summary>Seeks that skipped a run of revision rows instead of stepping through it.</summary>
+    public long RevisionRunSeeks { get; set; }
+
+    /// <summary>Pending intents merged into the page.</summary>
+    public long IntentsMerged { get; set; }
 
     public void Add(in KeyValueScanTally other)
     {

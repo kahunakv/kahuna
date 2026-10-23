@@ -70,7 +70,7 @@ public class TestMonotonicCurrentHead
                 Item(key, revision: 310, lastModifiedPhysical: 1_000)
             ]));
 
-            KeyValueEntry? current = backend.GetKeyValue(key);
+            ReadOnlyKeyValueEntry? current = backend.GetKeyValue(key);
             Assert.NotNull(current);
             Assert.Equal(311, current!.Revision);
             Assert.Equal("val311@2000", System.Text.Encoding.UTF8.GetString(current.Value!));
@@ -102,7 +102,7 @@ public class TestMonotonicCurrentHead
             // The delayed duplicate of the older commit lands after the newer head already flushed.
             Assert.True(backend.StoreKeyValues([Item(key, revision: 310, lastModifiedPhysical: 1_000)]));
 
-            KeyValueEntry? current = backend.GetKeyValue(key);
+            ReadOnlyKeyValueEntry? current = backend.GetKeyValue(key);
             Assert.NotNull(current);
             Assert.Equal(311, current!.Revision);
 
@@ -144,7 +144,7 @@ public class TestMonotonicCurrentHead
 
             for (int i = 0; i < count; i++)
             {
-                KeyValueEntry? current = backend.GetKeyValue(keys[i]);
+                ReadOnlyKeyValueEntry? current = backend.GetKeyValue(keys[i]);
                 Assert.NotNull(current);
                 Assert.Equal(i % 2 == 0 ? 311 : 310, current!.Revision);
             }
@@ -170,7 +170,7 @@ public class TestMonotonicCurrentHead
             Assert.True(backend.StoreKeyValues([Item(key, revision: 311, lastModifiedPhysical: 2_000)]));
             Assert.True(backend.StoreKeyValues([Item(key, revision: 311, lastModifiedPhysical: 3_000, state: KeyValueState.Deleted, value: null)]));
 
-            KeyValueEntry? current = backend.GetKeyValue(key);
+            ReadOnlyKeyValueEntry? current = backend.GetKeyValue(key);
             Assert.NotNull(current);
             Assert.Equal(KeyValueState.Deleted, current!.State);
             Assert.Equal(Ts(3_000), current.LastModified);
@@ -184,7 +184,7 @@ public class TestMonotonicCurrentHead
             Assert.Equal(KeyValueState.Deleted, current!.State);
             Assert.Equal(Ts(3_000), current.LastModified);
 
-            KeyValueEntry? history = backend.GetKeyValueRevision(key, 311);
+            ReadOnlyKeyValueEntry? history = backend.GetKeyValueRevision(key, 311);
             Assert.NotNull(history);
             Assert.Equal(KeyValueState.Deleted, history!.State);
             Assert.Equal(Ts(3_000), history.LastModified);
@@ -219,12 +219,12 @@ public class TestMonotonicCurrentHead
 
             foreach (string key in (string[])[keyA, keyB])
             {
-                KeyValueEntry? current = backend.GetKeyValue(key);
+                ReadOnlyKeyValueEntry? current = backend.GetKeyValue(key);
                 Assert.NotNull(current);
                 Assert.Equal(KeyValueState.Deleted, current!.State);
                 Assert.Equal(Ts(3_000), current.LastModified);
 
-                KeyValueEntry? history = backend.GetKeyValueRevision(key, 311);
+                ReadOnlyKeyValueEntry? history = backend.GetKeyValueRevision(key, 311);
                 Assert.NotNull(history);
                 Assert.Equal(KeyValueState.Deleted, history!.State);
                 Assert.Equal(Ts(3_000), history.LastModified);
@@ -252,7 +252,7 @@ public class TestMonotonicCurrentHead
             // The delayed older duplicate carries the same revision with an older commit HLC.
             Assert.True(backend.StoreKeyValues([Item(key, revision: 7, lastModifiedPhysical: 1_000, value: "old", noRevision: true)]));
 
-            KeyValueEntry? current = backend.GetKeyValue(key);
+            ReadOnlyKeyValueEntry? current = backend.GetKeyValue(key);
             Assert.NotNull(current);
             Assert.Equal(Ts(2_000), current!.LastModified);
             Assert.Equal("new", System.Text.Encoding.UTF8.GetString(current.Value!));
@@ -291,7 +291,7 @@ public class TestMonotonicCurrentHead
         {
             Assert.True(reopened.StoreKeyValues([Item(key, revision: 310, lastModifiedPhysical: 1_000)]));
 
-            KeyValueEntry? current = reopened.GetKeyValue(key);
+            ReadOnlyKeyValueEntry? current = reopened.GetKeyValue(key);
             Assert.NotNull(current);
             Assert.Equal(311, current!.Revision);
 

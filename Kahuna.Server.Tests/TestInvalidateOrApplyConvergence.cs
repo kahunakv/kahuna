@@ -725,7 +725,7 @@ public sealed class TestInvalidateOrApplyConvergence : RaftTrackingTest
 
         KeyValueReplicator replicator = new(
             null!, null!, null!, null!, null!, null!, NullLogger<IKahuna>.Instance,
-            hydrateFromBackend: (_, _) => Task.FromResult<KeyValueEntry?>(flushedRow));
+            hydrateFromBackend: (_, _) => Task.FromResult<ReadOnlyKeyValueEntry?>(flushedRow?.ToRow()));
 
         replicator.ScheduleDurableCommitRepair(1, new PreparedIntent(
             TransactionId: Ts(1_000), Epoch: 1, Key: "verify/b",
@@ -873,7 +873,7 @@ public sealed class TestInvalidateOrApplyConvergence : RaftTrackingTest
 
         // The queued backend write must land the durable row itself at the intent's revision.
         long deadline = Environment.TickCount64 + 10_000;
-        KeyValueEntry? durableRow = backend.GetKeyValue(key);
+        ReadOnlyKeyValueEntry? durableRow = backend.GetKeyValue(key);
         while (durableRow is null || durableRow.Revision < 6)
         {
             if (Environment.TickCount64 >= deadline)
@@ -904,7 +904,7 @@ public sealed class TestInvalidateOrApplyConvergence : RaftTrackingTest
         KeyValueReplicator replicator = new(
             null!, null!, null!, null!, null!, null!, NullLogger<IKahuna>.Instance,
             unflushedWrites: overlay,
-            hydrateFromBackend: (_, _) => Task.FromResult<KeyValueEntry?>(null),
+            hydrateFromBackend: (_, _) => Task.FromResult<ReadOnlyKeyValueEntry?>(null),
             transactionLocallyAborted: (_, _) => true);
 
         replicator.ScheduleDurableCommitRepair(1, new PreparedIntent(

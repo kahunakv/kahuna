@@ -44,7 +44,7 @@ public sealed class TestResumeReadHandler : RaftTrackingTest
         };
 
         var promise = new TaskCompletionSource<KeyValueResponse?>();
-        var cont = new PointReadContinuation("mykey", KeyValueResponseType.Get, promise) { DiskResult = diskEntry };
+        var cont = new PointReadContinuation("mykey", KeyValueResponseType.Get, promise) { DiskResult = diskEntry.ToRow() };
         KeyValueRequest msg = MakeResumeMsg(cont);
 
         handler.Execute(msg);
@@ -94,7 +94,7 @@ public sealed class TestResumeReadHandler : RaftTrackingTest
         };
 
         var promise = new TaskCompletionSource<KeyValueResponse?>();
-        var cont = new PointReadContinuation("mykey", KeyValueResponseType.Get, promise) { DiskResult = diskEntry };
+        var cont = new PointReadContinuation("mykey", KeyValueResponseType.Get, promise) { DiskResult = diskEntry.ToRow() };
         handler.Execute(MakeResumeMsg(cont));
 
         Assert.True(promise.Task.IsCompleted);
@@ -179,7 +179,7 @@ public sealed class TestResumeReadHandler : RaftTrackingTest
         };
 
         var promise = new TaskCompletionSource<KeyValueResponse?>();
-        var cont = new PointReadContinuation("k", KeyValueResponseType.Get, promise) { DiskResult = tombstone };
+        var cont = new PointReadContinuation("k", KeyValueResponseType.Get, promise) { DiskResult = tombstone.ToRow() };
         handler.Execute(MakeResumeMsg(cont));
 
         Assert.True(promise.Task.IsCompleted);
@@ -221,7 +221,7 @@ public sealed class TestResumeReadHandler : RaftTrackingTest
         };
 
         var promise = new TaskCompletionSource<KeyValueResponse?>();
-        var cont = new PointReadContinuation("k", KeyValueResponseType.Get, promise) { DiskResult = diskEntry };
+        var cont = new PointReadContinuation("k", KeyValueResponseType.Get, promise) { DiskResult = diskEntry.ToRow() };
         handler.Execute(MakeResumeMsg(cont));
 
         Assert.True(promise.Task.IsCompleted);
@@ -253,7 +253,7 @@ public sealed class TestResumeReadHandler : RaftTrackingTest
         };
 
         var promise = new TaskCompletionSource<KeyValueResponse?>();
-        var cont = new PointReadContinuation("k", KeyValueResponseType.Get, promise) { DiskResult = expired };
+        var cont = new PointReadContinuation("k", KeyValueResponseType.Get, promise) { DiskResult = expired.ToRow() };
         handler.Execute(MakeResumeMsg(cont));
 
         Assert.True(promise.Task.IsCompleted);

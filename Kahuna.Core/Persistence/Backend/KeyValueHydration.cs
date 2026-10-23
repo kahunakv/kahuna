@@ -11,4 +11,4 @@ namespace Kahuna.Server.Persistence.Backend;
 /// </summary>
 /// <param name="Head">The key's current row, or null.</param>
 /// <param name="RecentRevisions">Archived revisions below the head, newest first.</param>
-internal sealed record KeyValueHydration(KeyValueEntry? Head, List<KeyValueEntry> RecentRevisions);
+public sealed record KeyValueHydration(ReadOnlyKeyValueEntry? Head, List<ReadOnlyKeyValueEntry> RecentRevisions);

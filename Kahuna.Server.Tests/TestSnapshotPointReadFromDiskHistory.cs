@@ -258,21 +258,21 @@ public class TestSnapshotPointReadFromDiskHistory : RaftTrackingTest
 
         public bool StoreLocks(List<PersistenceRequestItem> items) => inner.StoreLocks(items);
         public bool StoreKeyValues(List<PersistenceRequestItem> items) => inner.StoreKeyValues(items);
-        public LockEntry? GetLock(string resource) => inner.GetLock(resource);
+        public LockRow? GetLock(string resource) => inner.GetLock(resource);
 
-        public KeyValueEntry? GetKeyValue(string keyName) =>
-            string.Equals(keyName, key, StringComparison.Ordinal) ? currentEntry : null;
+        public ReadOnlyKeyValueEntry? GetKeyValue(string keyName) =>
+            string.Equals(keyName, key, StringComparison.Ordinal) ? currentEntry.ToRow() : null;
 
-        public KeyValueEntry? GetKeyValueRevision(string keyName, long revision) =>
+        public ReadOnlyKeyValueEntry? GetKeyValueRevision(string keyName, long revision) =>
             inner.GetKeyValueRevision(keyName, revision);
 
-        public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp)
+        public ReadOnlyKeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp)
         {
             if (!string.Equals(keyName, key, StringComparison.Ordinal))
                 return null;
             // Return the as-of entry only if readTimestamp is at or after its LastModified.
             if (readTimestamp.CompareTo(asOfLastModified) >= 0 && asOfEntry.Revision <= maxRevision)
-                return asOfEntry;
+                return asOfEntry.ToRow();
             return null;
         }
 

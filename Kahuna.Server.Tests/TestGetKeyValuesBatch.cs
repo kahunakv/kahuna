@@ -52,13 +52,13 @@ public sealed class TestGetKeyValuesBatch : IDisposable
             lastModifiedNode: 0, lastModifiedPhysical: 200 + revision, lastModifiedCounter: 0,
             state: (int)KeyValueState.Set);
 
-    private static void AssertSameAsPointRead(IPersistenceBackend backend, string[] keys, KeyValueEntry?[] batch)
+    private static void AssertSameAsPointRead(IPersistenceBackend backend, string[] keys, ReadOnlyKeyValueEntry?[] batch)
     {
         Assert.Equal(keys.Length, batch.Length);
 
         for (int i = 0; i < keys.Length; i++)
         {
-            KeyValueEntry? single = backend.GetKeyValue(keys[i]);
+            ReadOnlyKeyValueEntry? single = backend.GetKeyValue(keys[i]);
 
             if (single is null)
             {
@@ -91,7 +91,7 @@ public sealed class TestGetKeyValuesBatch : IDisposable
             // index alignment cannot cancel out.
             string[] keys = ["svc/zz-missing", "svc/b", "svc/a", "svc/nope", "svc/c", "svc/also-missing"];
 
-            KeyValueEntry?[] batch = backend.GetKeyValues(keys);
+            ReadOnlyKeyValueEntry?[] batch = backend.GetKeyValues(keys);
 
             Assert.Null(batch[0]);
             Assert.NotNull(batch[1]);
@@ -118,7 +118,7 @@ public sealed class TestGetKeyValuesBatch : IDisposable
         {
             string[] keys = ["ghost/1", "ghost/2", "ghost/3"];
 
-            KeyValueEntry?[] batch = backend.GetKeyValues(keys);
+            ReadOnlyKeyValueEntry?[] batch = backend.GetKeyValues(keys);
 
             Assert.Equal(3, batch.Length);
             Assert.All(batch, Assert.Null);
@@ -140,7 +140,7 @@ public sealed class TestGetKeyValuesBatch : IDisposable
         {
             backend.StoreKeyValues([MakeItem("solo", 42)]);
 
-            KeyValueEntry?[] batch = backend.GetKeyValues(["solo"]);
+            ReadOnlyKeyValueEntry?[] batch = backend.GetKeyValues(["solo"]);
 
             AssertSameAsPointRead(backend, ["solo"], batch);
         }
@@ -168,7 +168,7 @@ public sealed class TestGetKeyValuesBatch : IDisposable
             backend.StoreKeyValues([MakeItem("hot", 2)]);
             backend.StoreKeyValues([MakeItem("hot", 3)]);
 
-            KeyValueEntry?[] batch = backend.GetKeyValues(["hot"]);
+            ReadOnlyKeyValueEntry?[] batch = backend.GetKeyValues(["hot"]);
 
             Assert.NotNull(batch[0]);
             Assert.Equal(3, batch[0]!.Revision);
@@ -204,7 +204,7 @@ public sealed class TestGetKeyValuesBatch : IDisposable
             for (int i = 0; i < 80; i++)
                 keys[i] = (i % 3 == 2) ? $"bulk/missing-{i}" : $"bulk/{i % 40:D4}";
 
-            KeyValueEntry?[] batch = backend.GetKeyValues(keys);
+            ReadOnlyKeyValueEntry?[] batch = backend.GetKeyValues(keys);
 
             AssertSameAsPointRead(backend, keys, batch);
         }

@@ -117,10 +117,10 @@ public sealed class TestBackendStorageRecovery
         }
 
         public bool StoreLocks(List<PersistenceRequestItem> items) => Inner.StoreLocks(items);
-        public LockEntry? GetLock(string resource) => Inner.GetLock(resource);
-        public KeyValueEntry? GetKeyValue(string keyName) => Inner.GetKeyValue(keyName);
-        public KeyValueEntry? GetKeyValueRevision(string keyName, long revision) => Inner.GetKeyValueRevision(keyName, revision);
-        public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) =>
+        public LockRow? GetLock(string resource) => Inner.GetLock(resource);
+        public ReadOnlyKeyValueEntry? GetKeyValue(string keyName) => Inner.GetKeyValue(keyName);
+        public ReadOnlyKeyValueEntry? GetKeyValueRevision(string keyName, long revision) => Inner.GetKeyValueRevision(keyName, revision);
+        public ReadOnlyKeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) =>
             Inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName) => Inner.GetKeyValueByPrefix(prefixKeyName);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit) =>
@@ -247,7 +247,7 @@ public sealed class TestBackendStorageRecovery
                     int i = 0;
                     while (!readersDone.IsCancellationRequested)
                     {
-                        KeyValueEntry? entry = backend.GetKeyValue($"swap/k{i++ % 64:D3}");
+                        ReadOnlyKeyValueEntry? entry = backend.GetKeyValue($"swap/k{i++ % 64:D3}");
                         if (entry is null)
                             throw new InvalidOperationException("a pre-swap key vanished during the swap");
                     }
@@ -278,7 +278,7 @@ public sealed class TestBackendStorageRecovery
             Assert.Equal(41L, backend.GetDurabilityFloor(0));
 
             Assert.True(backend.StoreKeyValues([MakeItem("swap/after", revision: 7)]));
-            KeyValueEntry? after = backend.GetKeyValue("swap/after");
+            ReadOnlyKeyValueEntry? after = backend.GetKeyValue("swap/after");
             Assert.NotNull(after);
             Assert.Equal(7, after.Revision);
         }

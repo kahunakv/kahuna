@@ -143,7 +143,7 @@ internal sealed class PartitionDataEnumerator
     /// route purely by key-space hash (there are no key-range lock spaces), so only partitions in
     /// the hash pool can own locks — a split-created partition enumerates none.
     /// </summary>
-    public async IAsyncEnumerable<IReadOnlyList<(string Resource, LockEntry Entry)>> EnumerateLocksAsync(
+    public async IAsyncEnumerable<IReadOnlyList<(string Resource, LockRow Entry)>> EnumerateLocksAsync(
         int partitionId,
         int pageSize,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
@@ -158,9 +158,9 @@ internal sealed class PartitionDataEnumerator
             LockScanPage page = await Task.Run(
                 () => persistenceBackend.ScanLocks(capturedCursor, pageSize), cancellationToken).ConfigureAwait(false);
 
-            List<(string, LockEntry)>? owned = null;
+            List<(string, LockRow)>? owned = null;
 
-            foreach ((string resource, LockEntry entry) in page.Items)
+            foreach ((string resource, LockRow entry) in page.Items)
             {
                 if (HashPartitionOfKeySpace(KeySpaceRegistry.ExtractKeySpace(resource), hashPoolSize) == partitionId)
                     (owned ??= []).Add((resource, entry));

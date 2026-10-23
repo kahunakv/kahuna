@@ -74,7 +74,7 @@ public sealed class TestPitrMixedNoRevisionHistory : IDisposable
             };
             try
             {
-                KeyValueEntry? e = reopened.GetKeyValue(key);
+                ReadOnlyKeyValueEntry? e = reopened.GetKeyValue(key);
                 return e is null ? (Kind.Absent, null) : (Kind.Present, Encoding.UTF8.GetString(e.Value!));
             }
             finally { (reopened as IDisposable)?.Dispose(); }

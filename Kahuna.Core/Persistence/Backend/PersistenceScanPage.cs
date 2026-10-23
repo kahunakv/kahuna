@@ -11,10 +11,10 @@ namespace Kahuna.Server.Persistence.Backend;
 /// non-null (e.g. a sharded backend advancing to its next shard), so callers must iterate until
 /// the cursor is null rather than stopping at the first short page.
 /// </summary>
-internal sealed record KeyValueScanPage(List<(string Key, ReadOnlyKeyValueEntry Entry)> Items, string? NextCursor);
+public sealed record KeyValueScanPage(List<(string Key, ReadOnlyKeyValueEntry Entry)> Items, string? NextCursor);
 
 /// <summary>
 /// One page of a whole-family lock scan (<see cref="IPersistenceBackend.ScanLocks"/>). Cursor
 /// semantics are identical to <see cref="KeyValueScanPage"/>.
 /// </summary>
-internal sealed record LockScanPage(List<(string Resource, LockEntry Entry)> Items, string? NextCursor);
+public sealed record LockScanPage(List<(string Resource, LockRow Entry)> Items, string? NextCursor);

@@ -10,7 +10,7 @@ namespace Kahuna.Server.Persistence.Pitr;
 /// the restore path can locate the correct WAL replay start point without opening the
 /// storage engine.
 /// </summary>
-internal sealed record CheckpointManifest(
+public sealed record CheckpointManifest(
     long AppliedIndex,
     int AppliedTimeNode,
     long AppliedTimePhysical,
@@ -24,13 +24,13 @@ internal sealed record CheckpointManifest(
     public static CheckpointManifest From(long appliedIndex, HLCTimestamp appliedTime) =>
         new(appliedIndex, appliedTime.N, appliedTime.L, appliedTime.C);
 
-    public void WriteTo(string checkpointPath)
+    internal void WriteTo(string checkpointPath)
     {
         string file = Path.Combine(checkpointPath, FileName);
         File.WriteAllText(file, JsonSerializer.Serialize(this, PitrJsonContext.Default.CheckpointManifest));
     }
 
-    public static CheckpointManifest ReadFrom(string checkpointPath)
+    internal static CheckpointManifest ReadFrom(string checkpointPath)
     {
         string file = Path.Combine(checkpointPath, FileName);
         string json = File.ReadAllText(file);
@@ -42,7 +42,7 @@ internal sealed record CheckpointManifest(
     /// Reads the sidecar out of an artifact store rather than a local directory, for verifying a backup
     /// whose bytes may not be on this filesystem at all.
     /// </summary>
-    public static async Task<CheckpointManifest> ReadFromStoreAsync(
+    internal static async Task<CheckpointManifest> ReadFromStoreAsync(
         IBackupArtifactStore store, Guid backupId, CancellationToken ct = default)
     {
         string key = LocalDirectoryArtifactStore.CheckpointDirectoryName + "/" + FileName;

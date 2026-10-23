@@ -44,7 +44,7 @@ public sealed class TestRevisionAtOrBefore
         return dir;
     }
 
-    private static string ValueOf(KeyValueEntry? entry) => Encoding.UTF8.GetString(entry!.Value!);
+    private static string ValueOf(ReadOnlyKeyValueEntry? entry) => Encoding.UTF8.GetString(entry!.Value!);
 
     // ─── Basic snapshot semantics (highest revision with revision ≤ max and LastModified ≤ ts) ────
 
@@ -53,7 +53,7 @@ public sealed class TestRevisionAtOrBefore
         StoreRevisions(backend, "metric", 3); // rev 0/1/2 at physical 100/200/300
 
         // A snapshot between rev1 (200) and rev2 (300) sees rev1.
-        KeyValueEntry? mid = backend.GetKeyValueRevisionAtOrBefore("metric", 2, Ts(250));
+        ReadOnlyKeyValueEntry? mid = backend.GetKeyValueRevisionAtOrBefore("metric", 2, Ts(250));
         Assert.NotNull(mid);
         Assert.Equal(1, mid!.Revision);
         Assert.Equal("val1", ValueOf(mid));
@@ -62,7 +62,7 @@ public sealed class TestRevisionAtOrBefore
         Assert.Null(backend.GetKeyValueRevisionAtOrBefore("metric", 2, Ts(99)));
 
         // maxRevision caps the result even when a newer revision is visible by timestamp.
-        KeyValueEntry? capped = backend.GetKeyValueRevisionAtOrBefore("metric", 1, Ts(10_000));
+        ReadOnlyKeyValueEntry? capped = backend.GetKeyValueRevisionAtOrBefore("metric", 1, Ts(10_000));
         Assert.NotNull(capped);
         Assert.Equal(1, capped!.Revision);
     }
@@ -97,7 +97,7 @@ public sealed class TestRevisionAtOrBefore
 
         // The newest visible revision of "metric" is its own rev 2 — never the sibling's rows, whose
         // "2024~r" suffix would parse to a bogus revision 2024 without the full-consumption guard.
-        KeyValueEntry? result = backend.GetKeyValueRevisionAtOrBefore("metric", long.MaxValue, Ts(10_000));
+        ReadOnlyKeyValueEntry? result = backend.GetKeyValueRevisionAtOrBefore("metric", long.MaxValue, Ts(10_000));
         Assert.NotNull(result);
         Assert.Equal(2, result!.Revision);
         Assert.Equal("val2", ValueOf(result));
@@ -133,7 +133,7 @@ public sealed class TestRevisionAtOrBefore
         StoreRevisions(backend, "metric~-arch", 3);
         StoreRevisions(backend, "metric", 3);
 
-        KeyValueEntry? result = backend.GetKeyValueRevisionAtOrBefore("metric", long.MaxValue, Ts(10_000));
+        ReadOnlyKeyValueEntry? result = backend.GetKeyValueRevisionAtOrBefore("metric", long.MaxValue, Ts(10_000));
         Assert.NotNull(result);
         Assert.Equal(2, result!.Revision);
         Assert.Equal("val2", ValueOf(result));

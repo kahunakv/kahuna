@@ -271,7 +271,7 @@ public sealed class TestSnapshotReadContinuation : RaftTrackingTest
         internal long LastAsOfCeiling { get; private set; } = long.MinValue;
         internal bool FailReads { get; init; }
 
-        public KeyValueEntry? GetKeyValue(string keyName) =>
+        public ReadOnlyKeyValueEntry? GetKeyValue(string keyName) =>
             FailReads ? throw new IOException("simulated backend read failure") : inner.GetKeyValue(keyName);
 
         public KeyValueHydration GetKeyValueWithRecentRevisions(string keyName, int recentRevisions)
@@ -282,7 +282,7 @@ public sealed class TestSnapshotReadContinuation : RaftTrackingTest
             return ((IPersistenceBackend)inner).GetKeyValueWithRecentRevisions(keyName, recentRevisions);
         }
 
-        public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp)
+        public ReadOnlyKeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp)
         {
             Interlocked.Increment(ref asOfReads);
             LastAsOfCeiling = maxRevision;
@@ -291,8 +291,8 @@ public sealed class TestSnapshotReadContinuation : RaftTrackingTest
 
         public bool StoreLocks(List<PersistenceRequestItem> items) => inner.StoreLocks(items);
         public bool StoreKeyValues(List<PersistenceRequestItem> items) => inner.StoreKeyValues(items);
-        public Kahuna.Server.Locks.Data.LockEntry? GetLock(string resource) => inner.GetLock(resource);
-        public KeyValueEntry? GetKeyValueRevision(string keyName, long revision) => inner.GetKeyValueRevision(keyName, revision);
+        public Kahuna.Server.Locks.Data.LockRow? GetLock(string resource) => inner.GetLock(resource);
+        public ReadOnlyKeyValueEntry? GetKeyValueRevision(string keyName, long revision) => inner.GetKeyValueRevision(keyName, revision);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName) => inner.GetKeyValueByPrefix(prefixKeyName);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit) =>
             inner.GetKeyValueByRange(prefix, startKey, limit);

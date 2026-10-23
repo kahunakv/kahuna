@@ -397,7 +397,7 @@ public sealed class TestKeyValueEvictionSweep : RaftTrackingTest
         // persistence backend directly — this is exactly what GetKeyValueEntry executes under
         // the scheduler. The scheduler adds fairness across partitions; it does not change what
         // GetKeyValue returns. A unit test that requires JoinCluster would be an integration test.
-        KeyValueEntry? recovered = context.PersistenceBackend.GetKeyValue(target);
+        ReadOnlyKeyValueEntry? recovered = context.PersistenceBackend.GetKeyValue(target);
         Assert.NotNull(recovered);
         Assert.Equal(value, recovered.Value);
         Assert.Equal(revision, recovered.Revision);

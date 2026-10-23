@@ -499,10 +499,10 @@ public sealed class TestTryScanByPrefixFromDiskHandler : RaftTrackingTest
 
         public bool StoreLocks(List<PersistenceRequestItem> items) => inner.StoreLocks(items);
         public bool StoreKeyValues(List<PersistenceRequestItem> items) => inner.StoreKeyValues(items);
-        public LockEntry? GetLock(string resource) => inner.GetLock(resource);
-        public KeyValueEntry? GetKeyValue(string keyName) => inner.GetKeyValue(keyName);
-        public KeyValueEntry? GetKeyValueRevision(string keyName, long revision) => inner.GetKeyValueRevision(keyName, revision);
-        public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) => inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);
+        public LockRow? GetLock(string resource) => inner.GetLock(resource);
+        public ReadOnlyKeyValueEntry? GetKeyValue(string keyName) => inner.GetKeyValue(keyName);
+        public ReadOnlyKeyValueEntry? GetKeyValueRevision(string keyName, long revision) => inner.GetKeyValueRevision(keyName, revision);
+        public ReadOnlyKeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) => inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName) => diskEntries.Where(e => e.Key.StartsWith(prefixKeyName, StringComparison.Ordinal)).Select(e => (e.Key, e.Entry)).ToList();
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit) => inner.GetKeyValueByRange(prefix, startKey, limit);
         public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, HLCTimestamp floorTimestamp, out RevisionPruneResult result) => inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, floorTimestamp, out result);
@@ -531,11 +531,11 @@ public sealed class TestTryScanByPrefixFromDiskHandler : RaftTrackingTest
 
         public bool StoreLocks(List<PersistenceRequestItem> items) => inner.StoreLocks(items);
         public bool StoreKeyValues(List<PersistenceRequestItem> items) => inner.StoreKeyValues(items);
-        public LockEntry? GetLock(string resource) => inner.GetLock(resource);
-        public KeyValueEntry? GetKeyValue(string keyName) => inner.GetKeyValue(keyName);
-        public KeyValueEntry? GetKeyValueRevision(string keyName, long revision) => inner.GetKeyValueRevision(keyName, revision);
-        public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) =>
-            asOf.TryGetValue(keyName, out KeyValueEntry? e) ? e : null;
+        public LockRow? GetLock(string resource) => inner.GetLock(resource);
+        public ReadOnlyKeyValueEntry? GetKeyValue(string keyName) => inner.GetKeyValue(keyName);
+        public ReadOnlyKeyValueEntry? GetKeyValueRevision(string keyName, long revision) => inner.GetKeyValueRevision(keyName, revision);
+        public ReadOnlyKeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) =>
+            asOf.TryGetValue(keyName, out KeyValueEntry? e) ? e?.ToRow() : null;
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName) =>
             latest.Where(e => e.Key.StartsWith(prefixKeyName, StringComparison.Ordinal)).Select(e => (e.Key, e.Entry)).ToList();
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit) => inner.GetKeyValueByRange(prefix, startKey, limit);
@@ -550,10 +550,10 @@ public sealed class TestTryScanByPrefixFromDiskHandler : RaftTrackingTest
 
         public bool StoreLocks(List<PersistenceRequestItem> items) => inner.StoreLocks(items);
         public bool StoreKeyValues(List<PersistenceRequestItem> items) => inner.StoreKeyValues(items);
-        public LockEntry? GetLock(string resource) => inner.GetLock(resource);
-        public KeyValueEntry? GetKeyValue(string keyName) => inner.GetKeyValue(keyName);
-        public KeyValueEntry? GetKeyValueRevision(string keyName, long revision) => inner.GetKeyValueRevision(keyName, revision);
-        public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) => inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);
+        public LockRow? GetLock(string resource) => inner.GetLock(resource);
+        public ReadOnlyKeyValueEntry? GetKeyValue(string keyName) => inner.GetKeyValue(keyName);
+        public ReadOnlyKeyValueEntry? GetKeyValueRevision(string keyName, long revision) => inner.GetKeyValueRevision(keyName, revision);
+        public ReadOnlyKeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) => inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName) => throw new InvalidOperationException("simulated disk fault");
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit) => inner.GetKeyValueByRange(prefix, startKey, limit);
         public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge, int batchSize, HLCTimestamp floorTimestamp, out RevisionPruneResult result) => inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, floorTimestamp, out result);
@@ -589,10 +589,10 @@ public sealed class TestTryScanByPrefixFromDiskHandler : RaftTrackingTest
 
         public bool StoreLocks(List<PersistenceRequestItem> items) => inner.StoreLocks(items);
         public bool StoreKeyValues(List<PersistenceRequestItem> items) => inner.StoreKeyValues(items);
-        public LockEntry? GetLock(string resource) => inner.GetLock(resource);
-        public KeyValueEntry? GetKeyValue(string keyName) => inner.GetKeyValue(keyName);
-        public KeyValueEntry? GetKeyValueRevision(string keyName, long revision) => inner.GetKeyValueRevision(keyName, revision);
-        public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) => inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);
+        public LockRow? GetLock(string resource) => inner.GetLock(resource);
+        public ReadOnlyKeyValueEntry? GetKeyValue(string keyName) => inner.GetKeyValue(keyName);
+        public ReadOnlyKeyValueEntry? GetKeyValueRevision(string keyName, long revision) => inner.GetKeyValueRevision(keyName, revision);
+        public ReadOnlyKeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) => inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName) =>
             diskEntries.Where(e => e.Key.StartsWith(prefixKeyName, StringComparison.Ordinal)).Select(e => (e.Key, e.Entry)).ToList();
 
@@ -638,10 +638,10 @@ public sealed class TestTryScanByPrefixFromDiskHandler : RaftTrackingTest
 
         public bool StoreLocks(List<PersistenceRequestItem> items) => inner.StoreLocks(items);
         public bool StoreKeyValues(List<PersistenceRequestItem> items) => inner.StoreKeyValues(items);
-        public LockEntry? GetLock(string resource) => inner.GetLock(resource);
-        public KeyValueEntry? GetKeyValue(string keyName) => inner.GetKeyValue(keyName);
-        public KeyValueEntry? GetKeyValueRevision(string keyName, long revision) => inner.GetKeyValueRevision(keyName, revision);
-        public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) => inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);
+        public LockRow? GetLock(string resource) => inner.GetLock(resource);
+        public ReadOnlyKeyValueEntry? GetKeyValue(string keyName) => inner.GetKeyValue(keyName);
+        public ReadOnlyKeyValueEntry? GetKeyValueRevision(string keyName, long revision) => inner.GetKeyValueRevision(keyName, revision);
+        public ReadOnlyKeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) => inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);
 
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName)
         {

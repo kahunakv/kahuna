@@ -557,17 +557,17 @@ public sealed class TestUnflushedOverlayScanBound
 
         public bool StoreLocks(List<PersistenceRequestItem> items) => inner.StoreLocks(items);
 
-        public Kahuna.Server.Locks.Data.LockEntry? GetLock(string resource) => inner.GetLock(resource);
+        public Kahuna.Server.Locks.Data.LockRow? GetLock(string resource) => inner.GetLock(resource);
 
-        public KeyValueEntry? GetKeyValue(string keyName) => inner.GetKeyValue(keyName);
+        public ReadOnlyKeyValueEntry? GetKeyValue(string keyName) => inner.GetKeyValue(keyName);
 
-        public KeyValueEntry?[] GetKeyValues(string[] keyNames) => inner.GetKeyValues(keyNames);
+        public ReadOnlyKeyValueEntry?[] GetKeyValues(string[] keyNames) => inner.GetKeyValues(keyNames);
 
-        public KeyValueEntry? GetKeyValueRevision(string keyName, long revision) => inner.GetKeyValueRevision(keyName, revision);
+        public ReadOnlyKeyValueEntry? GetKeyValueRevision(string keyName, long revision) => inner.GetKeyValueRevision(keyName, revision);
 
         public KeyValueHydration GetKeyValueWithRecentRevisions(string keyName, int recentRevisions) => inner.GetKeyValueWithRecentRevisions(keyName, recentRevisions);
 
-        public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) => inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);
+        public ReadOnlyKeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) => inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);
 
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName) => inner.GetKeyValueByPrefix(prefixKeyName);
 

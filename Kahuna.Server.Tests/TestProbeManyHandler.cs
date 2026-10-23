@@ -590,7 +590,7 @@ public sealed class TestProbeManyHandler : RaftTrackingTest
             ]);
         }
 
-        public KeyValueEntry? GetKeyValue(string keyName)
+        public ReadOnlyKeyValueEntry? GetKeyValue(string keyName)
         {
             Interlocked.Increment(ref singleReads);
             Entered.Set();
@@ -598,7 +598,7 @@ public sealed class TestProbeManyHandler : RaftTrackingTest
             return inner.GetKeyValue(keyName);
         }
 
-        public KeyValueEntry?[] GetKeyValues(string[] keyNames)
+        public ReadOnlyKeyValueEntry?[] GetKeyValues(string[] keyNames)
         {
             batchReads.Enqueue(keyNames);
             Entered.Set();
@@ -609,13 +609,13 @@ public sealed class TestProbeManyHandler : RaftTrackingTest
         public KeyValueHydration GetKeyValueWithRecentRevisions(string keyName, int recentRevisions) =>
             ((IPersistenceBackend)inner).GetKeyValueWithRecentRevisions(keyName, recentRevisions);
 
-        public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) =>
+        public ReadOnlyKeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) =>
             inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);
 
         public bool StoreLocks(List<PersistenceRequestItem> items) => inner.StoreLocks(items);
         public bool StoreKeyValues(List<PersistenceRequestItem> items) => inner.StoreKeyValues(items);
-        public Kahuna.Server.Locks.Data.LockEntry? GetLock(string resource) => inner.GetLock(resource);
-        public KeyValueEntry? GetKeyValueRevision(string keyName, long revision) => inner.GetKeyValueRevision(keyName, revision);
+        public Kahuna.Server.Locks.Data.LockRow? GetLock(string resource) => inner.GetLock(resource);
+        public ReadOnlyKeyValueEntry? GetKeyValueRevision(string keyName, long revision) => inner.GetKeyValueRevision(keyName, revision);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName) => inner.GetKeyValueByPrefix(prefixKeyName);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit) =>
             inner.GetKeyValueByRange(prefix, startKey, limit);

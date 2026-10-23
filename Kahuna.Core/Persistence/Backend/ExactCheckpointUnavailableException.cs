@@ -8,7 +8,7 @@ namespace Kahuna.Server.Persistence.Backend;
 /// roll back to, and an overwrite is indistinguishable from a brand-new key). The backup fails
 /// closed rather than emitting an image that silently drops or over-includes such a key.
 /// </summary>
-internal sealed class ExactCheckpointUnavailableException : Exception
+public sealed class ExactCheckpointUnavailableException : Exception
 {
     public ExactCheckpointUnavailableException(string message) : base(message) { }
 }

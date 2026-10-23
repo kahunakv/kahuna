@@ -49,7 +49,7 @@ public class TestRevisionProbe
     private static void AssertMatchesContract(IPersistenceBackend backend, string key, long[] written, long maxRevision, long tsPhysical)
     {
         long? expected = Expected(written, maxRevision, tsPhysical);
-        KeyValueEntry? actual = backend.GetKeyValueRevisionAtOrBefore(key, maxRevision, At(tsPhysical));
+        ReadOnlyKeyValueEntry? actual = backend.GetKeyValueRevisionAtOrBefore(key, maxRevision, At(tsPhysical));
 
         if (expected is null)
         {

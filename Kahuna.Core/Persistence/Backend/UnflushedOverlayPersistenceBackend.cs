@@ -100,30 +100,28 @@ internal sealed class UnflushedOverlayPersistenceBackend : IPersistenceBackend, 
         return stored;
     }
 
-    public LockEntry? GetLock(string resource)
+    public LockRow? GetLock(string resource)
     {
-        LockEntry? entry = inner.GetLock(resource);
+        LockRow? entry = inner.GetLock(resource);
 
         if (unflushedLockWrites.TryGet(resource, out UnflushedLockWrite queued)
             && (entry is null
                 || !(entry.FencingToken > queued.FencingToken
                      || (entry.FencingToken == queued.FencingToken && entry.LastModified > queued.LastModified))))
-            return new()
-            {
-                Owner = queued.Owner,
-                FencingToken = queued.FencingToken,
-                Expires = queued.Expires,
-                LastUsed = queued.LastUsed,
-                LastModified = queued.LastModified,
-                State = queued.State
-            };
+            return new(
+                queued.Owner,
+                queued.FencingToken,
+                queued.Expires,
+                queued.LastUsed,
+                queued.LastModified,
+                queued.State);
 
         return entry;
     }
 
-    public KeyValueEntry? GetKeyValue(string keyName)
+    public ReadOnlyKeyValueEntry? GetKeyValue(string keyName)
     {
-        KeyValueEntry? entry = inner.GetKeyValue(keyName);
+        ReadOnlyKeyValueEntry? entry = inner.GetKeyValue(keyName);
 
         if (unflushedWrites.TryGet(keyName, out UnflushedKeyValueWrite queued)
             && (entry is null || !IsInnerNewer(entry, queued)))
@@ -132,9 +130,9 @@ internal sealed class UnflushedOverlayPersistenceBackend : IPersistenceBackend, 
         return entry;
     }
 
-    public KeyValueEntry?[] GetKeyValues(string[] keyNames)
+    public ReadOnlyKeyValueEntry?[] GetKeyValues(string[] keyNames)
     {
-        KeyValueEntry?[] results = inner.GetKeyValues(keyNames);
+        ReadOnlyKeyValueEntry?[] results = inner.GetKeyValues(keyNames);
 
         if (unflushedWrites.IsEmpty)
             return results;
@@ -149,7 +147,7 @@ internal sealed class UnflushedOverlayPersistenceBackend : IPersistenceBackend, 
         return results;
     }
 
-    public KeyValueEntry? GetKeyValueRevision(string keyName, long revision)
+    public ReadOnlyKeyValueEntry? GetKeyValueRevision(string keyName, long revision)
     {
         // The overlay holds only the newest queued head; serve it on an exact revision match. A
         // no-revision write retains no history in the inner backend either, so it is excluded to
@@ -172,8 +170,8 @@ internal sealed class UnflushedOverlayPersistenceBackend : IPersistenceBackend, 
         // The queued write is the newest head. The inner head, if it holds a revision, becomes the
         // newest archived revision — the same shape a flush would leave behind. A no-revision queued
         // write retains no history, so the inner head is dropped rather than archived.
-        KeyValueEntry queuedHead = Materialize(queued);
-        List<KeyValueEntry> recent = new(hydration.RecentRevisions.Count + 1);
+        ReadOnlyKeyValueEntry queuedHead = Materialize(queued);
+        List<ReadOnlyKeyValueEntry> recent = new(hydration.RecentRevisions.Count + 1);
         if (hydration.Head is not null && !queued.NoRevision && hydration.Head.Revision < queuedHead.Revision)
             recent.Add(hydration.Head);
         recent.AddRange(hydration.RecentRevisions);
@@ -183,15 +181,15 @@ internal sealed class UnflushedOverlayPersistenceBackend : IPersistenceBackend, 
         return new KeyValueHydration(queuedHead, recent);
     }
 
-    public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp)
+    public ReadOnlyKeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp)
     {
         KeyValueScanTally discarded = default;
         return GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp, ref discarded);
     }
 
-    public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp, ref KeyValueScanTally tally)
+    public ReadOnlyKeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp, ref KeyValueScanTally tally)
     {
-        KeyValueEntry? best = inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp, ref tally);
+        ReadOnlyKeyValueEntry? best = inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp, ref tally);
 
         if (unflushedWrites.TryGet(keyName, out UnflushedKeyValueWrite queued)
             && !queued.NoRevision
@@ -507,18 +505,16 @@ internal sealed class UnflushedOverlayPersistenceBackend : IPersistenceBackend, 
         return normalized;
     }
 
-    /// <summary>Materialises a fresh entry per read — callers mutate returned entries and insert them into actor stores.</summary>
-    private static KeyValueEntry Materialize(in UnflushedKeyValueWrite queued) => new()
-    {
-        Value = queued.Value,
-        Revision = queued.Revision,
-        Expires = queued.Expires,
-        LastUsed = queued.LastUsed,
-        LastModified = queued.LastModified,
-        State = queued.State
-    };
+    /// <summary>The row that a queued write will persist.</summary>
+    private static ReadOnlyKeyValueEntry Materialize(in UnflushedKeyValueWrite queued) => new(
+        queued.Value,
+        queued.Revision,
+        queued.Expires,
+        queued.LastUsed,
+        queued.LastModified,
+        queued.State);
 
-    private static bool IsInnerNewer(KeyValueEntry entry, in UnflushedKeyValueWrite queued) =>
+    private static bool IsInnerNewer(ReadOnlyKeyValueEntry entry, in UnflushedKeyValueWrite queued) =>
         entry.Revision > queued.Revision
         || (entry.Revision == queued.Revision && entry.LastModified > queued.LastModified);
 }

@@ -49,7 +49,7 @@ internal sealed class KeyValueRestorer
     // duplicate whose first copy flushed before the crash) rather than missing. Consulted only on that path,
     // which is empty on a healthy restart, so its cost never touches the replay's throughput. Null (bare
     // direct-construction tests) proves nothing, and every such materialization is reported as missing.
-    private readonly Func<string, KeyValueEntry?>? readDurableRow;
+    private readonly Func<string, ReadOnlyKeyValueEntry?>? readDurableRow;
 
     // The data partition a key currently routes to. A materialization the replay cannot resolve for a key this
     // partition no longer owns — its range moved out after the floor, and the un-host purge took the key's rows
@@ -58,7 +58,7 @@ internal sealed class KeyValueRestorer
     // replays) means ownership is unknown, and the miss counts.
     private readonly Func<string, int>? keyOwner;
 
-    public KeyValueRestorer(IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter, IRaft raft, CompletionReceiptStore completionReceiptStore, ILogger<IKahuna> logger, UnflushedKeyValueWritesIndex? unflushedWrites = null, PartitionDurabilityTracker? durabilityTracker = null, PreparedIntentStore? preparedIntentStore = null, Func<string, KeyValueEntry?>? readDurableRow = null, Func<string, int>? keyOwner = null)
+    public KeyValueRestorer(IActorRef<BackgroundWriterActor, BackgroundWriteRequest> backgroundWriter, IRaft raft, CompletionReceiptStore completionReceiptStore, ILogger<IKahuna> logger, UnflushedKeyValueWritesIndex? unflushedWrites = null, PartitionDurabilityTracker? durabilityTracker = null, PreparedIntentStore? preparedIntentStore = null, Func<string, ReadOnlyKeyValueEntry?>? readDurableRow = null, Func<string, int>? keyOwner = null)
     {
         this.preparedIntentStore = preparedIntentStore;
         this.backgroundWriter = backgroundWriter;

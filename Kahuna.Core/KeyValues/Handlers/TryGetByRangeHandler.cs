@@ -392,7 +392,7 @@ internal sealed class TryGetByRangeHandler : BaseHandler
 
             // A dropped row never reaches the stage-3 merge, so it is counted here: the merge counts only the
             // rows it receives.
-            KeyValueEntry? snap = backend.GetKeyValueRevisionAtOrBefore(k, historyCeiling, snapshotTs, ref tally);
+            ReadOnlyKeyValueEntry? snap = backend.GetKeyValueRevisionAtOrBefore(k, historyCeiling, snapshotTs, ref tally);
             if (snap is null || snap.State is KeyValueState.Deleted or KeyValueState.Undefined
                 || (snap.Expires != HLCTimestamp.Zero && snap.Expires.CompareTo(currentTime) < 0))
             {

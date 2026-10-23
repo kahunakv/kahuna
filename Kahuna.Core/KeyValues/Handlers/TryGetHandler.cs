@@ -48,7 +48,7 @@ internal sealed class TryGetHandler : BaseHandler
     internal async ValueTask<PointReadStep> ResolvePointRead(
         KeyValueRequest message,
         HLCTimestamp currentTime,
-        Dictionary<string, KeyValueEntry?>? preloadedHeads)
+        Dictionary<string, ReadOnlyKeyValueEntry?>? preloadedHeads)
     {
         // ── Stage 1: in-memory pre-checks (actor thread, synchronous) ────────────────────
         bool inCache = context.Store.TryGetValue(message.Key, out KeyValueEntry? entry);
@@ -338,9 +338,9 @@ internal sealed class TryGetHandler : BaseHandler
     /// backend now. Either way the stale-hydration rule and the install are those of <see cref="BaseHandler.HydratePersistentHead"/>.
     /// </summary>
     private ValueTask<(KeyValueEntry? Entry, bool Stale)> HydrateForRead(
-        string key, HLCTimestamp currentTime, long coveredThrough, Dictionary<string, KeyValueEntry?>? preloadedHeads)
+        string key, HLCTimestamp currentTime, long coveredThrough, Dictionary<string, ReadOnlyKeyValueEntry?>? preloadedHeads)
     {
-        if (preloadedHeads is not null && preloadedHeads.Remove(key, out KeyValueEntry? preloaded))
+        if (preloadedHeads is not null && preloadedHeads.Remove(key, out ReadOnlyKeyValueEntry? preloaded))
             return new(InstallHydratedHead(key, preloaded, currentTime, coveredThrough));
 
         return HydratePersistentHead(key, currentTime, coveredThrough);
@@ -381,7 +381,7 @@ internal sealed class TryGetHandler : BaseHandler
         context.PendingReads[pointKey] = cont;
         int partitionId = ResolvePartition(message.Key);
 
-        Task<KeyValueEntry?> readTask;
+        Task<ReadOnlyKeyValueEntry?> readTask;
         try
         {
             readTask = context.BackendReadScheduler.EnqueueBatchableTask(
@@ -506,7 +506,7 @@ internal sealed class TryGetHandler : BaseHandler
         string key = message.Key;
         long compareRevision = message.CompareRevision;
 
-        Task<KeyValueEntry?> readTask;
+        Task<ReadOnlyKeyValueEntry?> readTask;
         try
         {
             readTask = context.BackendReadScheduler.EnqueueTask(

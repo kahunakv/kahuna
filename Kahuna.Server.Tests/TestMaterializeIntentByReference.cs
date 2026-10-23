@@ -419,7 +419,7 @@ public sealed class TestMaterializeIntentByReference : BaseCluster, IDisposable
 
         KeyValueReplicator replicator = new(
             null!, null!, null!, null!, null!, null!, NullLogger<IKahuna>.Instance,
-            hydrateFromBackend: (_, _) => Task.FromResult<KeyValueEntry?>(flushed));
+            hydrateFromBackend: (_, _) => Task.FromResult<ReadOnlyKeyValueEntry?>(flushed?.ToRow()));
 
         PreparedIntent intent = Intent("acct/1", revision: 9, value: [4, 5, 6]);
         byte[] record = PreparedIntentMaterializer.ToKeyValueRecord(intent, new KeyValueMessage(), byReference: true);
@@ -445,7 +445,7 @@ public sealed class TestMaterializeIntentByReference : BaseCluster, IDisposable
             hydrateFromBackend: (_, _) =>
             {
                 verified.TrySetResult();
-                return Task.FromResult<KeyValueEntry?>(stale);
+                return Task.FromResult<ReadOnlyKeyValueEntry?>(stale?.ToRow());
             });
 
         PreparedIntent intent = Intent("acct/1", revision: 9, value: [4, 5, 6]);
@@ -475,7 +475,7 @@ public sealed class TestMaterializeIntentByReference : BaseCluster, IDisposable
 
         KeyValueReplicator replicator = new(
             null!, null!, null!, null!, null!, null!, loggerFactory.CreateLogger<IKahuna>(),
-            hydrateFromBackend: (_, _) => Task.FromResult<KeyValueEntry?>(stale),
+            hydrateFromBackend: (_, _) => Task.FromResult<ReadOnlyKeyValueEntry?>(stale?.ToRow()),
             keyOwner: _ => PartitionId,
             materializationMissing: (partition, logIndex, key, revision) => reported.TrySetResult((partition, logIndex, key, revision)));
 
@@ -503,7 +503,7 @@ public sealed class TestMaterializeIntentByReference : BaseCluster, IDisposable
             hydrateFromBackend: (_, _) =>
             {
                 verified.TrySetResult();
-                return Task.FromResult<KeyValueEntry?>(null);
+                return Task.FromResult<ReadOnlyKeyValueEntry?>(null);
             },
             keyOwner: _ => PartitionId + 1,
             materializationMissing: (_, _, _, _) => Interlocked.Increment(ref reported));
@@ -543,7 +543,7 @@ public sealed class TestMaterializeIntentByReference : BaseCluster, IDisposable
 
         KeyValueReplicator replicator = new(
             null!, null!, null!, null!, null!, null!, loggerFactory.CreateLogger<IKahuna>(),
-            hydrateFromBackend: (_, _) => Task.FromResult<KeyValueEntry?>(stale),
+            hydrateFromBackend: (_, _) => Task.FromResult<ReadOnlyKeyValueEntry?>(stale?.ToRow()),
             preparedIntentStore: store,
             keyOwner: _ => PartitionId,
             materializationMissing: (_, logIndex, _, _) =>
@@ -593,7 +593,7 @@ public sealed class TestMaterializeIntentByReference : BaseCluster, IDisposable
             hydrateFromBackend: (_, _) =>
             {
                 Interlocked.Increment(ref hydrations);
-                return Task.FromResult<KeyValueEntry?>(stale);
+                return Task.FromResult<ReadOnlyKeyValueEntry?>(stale?.ToRow());
             },
             committedHeadRevisionProbe: key => key == "acct/installed" ? 9 : -1,
             preparedIntentStore: store,
@@ -636,7 +636,7 @@ public sealed class TestMaterializeIntentByReference : BaseCluster, IDisposable
             hydrateFromBackend: (_, _) =>
             {
                 verified.TrySetResult();
-                return Task.FromResult<KeyValueEntry?>(stale);
+                return Task.FromResult<ReadOnlyKeyValueEntry?>(stale?.ToRow());
             });
 
         PreparedIntent intent = Intent("acct/1", revision: 9, value: [4, 5, 6]);

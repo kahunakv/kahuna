@@ -57,7 +57,7 @@ internal sealed class TryProbeManyHandler : BaseHandler
             ? NewLockView(message, KeyValueKeySpace.OfKey(keys[0])!)
             : null;
 
-        Dictionary<string, KeyValueEntry?>? preloadedHeads = await PreloadMissingHeads(message, keys);
+        Dictionary<string, ReadOnlyKeyValueEntry?>? preloadedHeads = await PreloadMissingHeads(message, keys);
 
         // A probe served inline from inside another request's turn, or driven without an actor, finishes its
         // backend reads in this turn instead of deferring a reply that is not its own.
@@ -211,7 +211,7 @@ internal sealed class TryProbeManyHandler : BaseHandler
     /// here instead of one scheduler round trip per key. The actor holds its turn across the read, as a single
     /// transactional read does across its own, so no state of these keys changes before they use the rows.
     /// </summary>
-    private async ValueTask<Dictionary<string, KeyValueEntry?>?> PreloadMissingHeads(KeyValueRequest message, string[] keys)
+    private async ValueTask<Dictionary<string, ReadOnlyKeyValueEntry?>?> PreloadMissingHeads(KeyValueRequest message, string[] keys)
     {
         if (message.TransactionId == HLCTimestamp.Zero || !message.ReadTimestamp.IsNull()
             || message.Durability != KeyValueDurability.Persistent)
@@ -228,14 +228,14 @@ internal sealed class TryProbeManyHandler : BaseHandler
             return null;
 
         string[] missingKeys = [.. missing];
-        KeyValueEntry?[] rows = context.BackendReadScheduler is null
+        ReadOnlyKeyValueEntry?[] rows = context.BackendReadScheduler is null
             ? context.PointReadExecutor.ExecuteBatch(missingKeys)
             : await context.BackendReadScheduler.EnqueueTask(
                 ResolvePartition(missingKeys[0]),
                 (context.PointReadExecutor, missingKeys),
                 static state => state.PointReadExecutor.ExecuteBatch(state.missingKeys));
 
-        Dictionary<string, KeyValueEntry?> preloaded = new(rows.Length, StringComparer.Ordinal);
+        Dictionary<string, ReadOnlyKeyValueEntry?> preloaded = new(rows.Length, StringComparer.Ordinal);
         for (int i = 0; i < rows.Length; i++)
             preloaded[missingKeys[i]] = rows[i];
 

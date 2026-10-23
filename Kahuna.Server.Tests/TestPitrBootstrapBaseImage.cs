@@ -181,7 +181,7 @@ public sealed class TestPitrBootstrapBaseImage : IDisposable
         IPersistenceBackend backend = OpenBackend(storage, storagePath);
         try
         {
-            KeyValueEntry? fromTheFull = backend.GetKeyValue("base");
+            ReadOnlyKeyValueEntry? fromTheFull = backend.GetKeyValue("base");
             Assert.NotNull(fromTheFull);
             Assert.Equal("from-the-full", Encoding.UTF8.GetString(fromTheFull.Value!));
 
@@ -191,7 +191,7 @@ public sealed class TestPitrBootstrapBaseImage : IDisposable
 
             // The full's row came through the base image, the incremental's row through the replay.
             Assert.NotNull(backend.GetKeyValue("base"));
-            KeyValueEntry? fromTheIncremental = backend.GetKeyValue("incr");
+            ReadOnlyKeyValueEntry? fromTheIncremental = backend.GetKeyValue("incr");
             Assert.NotNull(fromTheIncremental);
             Assert.Equal("from-the-incremental", Encoding.UTF8.GetString(fromTheIncremental.Value!));
 

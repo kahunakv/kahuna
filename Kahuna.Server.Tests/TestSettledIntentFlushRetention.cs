@@ -611,11 +611,11 @@ public sealed class TestSettledIntentFlushRetention : IDisposable
         public long GetDurabilityFloor(int partitionId) => inner.GetDurabilityFloor(partitionId);
         public bool RemoveDurabilityFloor(int partitionId) => inner.RemoveDurabilityFloor(partitionId);
         public bool TryRecoverFromStorageFailure() => false;
-        public LockEntry? GetLock(string resource) => inner.GetLock(resource);
-        public KeyValueEntry? GetKeyValue(string keyName) => inner.GetKeyValue(keyName);
-        public KeyValueEntry?[] GetKeyValues(string[] keyNames) => inner.GetKeyValues(keyNames);
-        public KeyValueEntry? GetKeyValueRevision(string keyName, long revision) => inner.GetKeyValueRevision(keyName, revision);
-        public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) =>
+        public LockRow? GetLock(string resource) => inner.GetLock(resource);
+        public ReadOnlyKeyValueEntry? GetKeyValue(string keyName) => inner.GetKeyValue(keyName);
+        public ReadOnlyKeyValueEntry?[] GetKeyValues(string[] keyNames) => inner.GetKeyValues(keyNames);
+        public ReadOnlyKeyValueEntry? GetKeyValueRevision(string keyName, long revision) => inner.GetKeyValueRevision(keyName, revision);
+        public ReadOnlyKeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) =>
             inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);
         public KeyValueHydration GetKeyValueWithRecentRevisions(string keyName, int recentRevisions) =>
             inner.GetKeyValueWithRecentRevisions(keyName, recentRevisions);

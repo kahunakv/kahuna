@@ -333,7 +333,7 @@ public class TestPersistenceBackends
         Assert.False(result.BatchLimitReached);
         Assert.Equal(3, CountSqliteRevisionRows(path, "revtest", key));
 
-        KeyValueEntry? current = backend.GetKeyValue(key);
+        ReadOnlyKeyValueEntry? current = backend.GetKeyValue(key);
         Assert.NotNull(current);
         Assert.Equal(10, current.Revision);
         Assert.Equal("val10", System.Text.Encoding.UTF8.GetString(current.Value!));
@@ -719,7 +719,7 @@ public class TestPersistenceBackends
         Assert.Equal(7, result.RevisionsDeleted);
         Assert.Equal(3, CountRocksDbRevisionEntries(backend, key));
 
-        KeyValueEntry? current = backend.GetKeyValue(key);
+        ReadOnlyKeyValueEntry? current = backend.GetKeyValue(key);
         Assert.NotNull(current);
         Assert.Equal(10, current.Revision);
         Assert.Equal("val10", System.Text.Encoding.UTF8.GetString(current.Value!));
@@ -982,9 +982,9 @@ public class TestPersistenceBackends
         }
     }
 
-    private static List<(string Resource, Locks.Data.LockEntry Entry)> DrainLockScan(IPersistenceBackend backend, int limit)
+    private static List<(string Resource, Locks.Data.LockRow Entry)> DrainLockScan(IPersistenceBackend backend, int limit)
     {
-        List<(string, Locks.Data.LockEntry)> all = [];
+        List<(string, Locks.Data.LockRow)> all = [];
         string? cursor = null;
         int pages = 0;
 
@@ -1066,7 +1066,7 @@ public class TestPersistenceBackends
             // Re-acquisitions at a higher fencing token must not duplicate the resource.
             Assert.True(backend.StoreLocks([MakeLockItem("lockspace0/res0", 7), MakeLockItem("lockspace4/res2", 7)]));
 
-            List<(string Resource, Locks.Data.LockEntry Entry)> scanned = DrainLockScan(backend, limit: 4);
+            List<(string Resource, Locks.Data.LockRow Entry)> scanned = DrainLockScan(backend, limit: 4);
 
             Assert.Equal(expected.Count, scanned.Count);
             Assert.Equal(expected, scanned.Select(static s => s.Resource).ToHashSet());

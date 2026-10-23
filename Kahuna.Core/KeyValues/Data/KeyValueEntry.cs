@@ -374,4 +374,28 @@ internal sealed class KeyValueEntry
         ArchiveGapEndRevision >= 0
         && snapshot.CompareTo(ArchiveGapStart) > 0
         && FlushedRevision < ArchiveGapEndRevision - 1;
+
+    /// <summary>
+    /// A new entry holding a persisted row, for an actor to own: the persistence backend returns
+    /// immutable rows, and the actor keeps its own mutable entry. Returns null for a null row.
+    /// </summary>
+    [return: System.Diagnostics.CodeAnalysis.NotNullIfNotNull(nameof(row))]
+    public static KeyValueEntry? FromRow(ReadOnlyKeyValueEntry? row)
+    {
+        if (row is null)
+            return null;
+
+        return new()
+        {
+            Value = row.Value,
+            Revision = row.Revision,
+            Expires = row.Expires,
+            LastUsed = row.LastUsed,
+            LastModified = row.LastModified,
+            State = row.State,
+        };
+    }
+
+    /// <summary>The persisted fields of this entry as an immutable row.</summary>
+    public ReadOnlyKeyValueEntry ToRow() => new(Value, Revision, Expires, LastUsed, LastModified, State);
 }

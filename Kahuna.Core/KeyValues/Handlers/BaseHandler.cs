@@ -362,7 +362,7 @@ internal abstract class BaseHandler
             if (durability == KeyValueDurability.Persistent)
             {
                 if (readKeyValueEntry is null)
-                    entry = await context.BackendReadScheduler.EnqueueBatchableTask(ResolvePartition(key), key, context.PointReadExecutor);
+                    entry = KeyValueEntry.FromRow(await context.BackendReadScheduler.EnqueueBatchableTask(ResolvePartition(key), key, context.PointReadExecutor));
                 else
                     entry = new()
                     {
@@ -415,22 +415,27 @@ internal abstract class BaseHandler
     /// deferred-settlement lag, not lost history, and only a recorded head beyond it proves staleness.</para>
     /// </summary>
     protected bool HydratedRowProvablyStale(string key, KeyValueEntry? hydrated, long coveredThrough = -1) =>
-        HydratedRowProvablyStale(context, key, hydrated, coveredThrough);
+        HydratedRowProvablyStale(context, key, hydrated is not null, hydrated?.Revision ?? -1, coveredThrough);
+
+    /// <summary>The form of <see cref="HydratedRowProvablyStale(string, KeyValueEntry?, long)"/> for a row read from the backend.</summary>
+    protected bool HydratedRowProvablyStale(string key, ReadOnlyKeyValueEntry? hydrated, long coveredThrough = -1) =>
+        HydratedRowProvablyStale(context, key, hydrated is not null, hydrated?.Revision ?? -1, coveredThrough);
 
     /// <summary>Static form of <see cref="HydratedRowProvablyStale(string, KeyValueEntry?, long)"/> for read
     /// continuations, which carry the context as a parameter rather than a field.</summary>
-    internal static bool HydratedRowProvablyStale(KeyValueContext context, string key, KeyValueEntry? hydrated, long coveredThrough = -1)
+    internal static bool HydratedRowProvablyStale(KeyValueContext context, string key, ReadOnlyKeyValueEntry? hydrated, long coveredThrough = -1) =>
+        HydratedRowProvablyStale(context, key, hydrated is not null, hydrated?.Revision ?? -1, coveredThrough);
+
+    private static bool HydratedRowProvablyStale(KeyValueContext context, string key, bool hydrated, long observedRevision, long coveredThrough)
     {
         Transactions.PreparedIntentStore? intentStore = context.PreparedIntentStore;
         if (intentStore is null || !intentStore.TryGetCommittedHead(key, out long headRevision, out KeyValueState headState))
             return false;
 
-        long observedRevision = hydrated?.Revision ?? -1;
-
         if (headRevision <= observedRevision || headRevision <= coveredThrough)
             return false;
 
-        if (hydrated is null && headState != KeyValueState.Set)
+        if (!hydrated && headState != KeyValueState.Set)
             return false;
 
         Transactions.DurableTransactionMetrics.StaleHydrationRefused();
@@ -895,7 +900,7 @@ internal abstract class BaseHandler
     /// </summary>
     protected async ValueTask<(KeyValueEntry? Entry, bool Stale)> HydratePersistentHead(string key, HLCTimestamp currentTime, long coveredThrough = -1)
     {
-        KeyValueEntry? diskEntry = await context.BackendReadScheduler.EnqueueBatchableTask(
+        ReadOnlyKeyValueEntry? diskEntry = await context.BackendReadScheduler.EnqueueBatchableTask(
             ResolvePartition(key),
             key,
             context.PointReadExecutor);
@@ -905,14 +910,15 @@ internal abstract class BaseHandler
 
     /// <summary>
     /// The actor-thread half of <see cref="HydratePersistentHead"/>: refuses a provably stale row, otherwise makes
-    /// the loaded head resident. <paramref name="diskEntry"/> is the backend's current row for a key that is not
+    /// the loaded head resident. <paramref name="diskRow"/> is the backend's current row for a key that is not
     /// resident, or null when there is none.
     /// </summary>
-    protected (KeyValueEntry? Entry, bool Stale) InstallHydratedHead(string key, KeyValueEntry? diskEntry, HLCTimestamp currentTime, long coveredThrough)
+    protected (KeyValueEntry? Entry, bool Stale) InstallHydratedHead(string key, ReadOnlyKeyValueEntry? diskRow, HLCTimestamp currentTime, long coveredThrough)
     {
-        if (HydratedRowProvablyStale(key, diskEntry, coveredThrough))
+        if (HydratedRowProvablyStale(key, diskRow, coveredThrough))
             return (null, true);
 
+        KeyValueEntry? diskEntry = KeyValueEntry.FromRow(diskRow);
         if (diskEntry is not null)
         {
             diskEntry.FlushedRevision = diskEntry.Revision;

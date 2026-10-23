@@ -388,10 +388,10 @@ public sealed class TestPitrPrunedHistoryFloor : IDisposable
             inner.CreateCheckpointAsOf(d, i, cut, ct);
         public bool StoreLocks(List<PersistenceRequestItem> items) => inner.StoreLocks(items);
         public bool StoreKeyValues(List<PersistenceRequestItem> items) => inner.StoreKeyValues(items);
-        public LockEntry? GetLock(string r) => inner.GetLock(r);
-        public KeyValueEntry? GetKeyValue(string k) => inner.GetKeyValue(k);
-        public KeyValueEntry? GetKeyValueRevision(string k, long rev) => inner.GetKeyValueRevision(k, rev);
-        public KeyValueEntry? GetKeyValueRevisionAtOrBefore(string k, long maxRev, HLCTimestamp ts) => inner.GetKeyValueRevisionAtOrBefore(k, maxRev, ts);
+        public LockRow? GetLock(string r) => inner.GetLock(r);
+        public ReadOnlyKeyValueEntry? GetKeyValue(string k) => inner.GetKeyValue(k);
+        public ReadOnlyKeyValueEntry? GetKeyValueRevision(string k, long rev) => inner.GetKeyValueRevision(k, rev);
+        public ReadOnlyKeyValueEntry? GetKeyValueRevisionAtOrBefore(string k, long maxRev, HLCTimestamp ts) => inner.GetKeyValueRevisionAtOrBefore(k, maxRev, ts);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string p) => inner.GetKeyValueByPrefix(p);
         public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string p, string? s, int l) => inner.GetKeyValueByRange(p, s, l);
         public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int rc, TimeSpan ra, int bs, HLCTimestamp floorTs, out RevisionPruneResult r) =>
