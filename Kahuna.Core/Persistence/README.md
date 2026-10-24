@@ -4,6 +4,10 @@ Persistence contains the abstraction and background write path for durable lock 
 
 `IPersistenceBackend` defines the storage contract. Current backend implementations support memory, SQLite, and RocksDB storage. `BackgroundWriterActor` receives committed state from lock/key-value actors and batches the actual backend writes.
 
+Hosts can register additional persistence and WAL providers, and the server can load them through
+`--extension-assembly`. See the [storage engines guide](../../docs/storage-engines-guide.md) for the
+public contract, registration, deployment, and backup compatibility.
+
 Backend persistence runs asynchronously after consensus. With a durable WAL and appropriate sync
 settings, consensus durability precedes backend flush; an in-memory WAL/backend does not survive
 process loss. The application-durability floor retains log entries until their derived rows and

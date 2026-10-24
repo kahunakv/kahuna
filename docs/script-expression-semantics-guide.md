@@ -228,6 +228,33 @@ right now" and gives up immediately otherwise; omitting the option takes the ope
 earlier version mapped an explicit zero onto the default, so a caller could not opt out of queueing at
 all. A negative value is a script error.
 
+## Array literals
+
+A bracket at the start of an expression builds an array. Elements are evaluated in source order and
+may have different types or contain arrays:
+
+```
+LET empty = []
+LET items = ["a", "b", "c"]
+LET mixed = [1, "two", true, [3, 4]]
+RETURN items["1"]
+```
+
+This returns `b`. A bracket after an expression indexes its result, so `["a", "b"][0]` returns `a`.
+Trailing commas and missing elements are syntax errors: `[1,]`, `[,]`, and `[1,,2]` are refused.
+
+Two limits apply. The parsed expression must fit `MaxScriptDepth` (default 256); the element list
+also consumes depth, so a literal of roughly 250 elements can reach that limit even without nested
+arrays. The evaluated literal must contain at most 100,000 values, counting nested arrays and their
+contents each time they appear. Reusing an array twice counts both copies in the expanded value.
+Exceeding either limit produces a script error. Build large collections in bounded batches.
+
+`to_json` writes array values as JSON, including nested arrays: `to_json([1, [2, 3]])` returns the
+string `[1,[2,3]]`. Non-finite doubles inside an array encode as the strings `"NaN"`, `"Infinity"`, or
+`"-Infinity"`; lone UTF-16 surrogates encode as U+FFFD. When an array is returned directly, a nested
+array travels as JSON text in its result slot: `RETURN [[1], [2]]` produces slots containing `[1]` and
+`[2]`. Use `RETURN to_json(...)` when a consumer needs one JSON string for the whole array.
+
 ## Array indexing
 
 An index may be a whole number, a double holding a whole number, or a string holding one. A helper

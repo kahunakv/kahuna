@@ -159,7 +159,8 @@ public static partial class ExtensionAssemblyLoader
             storageEngines.Add("wal:" + storageType);
         }
 
-        logger.LogExtensionAssemblyLoaded(fullPath, hash, functionProviderTypes.Length, registry.Count - before, string.Join(", ", storageEngines));
+        if (logger.IsEnabled(LogLevel.Information))
+            logger.LogExtensionAssemblyLoaded(fullPath, hash, functionProviderTypes.Length, registry.Count - before, string.Join(", ", storageEngines));
     }
 
     private static T Create<T>(Type providerType, string fullPath)

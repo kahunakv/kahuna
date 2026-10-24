@@ -47,6 +47,13 @@ Historically, it referred to doctors, surgeons, dentists, priests, ministers, an
 
 Read the [documentation](https://kahunakv.github.io/) for architecture details, installation steps, and usage examples.
 
+Repository guides cover [storage engines and extensions](docs/storage-engines-guide.md),
+[embedding and startup](Kahuna.Core/Embedding/README.md),
+[batched point and range probes](docs/batched-probes-guide.md),
+[transaction sessions](docs/reusable-transaction-coordinator-guide.md),
+[key-value watch streams](docs/keyvalue-watch-streams-guide.md), and
+[script expression semantics](docs/script-expression-semantics-guide.md).
+
 ## Installation
 
 The quickest way to start a node is the .NET global tool:

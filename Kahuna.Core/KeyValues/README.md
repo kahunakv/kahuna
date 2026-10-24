@@ -22,6 +22,11 @@ Keep request routing in `KeyValueLocator`, state transitions in handlers, and cr
 
 ## Scan APIs and result limits
 
+For many point keys or bounded seeks in one key space, the embedded `IKahuna` API also offers
+`LocateAndTryProbeMany` and `LocateAndTryProbeManyRanges`, with optional Shared locks. See the
+[batched probes guide](../../docs/batched-probes-guide.md) for examples, partial results, and limits.
+For resumable change notifications, see the [watch streams guide](../../docs/keyvalue-watch-streams-guide.md).
+
 There are two families of multi-key reads, with different scaling characteristics:
 
 - **Paginated range scan** — `GetByRange` / `LocateAndScanRange`. Streams results page-by-page

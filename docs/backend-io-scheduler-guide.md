@@ -61,6 +61,9 @@ between pages. The meters `kahuna.scan.pages_read_on_actor_total` and
 
 ### Batched range probes
 
+For caller examples, result handling, lock semantics, and batch limits, see the
+[batched probes guide](batched-probes-guide.md).
+
 A batched range probe (`IKahuna.LocateAndTryProbeManyRanges`) asks one actor for many bounded seeks of
 one key space. On the RocksDB and SQLite backends, the actor reads the first page of every seek in one
 read-pool operation, and merges all the pages in one resume turn. A seek that needs a further page

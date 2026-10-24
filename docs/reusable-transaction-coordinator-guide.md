@@ -136,7 +136,28 @@ that avoids redundant acquisition calls; they are not the source of truth for fi
 | `ReadValidation` | Whether reads are tracked and checked for revision/write-intent changes at commit. | Optimistic locking always validates its read set at commit (validate-at-commit is what makes it optimistic), so `Optimistic` transactions perform the check regardless of this value. `TrackAndValidate` additionally requests the read-set check for a `Pessimistic` transaction; `None` on a pessimistic transaction relies on its locks alone. |
 | `ReadTimestamp` | A historical HLC snapshot applied to every read the transaction performs; zero means latest. | The read timestamp is a per-transaction property, so point, bucket, range, and paginated-range reads all observe the same pinned snapshot. A fixed timestamp cannot be combined with `TrackAndValidate`; Begin rejects that combination. |
 | `DecisionDurability` | Whether the commit decision is best-effort or recoverable after it is installed. | `BestEffort` is the default. Choose `Durable` only for all-persistent write sets that need post-decision recovery. |
-| `CoordinatorPartitionId` | The data partition whose leader hosts the session. Null (the default) hashes `CoordinatorKey`. | Set it when the transaction's data is in a key-range space: pass the partition of the first key the transaction touches, read from the range map, so registrations and the commit stay on that leader. Begin refuses an id that names no data partition with `InvalidInput`. |
+| `CoordinatorPartitionId` (embedded/raw protocol only) | The data partition whose leader hosts the session. Null (the default) hashes `CoordinatorKey`. | Set it when the transaction's data is in a key-range space: pass the partition of the first key the transaction touches, read from the range map, so registrations and the commit stay on that leader. Begin refuses an id that names no data partition with `InvalidInput`. |
+
+`CoordinatorPartitionId` belongs to the embedded `KeyValueTransactionOptions` and the raw gRPC/REST
+start request. The `Kahuna.Client` SDK's `KahunaTransactionOptions` does not expose this option;
+`KahunaClient` sessions continue to use their existing coordinator keys. Embedded callers set it before
+calling `IKahuna.LocateAndStartTransaction` and retain the returned handle:
+
+```csharp
+(KeyValueResponseType type, TransactionHandle handle) = await kahuna.LocateAndStartTransaction(
+    new KeyValueTransactionOptions
+    {
+        CoordinatorKey = "orders|tx/" + Guid.NewGuid().ToString("N"),
+        CoordinatorPartitionId = partitionId
+    }, cancellationToken);
+
+if (type != KeyValueResponseType.Set)
+    throw new InvalidOperationException($"Transaction start refused: {type}");
+```
+
+Here `partitionId` is an existing data partition obtained from the range map. Use
+`handle.CoordinatorKey` on later calls, including registered operations; it can differ from the key
+supplied at start. See the handle and upgrade rules below.
 
 `DecisionDurability` and `KeyValueDurability` answer different questions. The first controls recovery
 of the transaction decision; the second controls whether an individual value is persistent or
