@@ -1,4 +1,6 @@
 using Kahuna.Server.Communication;
+using System.Collections.Concurrent;
+using System.Diagnostics.Metrics;
 using System.Threading.Channels;
 using Grpc.Core;
 using Kommander;
@@ -8,6 +10,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Kahuna;
 using Kahuna.Communication.External.Grpc;
 using Kahuna.Server.KeyValues;
+using Kahuna.Server.KeyValues.Writes;
 using Kahuna.Shared.KeyValue;
 
 namespace Kahuna.Server.Tests;
@@ -201,6 +204,105 @@ public sealed class TestServerBatcherMaintenanceLane
 
         Assert.False(kahuna.Entered.Reader.TryRead(out _));
         Assert.False(responses.Written.TryRead(out _));
+    }
+
+    /// <summary>
+    /// Two forwarded one-phase bundles on one stream: the second waits on the lane until the first answers, and
+    /// the lane-wait histogram records that wait for the second and a free lane for the first. The wait is the
+    /// gap the receiver's own bundle timing does not include.
+    /// </summary>
+    [Fact]
+    public async Task OnePhaseBundleBehindAnUnansweredBundle_RecordsItsLaneWait()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        const int GatedPartition = 7;
+        const int FreePartition = 8;
+        const int HeldMs = 300;
+
+        ConcurrentBag<(string Request, double Ms)> waits = [];
+
+        using MeterListener listener = new();
+        listener.InstrumentPublished = (instrument, l) =>
+        {
+            if (instrument.Name == "kahuna.internode.ordered_lane_wait_ms")
+                l.EnableMeasurementEvents(instrument);
+        };
+        listener.SetMeasurementEventCallback<double>((_, value, tags, _) =>
+        {
+            foreach (KeyValuePair<string, object?> tag in tags)
+                if (tag.Key == "request")
+                    waits.Add(((string)tag.Value!, value));
+        });
+        listener.Start();
+
+        GatedOnePhaseKahuna kahuna = new(GatedPartition);
+        KeyValuesService service = new(kahuna, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
+        ChannelStreamWriter responses = new();
+
+        Task batch = service.BatchServerKeyValueRequests(
+            new ListStreamReader<GrpcBatchServerKeyValueRequest>([
+                new GrpcBatchServerKeyValueRequest
+                {
+                    Type = GrpcServerBatchType.ServerDurableOnePhase,
+                    RequestId = 1,
+                    DurableOnePhase = new GrpcDurableOnePhaseRequest { PartitionId = GatedPartition }
+                },
+                new GrpcBatchServerKeyValueRequest
+                {
+                    Type = GrpcServerBatchType.ServerDurableOnePhase,
+                    RequestId = 2,
+                    DurableOnePhase = new GrpcDurableOnePhaseRequest { PartitionId = FreePartition }
+                }
+            ]),
+            responses,
+            new StubServerCallContext(CancellationToken.None));
+
+        Assert.Equal(GatedPartition, await kahuna.Entered.Reader.ReadAsync(ct).AsTask().WaitAsync(Timeout, ct));
+
+        // The lane holds the second bundle while the first is unanswered.
+        await Task.Delay(HeldMs, ct);
+        Assert.False(kahuna.Entered.Reader.TryRead(out _));
+
+        kahuna.Gate.TrySetResult();
+
+        Assert.Equal(FreePartition, await kahuna.Entered.Reader.ReadAsync(ct).AsTask().WaitAsync(Timeout, ct));
+        await batch.WaitAsync(Timeout, ct);
+
+        listener.Dispose();
+
+        List<double> onePhaseWaits = [.. waits.Where(w => w.Request == "durable_one_phase").Select(w => w.Ms)];
+
+        // Other tests can record on the same process-wide meter, so the assertions look for this test's two
+        // samples instead of counting every sample.
+        Assert.Contains(onePhaseWaits, ms => ms >= HeldMs * 0.8);
+        Assert.Contains(onePhaseWaits, ms => ms < HeldMs * 0.5);
+    }
+
+    /// <summary>The one-phase bundle for one partition blocks until the gate opens; every other partition
+    /// answers at once. Each bundle that starts reports its partition.</summary>
+    private sealed class GatedOnePhaseKahuna : FakeKahunaBase
+    {
+        private readonly int gatedPartition;
+
+        public Channel<int> Entered { get; } = Channel.CreateUnbounded<int>();
+
+        public TaskCompletionSource Gate { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public GatedOnePhaseKahuna(int gatedPartition) => this.gatedPartition = gatedPartition;
+
+        public override async Task<DurableOnePhaseWireReply?> DurableOnePhaseLocal(
+            int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
+            HLCTimestamp transactionId, long epoch, HLCTimestamp opId, IReadOnlyList<RangeFence> fences,
+            long expectedTerm, CancellationToken cancellationToken)
+        {
+            Entered.Writer.TryWrite(partitionId);
+
+            if (partitionId == gatedPartition)
+                await Gate.Task;
+
+            return null;
+        }
     }
 
     /// <summary>Seeding blocks until the gate opens; reads answer immediately.</summary>

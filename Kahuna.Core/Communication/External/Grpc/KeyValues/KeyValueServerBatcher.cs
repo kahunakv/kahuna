@@ -1,5 +1,6 @@
 
 using System.Collections.Concurrent;
+using System.Diagnostics;
 
 using Grpc.Core;
 using Kahuna.Communication.External.Grpc.Logging;
@@ -63,25 +64,30 @@ internal sealed class KeyValueServerBatcher
         private Task tail = Task.CompletedTask;
 
         /// <summary>
-        /// Allocates the next turn. Called only from the stream's read loop, which dispatches
-        /// requests one at a time, so the tail needs no synchronization.
+        /// Allocates the next turn for a request of <paramref name="type"/>. Called only from the
+        /// stream's read loop, which dispatches requests one at a time, so the tail needs no
+        /// synchronization.
         /// </summary>
-        public LaneTurn Next()
+        public LaneTurn Next(GrpcServerBatchType type)
         {
             Task previous = tail;
             TaskCompletionSource turn = new(TaskCreationOptions.RunContinuationsAsynchronously);
             tail = turn.Task;
-            return new LaneTurn(previous, turn);
+            return new LaneTurn(previous, turn, type, Stopwatch.GetTimestamp());
         }
     }
 
     /// <summary>
-    /// One position in a stream's ordered lane: await <see cref="PreviousCompleted"/>, execute,
-    /// then call <see cref="Complete"/> unconditionally so the successors can run.
+    /// One position in a stream's ordered lane: await <see cref="PreviousCompleted"/>, call
+    /// <see cref="RecordWait"/>, execute, then call <see cref="Complete"/> unconditionally so the
+    /// successors can run.
     /// </summary>
-    private readonly struct LaneTurn(Task previous, TaskCompletionSource turn)
+    private readonly struct LaneTurn(Task previous, TaskCompletionSource turn, GrpcServerBatchType type, long givenAt)
     {
         public Task PreviousCompleted => previous;
+
+        /// <summary>Records how long this request waited for the earlier lane requests on its stream.</summary>
+        public void RecordWait() => InterNodeLaneMetrics.LaneWaited(type, givenAt);
 
         public void Complete() => turn.TrySetResult();
     }
@@ -245,51 +251,51 @@ internal sealed class KeyValueServerBatcher
                 break;
 
             case GrpcServerBatchType.ServerTryEnsureKeyRangeSeeded:
-                _ = EnsureKeyRangeSeededDelayed(responseWriter, lane.Next(), request, context, drain);
+                _ = EnsureKeyRangeSeededDelayed(responseWriter, lane.Next(request.Type), request, context, drain);
                 break;
 
             case GrpcServerBatchType.ServerTryEnsureKeyRangeRemoved:
-                _ = EnsureKeyRangeRemovedDelayed(responseWriter, lane.Next(), request, context, drain);
+                _ = EnsureKeyRangeRemovedDelayed(responseWriter, lane.Next(request.Type), request, context, drain);
                 break;
 
             case GrpcServerBatchType.ServerTryGetRangeLocks:
-                _ = GetRangeLocksDelayed(responseWriter, lane.Next(), request, context, drain);
+                _ = GetRangeLocksDelayed(responseWriter, lane.Next(request.Type), request, context, drain);
                 break;
 
             case GrpcServerBatchType.ServerTryImportRangeLocks:
-                _ = ImportRangeLocksDelayed(responseWriter, lane.Next(), request, context, drain);
+                _ = ImportRangeLocksDelayed(responseWriter, lane.Next(request.Type), request, context, drain);
                 break;
 
             case GrpcServerBatchType.ServerImportCompletionReceipts:
-                _ = ImportCompletionReceiptsDelayed(responseWriter, lane.Next(), request, context, drain);
+                _ = ImportCompletionReceiptsDelayed(responseWriter, lane.Next(request.Type), request, context, drain);
                 break;
 
             case GrpcServerBatchType.ServerDurableOperation:
-                _ = DurableOperationDelayed(responseWriter, lane.Next(), request, context, drain);
+                _ = DurableOperationDelayed(responseWriter, lane.Next(request.Type), request, context, drain);
                 break;
 
             case GrpcServerBatchType.ServerDurableBundle:
-                _ = DurableBundleDelayed(responseWriter, lane.Next(), request, context, drain);
+                _ = DurableBundleDelayed(responseWriter, lane.Next(request.Type), request, context, drain);
                 break;
 
             case GrpcServerBatchType.ServerDurableOnePhase:
-                _ = DurableOnePhaseDelayed(responseWriter, lane.Next(), request, context, drain);
+                _ = DurableOnePhaseDelayed(responseWriter, lane.Next(request.Type), request, context, drain);
                 break;
 
             case GrpcServerBatchType.ServerDurableDecision:
-                _ = DurableDecisionDelayed(responseWriter, lane.Next(), request, context, drain);
+                _ = DurableDecisionDelayed(responseWriter, lane.Next(request.Type), request, context, drain);
                 break;
 
             case GrpcServerBatchType.ServerLookupTransactionRecord:
-                _ = LookupTransactionRecordDelayed(responseWriter, lane.Next(), request, context, drain);
+                _ = LookupTransactionRecordDelayed(responseWriter, lane.Next(request.Type), request, context, drain);
                 break;
 
             case GrpcServerBatchType.ServerReplicateKeyValueRangePage:
-                _ = ReplicateKeyValueRangePageDelayed(responseWriter, lane.Next(), request, context, drain);
+                _ = ReplicateKeyValueRangePageDelayed(responseWriter, lane.Next(request.Type), request, context, drain);
                 break;
 
             case GrpcServerBatchType.ServerGetRangeTransactionState:
-                _ = GetRangeTransactionStateDelayed(responseWriter, lane.Next(), request, context, drain);
+                _ = GetRangeTransactionStateDelayed(responseWriter, lane.Next(request.Type), request, context, drain);
                 break;
 
             case GrpcServerBatchType.ServerGetStagedBaseVerdicts:
@@ -1070,6 +1076,7 @@ internal sealed class KeyValueServerBatcher
         try
         {
             await turn.PreviousCompleted;
+            turn.RecordWait();
             context.CancellationToken.ThrowIfCancellationRequested();
 
             GrpcEnsureKeyRangeSeededResponse resp = await service.EnsureKeyRangeSeededInternal(request.EnsureKeyRangeSeeded, context);
@@ -1103,6 +1110,7 @@ internal sealed class KeyValueServerBatcher
         try
         {
             await turn.PreviousCompleted;
+            turn.RecordWait();
             context.CancellationToken.ThrowIfCancellationRequested();
 
             GrpcEnsureKeyRangeRemovedResponse resp = await service.EnsureKeyRangeRemovedInternal(request.EnsureKeyRangeRemoved, context);
@@ -1136,6 +1144,7 @@ internal sealed class KeyValueServerBatcher
         try
         {
             await turn.PreviousCompleted;
+            turn.RecordWait();
             context.CancellationToken.ThrowIfCancellationRequested();
 
             GrpcGetRangeLocksResponse resp = await service.GetRangeLocksInternal(request.GetRangeLocks, context);
@@ -1169,6 +1178,7 @@ internal sealed class KeyValueServerBatcher
         try
         {
             await turn.PreviousCompleted;
+            turn.RecordWait();
             context.CancellationToken.ThrowIfCancellationRequested();
 
             GrpcImportRangeLocksResponse resp = await service.ImportRangeLocksInternal(request.ImportRangeLocks, context);
@@ -1202,6 +1212,7 @@ internal sealed class KeyValueServerBatcher
         try
         {
             await turn.PreviousCompleted;
+            turn.RecordWait();
             context.CancellationToken.ThrowIfCancellationRequested();
 
             GrpcImportCompletionReceiptsResponse resp = await service.ImportCompletionReceiptsInternal(request.ImportCompletionReceipts, context);
@@ -1235,6 +1246,7 @@ internal sealed class KeyValueServerBatcher
         try
         {
             await turn.PreviousCompleted;
+            turn.RecordWait();
             context.CancellationToken.ThrowIfCancellationRequested();
 
             GrpcDurableOperationResponse resp = await service.DurableOperationInternal(request.DurableOperation, context);
@@ -1268,6 +1280,7 @@ internal sealed class KeyValueServerBatcher
         try
         {
             await turn.PreviousCompleted;
+            turn.RecordWait();
             context.CancellationToken.ThrowIfCancellationRequested();
 
             GrpcDurableBundleResponse resp = await service.DurableBundleInternal(request.DurableBundle, context);
@@ -1301,6 +1314,7 @@ internal sealed class KeyValueServerBatcher
         try
         {
             await turn.PreviousCompleted;
+            turn.RecordWait();
             context.CancellationToken.ThrowIfCancellationRequested();
 
             GrpcDurableOnePhaseResponse resp = await service.DurableOnePhaseInternal(request.DurableOnePhase, context);
@@ -1334,6 +1348,7 @@ internal sealed class KeyValueServerBatcher
         try
         {
             await turn.PreviousCompleted;
+            turn.RecordWait();
             context.CancellationToken.ThrowIfCancellationRequested();
 
             GrpcDurableDecisionResponse resp = await service.DurableDecisionInternal(request.DurableDecision, context);
@@ -1367,6 +1382,7 @@ internal sealed class KeyValueServerBatcher
         try
         {
             await turn.PreviousCompleted;
+            turn.RecordWait();
             context.CancellationToken.ThrowIfCancellationRequested();
 
             GrpcReplicateKeyValueRangePageResponse resp = await service.ReplicateKeyValueRangePageInternal(request.ReplicateKeyValueRangePage, context);
@@ -1400,6 +1416,7 @@ internal sealed class KeyValueServerBatcher
         try
         {
             await turn.PreviousCompleted;
+            turn.RecordWait();
             context.CancellationToken.ThrowIfCancellationRequested();
 
             GrpcGetRangeTransactionStateResponse resp = await service.GetRangeTransactionStateInternal(request.GetRangeTransactionState, context);
@@ -1466,6 +1483,7 @@ internal sealed class KeyValueServerBatcher
         try
         {
             await turn.PreviousCompleted;
+            turn.RecordWait();
             context.CancellationToken.ThrowIfCancellationRequested();
 
             GrpcLookupTransactionRecordResponse resp = await service.LookupTransactionRecordInternal(request.LookupTransactionRecord, context);

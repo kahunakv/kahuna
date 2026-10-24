@@ -243,6 +243,16 @@ writes a row keeps the bundle open by naming the index key space in the row key 
 whether apply-time validation is enabled once at startup, so the setting can be confirmed without a
 metrics scrape.
 
+On the receiving leader, a forwarded bundle runs on the ordered lane of the inter-node stream it arrived
+on, together with the other durable requests (operations, bundles, decisions, record lookups) and the
+placement requests. The lane runs one request at a time per stream, and each request holds its turn until
+it answers. A forwarded bundle can therefore wait for the Raft rounds of the earlier lane requests on its
+stream, and that wait is outside the receiver's `one_phase_bundle_ms`. The receiver records it on
+`kahuna.internode.ordered_lane_wait_ms{request}`: one sample per lane request, from the moment the read
+loop gives the request its turn to the moment its predecessor completes. A large `durable_one_phase`
+series there, set against a small `session_registration_forward_ms`, says the forwarded commit's cost is
+the lane, not the wire.
+
 ### 6.4 The decision deadline
 
 Each finalize freezes `deadline = commitTimestamp + clamp(multiplier × max(observed-finalize-p99,
