@@ -415,6 +415,12 @@ internal sealed partial class KeyValuesManager : IDisposable
     internal Transactions.SessionRegistrationCounts SessionRegistrationCounts => locator.SessionRegistrationCounts;
 
     /// <summary>
+    /// The partition this node routes a session's calls to for <paramref name="coordinatorKey"/>: the partition a
+    /// pinned key names, otherwise the hash rule on the key (for tests and diagnostics).
+    /// </summary>
+    internal int LocateCoordinatorPartition(string coordinatorKey) => locator.LocatePartition(coordinatorKey);
+
+    /// <summary>
     /// The wall time this node's forwarded session-registration calls have taken so far (per node, for tests
     /// and diagnostics). The counts above say how many hops a transaction pays; these say what one hop costs,
     /// which is the half that turns a hop count into a share of commit latency. Zero unless a listener asked

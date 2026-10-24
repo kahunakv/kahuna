@@ -64,7 +64,8 @@ internal sealed class LocatorTransactionOperations
         if (string.IsNullOrEmpty(options.CoordinatorKey))
             options.CoordinatorKey = Guid.NewGuid().ToString("N");
 
-        int partitionId = dataPartitionRouter.Locate(options.CoordinatorKey);
+        if (!TryPinCoordinator(options, out int partitionId))
+            return new(KeyValueResponseType.InvalidInput, TransactionHandle.None);
 
         if (!raft.Joined || await routing.AmILeaderIfHosted(partitionId, cancellationToken))
             return await manager.StartTransaction(options);
@@ -76,6 +77,79 @@ internal sealed class LocatorTransactionOperations
         logger.LogStartTransactionRedirected(options.CoordinatorKey, partitionId, leader);
 
         return await interNodeCommunication.StartTransaction(leader, options, cancellationToken);
+    }
+
+    /// <summary>
+    /// The partition whose leader hosts the session for <paramref name="coordinatorKey"/>: the partition a
+    /// pinned key names, otherwise the hash rule on the key. A pinned partition is read from the key and
+    /// never from the range map, so a split or move of the caller's range between start and commit cannot
+    /// send a later call to a partition other than the session's.
+    /// </summary>
+    private int LocateCoordinator(string coordinatorKey) =>
+        CoordinatorKeys.TryGetPinnedPartition(coordinatorKey, out int pinned) ? pinned : dataPartitionRouter.Locate(coordinatorKey);
+
+    /// <summary>
+    /// Resolves the partition a new session starts on and, when the caller chose one, rewrites
+    /// <see cref="KeyValueTransactionOptions.CoordinatorKey"/> into the pinned form that carries it. A key that
+    /// is already pinned (a start forwarded from another node, or a caller that composed the form) keeps its
+    /// partition. False, with nothing started, for a malformed pinned key, for a pinned key that disagrees
+    /// with <see cref="KeyValueTransactionOptions.CoordinatorPartitionId"/>, and for an id that names no data
+    /// partition: a refused id must never fall back to the hash rule, because the caller asked for placement
+    /// it would then silently not get.
+    /// </summary>
+    private bool TryPinCoordinator(KeyValueTransactionOptions options, out int partitionId)
+    {
+        string key = options.CoordinatorKey;
+        int? requested = options.CoordinatorPartitionId;
+
+        if (CoordinatorKeys.IsReserved(key))
+        {
+            if (!CoordinatorKeys.TryGetPinnedPartition(key, out partitionId))
+            {
+                logger.LogStartTransactionCoordinatorPartitionRefused(key, requested, "the key uses the reserved pinned form but does not parse");
+                return false;
+            }
+
+            if (requested is { } explicitPartition && explicitPartition != partitionId)
+            {
+                logger.LogStartTransactionCoordinatorPartitionRefused(key, requested, "the pinned key names another partition");
+                return false;
+            }
+        }
+        else if (requested is { } chosen)
+        {
+            partitionId = chosen;
+        }
+        else
+        {
+            partitionId = dataPartitionRouter.Locate(key);
+            return true;
+        }
+
+        if (!IsDataPartition(partitionId))
+        {
+            logger.LogStartTransactionCoordinatorPartitionRefused(key, requested, "no data partition has this id");
+            return false;
+        }
+
+        if (!CoordinatorKeys.IsReserved(key))
+            options.CoordinatorKey = CoordinatorKeys.Pin(partitionId, key);
+
+        return true;
+    }
+
+    /// <summary>
+    /// True when <paramref name="partitionId"/> names a user partition the committed partition map holds. A
+    /// partition's generation starts at 1 and reads 0 once it is removed or was never created, so the
+    /// generation answers without copying the map. Before this node joins a cluster no map is applied yet and
+    /// only the system partition is refused; the start then runs locally whatever the id names.
+    /// </summary>
+    private bool IsDataPartition(int partitionId)
+    {
+        if (partitionId < DataPartitionRouter.FirstUserPartitionId)
+            return false;
+
+        return !raft.Joined || raft.GetPartitionGeneration(partitionId) > 0;
     }
 
     /// <summary>
@@ -155,7 +229,7 @@ internal sealed class LocatorTransactionOperations
         if (OwnsSession(handle.TransactionId))
             return await manager.CommitTransaction(handle);
 
-        int partitionId = dataPartitionRouter.Locate(handle.CoordinatorKey);
+        int partitionId = LocateCoordinator(handle.CoordinatorKey);
 
         if (!raft.Joined || await routing.AmILeaderIfHosted(partitionId, cancellationToken))
         {
@@ -197,7 +271,7 @@ internal sealed class LocatorTransactionOperations
         if (OwnsSession(handle.TransactionId))
             return await manager.RollbackTransaction(handle);
 
-        int partitionId = dataPartitionRouter.Locate(handle.CoordinatorKey);
+        int partitionId = LocateCoordinator(handle.CoordinatorKey);
 
         if (!raft.Joined || await routing.AmILeaderIfHosted(partitionId, cancellationToken))
         {
@@ -233,7 +307,7 @@ internal sealed class LocatorTransactionOperations
         if (string.IsNullOrEmpty(coordinatorKey))
             return (OperationRegistrationOutcome.RejectedSessionClosed, KeyValueResponseType.Errored, 0, HLCTimestamp.Zero, null, TransactionConflictPolicy.Normal);
 
-        int partitionId = dataPartitionRouter.Locate(coordinatorKey);
+        int partitionId = LocateCoordinator(coordinatorKey);
 
         // The session's owner registers it, whoever leads the coordinator partition now (see OwnsSession).
         if (OwnsSession(transactionId) || !raft.Joined || await routing.AmILeaderIfHosted(partitionId, cancellationToken))
@@ -270,7 +344,7 @@ internal sealed class LocatorTransactionOperations
     }
 
     /// <summary>Returns the partition id that owns the coordinator session for <paramref name="coordinatorKey"/>.</summary>
-    public int LocatePartition(string coordinatorKey) => dataPartitionRouter.Locate(coordinatorKey);
+    public int LocatePartition(string coordinatorKey) => LocateCoordinator(coordinatorKey);
 
     /// <summary>The session-registration calls this node has made so far (per node, for tests and diagnostics).</summary>
     internal SessionRegistrationCounts SessionRegistrationCounts => sessionRegistration.Snapshot;
@@ -313,7 +387,7 @@ internal sealed class LocatorTransactionOperations
         if (string.IsNullOrEmpty(coordinatorKey))
             return (KeyValueResponseType.MustRetry, null);
 
-        int partitionId = dataPartitionRouter.Locate(coordinatorKey);
+        int partitionId = LocateCoordinator(coordinatorKey);
 
         if (OwnsSession(transactionId) || !raft.Joined || await routing.AmILeaderIfHosted(partitionId, cancellationToken))
         {
@@ -353,7 +427,7 @@ internal sealed class LocatorTransactionOperations
         if (string.IsNullOrEmpty(coordinatorKey))
             return null;
 
-        int partitionId = dataPartitionRouter.Locate(coordinatorKey);
+        int partitionId = LocateCoordinator(coordinatorKey);
 
         if (OwnsSession(transactionId) || !raft.Joined || await routing.AmILeaderIfHosted(partitionId, cancellationToken))
         {
@@ -393,7 +467,7 @@ internal sealed class LocatorTransactionOperations
         if (string.IsNullOrEmpty(coordinatorKey))
             return (KeyValueResponseType.Errored, null);
 
-        int partitionId = dataPartitionRouter.Locate(coordinatorKey);
+        int partitionId = LocateCoordinator(coordinatorKey);
 
         if (!raft.Joined || await routing.AmILeaderIfHosted(partitionId, cancellationToken))
             return await manager.CloseTransaction(transactionId, cancellationToken);

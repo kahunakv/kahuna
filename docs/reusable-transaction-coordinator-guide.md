@@ -136,6 +136,7 @@ that avoids redundant acquisition calls; they are not the source of truth for fi
 | `ReadValidation` | Whether reads are tracked and checked for revision/write-intent changes at commit. | Optimistic locking always validates its read set at commit (validate-at-commit is what makes it optimistic), so `Optimistic` transactions perform the check regardless of this value. `TrackAndValidate` additionally requests the read-set check for a `Pessimistic` transaction; `None` on a pessimistic transaction relies on its locks alone. |
 | `ReadTimestamp` | A historical HLC snapshot applied to every read the transaction performs; zero means latest. | The read timestamp is a per-transaction property, so point, bucket, range, and paginated-range reads all observe the same pinned snapshot. A fixed timestamp cannot be combined with `TrackAndValidate`; Begin rejects that combination. |
 | `DecisionDurability` | Whether the commit decision is best-effort or recoverable after it is installed. | `BestEffort` is the default. Choose `Durable` only for all-persistent write sets that need post-decision recovery. |
+| `CoordinatorPartitionId` | The data partition whose leader hosts the session. Null (the default) hashes `CoordinatorKey`. | Set it when the transaction's data is in a key-range space: pass the partition of the first key the transaction touches, read from the range map, so registrations and the commit stay on that leader. Begin refuses an id that names no data partition with `InvalidInput`. |
 
 `DecisionDurability` and `KeyValueDurability` answer different questions. The first controls recovery
 of the transaction decision; the second controls whether an individual value is persistent or
@@ -161,6 +162,21 @@ The two keys have deliberately different jobs:
 - **`RecordAnchorKey`** is assigned exactly once, when the coordinator folds the first confirmed
   persistent modified key into the working set. It places the canonical transaction record and routes a
   consult of it after the live session is gone.
+
+By default the coordinator key is routed by the hash placement rule, so a key inside a table's
+placement group puts the session on that table's hash-routed leader. A key-range table lives on its
+range descriptor's partition instead, which no key string names reliably. For that case Begin takes
+`CoordinatorPartitionId`, and the returned handle carries a **pinned** coordinator key of the form
+`"\u0001p/{partition}/{key}"` (`CoordinatorKeys.Pin`). Callers must send the handle's
+`CoordinatorKey`, not the key they passed to Begin, on every later operation, commit, and rollback.
+`TransactionHandle.CoordinatorPartitionId` reads the partition back. The partition is fixed for the
+life of the session: a split or a move of the caller's range does not move the session, because the
+pinned key never consults the range map. The gRPC and REST start responses return the pinned key in
+`CoordinatorKey`. A node that predates pinning hashes the pinned key as a plain key. Its commit and
+rollback still reach the session through the owner check and the peer probe, but it refuses
+operation registrations for the session. Set `CoordinatorPartitionId` only after every node in the
+cluster runs a version that reads pinned keys. A handle without a pinned key keeps the hash rule on
+every version.
 
 The anchor is a logical user key used for placement; the canonical record itself is internal metadata
 and is never written into the user key/value namespace. For a batch, successful modifications are

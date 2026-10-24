@@ -13,6 +13,13 @@ public sealed class KahunaStartTransactionRequest
     [JsonPropertyName("coordinatorKey")]
     public string? CoordinatorKey { get; set; }
 
+    /// <summary>
+    /// The data partition whose leader hosts the session; null keeps the hash rule on the coordinator key. The
+    /// response then carries the pinned coordinator key, which the caller sends on every later call.
+    /// </summary>
+    [JsonPropertyName("coordinatorPartitionId")]
+    public int? CoordinatorPartitionId { get; set; }
+
     [JsonPropertyName("timeout")]
     public int Timeout { get; set; }
 

@@ -698,6 +698,7 @@ public static class KeyValuesHandlers
             (KeyValueResponseType type, TransactionHandle handle) = await keyValues.LocateAndStartTransaction(new()
             {
                 CoordinatorKey = request.CoordinatorKey,
+                CoordinatorPartitionId = request.CoordinatorPartitionId,
                 Locking = request.LockingType,
                 Timeout = request.Timeout,
                 AsyncRelease = request.AsyncRelease,
@@ -711,7 +712,12 @@ public static class KeyValuesHandlers
                 Origin = request.Origin
             }, cancellationToken);
 
-            return new KahunaStartTransactionResponse { Type = type, TransactionId = handle.TransactionId };
+            return new KahunaStartTransactionResponse
+            {
+                Type = type,
+                TransactionId = handle.TransactionId,
+                CoordinatorKey = string.IsNullOrEmpty(handle.CoordinatorKey) ? null : handle.CoordinatorKey
+            };
         });
 
         app.MapPost("/v1/kv/commit-tx-session", async (KahunaCommitTransactionRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>

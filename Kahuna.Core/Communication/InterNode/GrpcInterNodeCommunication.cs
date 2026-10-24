@@ -1730,6 +1730,9 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         if (options.Origin is not null)
             request.Origin = options.Origin;
 
+        if (options.CoordinatorPartitionId is { } coordinatorPartitionId)
+            request.CoordinatorPartitionId = coordinatorPartitionId;
+
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request), "StartTransaction", node).ConfigureAwait(false);
         if (!response.IsAnswered)
         {
@@ -1743,9 +1746,16 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
 
 
         HLCTimestamp transactionId = new(remoteResponse.TransactionIdNode, remoteResponse.TransactionIdPhysical, remoteResponse.TransactionIdCounter);
+
+        // The leader's key is the one the session is routed by. An older leader does not return it; the key
+        // sent is then the session's key, because this node already pinned it before forwarding.
+        string coordinatorKey = remoteResponse.HasCoordinatorKey && !string.IsNullOrEmpty(remoteResponse.CoordinatorKey)
+            ? remoteResponse.CoordinatorKey
+            : options.CoordinatorKey;
+
         return (
             (KeyValueResponseType)remoteResponse.Type,
-            new TransactionHandle(transactionId, options.CoordinatorKey)
+            new TransactionHandle(transactionId, coordinatorKey)
         );
     }
 

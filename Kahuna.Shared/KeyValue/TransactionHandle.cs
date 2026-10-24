@@ -21,4 +21,11 @@ public readonly record struct TransactionHandle(HLCTimestamp TransactionId, stri
 
     /// <summary>Returns true when this handle carries no meaningful identity.</summary>
     public bool IsEmpty => TransactionId == HLCTimestamp.Zero || string.IsNullOrEmpty(CoordinatorKey);
+
+    /// <summary>
+    /// The partition the session was started on when the caller chose one, read from the pinned
+    /// <see cref="CoordinatorKey"/> (see <see cref="CoordinatorKeys"/>). Null when the session is routed by the
+    /// hash rule on the coordinator key.
+    /// </summary>
+    public int? CoordinatorPartitionId => CoordinatorKeys.TryGetPinnedPartition(CoordinatorKey, out int partitionId) ? partitionId : null;
 }

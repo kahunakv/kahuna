@@ -1007,6 +1007,8 @@ message GrpcStartTransactionRequest
   // What produced the transaction's writes, carried on its prepared intents and watch events. Absent for an
   // ordinary transaction.
   optional string Origin = 14;
+  // The data partition whose leader hosts the session. Absent keeps the hash rule on CoordinatorKey.
+  optional int32 CoordinatorPartitionId = 15;
 }
 
 message GrpcStartTransactionResponse
@@ -1016,6 +1018,9 @@ message GrpcStartTransactionResponse
   int32 TransactionIdNode = 3;
   int64 TransactionIdPhysical = 4;
   uint32 TransactionIdCounter = 5;
+  // The coordinator key the session is routed by; it is the pinned form when the request chose a partition.
+  // Absent from an older server, where the requested key applies.
+  optional string CoordinatorKey = 6;
 }
 
 message GrpcCommitTransactionRequest

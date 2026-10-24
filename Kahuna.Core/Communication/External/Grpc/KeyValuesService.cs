@@ -2149,6 +2149,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         (KeyValueResponseType type, TransactionHandle handle) = await keyValues.LocateAndStartTransaction(new()
         {
             CoordinatorKey = request.CoordinatorKey,
+            CoordinatorPartitionId = request.HasCoordinatorPartitionId ? request.CoordinatorPartitionId : null,
             Locking = (KeyValueTransactionLocking)request.LockingType,
             Timeout = request.Timeout,
             AsyncRelease = request.AsyncRelease,
@@ -2169,6 +2170,9 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             TransactionIdPhysical = handle.TransactionId.L,
             TransactionIdCounter = handle.TransactionId.C
         };
+
+        if (!string.IsNullOrEmpty(handle.CoordinatorKey))
+            response.CoordinatorKey = handle.CoordinatorKey;
 
         return response;
     }

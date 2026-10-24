@@ -17,6 +17,17 @@ public sealed class KeyValueTransactionOptions
     public string CoordinatorKey { get; set; } = string.Empty;
 
     /// <summary>
+    /// The data partition whose leader hosts the coordinator session, for a caller whose data is not placed by
+    /// the hash rule (a key-range table lives on its range descriptor's partition). Null keeps the hash rule on
+    /// <see cref="CoordinatorKey"/>. When set, the start refuses an id that names no data partition, and the
+    /// returned handle carries a pinned coordinator key (see <see cref="CoordinatorKeys"/>) that routes commit,
+    /// rollback and every operation registration to this partition. The partition is fixed for the life of the
+    /// session: a later split or move of the caller's range does not move it. Set it only once every node in
+    /// the cluster reads pinned keys: a node that predates them refuses the session's operation registrations.
+    /// </summary>
+    public int? CoordinatorPartitionId { get; set; }
+
+    /// <summary>
     /// Timeout in milliseconds for the transaction.
     /// </summary>
     public int Timeout { get; set; }

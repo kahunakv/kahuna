@@ -124,6 +124,9 @@ public static partial class KahunaLoggerExtensions
     [LoggerMessage(Level = LogLevel.Debug, Message = "START-TRANSACTION Redirect {KeyValueName} to leader partition {Partition} at {Leader}")]
     public static partial void LogStartTransactionRedirected(this ILogger<IKahuna> logger, string keyValueName, int partition, string leader);
 
+    [LoggerMessage(Level = LogLevel.Warning, Message = "START-TRANSACTION Refused coordinator key {CoordinatorKey} with requested partition {Partition}: {Reason}")]
+    public static partial void LogStartTransactionCoordinatorPartitionRefused(this ILogger<IKahuna> logger, string coordinatorKey, int? partition, string reason);
+
     [LoggerMessage(Level = LogLevel.Debug, Message = "COMMIT-TRANSACTION Redirect {KeyValueName} to leader partition {Partition} at {Leader}")]
     public static partial void LogCommitTransactionRedirected(this ILogger<IKahuna> logger, string keyValueName, int partition, string leader);
 
