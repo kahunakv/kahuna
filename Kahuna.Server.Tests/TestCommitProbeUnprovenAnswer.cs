@@ -323,4 +323,50 @@ public sealed class TestCommitProbeUnprovenAnswer
         Assert.Equal(KeyValueResponseType.Set, rerun.Type);
         Assert.Equal((KeyValueResponseType.Get, "V2"), await Read(node.Kahuna, key, ct));
     }
+
+    /// <summary>
+    /// A test gate holds the gate up on a node that keeps leading, so the requests routed there answer
+    /// MustRetry while the session's exclusion stays intact. The leader-change comparison can re-run while such
+    /// a gate stands: a standalone election notifies twice (an empty leader at candidate time, the local endpoint
+    /// once leadership is published), and the run the first notice started finishes only once the cluster
+    /// initializes — inside the window a test opens right after start. The re-run asks the containment whether a
+    /// gated node was promoted again. A gate raised by a detection relinquishes at once on that question; a test
+    /// gate must not: stepping the sole node down costs the partition an election, the re-elected node no longer
+    /// holds the session's exclusion, and the commit expected to pass once the gate clears answers Aborted. The
+    /// promotion hook is driven directly here, as the re-run drives it, and the term proves no election ran.
+    /// </summary>
+    [Fact]
+    public async Task TestGate_PromotionHookWhileGated_KeepsTheNodeLeading_AndTheSessionCommitsOnceClear()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        await using EmbeddedKahunaNode node = await StartNode(loggerFactory, ct);
+        KahunaManager manager = (KahunaManager)node.Kahuna;
+
+        (string gatedKey, string companion) = KeysOnTwoPartitions(node);
+        await Seed(node.Kahuna, gatedKey, "V1", ct);
+        await Seed(node.Kahuna, companion, "W1", ct);
+
+        TransactionHandle tx = await Start(node.Kahuna, gatedKey + "/tx", ct);
+        await Stage(node.Kahuna, tx, gatedKey, "V2", ct);
+        await Stage(node.Kahuna, tx, companion, "W2", ct);
+
+        int gatedPartition = manager.KeyValues.RouteKey(gatedKey);
+        long termBefore = node.Raft.GetPartitionTerm(gatedPartition);
+
+        using (Gate(node, gatedKey))
+        {
+            Assert.True(await manager.KeyValues.DivergenceContainment.OnPromotedAsync(gatedPartition), "the partition was not seen as gated");
+            Assert.True(await node.Raft.AmILeader(gatedPartition, ct), "the test gate relinquished leadership");
+            Assert.Equal(termBefore, node.Raft.GetPartitionTerm(gatedPartition));
+
+            Assert.Equal(KeyValueResponseType.MustRetry, await Commit(node.Kahuna, tx, ct));
+        }
+
+        Assert.Equal(KeyValueResponseType.Committed, await Commit(node.Kahuna, tx, ct));
+        Assert.Equal(termBefore, node.Raft.GetPartitionTerm(gatedPartition));
+
+        Assert.Equal((KeyValueResponseType.Get, "V2"), await Read(node.Kahuna, gatedKey, ct));
+        Assert.Equal((KeyValueResponseType.Get, "W2"), await Read(node.Kahuna, companion, ct));
+    }
 }

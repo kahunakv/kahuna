@@ -60,7 +60,12 @@ internal sealed class PartitionDivergenceContainment
     // Partitions with a relinquish in flight, so a burst of detections runs one transfer, not a pile.
     private readonly ConcurrentDictionary<int, byte> relinquishInFlight = new();
 
-    private sealed record GatedPartition(string FullerPeer, string Evidence, DateTime SinceUtc, CancellationTokenSource Lifetime);
+    /// <param name="RelinquishesLeadership">
+    /// Whether this node hands leadership of the partition away while the gate stands. True for every gate a
+    /// detection raised: the flag is the evidence, and a gated node promoted again relinquishes on it alone. False
+    /// for a test gate, which holds the gate up on a node that keeps leading.
+    /// </param>
+    private sealed record GatedPartition(string FullerPeer, string Evidence, DateTime SinceUtc, CancellationTokenSource Lifetime, bool RelinquishesLeadership);
 
     public PartitionDivergenceContainment(IRaft raft, ILogger<IKahuna> logger)
     {
@@ -81,11 +86,16 @@ internal sealed class PartitionDivergenceContainment
     /// Test-only: gates the partition on this node the way a detection does, but without the relinquish, the
     /// withheld candidacy and the re-seed requests, so a test can hold the gate up on a node that keeps leading.
     /// That is the window a real detection opens too — the gate stands at once and the relinquish runs detached —
-    /// and the one in which a request routed here is answered MustRetry. Disposing the result clears the gate.
+    /// and the one in which a request routed here is answered MustRetry. The node keeps leading for as long as
+    /// the gate stands: a leader-change notification that reaches <see cref="OnPromotedAsync"/> meanwhile (a
+    /// standalone election notifies twice, and the comparison the first notice started re-runs for the second
+    /// once the cluster initializes) finds the gate but does not relinquish on it, since a step-down would cost
+    /// the partition an election and the test's sessions their in-memory exclusions. Disposing the result clears
+    /// the gate.
     /// </summary>
     internal IDisposable GateForTests(int partitionId)
     {
-        GatedPartition state = new(string.Empty, "gated by a test", DateTime.UtcNow, new CancellationTokenSource());
+        GatedPartition state = new(string.Empty, "gated by a test", DateTime.UtcNow, new CancellationTokenSource(), RelinquishesLeadership: false);
 
         if (!gated.TryAdd(partitionId, state))
         {
@@ -121,7 +131,7 @@ internal sealed class PartitionDivergenceContainment
     /// <param name="moment">Where it was detected (promotion, recovery, restart, apply), for the log line.</param>
     internal async Task ContainAsync(int partitionId, string fullerPeer, string evidence, string moment)
     {
-        GatedPartition state = new(fullerPeer, evidence, DateTime.UtcNow, new CancellationTokenSource());
+        GatedPartition state = new(fullerPeer, evidence, DateTime.UtcNow, new CancellationTokenSource(), RelinquishesLeadership: true);
 
         if (gated.TryAdd(partitionId, state))
         {
@@ -302,11 +312,15 @@ internal sealed class PartitionDivergenceContainment
     /// <summary>
     /// A gated node was promoted again: relinquish at once, on the evidence that gated it. Returns
     /// whether the partition was gated (and so whether the caller can skip the fingerprint probe).
+    /// A gate that keeps the node leading (<see cref="GateForTests"/>) is reported as gated but not relinquished.
     /// </summary>
     internal async Task<bool> OnPromotedAsync(int partitionId)
     {
         if (!gated.TryGetValue(partitionId, out GatedPartition? state))
             return false;
+
+        if (!state.RelinquishesLeadership)
+            return true;
 
         // The notification reaches every replica; only the gated node that now leads has anything to do.
         using CancellationTokenSource timeout = new(RelinquishTimeoutMs);
