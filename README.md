@@ -107,7 +107,8 @@ scripts in `scripts/`.
 
 ## Architecture
 
-<img src="https://github.com/user-attachments/assets/b60b213c-d12d-48a5-ba22-38fe99d2a590" height="350">
+<img width="838" height="578" alt="architecture" src="https://github.com/user-attachments/assets/fea5e105-29b4-4713-bfbe-bdd097ac3a1e" />
+
 
 ### Distributed Storage Engine
 
