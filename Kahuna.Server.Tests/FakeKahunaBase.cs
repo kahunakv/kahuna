@@ -24,10 +24,10 @@ internal abstract class FakeKahunaBase : IKahuna
 {
     public virtual Task<bool> DurableOperationLocal(int partitionId, int kind, string logType, byte[] payload, CancellationToken cancellationToken) => throw new NotImplementedException();
     public virtual Task<byte[]?> LookupTransactionRecordLocal(int partitionId, HLCTimestamp transactionId, long epoch, string anchorKey, CancellationToken cancellationToken) => throw new NotImplementedException();
-    public virtual Task<DurableBundleWireReply?> DurableBundleLocal(int partitionId, IReadOnlyList<(string LogType, byte[] Payload)> entries, bool terminal, int stage, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken) => throw new NotImplementedException();
-    public virtual Task<DurableDecisionWireReply?> DurableDecisionLocal(int partitionId, byte[] decisionDelta, HLCTimestamp transactionId, long epoch, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken) => throw new NotImplementedException();
+    public virtual Task<DurableBundleWireReply?> DurableBundleLocal(int partitionId, IReadOnlyList<(string LogType, byte[] Payload)> entries, bool terminal, int stage, IReadOnlyList<RangeFence> fences, CancellationToken cancellationToken) => throw new NotImplementedException();
+    public virtual Task<DurableDecisionWireReply?> DurableDecisionLocal(int partitionId, byte[] decisionDelta, HLCTimestamp transactionId, long epoch, IReadOnlyList<RangeFence> fences, CancellationToken cancellationToken) => throw new NotImplementedException();
 
-    public virtual Task<DurableOnePhaseWireReply?> DurableOnePhaseLocal(int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta, HLCTimestamp transactionId, long epoch, HLCTimestamp opId, string? fenceKey, long fenceGeneration, long expectedTerm, CancellationToken cancellationToken) => throw new NotImplementedException();
+    public virtual Task<DurableOnePhaseWireReply?> DurableOnePhaseLocal(int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta, HLCTimestamp transactionId, long epoch, HLCTimestamp opId, IReadOnlyList<RangeFence> fences, long expectedTerm, CancellationToken cancellationToken) => throw new NotImplementedException();
     public virtual Task<bool> ReplicateKeyValueRangePageLocal(int partitionId, byte[] page, CancellationToken cancellationToken) => throw new NotImplementedException();
 
     public virtual Task<bool> ReplicateKeyValueRangePageOnLeader(int partitionId, byte[] page, CancellationToken cancellationToken) => throw new NotImplementedException();

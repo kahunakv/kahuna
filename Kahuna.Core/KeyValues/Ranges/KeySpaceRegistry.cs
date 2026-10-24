@@ -33,6 +33,17 @@ internal sealed class KeySpaceRegistry
     /// </exception>
     public void RegisterKeyRange(string keySpace)
     {
+        EnsureRegistrable(keySpace);
+        modes[keySpace] = RoutingMode.KeyRange;
+    }
+
+    /// <summary>The validity rules of <see cref="RegisterKeyRange"/> alone, so a caller that seeds a space's
+    /// descriptor before it flips the mode can reject an invalid space before anything replicates.</summary>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="keySpace"/> is empty, or ends with <c>/meta</c> — schema-log spaces must stay hash-routed.
+    /// </exception>
+    public static void EnsureRegistrable(string keySpace)
+    {
         if (string.IsNullOrEmpty(keySpace))
             throw new ArgumentException("Key space must be non-empty.", nameof(keySpace));
 
@@ -40,8 +51,6 @@ internal sealed class KeySpaceRegistry
             throw new ArgumentException(
                 $"Key space '{keySpace}' is a schema-log space and must not be registered as key-range.",
                 nameof(keySpace));
-
-        modes[keySpace] = RoutingMode.KeyRange;
     }
 
     /// <summary>

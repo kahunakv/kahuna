@@ -12,10 +12,11 @@ namespace Kahuna.Server.KeyValues.Transactions;
 
 /// <summary>The per-partition prepared-intent group of one transaction. The anchor partition additionally carries
 /// the canonical record's initialization (see <see cref="DurableFinalizeInput.AnchorPartitionId"/>). The
-/// <paramref name="Generation"/> is the range-descriptor generation this partition was resolved against at freeze,
-/// used to re-fence the prepare submission at dispatch so a split between freeze and dispatch releases it retryably
-/// instead of appending to a retired partition.</summary>
-internal sealed record DurablePartitionPrepare(int PartitionId, long Generation, IReadOnlyList<PreparedIntent> Intents);
+/// <paramref name="Fences"/> are the dispatch fences of this group: one key per range descriptor (or hash space)
+/// the group's keys resolved through at freeze, each at the generation that key resolved to, so the prepare
+/// submission is re-fenced at dispatch against every space it touches and a split between freeze and dispatch
+/// releases it retryably instead of appending to a retired partition. Empty means unfenced (protocol tests).</summary>
+internal sealed record DurablePartitionPrepare(int PartitionId, IReadOnlyList<RangeFence> Fences, IReadOnlyList<PreparedIntent> Intents);
 
 /// <summary>The frozen, immutable inputs of one finalize attempt: identity, the canonical commit timestamp and
 /// decision deadline, the participant manifest, and the per-partition prepared intents. Freezing happens in the
@@ -32,7 +33,13 @@ internal sealed record DurableFinalizeInput(
     long ManifestHash,
     IReadOnlyList<TransactionParticipantRef> Manifest,
     IReadOnlyList<DurablePartitionPrepare> Partitions,
-    HLCTimestamp CreatedAt);
+    HLCTimestamp CreatedAt)
+{
+    /// <summary>The canonical record's dispatch fence: the anchor key at the generation it resolved to at freeze.
+    /// Carried by the record initialization and the decision, which replicate on the anchor partition alone; the
+    /// anchor partition's prepare group carries this fence among its own.</summary>
+    public RangeFence[] AnchorFence => [new RangeFence(RecordAnchorKey, AnchorGeneration)];
+}
 
 internal enum DurableFinalizeResult
 {
@@ -128,21 +135,23 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     /// carries the producing stage instead of inferring it from the delta's log type.</summary>
     public delegate Task<bool> ReplicateDelegate(int partitionId, string logType, byte[] logData, Writes.WriteAdmissionClass admissionClass, Writes.WriteSubmissionStage stage, CancellationToken cancellationToken);
 
-    /// <summary>Like <see cref="ReplicateDelegate"/> but re-fences the submission at dispatch against the range
-    /// descriptor <paramref name="fenceKey"/> was resolved to at freeze (<paramref name="fenceGeneration"/>): a
-    /// split/merge between freeze and dispatch releases it retryably instead of appending to a retired partition.
-    /// Used for the pre-decision record initialization, prepare, and decision; null falls back to the unfenced
-    /// replicate (protocol tests, and the post-decision settle/materialize which recovery backstops).</summary>
-    public delegate Task<bool> ReplicateFencedDelegate(int partitionId, string logType, byte[] logData, string fenceKey, long fenceGeneration, Writes.WriteAdmissionClass admissionClass, Writes.WriteSubmissionStage stage, CancellationToken cancellationToken);
+    /// <summary>Like <see cref="ReplicateDelegate"/> but re-fences the submission at dispatch against every range
+    /// descriptor its keys were resolved through at freeze (<paramref name="fences"/>, each key at its own
+    /// generation): a split/merge between freeze and dispatch releases it retryably instead of appending to a
+    /// retired partition. Used for the pre-decision record initialization, prepare, and decision; null falls back
+    /// to the unfenced replicate (protocol tests, and the post-decision settle/materialize which recovery
+    /// backstops).</summary>
+    public delegate Task<bool> ReplicateFencedDelegate(int partitionId, string logType, byte[] logData, IReadOnlyList<RangeFence> fences, Writes.WriteAdmissionClass admissionClass, Writes.WriteSubmissionStage stage, CancellationToken cancellationToken);
 
     /// <summary>Replicates the anchor partition's record initialization and its own prepared-intent group as one
-    /// atomic ordered proposal (removing a pre-decision barrier), fenced against the anchor descriptor. Returns two
-    /// independent signals: <c>BatchCommitted</c> — the proposal reached Raft so the record is durably initialized;
-    /// and <c>PrepareAcknowledged</c> — the anchor prepare took ownership of its key. The two cannot be folded: a
+    /// atomic ordered proposal (removing a pre-decision barrier), fenced against the anchor descriptor and every
+    /// descriptor the group's keys resolved through (<paramref name="fences"/>). Returns two independent signals:
+    /// <c>BatchCommitted</c> — the proposal reached Raft so the record is durably initialized; and
+    /// <c>PrepareAcknowledged</c> — the anchor prepare took ownership of its key. The two cannot be folded: a
     /// committed batch whose prepare was rejected must drive a truthful abort (the record exists), while a batch that
     /// never committed is a clean retry with nothing durable. Null keeps the unbundled init-then-prepare sequence
     /// (protocol tests, and the fallback when the anchor key routes outside the participant partitions).</summary>
-    public delegate Task<(bool BatchCommitted, bool PrepareAcknowledged)> ReplicateAnchorBundleDelegate(int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, string fenceKey, long fenceGeneration, CancellationToken cancellationToken);
+    public delegate Task<(bool BatchCommitted, bool PrepareAcknowledged)> ReplicateAnchorBundleDelegate(int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, IReadOnlyList<RangeFence> fences, CancellationToken cancellationToken);
 
     /// <summary>Runs the post-decision resolution (materialize committed values, settle intents) on a background
     /// task, off the commit critical path (deferred settlement). When <see langword="null"/>, resolution is instead
@@ -179,11 +188,12 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     /// back to standard 2PC. Null delegate disables the fast path entirely. <paramref name="expectedTerm"/> is the
     /// Raft term the anchor partition must still be led under when the bundle is appended — the term the commit
     /// probe confirmed the transaction's staged intents (and locks) under; the anchor leader refuses the bundle
-    /// before anything is appended when its term differs, and 0 disables that fence.</summary>
+    /// before anything is appended when its term differs, and 0 disables that fence. <paramref name="fences"/> are
+    /// the anchor group's dispatch fences: the anchor descriptor and every descriptor its keys resolved through.</summary>
     public delegate Task<Writes.DurableOnePhaseReply?> ReplicateOnePhaseBundleDelegate(
         int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
         HLCTimestamp transactionId, long epoch, HLCTimestamp opId,
-        string fenceKey, long fenceGeneration, long expectedTerm, CancellationToken cancellationToken);
+        IReadOnlyList<RangeFence> fences, long expectedTerm, CancellationToken cancellationToken);
 
     /// <summary>Checks every frozen intent's validated base (<see cref="PreparedIntent.BaseRevision"/> /
     /// <see cref="PreparedIntent.BaseState"/>) against the key's current committed state — the write-side
@@ -210,14 +220,14 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     /// success reports only that the batch committed — not that the transition applied. Null falls back to the
     /// ordinary fenced/unfenced replicate, whose sender-side projection is then trusted (single-node and
     /// protocol-test configurations, where the local apply IS the canonical apply).</summary>
-    public delegate Task<bool> ReplicateDecisionDelegate(int partitionId, byte[] decisionDelta, string fenceKey, long fenceGeneration, CancellationToken cancellationToken);
+    public delegate Task<bool> ReplicateDecisionDelegate(int partitionId, byte[] decisionDelta, IReadOnlyList<RangeFence> fences, CancellationToken cancellationToken);
 
     /// <summary>Replicates the terminal decision delta on the anchor partition and answers the CANONICAL outcome
     /// read after the ordered apply — from this node's own store when it leads the anchor, from the anchor
     /// leader's typed answer otherwise — so the winner needs no separate lookup call. An answer that is
     /// replicated but not <c>Known</c> (an older remote node) falls back to the routed lookup. Preferred over
     /// <see cref="ReplicateDecisionDelegate"/> when wired.</summary>
-    public delegate Task<Writes.DurableDecisionReply> DecideDelegate(int partitionId, byte[] decisionDelta, HLCTimestamp transactionId, long epoch, string fenceKey, long fenceGeneration, CancellationToken cancellationToken);
+    public delegate Task<Writes.DurableDecisionReply> DecideDelegate(int partitionId, byte[] decisionDelta, HLCTimestamp transactionId, long epoch, IReadOnlyList<RangeFence> fences, CancellationToken cancellationToken);
 
     /// <summary>Reads the transaction's canonical record by its anchor key — locally when this node leads the
     /// anchor partition, routed to the anchor leader otherwise. The decision winner and the resolution
@@ -605,7 +615,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         if (anchorIndex >= 0)
         {
             Task<(bool BatchCommitted, bool PrepareAcknowledged)> anchorBundleTask = replicateAnchorBundle!(
-                input.AnchorPartitionId, initDelta, prepareDeltas[anchorIndex], input.RecordAnchorKey, input.AnchorGeneration, cancellationToken);
+                input.AnchorPartitionId, initDelta, prepareDeltas[anchorIndex], input.Partitions[anchorIndex].Fences, cancellationToken);
 
             // Every non-anchor partition prepares concurrently. Never abandon a submission on the first failure —
             // its outcome is needed to drive a truthful abort; a prepared-then-aborted intent is cleaned up by
@@ -617,7 +627,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
                     continue;
 
                 DurablePartitionPrepare partition = input.Partitions[i];
-                otherPrepareTaskList.Add(ReplicatePrepareAsync(partition.PartitionId, prepareDeltas[i], partition.Intents[0].Key, partition.Generation, Writes.WriteSubmissionStage.Prepare, cancellationToken));
+                otherPrepareTaskList.Add(ReplicatePrepareAsync(partition.PartitionId, prepareDeltas[i], partition.Fences, Writes.WriteSubmissionStage.Prepare, cancellationToken));
             }
 
             Task<bool>[] otherPrepareTasks = otherPrepareTaskList.ToArray();
@@ -647,7 +657,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         {
             // Nothing to bundle (anchor key routes outside the participant partitions, or no bundle seam): keep the
             // original init-then-prepare sequence. Nothing is durable if the init fails, so it is a clean retry.
-            if (!await ReplicateRecordAsync(input.AnchorPartitionId, initDelta, input.RecordAnchorKey, input.AnchorGeneration, Writes.WriteAdmissionClass.Ordinary, Writes.WriteSubmissionStage.RecordInit, cancellationToken).ConfigureAwait(false))
+            if (!await ReplicateRecordAsync(input.AnchorPartitionId, initDelta, input.AnchorFence, Writes.WriteAdmissionClass.Ordinary, Writes.WriteSubmissionStage.RecordInit, cancellationToken).ConfigureAwait(false))
                 return Retry();
 
             // ── Prepare barrier: prepare every partition, waiting for all (never abandon a submission on the first
@@ -657,7 +667,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             for (int i = 0; i < input.Partitions.Count; i++)
             {
                 DurablePartitionPrepare partition = input.Partitions[i];
-                prepareTasks[i] = ReplicatePrepareAsync(partition.PartitionId, prepareDeltas[i], partition.Intents[0].Key, partition.Generation, Writes.WriteSubmissionStage.Prepare, cancellationToken);
+                prepareTasks[i] = ReplicatePrepareAsync(partition.PartitionId, prepareDeltas[i], partition.Fences, Writes.WriteSubmissionStage.Prepare, cancellationToken);
             }
             bool[] prepareResults = await Task.WhenAll(prepareTasks).ConfigureAwait(false);
             for (int i = 0; i < prepareResults.Length; i++)
@@ -850,7 +860,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             {
                 int i = unacknowledged[k];
                 DurablePartitionPrepare partition = input.Partitions[i];
-                retryTasks[k] = ReplicatePrepareAsync(partition.PartitionId, prepareDeltas[i], partition.Intents[0].Key, partition.Generation, Writes.WriteSubmissionStage.RePrepare, cancellationToken);
+                retryTasks[k] = ReplicatePrepareAsync(partition.PartitionId, prepareDeltas[i], partition.Fences, Writes.WriteSubmissionStage.RePrepare, cancellationToken);
             }
 
             bool[] retryResults = await AwaitRenewingLeaseAsync(Task.WhenAll(retryTasks), input, lease, opId, cancellationToken).ConfigureAwait(false);
@@ -1170,15 +1180,15 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         {
             if (decide is not null)
             {
-                Writes.DurableDecisionReply reply = await decide(input.AnchorPartitionId, delta, input.TransactionId, input.Epoch, input.RecordAnchorKey, input.AnchorGeneration, cancellationToken).ConfigureAwait(false);
+                Writes.DurableDecisionReply reply = await decide(input.AnchorPartitionId, delta, input.TransactionId, input.Epoch, input.AnchorFence, cancellationToken).ConfigureAwait(false);
                 typed = reply;
                 replicated = reply.Replicated;
             }
             else
             {
                 replicated = replicateDecision is not null
-                    ? await replicateDecision(input.AnchorPartitionId, delta, input.RecordAnchorKey, input.AnchorGeneration, cancellationToken).ConfigureAwait(false)
-                    : await ReplicateRecordAsync(input.AnchorPartitionId, delta, input.RecordAnchorKey, input.AnchorGeneration, Writes.WriteAdmissionClass.Terminal, Writes.WriteSubmissionStage.Decision, cancellationToken).ConfigureAwait(false);
+                    ? await replicateDecision(input.AnchorPartitionId, delta, input.AnchorFence, cancellationToken).ConfigureAwait(false)
+                    : await ReplicateRecordAsync(input.AnchorPartitionId, delta, input.AnchorFence, Writes.WriteAdmissionClass.Terminal, Writes.WriteSubmissionStage.Decision, cancellationToken).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException)
@@ -1407,7 +1417,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         Writes.DurableOnePhaseReply? proposed = await replicateOnePhaseBundle!(
             partition.PartitionId, initDelta, anchorPrepareDelta, decisionDelta,
             input.TransactionId, input.Epoch, opId,
-            input.RecordAnchorKey, input.AnchorGeneration, exclusionTerm, cancellationToken).ConfigureAwait(false);
+            partition.Fences, exclusionTerm, cancellationToken).ConfigureAwait(false);
 
         // Record the attempt's decomposition from the reply: the bundle's durable round is the leader's own
         // enqueue-to-acknowledgement measurement, and everything else since the attempt began — including both
@@ -1600,15 +1610,15 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         Writes.DurableDecisionReply? typed = null;
         if (decide is not null)
         {
-            Writes.DurableDecisionReply reply = await decide(input.AnchorPartitionId, delta, input.TransactionId, input.Epoch, input.RecordAnchorKey, input.AnchorGeneration, cancellationToken).ConfigureAwait(false);
+            Writes.DurableDecisionReply reply = await decide(input.AnchorPartitionId, delta, input.TransactionId, input.Epoch, input.AnchorFence, cancellationToken).ConfigureAwait(false);
             typed = reply;
             replicated = reply.Replicated;
         }
         else
         {
             replicated = replicateDecision is not null
-                ? await replicateDecision(input.AnchorPartitionId, delta, input.RecordAnchorKey, input.AnchorGeneration, cancellationToken).ConfigureAwait(false)
-                : await ReplicateRecordAsync(input.AnchorPartitionId, delta, input.RecordAnchorKey, input.AnchorGeneration, Writes.WriteAdmissionClass.Terminal, Writes.WriteSubmissionStage.Decision, cancellationToken).ConfigureAwait(false);
+                ? await replicateDecision(input.AnchorPartitionId, delta, input.AnchorFence, cancellationToken).ConfigureAwait(false)
+                : await ReplicateRecordAsync(input.AnchorPartitionId, delta, input.AnchorFence, Writes.WriteAdmissionClass.Terminal, Writes.WriteSubmissionStage.Decision, cancellationToken).ConfigureAwait(false);
         }
         DurableTransactionMetrics.FinalizeDecisionReplicateMs.Record(Stopwatch.GetElapsedTime(replicateStart).TotalMilliseconds);
 
@@ -1783,8 +1793,9 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     /// <summary>
     /// Why <paramref name="partition"/>'s prepare was refused, as far as this node can tell: the leader's memo
     /// for this transaction's keys (recorded at the prepare's apply, locally or mirrored from a remote leader's
-    /// typed answer; a stale base outranks a held key), else a range that no longer routes the key to the frozen
-    /// partition, else <see cref="Writes.PrepareRejectionKind.None"/> — no verdict, retried as before.
+    /// typed answer; a stale base outranks a held key), else a range that no longer routes one of the group's
+    /// fenced keys to the frozen partition (every space the group touches is probed, not only the first key's),
+    /// else <see cref="Writes.PrepareRejectionKind.None"/> — no verdict, retried as before.
     /// </summary>
     private Writes.PrepareRejectionKind ClassifyPrepareRefusal(DurableFinalizeInput input, DurablePartitionPrepare partition)
     {
@@ -1799,9 +1810,28 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         if (dominant != Writes.PrepareRejectionKind.None)
             return dominant;
 
-        if (resolveCurrentPartition is not null && partition.Intents.Count > 0
-            && ResolveCurrentPartitionSafe(partition.Intents[0].Key, partition.PartitionId) != partition.PartitionId)
-            return Writes.PrepareRejectionKind.RangeMoved;
+        if (resolveCurrentPartition is null)
+            return Writes.PrepareRejectionKind.None;
+
+        // The fences name one key per descriptor the group touches, so they are the cheapest complete probe; a
+        // group frozen without fences is probed through its intents, since whether the frozen partition still
+        // owns the keys does not depend on the dispatch fence.
+        if (partition.Fences.Count > 0)
+        {
+            for (int i = 0; i < partition.Fences.Count; i++)
+            {
+                if (ResolveCurrentPartitionSafe(partition.Fences[i].Key, partition.PartitionId) != partition.PartitionId)
+                    return Writes.PrepareRejectionKind.RangeMoved;
+            }
+
+            return Writes.PrepareRejectionKind.None;
+        }
+
+        for (int i = 0; i < partition.Intents.Count; i++)
+        {
+            if (ResolveCurrentPartitionSafe(partition.Intents[i].Key, partition.PartitionId) != partition.PartitionId)
+                return Writes.PrepareRejectionKind.RangeMoved;
+        }
 
         return Writes.PrepareRejectionKind.None;
     }
@@ -2033,17 +2063,17 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     // transaction. The caller passes the class so the decision draws on reserve capacity and can never be
     // rejected by an ordinary-write burst on the anchor partition. The caller also passes the stage — the same
     // record log type carries both an init and a decision, and only the call site knows which it is sending.
-    private Task<bool> ReplicateRecordAsync(int partitionId, byte[] delta, string fenceKey, long fenceGeneration, Writes.WriteAdmissionClass admissionClass, Writes.WriteSubmissionStage stage, CancellationToken cancellationToken) =>
+    private Task<bool> ReplicateRecordAsync(int partitionId, byte[] delta, IReadOnlyList<RangeFence> fences, Writes.WriteAdmissionClass admissionClass, Writes.WriteSubmissionStage stage, CancellationToken cancellationToken) =>
         replicateFenced is not null
-            ? replicateFenced(partitionId, ReplicationTypes.TransactionRecord, delta, fenceKey, fenceGeneration, admissionClass, stage, cancellationToken)
+            ? replicateFenced(partitionId, ReplicationTypes.TransactionRecord, delta, fences, admissionClass, stage, cancellationToken)
             : replicate(partitionId, ReplicationTypes.TransactionRecord, delta, admissionClass, stage, cancellationToken);
 
-    // Pre-decision prepare: fenced against the partition group's frozen descriptor. A rejected prepare surfaces as
-    // a failed replicate (the seam folds in prepare acknowledgement) and drives an abort. Ordinary work. The
-    // stage separates the first barrier's prepares from the retry loop's re-proposals.
-    private Task<bool> ReplicatePrepareAsync(int partitionId, byte[] delta, string fenceKey, long fenceGeneration, Writes.WriteSubmissionStage stage, CancellationToken cancellationToken) =>
+    // Pre-decision prepare: fenced against every descriptor the partition group's keys were frozen through. A
+    // rejected prepare surfaces as a failed replicate (the seam folds in prepare acknowledgement) and drives an
+    // abort. Ordinary work. The stage separates the first barrier's prepares from the retry loop's re-proposals.
+    private Task<bool> ReplicatePrepareAsync(int partitionId, byte[] delta, IReadOnlyList<RangeFence> fences, Writes.WriteSubmissionStage stage, CancellationToken cancellationToken) =>
         replicateFenced is not null
-            ? replicateFenced(partitionId, ReplicationTypes.PreparedIntent, delta, fenceKey, fenceGeneration, Writes.WriteAdmissionClass.Ordinary, stage, cancellationToken)
+            ? replicateFenced(partitionId, ReplicationTypes.PreparedIntent, delta, fences, Writes.WriteAdmissionClass.Ordinary, stage, cancellationToken)
             : replicate(partitionId, ReplicationTypes.PreparedIntent, delta, Writes.WriteAdmissionClass.Ordinary, stage, cancellationToken);
 
     // Post-decision settle: unfenced and terminal. The decision is already durable; a split at this point is

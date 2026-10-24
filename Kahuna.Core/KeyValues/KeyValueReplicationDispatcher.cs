@@ -486,11 +486,13 @@ internal sealed class KeyValueReplicationDispatcher
     /// cluster via Raft, but the registry is node-local and must be kept in sync explicitly.
     /// <para>
     /// Any key space present in the range map was placed there through <see cref="MutateAsync"/>,
-    /// which in turn requires passing through <see cref="KeySpaceRegistry.RegisterKeyRange"/> on
-    /// the seeding node. That path already enforces all validity rules (e.g. non-empty, not a
-    /// reserved space). Re-applying those rules here would duplicate consumer-specific knowledge
+    /// and the seeding node checked it against <see cref="KeySpaceRegistry.EnsureRegistrable"/>
+    /// before it committed the seed. That path already enforces all validity rules (e.g. non-empty,
+    /// not a reserved space). Re-applying those rules here would duplicate consumer-specific knowledge
     /// inside Kahuna; instead we call <c>RegisterKeyRange</c> unconditionally and let it enforce
-    /// its own invariants if a descriptor ever arrives with an invalid key space.
+    /// its own invariants if a descriptor ever arrives with an invalid key space. This sync is also
+    /// what flips a freshly seeded space to key-range routing: the registry follows the map, so a
+    /// space is never key-range routed on a node whose map has no descriptor for it.
     /// </para>
     /// </summary>
     /// <summary>

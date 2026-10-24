@@ -220,6 +220,11 @@ internal sealed class KeyValueLocator
     public (int PartitionId, long Generation) LocateRange(string key) =>
         routing.LocateRange(key);
 
+    /// <summary>Routes a key and reports its routing mode and, for a key-range key, the descriptor it resolved
+    /// through, in one classification pass (see <see cref="LocatorRouting.LocateRangeWithMode"/>).</summary>
+    internal (int PartitionId, long Generation, bool IsKeyRange, Ranges.RangeDescriptor? Descriptor) LocateRangeWithMode(string key) =>
+        routing.LocateRangeWithMode(key);
+
     public bool TryLocateRange(string key, out int partitionId) =>
         routing.TryLocateRange(key, out partitionId);
 

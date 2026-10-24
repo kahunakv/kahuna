@@ -59,9 +59,11 @@ internal static class RangeRouting
     /// map). Generation <c>0</c> disables the fence — hash routing is static, nothing to fence against.</item>
     /// </list>
     /// </summary>
-    /// <exception cref="KahunaServerException">
-    /// A key-range space has no descriptor covering the key (a gap — should be impossible once the
-    /// map is initialized, since <see cref="RangeMap.Validate"/> rejects gaps).
+    /// <exception cref="RangeDescriptorMissingException">
+    /// A key-range space has no descriptor covering the key on this node. A validated map has no gaps
+    /// (<see cref="RangeMap.Validate"/> rejects them), so this is the transient state of a space whose seed
+    /// descriptor has not replicated here yet, or whose descriptors were removed and whose routing mode is not
+    /// reconciled yet. Retryable: nothing was routed.
     /// </exception>
     public static (int PartitionId, long Generation) Locate(
         KeySpaceRegistry registry,
@@ -92,8 +94,7 @@ internal static class RangeRouting
 
         int separator = key.LastIndexOf('/');
 
-        throw new KahunaServerException(
-            $"No range descriptor covers key '{key}' in key-range space '{(separator < 0 ? key : key[..separator])}'.");
+        throw new RangeDescriptorMissingException(key, separator < 0 ? key : key[..separator]);
     }
 
     /// <summary>

@@ -2379,7 +2379,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
 
     public async Task<DurableBundleWireReply?> DurableBundle(
         string node, int partitionId, IReadOnlyList<(string LogType, byte[] Payload)> entries,
-        bool terminal, int stage, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken)
+        bool terminal, int stage, IReadOnlyList<RangeFence> fences, CancellationToken cancellationToken)
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);
 
@@ -2387,10 +2387,12 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         {
             PartitionId = partitionId,
             AdmissionClass = terminal ? 1 : 0,
-            Stage = stage,
-            FenceKey = fenceKey ?? string.Empty,
-            FenceGeneration = fenceGeneration
+            Stage = stage
         };
+
+        // Every fence rides the repeated field; the first one is mirrored into the single-fence fields an older
+        // receiver reads, so it still fences one consistent key/generation pair.
+        (request.FenceKey, request.FenceGeneration) = RangeFenceWire.Write(fences, request.Fences);
 
         for (int i = 0; i < entries.Count; i++)
             request.Entries.Add(new GrpcDurableBundleEntry { LogType = entries[i].LogType, Payload = UnsafeByteOperations.UnsafeWrap(entries[i].Payload) });
@@ -2413,7 +2415,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
 
     public async Task<DurableDecisionWireReply?> DurableDecision(
         string node, int partitionId, byte[] decisionDelta, HLCTimestamp transactionId, long epoch,
-        string? fenceKey, long fenceGeneration, CancellationToken cancellationToken)
+        IReadOnlyList<RangeFence> fences, CancellationToken cancellationToken)
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);
 
@@ -2421,13 +2423,13 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         {
             PartitionId = partitionId,
             DecisionDelta = UnsafeByteOperations.UnsafeWrap(decisionDelta),
-            FenceKey = fenceKey ?? string.Empty,
-            FenceGeneration = fenceGeneration,
             TransactionIdNode = transactionId.N,
             TransactionIdPhysical = transactionId.L,
             TransactionIdCounter = transactionId.C,
             Epoch = epoch
         };
+
+        (request.FenceKey, request.FenceGeneration) = RangeFenceWire.Write(fences, request.Fences);
 
         GrpcServerBatcherResponse batchResponse;
 
@@ -2446,7 +2448,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
     public async Task<DurableOnePhaseWireReply?> DurableOnePhase(
         string node, int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
         HLCTimestamp transactionId, long epoch, HLCTimestamp opId,
-        string? fenceKey, long fenceGeneration, long expectedTerm, CancellationToken cancellationToken)
+        IReadOnlyList<RangeFence> fences, long expectedTerm, CancellationToken cancellationToken)
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);
 
@@ -2456,8 +2458,6 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             RecordInitDelta = UnsafeByteOperations.UnsafeWrap(recordInitDelta),
             AnchorPrepareDelta = UnsafeByteOperations.UnsafeWrap(anchorPrepareDelta),
             DecisionDelta = UnsafeByteOperations.UnsafeWrap(decisionDelta),
-            FenceKey = fenceKey ?? string.Empty,
-            FenceGeneration = fenceGeneration,
             ExpectedTerm = expectedTerm,
             TransactionIdNode = transactionId.N,
             TransactionIdPhysical = transactionId.L,
@@ -2467,6 +2467,8 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             OpIdPhysical = opId.L,
             OpIdCounter = opId.C
         };
+
+        (request.FenceKey, request.FenceGeneration) = RangeFenceWire.Write(fences, request.Fences);
 
         GrpcServerBatcherResponse batchResponse;
 

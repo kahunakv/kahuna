@@ -1679,13 +1679,22 @@ message GrpcDurableBundleEntry {
 // (record init + prepare for an anchor, or a single prepare), carrying the origin's admission class and the
 // range fence it froze the partition against, so the receiver admits and re-fences exactly as the origin's
 // own scheduler would have. Independent per-entry forwards are not an atomic bundle; this is.
+// One dispatch fence of a durable submission: a key and the range-descriptor generation it resolved to when the
+// origin froze the submission's partition. The receiver re-resolves every fence at dispatch and releases the
+// submission retryably when any descriptor moved.
+message GrpcRangeFence {
+  string Key = 1;
+  int64 Generation = 2;
+}
+
 message GrpcDurableBundleRequest {
   int32 PartitionId = 1;
   repeated GrpcDurableBundleEntry Entries = 2;
   int32 AdmissionClass = 3;   // 0 ordinary, 1 terminal (Kahuna's WriteAdmissionClass)
-  string FenceKey = 4;        // empty = unfenced
+  string FenceKey = 4;        // the first fence, for a receiver that predates Fences; empty = unfenced
   int64 FenceGeneration = 5;
   int32 Stage = 6;            // the origin's WriteSubmissionStage; 0 (other) from an older sender
+  repeated GrpcRangeFence Fences = 7;   // every fence; a receiver reads this when present, else FenceKey/FenceGeneration
 }
 
 // The two signals of a bundle stay separate: BatchCommitted (the proposal reached Raft; the record is durable)
@@ -1703,12 +1712,13 @@ message GrpcDurableBundleResponse {
 message GrpcDurableDecisionRequest {
   int32 PartitionId = 1;
   bytes DecisionDelta = 2;
-  string FenceKey = 3;        // empty = unfenced
+  string FenceKey = 3;        // the first fence, for a receiver that predates Fences; empty = unfenced
   int64 FenceGeneration = 4;
   int32 TransactionIdNode = 5;
   int64 TransactionIdPhysical = 6;
   uint32 TransactionIdCounter = 7;
   int64 Epoch = 8;
+  repeated GrpcRangeFence Fences = 9;   // every fence; a receiver reads this when present, else FenceKey/FenceGeneration
 }
 
 // Replicated: the batch carrying the decision committed. Known: the record was read after the apply, and
@@ -1730,7 +1740,7 @@ message GrpcDurableOnePhaseRequest {
   bytes RecordInitDelta = 2;
   bytes AnchorPrepareDelta = 3;
   bytes DecisionDelta = 4;
-  string FenceKey = 5;        // empty = unfenced
+  string FenceKey = 5;        // the first fence, for a receiver that predates Fences; empty = unfenced
   int64 FenceGeneration = 6;
   int32 TransactionIdNode = 7;
   int64 TransactionIdPhysical = 8;
@@ -1743,6 +1753,7 @@ message GrpcDurableOnePhaseRequest {
   // transaction's staged intents (and locks) on the partition were confirmed under at the commit probe. The
   // receiver refuses the bundle before anything is appended when its term differs. 0 = no fence.
   int64 ExpectedTerm = 14;
+  repeated GrpcRangeFence Fences = 15;  // every fence; a receiver reads this when present, else FenceKey/FenceGeneration
 }
 
 // The bundle signals (BatchCommitted / PrepareAcknowledged / PrepareRejection, as in GrpcDurableBundleResponse)

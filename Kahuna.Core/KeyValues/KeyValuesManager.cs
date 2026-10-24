@@ -342,35 +342,35 @@ internal sealed partial class KeyValuesManager : IDisposable
     internal KeyValueActorRouters Routers => routers;
 
     /// <summary>Resolves a key to the data partition its durable records are anchored on.</summary>
-    internal (int PartitionId, long Generation) LocateDurablePartition(string key) => durableReplication.LocateDurablePartition(key);
+    internal Transactions.DurableKeyRoute LocateDurablePartition(string key) => durableReplication.LocateDurablePartition(key);
 
     /// <summary>Replicates a durable entry through the partition write scheduler.</summary>
     internal Task<bool> ReplicateDurableThroughScheduler(int partitionId, string logType, byte[] data, Writes.WriteAdmissionClass admissionClass, Writes.WriteSubmissionStage stage, CancellationToken cancellationToken) =>
         durableReplication.ReplicateDurableThroughScheduler(partitionId, logType, data, admissionClass, stage, cancellationToken);
 
-    /// <summary>Replicates a durable entry fenced on a range lock's key and generation.</summary>
-    internal Task<bool> ReplicateDurableThroughSchedulerFenced(int partitionId, string logType, byte[] data, string fenceKey, long fenceGeneration, Writes.WriteAdmissionClass admissionClass, Writes.WriteSubmissionStage stage, CancellationToken cancellationToken, bool projectRecordLocally = true) =>
-        durableReplication.ReplicateDurableThroughSchedulerFenced(partitionId, logType, data, fenceKey, fenceGeneration, admissionClass, stage, cancellationToken, projectRecordLocally);
+    /// <summary>Replicates a durable entry re-fenced at dispatch against every range descriptor in <paramref name="fences"/>.</summary>
+    internal Task<bool> ReplicateDurableThroughSchedulerFenced(int partitionId, string logType, byte[] data, IReadOnlyList<Writes.RangeFence> fences, Writes.WriteAdmissionClass admissionClass, Writes.WriteSubmissionStage stage, CancellationToken cancellationToken, bool projectRecordLocally = true) =>
+        durableReplication.ReplicateDurableThroughSchedulerFenced(partitionId, logType, data, fences, admissionClass, stage, cancellationToken, projectRecordLocally);
 
     /// <summary>Replicates an anchor's init+prepare as one atomic batch. Reports batch commit and prepare
     /// acknowledgement independently.</summary>
     /// <summary>Replicates a terminal decision on the anchor partition and answers the canonical outcome.</summary>
     internal Task<Writes.DurableDecisionReply> ReplicateDurableDecisionThroughSchedulerFenced(
-        int partitionId, byte[] decisionDelta, HLCTimestamp transactionId, long epoch, string fenceKey, long fenceGeneration, CancellationToken cancellationToken) =>
-        durableReplication.ReplicateDurableDecisionThroughSchedulerFenced(partitionId, decisionDelta, transactionId, epoch, fenceKey, fenceGeneration, cancellationToken);
+        int partitionId, byte[] decisionDelta, HLCTimestamp transactionId, long epoch, IReadOnlyList<Writes.RangeFence> fences, CancellationToken cancellationToken) =>
+        durableReplication.ReplicateDurableDecisionThroughSchedulerFenced(partitionId, decisionDelta, transactionId, epoch, fences, cancellationToken);
 
     internal Task<(bool BatchCommitted, bool PrepareAcknowledged)> ReplicateDurableBundleThroughSchedulerFenced(
-        int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, string fenceKey, long fenceGeneration, CancellationToken cancellationToken) =>
-        durableReplication.ReplicateDurableBundleThroughSchedulerFenced(partitionId, recordInitDelta, anchorPrepareDelta, fenceKey, fenceGeneration, cancellationToken);
+        int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, IReadOnlyList<Writes.RangeFence> fences, CancellationToken cancellationToken) =>
+        durableReplication.ReplicateDurableBundleThroughSchedulerFenced(partitionId, recordInitDelta, anchorPrepareDelta, fences, cancellationToken);
 
     /// <summary>One-phase bundled commit, run locally or forwarded whole to a remote anchor leader. Null when
     /// the remote leader does not implement the typed operation (an older node).</summary>
     internal Task<Writes.DurableOnePhaseReply?> ReplicateDurableOnePhaseBundleThroughSchedulerFenced(
         int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
         HLCTimestamp transactionId, long epoch, HLCTimestamp opId,
-        string fenceKey, long fenceGeneration, long expectedTerm, CancellationToken cancellationToken) =>
+        IReadOnlyList<Writes.RangeFence> fences, long expectedTerm, CancellationToken cancellationToken) =>
         durableReplication.ReplicateDurableOnePhaseBundleThroughSchedulerFenced(
-            partitionId, recordInitDelta, anchorPrepareDelta, decisionDelta, transactionId, epoch, opId, fenceKey, fenceGeneration, expectedTerm, cancellationToken);
+            partitionId, recordInitDelta, anchorPrepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, cancellationToken);
 
     /// <summary>Executes a durable operation on this node (the inbound leg of a routed durable call).</summary>
     internal Task<bool> DurableOperationLocal(int partitionId, int kind, string logType, byte[] payload, CancellationToken cancellationToken) =>
@@ -379,22 +379,22 @@ internal sealed partial class KeyValuesManager : IDisposable
     /// <summary>Runs a forwarded durable bundle on this node as one atomic scheduler submission.</summary>
     internal Task<Writes.DurableBundleWireReply?> DurableBundleLocal(
         int partitionId, IReadOnlyList<(string LogType, byte[] Payload)> entries,
-        bool terminal, int stage, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken) =>
-        durableReplication.DurableBundleLocal(partitionId, entries, terminal, stage, fenceKey, fenceGeneration, cancellationToken);
+        bool terminal, int stage, IReadOnlyList<Writes.RangeFence> fences, CancellationToken cancellationToken) =>
+        durableReplication.DurableBundleLocal(partitionId, entries, terminal, stage, fences, cancellationToken);
 
     /// <summary>Runs a forwarded one-phase bundle on this node as one atomic scheduler submission and answers
     /// the bundle signals plus the canonical outcome.</summary>
     internal Task<Writes.DurableOnePhaseWireReply?> DurableOnePhaseLocal(
         int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
         HLCTimestamp transactionId, long epoch, HLCTimestamp opId,
-        string? fenceKey, long fenceGeneration, long expectedTerm, CancellationToken cancellationToken) =>
-        durableReplication.DurableOnePhaseLocal(partitionId, recordInitDelta, anchorPrepareDelta, decisionDelta, transactionId, epoch, opId, fenceKey, fenceGeneration, expectedTerm, cancellationToken);
+        IReadOnlyList<Writes.RangeFence> fences, long expectedTerm, CancellationToken cancellationToken) =>
+        durableReplication.DurableOnePhaseLocal(partitionId, recordInitDelta, anchorPrepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, cancellationToken);
 
     /// <summary>Replicates a forwarded terminal decision on this node and answers the canonical outcome.</summary>
     internal Task<Writes.DurableDecisionWireReply?> DurableDecisionLocal(
         int partitionId, byte[] decisionDelta, HLCTimestamp transactionId, long epoch,
-        string? fenceKey, long fenceGeneration, CancellationToken cancellationToken) =>
-        durableReplication.DurableDecisionLocal(partitionId, decisionDelta, transactionId, epoch, fenceKey, fenceGeneration, cancellationToken);
+        IReadOnlyList<Writes.RangeFence> fences, CancellationToken cancellationToken) =>
+        durableReplication.DurableDecisionLocal(partitionId, decisionDelta, transactionId, epoch, fences, cancellationToken);
 
     /// <summary>Looks a transaction record up on this node.</summary>
     internal Task<byte[]?> LookupTransactionRecordLocal(int partitionId, HLCTimestamp transactionId, long epoch, string anchorKey, CancellationToken cancellationToken) =>

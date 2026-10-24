@@ -265,7 +265,7 @@ public sealed class TestDurableTransportAttribution : BaseCluster
             (byte[] init, byte[] prepare, byte[] decision) = RawOnePhase(txId, key + "/1p", now, opId, now, deadline, 0);
 
             DurableOnePhaseWireReply? committed = await leader.DurableOnePhaseLocal(
-                partition, init, prepare, decision, txId, 1, opId, null, 0, 0, ct);
+                partition, init, prepare, decision, txId, 1, opId, [], 0, ct);
             Assert.NotNull(committed);
             Assert.True(committed!.Value.BatchCommitted);
             Assert.True(committed.Value.PrepareAcknowledged);
@@ -274,7 +274,7 @@ public sealed class TestDurableTransportAttribution : BaseCluster
 
             // ── Duplicate delivery: idempotent, the same canonical answer ──
             DurableOnePhaseWireReply? duplicate = await leader.DurableOnePhaseLocal(
-                partition, init, prepare, decision, txId, 1, opId, null, 0, 0, ct);
+                partition, init, prepare, decision, txId, 1, opId, [], 0, ct);
             Assert.NotNull(duplicate);
             Assert.True(duplicate!.Value.DecisionKnown);
             Assert.Equal((int)TransactionDecision.Commit, duplicate.Value.Decision);
@@ -282,7 +282,7 @@ public sealed class TestDurableTransportAttribution : BaseCluster
             // ── Key held by a live foreign intent: the gate withholds the commit and names the verdict ──
             string heldKey = key + "/1p-held";
             HLCTimestamp holder = new(now.N, now.L - 3_000, now.C);
-            DurableBundleWireReply? held = await leader.DurableBundleLocal(partition, RawBundle(holder, heldKey, now, 0), terminal: false, stage: 0, null, 0, ct);
+            DurableBundleWireReply? held = await leader.DurableBundleLocal(partition, RawBundle(holder, heldKey, now, 0), terminal: false, stage: 0, [], ct);
             Assert.True(held!.Value.PrepareAcknowledged);
 
             HLCTimestamp loser = new(now.N, now.L - 2_000, now.C);
@@ -290,7 +290,7 @@ public sealed class TestDurableTransportAttribution : BaseCluster
             (byte[] loserInit, byte[] loserPrepare, byte[] loserDecision) = RawOnePhase(loser, heldKey, now, loserOp, now, deadline, 0);
 
             DurableOnePhaseWireReply? refused = await leader.DurableOnePhaseLocal(
-                partition, loserInit, loserPrepare, loserDecision, loser, 1, loserOp, null, 0, 0, ct);
+                partition, loserInit, loserPrepare, loserDecision, loser, 1, loserOp, [], 0, ct);
             Assert.NotNull(refused);
             Assert.True(refused!.Value.BatchCommitted);
             Assert.False(refused.Value.PrepareAcknowledged);
@@ -307,7 +307,7 @@ public sealed class TestDurableTransportAttribution : BaseCluster
             (byte[] lateInit, byte[] latePrepare, byte[] lateDecision) = RawOnePhase(late, key + "/1p-late", now, lateOp, pastDeadline, shortDeadline, 0);
 
             DurableOnePhaseWireReply? withheld = await leader.DurableOnePhaseLocal(
-                partition, lateInit, latePrepare, lateDecision, late, 1, lateOp, null, 0, 0, ct);
+                partition, lateInit, latePrepare, lateDecision, late, 1, lateOp, [], 0, ct);
             Assert.NotNull(withheld);
             Assert.True(withheld!.Value.BatchCommitted);
             Assert.True(withheld.Value.PrepareAcknowledged);
@@ -350,12 +350,12 @@ public sealed class TestDurableTransportAttribution : BaseCluster
             HLCTimestamp holder = new(now.N, now.L - 3_000, now.C);
             HLCTimestamp loser = new(now.N, now.L - 2_000, now.C);
 
-            DurableBundleWireReply? first = await leader.DurableBundleLocal(partition, RawBundle(holder, heldKey, now, 0), terminal: false, stage: 0, null, 0, ct);
+            DurableBundleWireReply? first = await leader.DurableBundleLocal(partition, RawBundle(holder, heldKey, now, 0), terminal: false, stage: 0, [], ct);
             Assert.NotNull(first);
             Assert.True(first!.Value.BatchCommitted);
             Assert.True(first.Value.PrepareAcknowledged);
 
-            DurableBundleWireReply? second = await leader.DurableBundleLocal(partition, RawBundle(loser, heldKey, now, 0), terminal: false, stage: 0, null, 0, ct);
+            DurableBundleWireReply? second = await leader.DurableBundleLocal(partition, RawBundle(loser, heldKey, now, 0), terminal: false, stage: 0, [], ct);
             Assert.NotNull(second);
             Assert.True(second!.Value.BatchCommitted);          // the record is durable...
             Assert.False(second.Value.PrepareAcknowledged);     // ...the prepare is not
@@ -371,7 +371,7 @@ public sealed class TestDurableTransportAttribution : BaseCluster
             }
 
             HLCTimestamp stale = new(now.N, now.L - 1_000, now.C);
-            DurableBundleWireReply? staleReply = await leader.DurableBundleLocal(partition, RawBundle(stale, key, now, 0), terminal: false, stage: 0, null, 0, ct);
+            DurableBundleWireReply? staleReply = await leader.DurableBundleLocal(partition, RawBundle(stale, key, now, 0), terminal: false, stage: 0, [], ct);
             Assert.NotNull(staleReply);
             Assert.True(staleReply!.Value.BatchCommitted);
             Assert.False(staleReply.Value.PrepareAcknowledged);
@@ -380,7 +380,7 @@ public sealed class TestDurableTransportAttribution : BaseCluster
             // ── Decision: the canonical winner ──
             HLCTimestamp deadline = new(now.N, now.L + 60_000, now.C);
             byte[] commit = TransactionRecordStore.SerializeDelta([new CommitTransactionCommand(holder, 1, 0, now, now)]);
-            DurableDecisionWireReply? decided = await leader.DurableDecisionLocal(partition, commit, holder, 1, null, 0, ct);
+            DurableDecisionWireReply? decided = await leader.DurableDecisionLocal(partition, commit, holder, 1, [], ct);
             Assert.NotNull(decided);
             Assert.True(decided!.Value.Replicated);
             Assert.True(decided.Value.Known);
@@ -389,12 +389,12 @@ public sealed class TestDurableTransportAttribution : BaseCluster
             // A recovery abort that lands first wins; the commit that follows is answered with that abort.
             byte[] abort = TransactionRecordStore.SerializeDelta([new AbortTransactionCommand(
                 loser, 1, 0, TransactionAbortClass.PresumedAbort, now, now, heldKey, now, deadline, now)]);
-            DurableDecisionWireReply? aborted = await leader.DurableDecisionLocal(partition, abort, loser, 1, null, 0, ct);
+            DurableDecisionWireReply? aborted = await leader.DurableDecisionLocal(partition, abort, loser, 1, [], ct);
             Assert.NotNull(aborted);
             Assert.Equal((int)TransactionDecision.Abort, aborted!.Value.Decision);
 
             byte[] lateCommit = TransactionRecordStore.SerializeDelta([new CommitTransactionCommand(loser, 1, 0, now, now)]);
-            DurableDecisionWireReply? raced = await leader.DurableDecisionLocal(partition, lateCommit, loser, 1, null, 0, ct);
+            DurableDecisionWireReply? raced = await leader.DurableDecisionLocal(partition, lateCommit, loser, 1, [], ct);
             Assert.NotNull(raced);
             Assert.True(raced!.Value.Replicated);
             Assert.True(raced.Value.Known);

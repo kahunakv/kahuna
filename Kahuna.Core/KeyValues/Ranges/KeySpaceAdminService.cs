@@ -76,15 +76,19 @@ internal sealed class KeySpaceAdminService
     private const long InitialSeedGeneration = 1;
 
     /// <summary>
-    /// Flips <paramref name="keySpace"/> to key-range routing on this node and, on the meta-partition
-    /// leader, auto-seeds its initial whole-space descriptor (<c>[-inf, +inf)</c>) if none exists yet.
+    /// Seeds <paramref name="keySpace"/>'s initial whole-space descriptor (<c>[-inf, +inf)</c>) on the
+    /// meta-partition leader if none exists yet, and then flips the space to key-range routing on this node.
     /// <para>
     /// <see cref="KeySpaceRegistry.RegisterKeyRange"/> alone only changes the routing <i>mode</i>; until
-    /// a covering descriptor exists, routing a key throws "no range descriptor covers key". This makes
-    /// registration self-sufficient: callers no longer reach into the internal <see cref="RangeMapStore"/>
-    /// to bootstrap the first range. The seed is the trivial whole-space range — no key-distribution or
-    /// PK-type knowledge is needed; real boundaries are discovered later by the auto-splitter from live
-    /// data.
+    /// a covering descriptor exists, routing a key is refused retryably ("no range descriptor covers key").
+    /// The seed therefore comes first: a writer that routes a key of the space while the seed is in flight
+    /// still routes it by hash, and the mode flips only once the descriptor is visible on this node — the
+    /// range-map apply registers the space the moment the descriptor lands (so does the explicit flip
+    /// below), and no writer ever meets a key-range space without a descriptor on the registration path.
+    /// This makes registration self-sufficient: callers no longer reach into the internal
+    /// <see cref="RangeMapStore"/> to bootstrap the first range. The seed is the trivial whole-space range
+    /// — no key-distribution or PK-type knowledge is needed; real boundaries are discovered later by the
+    /// auto-splitter from live data.
     /// </para>
     /// <para>
     /// The mode flip is node-local (every node must call this). The seed is a single replicated meta-log
@@ -106,14 +110,22 @@ internal sealed class KeySpaceAdminService
         if (raft.Configuration.InitialPartitions < RangeMapStore.FirstDataPartitionId)
             return false;
 
-        keySpaceRegistry.RegisterKeyRange(keySpace);
+        // Validate the space before anything replicates: the registry rejects an empty or schema-log space, and
+        // a seed must never be committed for a space the registry would then refuse to route.
+        KeySpaceRegistry.EnsureRegistrable(keySpace);
+
         bool seeded = await EnsureKeyRangeSeededAsync(keySpace, cancellationToken).ConfigureAwait(false);
-        // Re-affirm after the descriptor is committed and locally visible. A ReconcileTo triggered
-        // by an unrelated replication event between the pre-flip above and the seed commit can prune
-        // this space (descriptor not yet in the map on this node). Re-asserting here closes that
-        // window: the descriptor is now visible, so any subsequent ReconcileTo will find it in the
-        // live set and keep the mode.
-        keySpaceRegistry.RegisterKeyRange(keySpace);
+
+        // Flip the mode only now, with the descriptor committed and locally visible (the apply of the seed has
+        // already registered the space through the range-map sync; this re-assertion covers a node whose apply
+        // raced a ReconcileTo from an unrelated replication event). Flipping before the seed opened a window in
+        // which the space routed by key range with no descriptor to route through, and every writer in that
+        // window was refused. If the forwarded seed has not replicated here within its wait, the space stays
+        // hash-routed on this node until the descriptor arrives and the apply registers it — the writer-visible
+        // routing is always consistent with the local map.
+        if (rangeMapStore.Current.FindAll(keySpace).Count > 0)
+            keySpaceRegistry.RegisterKeyRange(keySpace);
+
         return seeded;
     }
 

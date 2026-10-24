@@ -193,9 +193,9 @@ public sealed class TestDurableStateTransfer : BaseCluster
     }
 
     /// <summary>
-    /// A durable submission re-fences at dispatch only when it carries a routing key: a keyed submission whose
+    /// A durable submission re-fences at dispatch only when it carries routing keys: a fenced submission whose
     /// range descriptor moved since freeze is released retryably (so it is not appended to the retired partition),
-    /// a keyed submission that did not move dispatches, and an unkeyed submission (post-decision settle, recovery,
+    /// a fenced submission that did not move dispatches, and an unfenced submission (post-decision settle, recovery,
     /// state-transfer import) never fences.
     /// </summary>
     [Fact]
@@ -205,13 +205,53 @@ public sealed class TestDurableStateTransfer : BaseCluster
         fence.StaleKeys.Add("k:moved");
         RaftProposalEntry[] entries = [new(ReplicationTypes.TransactionRecord, [1], AutoCommit: true, ExpectedGeneration: 0)];
 
-        DurableProposalSubmission unfenced = new(1, entries, new TaskCompletionSource<bool>(), WriteAdmissionClass.Ordinary, WriteSubmissionStage.Other, applyOnCommit: null, fenceKey: null);
+        DurableProposalSubmission unfenced = new(1, entries, new TaskCompletionSource<bool>(), WriteAdmissionClass.Ordinary, WriteSubmissionStage.Other, applyOnCommit: null, fences: null);
         Assert.False(unfenced.IsStale(fence));
 
-        DurableProposalSubmission moved = new(1, entries, new TaskCompletionSource<bool>(), WriteAdmissionClass.Ordinary, WriteSubmissionStage.Other, applyOnCommit: null, fenceKey: "k:moved", fenceGeneration: 3);
+        DurableProposalSubmission moved = new(1, entries, new TaskCompletionSource<bool>(), WriteAdmissionClass.Ordinary, WriteSubmissionStage.Other, applyOnCommit: null, fences: [new RangeFence("k:moved", 3)]);
         Assert.True(moved.IsStale(fence));
 
-        DurableProposalSubmission stable = new(1, entries, new TaskCompletionSource<bool>(), WriteAdmissionClass.Ordinary, WriteSubmissionStage.Other, applyOnCommit: null, fenceKey: "k:stable", fenceGeneration: 3);
+        DurableProposalSubmission stable = new(1, entries, new TaskCompletionSource<bool>(), WriteAdmissionClass.Ordinary, WriteSubmissionStage.Other, applyOnCommit: null, fences: [new RangeFence("k:stable", 3)]);
         Assert.False(stable.IsStale(fence));
+    }
+
+    /// <summary>
+    /// A submission whose partition group spans several key spaces carries one fence per space, each key at its
+    /// own generation, and is stale as soon as any of them moved: the second space's move is seen even though
+    /// the first space is unchanged, and a group whose spaces all stand still dispatches. Every fence is probed
+    /// with the key it names, so the fence never pairs one space's key with another space's generation.
+    /// </summary>
+    [Fact]
+    public void DurableSubmission_WithSeveralFences_IsStaleWhenAnyDescriptorMoved()
+    {
+        RecordingFence fence = new();
+        fence.StaleKeys.Add("idx/moved");
+        RaftProposalEntry[] entries = [new(ReplicationTypes.PreparedIntent, [1], AutoCommit: true, ExpectedGeneration: 0)];
+
+        RangeFence[] mixed = [new RangeFence("rows/k1", 1), new RangeFence("meta/k1", 0), new RangeFence("idx/moved", 2)];
+        DurableProposalSubmission secondSpaceMoved = new(7, entries, new TaskCompletionSource<bool>(), WriteAdmissionClass.Ordinary, WriteSubmissionStage.Prepare, applyOnCommit: null, fences: mixed);
+        Assert.True(secondSpaceMoved.IsStale(fence));
+
+        // Each probe carried the key's own generation and the submission's partition.
+        Assert.Contains(("rows/k1", 1L, 7), fence.Probes);
+        Assert.Contains(("meta/k1", 0L, 7), fence.Probes);
+        Assert.Contains(("idx/moved", 2L, 7), fence.Probes);
+
+        RangeFence[] still = [new RangeFence("rows/k1", 1), new RangeFence("meta/k1", 0)];
+        DurableProposalSubmission unchanged = new(7, entries, new TaskCompletionSource<bool>(), WriteAdmissionClass.Ordinary, WriteSubmissionStage.Prepare, applyOnCommit: null, fences: still);
+        Assert.False(unchanged.IsStale(fence));
+    }
+
+    private sealed class RecordingFence : IWriteRangeFence
+    {
+        public readonly HashSet<string> StaleKeys = [];
+
+        public readonly List<(string Key, long Generation, int PartitionId)> Probes = [];
+
+        public bool IsStale(string key, long admittedGeneration, int admittedPartitionId)
+        {
+            Probes.Add((key, admittedGeneration, admittedPartitionId));
+            return StaleKeys.Contains(key);
+        }
     }
 }

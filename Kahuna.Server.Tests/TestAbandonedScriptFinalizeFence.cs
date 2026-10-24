@@ -104,7 +104,9 @@ public sealed class TestAbandonedScriptFinalizeFence
         await node.WaitForLeaderForKeyAsync(heldKey, ct);
 
         KahunaManager kahuna = (KahunaManager)node.Kahuna;
-        (int partition, long generation) = kahuna.KeyValues.LocateDurablePartition(heldKey);
+        DurableKeyRoute heldRoute = kahuna.KeyValues.LocateDurablePartition(heldKey);
+        int partition = heldRoute.PartitionId;
+        long generation = heldRoute.Generation;
 
         HLCTimestamp now = node.Raft.HybridLogicalClock.TrySendOrLocalEvent(node.Raft.GetLocalNodeId());
         HLCTimestamp deadline = new(now.N, now.L + 60_000, now.C);
@@ -115,7 +117,7 @@ public sealed class TestAbandonedScriptFinalizeFence
         (byte[] holderInit, byte[] holderPrepare, byte[] holderDecision, _) = RawOnePhase(holder, [heldKey], now, holderOp, deadline);
 
         DurableOnePhaseWireReply? committed = await node.Kahuna.DurableOnePhaseLocal(
-            partition, holderInit, holderPrepare, holderDecision, holder, 1, holderOp, null, 0, 0, ct);
+            partition, holderInit, holderPrepare, holderDecision, holder, 1, holderOp, [], 0, ct);
         Assert.NotNull(committed);
         Assert.True(committed!.Value.PrepareAcknowledged);
         Assert.Equal((int)TransactionDecision.Commit, committed.Value.Decision);
@@ -128,7 +130,7 @@ public sealed class TestAbandonedScriptFinalizeFence
         (byte[] init, byte[] prepare, byte[] decision, List<PreparedIntent> intents) = RawOnePhase(abandoned, [heldKey, freshKey], now, abandonedOp, deadline);
 
         DurableOnePhaseWireReply? refused = await node.Kahuna.DurableOnePhaseLocal(
-            partition, init, prepare, decision, abandoned, 1, abandonedOp, null, 0, 0, ct);
+            partition, init, prepare, decision, abandoned, 1, abandonedOp, [], 0, ct);
         Assert.NotNull(refused);
         Assert.True(refused!.Value.BatchCommitted);
         Assert.False(refused.Value.PrepareAcknowledged);
@@ -150,7 +152,7 @@ public sealed class TestAbandonedScriptFinalizeFence
         DurableFinalizeInput input = new(
             abandoned, 1, heldKey, heldKey, partition, generation, now, deadline, 0,
             [new TransactionParticipantRef(heldKey, KeyValueDurability.Persistent), new TransactionParticipantRef(freshKey, KeyValueDurability.Persistent)],
-            [new DurablePartitionPrepare(partition, generation, intents)],
+            [new DurablePartitionPrepare(partition, [new RangeFence(heldKey, generation)], intents)],
             now);
 
         TransactionContext context = new()

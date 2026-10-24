@@ -828,8 +828,7 @@ internal sealed class RangeStateTransferService
             Writes.WriteSubmissionStage.Other,
             // Key/value copies only: the awaiter has no durable record/intent entry to wait for and resolves at once.
             (batchPartitionId, batchEntries, entryLogIndices) => durableReplication.AwaitDurableEntriesAppliedAsync(batchPartitionId, batchEntries, entryLogIndices, cancellationToken),
-            fenceKey: null,
-            fenceGeneration: 0);
+            fences: null);
 
         if (!writeAggregator.TryEnqueue(submission))
             return false;

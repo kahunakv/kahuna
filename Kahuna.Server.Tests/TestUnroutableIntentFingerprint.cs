@@ -119,7 +119,8 @@ public sealed class TestUnroutableIntentFingerprint : BaseCluster
         }
     }
 
-    /// <summary>The throwing resolution keeps naming the key and its space: request paths report it.</summary>
+    /// <summary>The throwing resolution keeps naming the key and its space: request paths report it. The refusal
+    /// is typed and carries MustRetry, so every surface answers it as retryable instead of a server error.</summary>
     [Fact]
     public async Task Locate_OverAKeyNoDescriptorCovers_StillRefusesByKeyAndSpace()
     {
@@ -130,8 +131,12 @@ public sealed class TestUnroutableIntentFingerprint : BaseCluster
         {
             manager.RegisterKeyRange("ur:t");
 
-            KahunaServerException refused = Assert.Throws<KahunaServerException>(() => manager.LocateRange("ur:t/k0001"));
+            RangeDescriptorMissingException refused = Assert.Throws<RangeDescriptorMissingException>(() => manager.LocateRange("ur:t/k0001"));
             Assert.Equal("No range descriptor covers key 'ur:t/k0001' in key-range space 'ur:t'.", refused.Message);
+            Assert.Equal("ur:t/k0001", refused.Key);
+            Assert.Equal("ur:t", refused.KeySpace);
+            Assert.Equal(KeyValueResponseType.MustRetry, refused.ResponseType);
+            Assert.True(Kahuna.Server.Communication.Internode.RetryableFailureClassifier.IsRetryable(refused));
 
             // A hash-routed key is unaffected by the registration.
             Assert.InRange(manager.LocateRange("plain/k0001").PartitionId, 1, Partitions);

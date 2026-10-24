@@ -271,9 +271,16 @@ Three consequences to keep in mind:
 * **Renaming moves data.** Adding or changing a group on a key space that already holds data is a
   placement change; the old keys stay where they were hashed. Introduce a group when a key space is
   created, not after.
-* **Key-range spaces seed by group too.** `RegisterKeyRange` seeds a new space's whole-space
+* **Key-range spaces seed by group too.** `RegisterKeyRangeAsync` seeds a new space's whole-space
   descriptor on the partition of its group (`KeySpaceAdminService.SeedPartitionFor`), so ranged
-  rows and ranged index entries start together. Later splits move ranges independently.
+  rows and ranged index entries start together. Later splits move ranges independently. The seed is
+  committed **before** the space flips to key-range routing on the registering node (the range-map
+  apply flips it on every node as the descriptor lands), so a writer racing the registration is
+  routed by hash until the descriptor is visible and never meets a key-range space with no
+  descriptor. Should that state ever be observed (a space registered with the mode-only
+  `RegisterKeyRange`, or a removal whose registry prune is still pending), the lookup refuses with
+  `RangeDescriptorMissingException`, a `KahunaServerException` carrying `MustRetry` that every
+  public surface answers as a retryable refusal.
 * **Clients see the rule.** The routing metadata (`GET /v1/cluster/routing`) publishes the hash
   identifier `kahuna.placement-group-jump-xxh32-v1` together with `prefixSeparator` (`/`) and
   `groupSeparator` (`|`); a client that does not implement exactly that stays on learned routes

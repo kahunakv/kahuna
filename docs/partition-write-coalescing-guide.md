@@ -132,7 +132,9 @@ All types live in `Kahuna.Core/KeyValues/Writes/`.
   prepared-intent prepare, or a resolution). Its completion resolves the finalizer's task once the ordered
   consumer apply of its entries has run, with that apply's result; a rejected prepare is reported as a
   non-commit so the finalizer aborts. It re-fences the pre-decision record/prepare against the range map at
-  dispatch, so a split/merge since freeze releases it retryably rather than appending to a retired partition.
+  dispatch — every fence it carries, one key per descriptor or hash space the group's keys were frozen
+  through, each at that key's own generation — so a split/merge of any of them since freeze releases it
+  retryably rather than appending to a retired partition.
 
   The completion **does not apply the delta**. The transaction-record and prepared-intent stores have one
   live writer: the per-partition consumer apply that Raft drives in log order, on the leader exactly as on
@@ -162,7 +164,8 @@ All types live in `Kahuna.Core/KeyValues/Writes/`.
   item's owning key actor.
 
 - **`IWriteRangeFence`** / `RangeMapWriteFence` — re-checks a key-range write's routed generation
-  against the live range map at flush time.
+  against the live range map at flush time. A direct write probes its one key; a durable submission probes
+  each `RangeFence` it carries and is stale as soon as any of them moved.
 
 - **`PartitionAdmissionRegistry`** — per-partition item/byte reservation accounting: the facade
   reserves on admission, the lane releases as items complete or are released.

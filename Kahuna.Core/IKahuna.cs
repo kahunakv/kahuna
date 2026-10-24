@@ -154,17 +154,18 @@ public interface IKahuna
     /// <summary>Runs a forwarded durable bundle on this node because it leads the partition: the ordered entries
     /// enter the local scheduler as one atomic submission under the origin's admission class, producing stage
     /// (a <see cref="Kahuna.Server.KeyValues.Writes.WriteSubmissionStage"/> value; 0 from an older sender that
-    /// does not carry it), and range fence. Redirects once to the actual leader when routed here on a stale
+    /// does not carry it), and range fences (one key per descriptor the origin froze the group through, each at
+    /// its own generation; empty = unfenced). Redirects once to the actual leader when routed here on a stale
     /// guess.</summary>
     public Task<DurableBundleWireReply?> DurableBundleLocal(
         int partitionId, IReadOnlyList<(string LogType, byte[] Payload)> entries,
-        bool terminal, int stage, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken);
+        bool terminal, int stage, IReadOnlyList<RangeFence> fences, CancellationToken cancellationToken);
 
     /// <summary>Replicates a forwarded terminal decision on this node because it leads the anchor partition and
     /// answers the canonical outcome read from its record store after the ordered apply.</summary>
     public Task<DurableDecisionWireReply?> DurableDecisionLocal(
         int partitionId, byte[] decisionDelta, HLCTimestamp transactionId, long epoch,
-        string? fenceKey, long fenceGeneration, CancellationToken cancellationToken);
+        IReadOnlyList<RangeFence> fences, CancellationToken cancellationToken);
 
     /// <summary>Runs a forwarded one-phase commit bundle ([record init, prepare, commit decision]) on this node
     /// because it leads the anchor partition: one atomic scheduler submission, answered with the bundle signals
@@ -172,7 +173,7 @@ public interface IKahuna
     public Task<DurableOnePhaseWireReply?> DurableOnePhaseLocal(
         int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
         HLCTimestamp transactionId, long epoch, HLCTimestamp opId,
-        string? fenceKey, long fenceGeneration, long expectedTerm, CancellationToken cancellationToken);
+        IReadOnlyList<RangeFence> fences, long expectedTerm, CancellationToken cancellationToken);
 
     /// <summary>Serves a canonical transaction-record lookup routed here because this node is the record's anchor
     /// partition leader. Returns the serialized record, or null when no record exists locally.</summary>
@@ -468,19 +469,22 @@ public interface IKahuna
     /// it is not replicated). Idempotent.
     /// <para>
     /// This only flips the routing <i>mode</i>; it does not create the initial range descriptor, so a
-    /// subsequent write throws until one exists. Prefer <see cref="RegisterKeyRangeAsync"/>, which also
-    /// auto-seeds the initial whole-space descriptor on the meta-partition leader.
+    /// subsequent write is refused retryably (MustRetry) until one exists. Prefer
+    /// <see cref="RegisterKeyRangeAsync"/>, which seeds the initial whole-space descriptor on the
+    /// meta-partition leader first and flips the mode once the descriptor is visible.
     /// </para>
     /// </summary>
     public void RegisterKeyRange(string keySpace);
 
     /// <summary>
-    /// Marks <paramref name="keySpace"/> as key-range routed on this node <b>and</b> auto-seeds its
-    /// initial whole-space descriptor (<c>[-inf, +inf)</c>) on the meta-partition leader if none exists.
+    /// Seeds <paramref name="keySpace"/>'s initial whole-space descriptor (<c>[-inf, +inf)</c>) on the
+    /// meta-partition leader if none exists, <b>and then</b> marks the space as key-range routed on this
+    /// node once the descriptor is visible here, so no writer meets a key-range space without a descriptor.
     /// Call on every node at startup; the mode flip is node-local while the seed is a single replicated
     /// meta write that only the meta-partition leader commits (a no-op elsewhere — the descriptor arrives
-    /// by replication). Idempotent. The seed needs no key-distribution or PK-type knowledge: it is the
-    /// trivial whole-space range, and the auto-splitter discovers real boundaries later from live data.
+    /// by replication, and its apply flips the mode too). Idempotent. The seed needs no key-distribution or
+    /// PK-type knowledge: it is the trivial whole-space range, and the auto-splitter discovers real boundaries
+    /// later from live data.
     /// </summary>
     /// <returns><c>true</c> iff this call committed the seed descriptor.</returns>
     public Task<bool> RegisterKeyRangeAsync(string keySpace, CancellationToken cancellationToken = default);

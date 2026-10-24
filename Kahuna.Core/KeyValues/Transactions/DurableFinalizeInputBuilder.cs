@@ -1,5 +1,6 @@
 
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kahuna.Server.KeyValues.Writes;
 using Kahuna.Shared.KeyValue;
 using Kommander.Time;
 
@@ -23,6 +24,13 @@ namespace Kahuna.Server.KeyValues.Transactions;
 /// is the transaction's own pre-write read observation when one exists — exact, and enforced by the commit-time
 /// staged-base compare-and-set — or the unknown-base sentinel for a blind write; it is never consulted for the
 /// committed value (the materializer replays only value/revision/expiry/NoRevision).</para>
+///
+/// <para>Dispatch fences: each partition group carries one <see cref="RangeFence"/> per range descriptor its keys
+/// resolved through (and one per hash-routed key space, at generation zero), each pairing a key with the
+/// generation <b>that same key</b> resolved to. A partition whose keys span several key spaces — a key-range row
+/// space beside a hash-routed meta space, or two key-range spaces at different generations — therefore fences
+/// every space it touches, and never a key of one space against the generation of another: that mismatch read as
+/// a moved range on every dispatch and refused the commit on every round.</para>
 /// </summary>
 internal static class DurableFinalizeInputBuilder
 {
@@ -35,7 +43,7 @@ internal static class DurableFinalizeInputBuilder
         HLCTimestamp decisionDeadline,
         IReadOnlyCollection<(string Key, KeyValueDurability Durability)> modifiedKeys,
         IReadOnlyDictionary<string, StagedValue> stagedByKey,
-        Func<string, (int PartitionId, long Generation)> locate,
+        Func<string, DurableKeyRoute> locate,
         out DurableFinalizeInput? input,
         IReadOnlyDictionary<(string Key, KeyValueDurability Durability), KeyValueTransactionReadKey>? writtenBases = null,
         string? origin = null)
@@ -58,7 +66,12 @@ internal static class DurableFinalizeInputBuilder
         long manifestHash = TransactionManifest.ComputeHash(transactionId, epoch, anchorKey, commitTimestamp, manifest);
 
         Dictionary<int, List<PreparedIntent>> byPartition = [];
-        Dictionary<int, long> generationByPartition = [];
+        Dictionary<int, List<RangeFence>> fencesByPartition = [];
+
+        // One fence per distinct descriptor per partition. A descriptor is identified by its key space and start
+        // bound; a hash-routed key space has no descriptor and dedupes on (space, null), so the whole space is
+        // fenced once at generation zero.
+        HashSet<FenceIdentity> fenced = [];
 
         foreach ((string key, KeyValueDurability _) in modifiedKeys)
         {
@@ -94,11 +107,13 @@ internal static class DurableFinalizeInputBuilder
                 baseState = observedBase.Exists ? KeyValueState.Set : KeyValueState.Undefined;
             }
 
+            string? bucket = GetBucket(key);
+
             PreparedIntent intent = new(
                 transactionId, epoch, key, manifestHash, anchorKey, commitTimestamp,
                 State: staged.State,
                 Value: staged.Value,
-                Bucket: GetBucket(key),
+                Bucket: bucket,
                 Revision: staged.Revision,
                 Expires: expires,
                 NoRevision: staged.NoRevision,
@@ -109,34 +124,58 @@ internal static class DurableFinalizeInputBuilder
                 Origin: origin
             );
 
-            (int partitionId, long generation) = locate(key);
+            DurableKeyRoute route = locate(key);
 
-            if (!byPartition.TryGetValue(partitionId, out List<PreparedIntent>? list))
-                byPartition[partitionId] = list = [];
+            if (!byPartition.TryGetValue(route.PartitionId, out List<PreparedIntent>? list))
+            {
+                byPartition[route.PartitionId] = list = [];
+                fencesByPartition[route.PartitionId] = [];
+            }
 
             list.Add(intent);
-            generationByPartition[partitionId] = generation;
+
+            // The bucket is the key's space (the prefix before the last '/'); a key with no '/' is its own space.
+            AddFence(fencesByPartition[route.PartitionId], fenced, route.PartitionId, bucket ?? key, route, key);
         }
+
+        DurableKeyRoute anchorRoute = locate(anchorKey);
+
+        // The anchor partition's bundle carries the record initialization beside its prepare, so it is fenced
+        // against the anchor descriptor as well; a partition the anchor key routes to but no written key does
+        // is fenced by the record path alone.
+        if (fencesByPartition.TryGetValue(anchorRoute.PartitionId, out List<RangeFence>? anchorFences))
+            AddFence(anchorFences, fenced, anchorRoute.PartitionId, GetBucket(anchorKey) ?? anchorKey, anchorRoute, anchorKey);
 
         List<DurablePartitionPrepare> partitions = new(byPartition.Count);
         foreach ((int partitionId, List<PreparedIntent> intents) in byPartition)
-            partitions.Add(new DurablePartitionPrepare(partitionId, generationByPartition[partitionId], intents));
-
-        (int anchorPartitionId, long anchorGeneration) = locate(anchorKey);
+            partitions.Add(new DurablePartitionPrepare(partitionId, fencesByPartition[partitionId], intents));
 
         input = new DurableFinalizeInput(
-            transactionId, epoch, coordinatorKey, anchorKey, anchorPartitionId, anchorGeneration,
+            transactionId, epoch, coordinatorKey, anchorKey, anchorRoute.PartitionId, anchorRoute.Generation,
             commitTimestamp, decisionDeadline, manifestHash, manifest, partitions, CreatedAt: transactionId);
 
         return true;
     }
 
+    /// <summary>Adds <paramref name="key"/> at its own resolved generation as a fence of its partition, once per
+    /// descriptor (or hash space) the partition's keys touch.</summary>
+    private static void AddFence(List<RangeFence> fences, HashSet<FenceIdentity> fenced, int partitionId, string keySpace, DurableKeyRoute route, string key)
+    {
+        if (fenced.Add(new FenceIdentity(partitionId, keySpace, route.RangeStartKey)))
+            fences.Add(new RangeFence(key, route.Generation));
+    }
+
     /// <summary>The bucket (parent prefix) of a key, matching the derivation the actor apply path uses when it
     /// recomputes a fresh entry's bucket. Keeping the prepared intent's bucket consistent with that derivation
-    /// keeps the intent faithful for bucket-scoped visibility and stable across a dedup-digest recompute.</summary>
+    /// keeps the intent faithful for bucket-scoped visibility and stable across a dedup-digest recompute. The
+    /// bucket is also the key's routing space, so it names the descriptor a fence stands for.</summary>
     private static string? GetBucket(string key)
     {
         int index = key.LastIndexOf('/');
         return index == -1 ? null : key[..index];
     }
+
+    /// <summary>What one dispatch fence stands for: a range descriptor (its key space and start bound) on a
+    /// partition, or a hash-routed key space (null start bound) on it. Ordinal on every string.</summary>
+    private readonly record struct FenceIdentity(int PartitionId, string KeySpace, string? RangeStartKey);
 }

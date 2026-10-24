@@ -17,9 +17,11 @@ public static class RetryableFailureClassifier
     /// Retryable = any Raft resolution failure (missing partition, undecided leader, node not
     /// initialized), an inter-node transport failure — the remote unreachable or no longer
     /// answering, including a dead pooled HTTP/2 connection that reports StatusCode.Internal with a
-    /// transport-layer cause — or a forward chain that hit its loop-safety ceiling, which means the
-    /// nodes it visited hold disagreeing views and a retry against a settled one is the resolution.
-    /// Cancellation is deliberately not mapped — the client gave up, there is nobody to answer.
+    /// transport-layer cause — a forward chain that hit its loop-safety ceiling, which means the
+    /// nodes it visited hold disagreeing views and a retry against a settled one is the resolution,
+    /// or a server failure that names <see cref="Kahuna.Shared.KeyValue.KeyValueResponseType.MustRetry"/>
+    /// as its response type (a key routed into a key-range space that has no descriptor on this node
+    /// yet). Cancellation is deliberately not mapped — the client gave up, there is nobody to answer.
     ///
     /// <para>Wrappers are unwrapped before classifying: a retryable failure that arrives inside an
     /// <see cref="AggregateException"/> or as another exception's <c>InnerException</c> is still
@@ -33,6 +35,9 @@ public static class RetryableFailureClassifier
                 return true;
 
             case ForwardLoopException:
+                return true;
+
+            case KahunaServerException { ResponseType: Kahuna.Shared.KeyValue.KeyValueResponseType.MustRetry }:
                 return true;
 
             case RpcException rpc:

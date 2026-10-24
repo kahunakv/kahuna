@@ -116,19 +116,20 @@ public interface IInterNodeCommunication
     /// <summary>Forwards an ordered group of durable-2PC deltas to the partition leader as ONE atomic scheduler
     /// submission (an anchor's record init + prepare, or a single prepare), carrying the origin's admission class,
     /// producing stage (a <see cref="Kahuna.Server.KeyValues.Writes.WriteSubmissionStage"/> value, so the leader's
-    /// queue-delay attribution names the origin's stage instead of inferring it), and range fence. Answers null
+    /// queue-delay attribution names the origin's stage instead of inferring it), and range fences (one key per
+    /// descriptor the origin froze the group through, each at its own generation; empty = unfenced). Answers null
     /// when the receiver does not implement the operation (an older node), so the caller can fall back to
     /// per-entry forwards.</summary>
     public Task<DurableBundleWireReply?> DurableBundle(
         string node, int partitionId, IReadOnlyList<(string LogType, byte[] Payload)> entries,
-        bool terminal, int stage, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken);
+        bool terminal, int stage, IReadOnlyList<RangeFence> fences, CancellationToken cancellationToken);
 
     /// <summary>Replicates a transaction's terminal decision on its anchor partition's leader and answers with
     /// the canonical outcome read after the ordered apply. Answers null when the receiver does not implement the
     /// operation, so the caller can fall back to a plain forward plus a record lookup.</summary>
     public Task<DurableDecisionWireReply?> DurableDecision(
         string node, int partitionId, byte[] decisionDelta, HLCTimestamp transactionId, long epoch,
-        string? fenceKey, long fenceGeneration, CancellationToken cancellationToken);
+        IReadOnlyList<RangeFence> fences, CancellationToken cancellationToken);
 
     /// <summary>Forwards a one-phase commit bundle ([record init, prepare, commit decision] of one transaction)
     /// to the anchor partition's leader, which submits it as ONE atomic scheduler submission and answers with the
@@ -140,7 +141,7 @@ public interface IInterNodeCommunication
     public Task<DurableOnePhaseWireReply?> DurableOnePhase(
         string node, int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
         HLCTimestamp transactionId, long epoch, HLCTimestamp opId,
-        string? fenceKey, long fenceGeneration, long expectedTerm, CancellationToken cancellationToken);
+        IReadOnlyList<RangeFence> fences, long expectedTerm, CancellationToken cancellationToken);
 
     /// <summary>Routes a linearizable canonical transaction-record lookup to the partition leader that owns the
     /// record's anchor key, returning the serialized record (null when absent). Used by the consult sites so a

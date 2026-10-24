@@ -18,19 +18,19 @@ public sealed partial class KahunaManager
 
     public Task<DurableBundleWireReply?> DurableBundleLocal(
         int partitionId, IReadOnlyList<(string LogType, byte[] Payload)> entries,
-        bool terminal, int stage, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken) =>
-        keyValues.DurableBundleLocal(partitionId, entries, terminal, stage, fenceKey, fenceGeneration, cancellationToken);
+        bool terminal, int stage, IReadOnlyList<RangeFence> fences, CancellationToken cancellationToken) =>
+        keyValues.DurableBundleLocal(partitionId, entries, terminal, stage, fences, cancellationToken);
 
     public Task<DurableDecisionWireReply?> DurableDecisionLocal(
         int partitionId, byte[] decisionDelta, HLCTimestamp transactionId, long epoch,
-        string? fenceKey, long fenceGeneration, CancellationToken cancellationToken) =>
-        keyValues.DurableDecisionLocal(partitionId, decisionDelta, transactionId, epoch, fenceKey, fenceGeneration, cancellationToken);
+        IReadOnlyList<RangeFence> fences, CancellationToken cancellationToken) =>
+        keyValues.DurableDecisionLocal(partitionId, decisionDelta, transactionId, epoch, fences, cancellationToken);
 
     public Task<DurableOnePhaseWireReply?> DurableOnePhaseLocal(
         int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
         HLCTimestamp transactionId, long epoch, HLCTimestamp opId,
-        string? fenceKey, long fenceGeneration, long expectedTerm, CancellationToken cancellationToken) =>
-        keyValues.DurableOnePhaseLocal(partitionId, recordInitDelta, anchorPrepareDelta, decisionDelta, transactionId, epoch, opId, fenceKey, fenceGeneration, expectedTerm, cancellationToken);
+        IReadOnlyList<RangeFence> fences, long expectedTerm, CancellationToken cancellationToken) =>
+        keyValues.DurableOnePhaseLocal(partitionId, recordInitDelta, anchorPrepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, cancellationToken);
 
     public Task<byte[]?> LookupTransactionRecordLocal(int partitionId, HLCTimestamp transactionId, long epoch, string anchorKey, CancellationToken cancellationToken) =>
         keyValues.LookupTransactionRecordLocal(partitionId, transactionId, epoch, anchorKey, cancellationToken);

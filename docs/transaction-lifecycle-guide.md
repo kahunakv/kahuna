@@ -111,7 +111,12 @@ For each operation:
 
 The range descriptor **generation** resolved here is carried forward and re-checked at dispatch (the
 *fence*), so a split or merge between resolution and dispatch releases the operation retryably instead of
-appending to a retired partition.
+appending to a retired partition. A durable transaction's partition group carries one fence per key space
+it touches — one key per range descriptor, each at the generation **that key** resolved to, plus one per
+hash-routed space at generation zero — so a group that mixes a key-range row space with a hash-routed
+schema-log space, or two key-range spaces at different generations, is fenced against every space and
+never pairs one key with another key's generation (that pairing read as a moved range on every dispatch
+and refused the commit on every round).
 
 ---
 
@@ -389,8 +394,9 @@ A submission carries:
 - an **admission class** — `Ordinary` (record init, prepare) or `Terminal` (decision, materialize, settle).
   Terminal work draws on reserved capacity so an ordinary-write burst can never starve the step that
   *finishes* an already-prepared transaction;
-- an optional **fence** (key + generation) re-checked at dispatch, so a split/merge since freeze releases
-  the submission retryably;
+- an optional list of **fences** (one key + generation per range descriptor or hash space the group's keys
+  resolved through) re-checked at dispatch, so a split/merge of any of them since freeze releases the
+  submission retryably; the anchor record's own fence rides with the anchor group's;
 - an **on-commit callback**, which waits for the ordered Raft consumer apply of each record/intent entry
   (never applying the delta itself — the consumer apply is the stores' single live writer, on the leader as
   on a follower) and reports whether every prepare took ownership of its key.

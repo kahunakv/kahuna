@@ -56,7 +56,14 @@ internal sealed class DurableReplicationGateway
     // committed entries and folds their prepare acknowledgements; it never applies a delta itself.
     private readonly DurableOrderedApplyAwaiter orderedApply;
 
-    internal (int PartitionId, long Generation) LocateDurablePartition(string key) => locator.LocateRange(key);
+    /// <summary>Where <paramref name="key"/> routes now: its data partition, the descriptor generation it resolved
+    /// through (zero for a hash-routed key) and, for a key-range key, the descriptor's start bound, so a freeze can
+    /// fence one key per descriptor its partition group touches.</summary>
+    internal Transactions.DurableKeyRoute LocateDurablePartition(string key)
+    {
+        (int partitionId, long generation, bool _, Ranges.RangeDescriptor? descriptor) = locator.LocateRangeWithMode(key);
+        return new Transactions.DurableKeyRoute(partitionId, generation, descriptor?.StartKey);
+    }
 
     // Instance-owned transport counts, beside the process-wide meter counters: in-process test clusters share
     // the static meter across every node, so a per-node figure (how many calls ONE coordinator made for ONE
@@ -88,7 +95,7 @@ internal sealed class DurableReplicationGateway
     /// </summary>
     private async Task<DurableBundleReply?> ForwardDurableBundleAsync(
         string node, int partitionId, IReadOnlyList<(string LogType, byte[] Payload)> entries,
-        WriteAdmissionClass admissionClass, WriteSubmissionStage stage, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken)
+        WriteAdmissionClass admissionClass, WriteSubmissionStage stage, IReadOnlyList<RangeFence> fences, CancellationToken cancellationToken)
     {
         bool multi = entries.Count > 1;
 
@@ -98,7 +105,7 @@ internal sealed class DurableReplicationGateway
         try
         {
             DurableBundleWireReply? wire = await interNodeCommunication.DurableBundle(
-                node, partitionId, entries, admissionClass == WriteAdmissionClass.Terminal, (int)stage, fenceKey, fenceGeneration, cancellationToken).ConfigureAwait(false);
+                node, partitionId, entries, admissionClass == WriteAdmissionClass.Terminal, (int)stage, fences, cancellationToken).ConfigureAwait(false);
             reply = wire is { } answeredWire ? DurableBundleReply.FromWire(answeredWire) : null;
         }
         catch
@@ -141,10 +148,10 @@ internal sealed class DurableReplicationGateway
     /// </summary>
     private async Task<bool> ForwardDurableDeltaAsync(
         string node, int partitionId, string logType, byte[] data, WriteAdmissionClass admissionClass,
-        WriteSubmissionStage stage, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken)
+        WriteSubmissionStage stage, IReadOnlyList<RangeFence> fences, CancellationToken cancellationToken)
     {
         DurableBundleReply? typed = await ForwardDurableBundleAsync(
-            node, partitionId, [(logType, data)], admissionClass, stage, fenceKey, fenceGeneration, cancellationToken).ConfigureAwait(false);
+            node, partitionId, [(logType, data)], admissionClass, stage, fences, cancellationToken).ConfigureAwait(false);
 
         if (typed is { } reply)
         {
@@ -161,13 +168,13 @@ internal sealed class DurableReplicationGateway
     /// receiver does not implement it.</summary>
     private async Task<DurableDecisionReply?> ForwardDurableDecisionAsync(
         string node, int partitionId, byte[] decisionDelta, HLCTimestamp transactionId, long epoch,
-        string? fenceKey, long fenceGeneration, CancellationToken cancellationToken)
+        IReadOnlyList<RangeFence> fences, CancellationToken cancellationToken)
     {
         DurableDecisionReply? reply;
         try
         {
             DurableDecisionWireReply? wire = await interNodeCommunication.DurableDecision(
-                node, partitionId, decisionDelta, transactionId, epoch, fenceKey, fenceGeneration, cancellationToken).ConfigureAwait(false);
+                node, partitionId, decisionDelta, transactionId, epoch, fences, cancellationToken).ConfigureAwait(false);
             reply = wire is { } answeredWire ? DurableDecisionReply.FromWire(answeredWire) : null;
         }
         catch
@@ -284,7 +291,7 @@ internal sealed class DurableReplicationGateway
         string? leader = await ResolveDurableLeader(partitionId, cancellationToken).ConfigureAwait(false);
         if (leader is not null)
         {
-            bool ok = await ForwardDurableDeltaAsync(leader, partitionId, logType, data, admissionClass, stage, fenceKey: null, fenceGeneration: 0, cancellationToken).ConfigureAwait(false);
+            bool ok = await ForwardDurableDeltaAsync(leader, partitionId, logType, data, admissionClass, stage, fences: [], cancellationToken).ConfigureAwait(false);
 
             // The authoritative apply happened on the remote leader (its scheduler is the single ordered owner).
             // Keep a local projection of the canonical record only, so this node's own decision read-back and
@@ -304,22 +311,22 @@ internal sealed class DurableReplicationGateway
             return ok;
         }
 
-        return await ReplicateDurableLocal(partitionId, logType, data, admissionClass, stage, fenceKey: null, fenceGeneration: 0, cancellationToken).ConfigureAwait(false);
+        return await ReplicateDurableLocal(partitionId, logType, data, admissionClass, stage, fences: [], cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
-    /// Like <see cref="ReplicateDurableThroughScheduler"/> but re-fences the submission at dispatch against the
-    /// range descriptor <paramref name="fenceKey"/> resolved to at freeze (<paramref name="fenceGeneration"/>):
-    /// a split/merge between freeze and dispatch releases it retryably instead of appending to a retired partition.
+    /// Like <see cref="ReplicateDurableThroughScheduler"/> but re-fences the submission at dispatch against every
+    /// range descriptor its keys resolved through at freeze (<paramref name="fences"/>, each key at its own
+    /// generation): a split/merge between freeze and dispatch releases it retryably instead of appending to a retired partition.
     /// A forward to a remote leader carries the fence and the admission class on the typed bundle wire; an older
     /// receiver runs the untyped forward without them.
     /// </summary>
-    internal async Task<bool> ReplicateDurableThroughSchedulerFenced(int partitionId, string logType, byte[] data, string fenceKey, long fenceGeneration, Writes.WriteAdmissionClass admissionClass, WriteSubmissionStage stage, CancellationToken cancellationToken, bool projectRecordLocally = true)
+    internal async Task<bool> ReplicateDurableThroughSchedulerFenced(int partitionId, string logType, byte[] data, IReadOnlyList<RangeFence> fences, Writes.WriteAdmissionClass admissionClass, WriteSubmissionStage stage, CancellationToken cancellationToken, bool projectRecordLocally = true)
     {
         string? leader = await ResolveDurableLeader(partitionId, cancellationToken).ConfigureAwait(false);
         if (leader is not null)
         {
-            bool ok = await ForwardDurableDeltaAsync(leader, partitionId, logType, data, admissionClass, stage, fenceKey, fenceGeneration, cancellationToken).ConfigureAwait(false);
+            bool ok = await ForwardDurableDeltaAsync(leader, partitionId, logType, data, admissionClass, stage, fences, cancellationToken).ConfigureAwait(false);
 
             // Same projection contract as the unfenced variant: sound only for a delta whose sender is the
             // transition's sole author. A terminal DECISION forwarded to a remote leader must pass
@@ -336,10 +343,10 @@ internal sealed class DurableReplicationGateway
             return ok;
         }
 
-        return await ReplicateDurableLocal(partitionId, logType, data, admissionClass, stage, fenceKey, fenceGeneration, cancellationToken).ConfigureAwait(false);
+        return await ReplicateDurableLocal(partitionId, logType, data, admissionClass, stage, fences, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<bool> ReplicateDurableLocal(int partitionId, string logType, byte[] data, Writes.WriteAdmissionClass admissionClass, WriteSubmissionStage stage, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken)
+    private async Task<bool> ReplicateDurableLocal(int partitionId, string logType, byte[] data, Writes.WriteAdmissionClass admissionClass, WriteSubmissionStage stage, IReadOnlyList<RangeFence> fences, CancellationToken cancellationToken)
     {
         TaskCompletionSource<bool> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -356,8 +363,7 @@ internal sealed class DurableReplicationGateway
             admissionClass,
             stage,
             (batchPartitionId, entries, entryLogIndices) => AwaitDurableEntriesAppliedAsync(batchPartitionId, entries, entryLogIndices, cancellationToken),
-            fenceKey,
-            fenceGeneration
+            fences
         );
 
         if (!writeAggregator.TryEnqueue(submission))
@@ -370,15 +376,15 @@ internal sealed class DurableReplicationGateway
     /// <summary>
     /// Replicates the anchor partition's <c>[TransactionRecord init, PreparedIntent prepare]</c> as one atomic
     /// ordered proposal, removing a pre-decision Raft barrier: the record initialization no longer costs a separate
-    /// round trip before the anchor partition's prepare. Fenced against the anchor descriptor <paramref name="fenceKey"/>
-    /// at <paramref name="fenceGeneration"/> like the standalone pre-decision path.
+    /// round trip before the anchor partition's prepare. Fenced against the anchor descriptor and every descriptor the
+    /// anchor group's keys resolved through (<paramref name="fences"/>) like the standalone pre-decision path.
     /// <para>Returns two independent signals the caller cannot fold into one: <c>BatchCommitted</c> — the proposal
     /// reached Raft, so the record is durably initialized (Undecided); and <c>PrepareAcknowledged</c> — the anchor
     /// prepare took ownership of its key. A committed batch with a rejected prepare must drive a truthful abort
     /// (the record exists), whereas a batch that never committed is a clean retry with nothing durable.</para>
     /// </summary>
     internal async Task<(bool BatchCommitted, bool PrepareAcknowledged)> ReplicateDurableBundleThroughSchedulerFenced(
-        int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, string fenceKey, long fenceGeneration, CancellationToken cancellationToken)
+        int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, IReadOnlyList<RangeFence> fences, CancellationToken cancellationToken)
     {
         string? leader = await ResolveDurableLeader(partitionId, cancellationToken).ConfigureAwait(false);
         if (leader is not null)
@@ -390,7 +396,7 @@ internal sealed class DurableReplicationGateway
             DurableBundleReply? typed = await ForwardDurableBundleAsync(
                 leader, partitionId,
                 [(ReplicationTypes.TransactionRecord, recordInitDelta), (ReplicationTypes.PreparedIntent, anchorPrepareDelta)],
-                Writes.WriteAdmissionClass.Ordinary, WriteSubmissionStage.Prepare, fenceKey, fenceGeneration, cancellationToken).ConfigureAwait(false);
+                Writes.WriteAdmissionClass.Ordinary, WriteSubmissionStage.Prepare, fences, cancellationToken).ConfigureAwait(false);
 
             if (typed is { } reply)
             {
@@ -417,7 +423,7 @@ internal sealed class DurableReplicationGateway
             return (true, prepareOk);
         }
 
-        return await ReplicateDurableBundleLocal(partitionId, recordInitDelta, anchorPrepareDelta, fenceKey, fenceGeneration, cancellationToken).ConfigureAwait(false);
+        return await ReplicateDurableBundleLocal(partitionId, recordInitDelta, anchorPrepareDelta, fences, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -429,19 +435,19 @@ internal sealed class DurableReplicationGateway
     /// the anchor to one that already won.
     /// </summary>
     internal async Task<DurableDecisionReply> ReplicateDurableDecisionThroughSchedulerFenced(
-        int partitionId, byte[] decisionDelta, HLCTimestamp transactionId, long epoch, string fenceKey, long fenceGeneration, CancellationToken cancellationToken)
+        int partitionId, byte[] decisionDelta, HLCTimestamp transactionId, long epoch, IReadOnlyList<RangeFence> fences, CancellationToken cancellationToken)
     {
         string? leader = await ResolveDurableLeader(partitionId, cancellationToken).ConfigureAwait(false);
         if (leader is null)
         {
-            bool replicated = await ReplicateDurableLocal(partitionId, ReplicationTypes.TransactionRecord, decisionDelta, Writes.WriteAdmissionClass.Terminal, WriteSubmissionStage.Decision, fenceKey, fenceGeneration, cancellationToken).ConfigureAwait(false);
+            bool replicated = await ReplicateDurableLocal(partitionId, ReplicationTypes.TransactionRecord, decisionDelta, Writes.WriteAdmissionClass.Terminal, WriteSubmissionStage.Decision, fences, cancellationToken).ConfigureAwait(false);
             if (!replicated)
                 return new DurableDecisionReply(false, false, TransactionDecision.Undecided, TransactionAbortClass.None);
 
             return ReadDecisionAfterApply(transactionId, epoch);
         }
 
-        DurableDecisionReply? typed = await ForwardDurableDecisionAsync(leader, partitionId, decisionDelta, transactionId, epoch, fenceKey, fenceGeneration, cancellationToken).ConfigureAwait(false);
+        DurableDecisionReply? typed = await ForwardDurableDecisionAsync(leader, partitionId, decisionDelta, transactionId, epoch, fences, cancellationToken).ConfigureAwait(false);
         if (typed is { } reply)
             return reply;
 
@@ -466,7 +472,7 @@ internal sealed class DurableReplicationGateway
     /// </summary>
     internal async Task<DurableBundleWireReply?> DurableBundleLocal(
         int partitionId, IReadOnlyList<(string LogType, byte[] Payload)> entries,
-        bool terminal, int stage, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken)
+        bool terminal, int stage, IReadOnlyList<RangeFence> fences, CancellationToken cancellationToken)
     {
         WriteAdmissionClass admissionClass = terminal ? WriteAdmissionClass.Terminal : WriteAdmissionClass.Ordinary;
 
@@ -492,7 +498,7 @@ internal sealed class DurableReplicationGateway
             {
                 Interlocked.Increment(ref redirects);
                 DurableTransactionMetrics.DurableOperationRedirected();
-                DurableBundleReply? redirected = await ForwardDurableBundleAsync(actualLeader, partitionId, entries, admissionClass, submissionStage, fenceKey, fenceGeneration, cancellationToken).ConfigureAwait(false);
+                DurableBundleReply? redirected = await ForwardDurableBundleAsync(actualLeader, partitionId, entries, admissionClass, submissionStage, fences, cancellationToken).ConfigureAwait(false);
                 return redirected?.ToWire();
             }
 
@@ -516,8 +522,7 @@ internal sealed class DurableReplicationGateway
             admissionClass,
             submissionStage,
             (batchPartitionId, batchEntries, entryLogIndices) => AwaitDurableEntriesAppliedAsync(batchPartitionId, batchEntries, entryLogIndices, cancellationToken),
-            fenceKey,
-            fenceGeneration);
+            fences);
 
         if (!writeAggregator.TryEnqueue(submission))
             return new DurableBundleWireReply(false, false, 0);
@@ -556,7 +561,7 @@ internal sealed class DurableReplicationGateway
     /// </summary>
     internal async Task<DurableDecisionWireReply?> DurableDecisionLocal(
         int partitionId, byte[] decisionDelta, HLCTimestamp transactionId, long epoch,
-        string? fenceKey, long fenceGeneration, CancellationToken cancellationToken)
+        IReadOnlyList<RangeFence> fences, CancellationToken cancellationToken)
     {
         if (!await raft.AmILeaderIfHosted(partitionId, cancellationToken).ConfigureAwait(false))
         {
@@ -574,7 +579,7 @@ internal sealed class DurableReplicationGateway
             {
                 Interlocked.Increment(ref redirects);
                 DurableTransactionMetrics.DurableOperationRedirected();
-                DurableDecisionReply? redirected = await ForwardDurableDecisionAsync(actualLeader, partitionId, decisionDelta, transactionId, epoch, fenceKey, fenceGeneration, cancellationToken).ConfigureAwait(false);
+                DurableDecisionReply? redirected = await ForwardDurableDecisionAsync(actualLeader, partitionId, decisionDelta, transactionId, epoch, fences, cancellationToken).ConfigureAwait(false);
                 return redirected?.ToWire();
             }
 
@@ -582,7 +587,7 @@ internal sealed class DurableReplicationGateway
                 return new DurableDecisionReply(false, false, TransactionDecision.Undecided, TransactionAbortClass.None).ToWire();
         }
 
-        bool replicated = await ReplicateDurableLocal(partitionId, ReplicationTypes.TransactionRecord, decisionDelta, Writes.WriteAdmissionClass.Terminal, WriteSubmissionStage.Decision, fenceKey, fenceGeneration, cancellationToken).ConfigureAwait(false);
+        bool replicated = await ReplicateDurableLocal(partitionId, ReplicationTypes.TransactionRecord, decisionDelta, Writes.WriteAdmissionClass.Terminal, WriteSubmissionStage.Decision, fences, cancellationToken).ConfigureAwait(false);
         if (!replicated)
             return new DurableDecisionReply(false, false, TransactionDecision.Undecided, TransactionAbortClass.None).ToWire();
 
@@ -609,14 +614,14 @@ internal sealed class DurableReplicationGateway
     internal async Task<DurableOnePhaseReply?> ReplicateDurableOnePhaseBundleThroughSchedulerFenced(
         int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
         HLCTimestamp transactionId, long epoch, HLCTimestamp opId,
-        string fenceKey, long fenceGeneration, long expectedTerm, CancellationToken cancellationToken)
+        IReadOnlyList<RangeFence> fences, long expectedTerm, CancellationToken cancellationToken)
     {
         string? leader = await ResolveDurableLeader(partitionId, cancellationToken).ConfigureAwait(false);
         if (leader is not null)
         {
             DurableOnePhaseReply? typed = await ForwardDurableOnePhaseAsync(
                 leader, partitionId, recordInitDelta, anchorPrepareDelta, decisionDelta,
-                transactionId, epoch, opId, fenceKey, fenceGeneration, expectedTerm, cancellationToken).ConfigureAwait(false);
+                transactionId, epoch, opId, fences, expectedTerm, cancellationToken).ConfigureAwait(false);
 
             // Mirror a refused prepare's verdict into the local intent store, as the typed bundle forward does,
             // so the origin's classification reads it exactly as a local refusal. Nothing is projected into the
@@ -630,7 +635,7 @@ internal sealed class DurableReplicationGateway
 
         return await ReplicateDurableOnePhaseLocal(
             partitionId, recordInitDelta, anchorPrepareDelta, decisionDelta,
-            transactionId, epoch, opId, fenceKey, fenceGeneration, expectedTerm, cancellationToken).ConfigureAwait(false);
+            transactionId, epoch, opId, fences, expectedTerm, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Forwards a one-phase bundle to the anchor partition's leader as the typed one-phase operation.
@@ -639,14 +644,14 @@ internal sealed class DurableReplicationGateway
     private async Task<DurableOnePhaseReply?> ForwardDurableOnePhaseAsync(
         string node, int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
         HLCTimestamp transactionId, long epoch, HLCTimestamp opId,
-        string? fenceKey, long fenceGeneration, long expectedTerm, CancellationToken cancellationToken)
+        IReadOnlyList<RangeFence> fences, long expectedTerm, CancellationToken cancellationToken)
     {
         DurableOnePhaseReply? reply;
         try
         {
             DurableOnePhaseWireReply? wire = await interNodeCommunication.DurableOnePhase(
                 node, partitionId, recordInitDelta, anchorPrepareDelta, decisionDelta,
-                transactionId, epoch, opId, fenceKey, fenceGeneration, expectedTerm, cancellationToken).ConfigureAwait(false);
+                transactionId, epoch, opId, fences, expectedTerm, cancellationToken).ConfigureAwait(false);
             reply = wire is { } answeredWire ? DurableOnePhaseReply.FromWire(answeredWire) : null;
         }
         catch
@@ -677,7 +682,7 @@ internal sealed class DurableReplicationGateway
     internal async Task<DurableOnePhaseWireReply?> DurableOnePhaseLocal(
         int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
         HLCTimestamp transactionId, long epoch, HLCTimestamp opId,
-        string? fenceKey, long fenceGeneration, long expectedTerm, CancellationToken cancellationToken)
+        IReadOnlyList<RangeFence> fences, long expectedTerm, CancellationToken cancellationToken)
     {
         if (!await raft.AmILeaderIfHosted(partitionId, cancellationToken).ConfigureAwait(false))
         {
@@ -697,7 +702,7 @@ internal sealed class DurableReplicationGateway
                 DurableTransactionMetrics.DurableOperationRedirected();
                 DurableOnePhaseReply? redirected = await ForwardDurableOnePhaseAsync(
                     actualLeader, partitionId, recordInitDelta, anchorPrepareDelta, decisionDelta,
-                    transactionId, epoch, opId, fenceKey, fenceGeneration, expectedTerm, cancellationToken).ConfigureAwait(false);
+                    transactionId, epoch, opId, fences, expectedTerm, cancellationToken).ConfigureAwait(false);
                 return redirected?.ToWire();
             }
 
@@ -707,7 +712,7 @@ internal sealed class DurableReplicationGateway
 
         DurableOnePhaseReply reply = await ReplicateDurableOnePhaseLocal(
             partitionId, recordInitDelta, anchorPrepareDelta, decisionDelta,
-            transactionId, epoch, opId, fenceKey, fenceGeneration, expectedTerm, cancellationToken).ConfigureAwait(false);
+            transactionId, epoch, opId, fences, expectedTerm, cancellationToken).ConfigureAwait(false);
         return reply.ToWire();
     }
 
@@ -718,7 +723,7 @@ internal sealed class DurableReplicationGateway
     private async Task<DurableOnePhaseReply> ReplicateDurableOnePhaseLocal(
         int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
         HLCTimestamp transactionId, long epoch, HLCTimestamp opId,
-        string? fenceKey, long fenceGeneration, long exclusionTerm, CancellationToken cancellationToken)
+        IReadOnlyList<RangeFence> fences, long exclusionTerm, CancellationToken cancellationToken)
     {
         // Term fence, see ReplicateDurableLocal. The bundle is fenced to the term the coordinator's commit probe
         // confirmed the transaction's staged intents (and locks) under, when it reports one, rather than to this
@@ -760,8 +765,7 @@ internal sealed class DurableReplicationGateway
             Writes.WriteAdmissionClass.Ordinary,
             WriteSubmissionStage.OnePhase,
             (batchPartitionId, entries, entryLogIndices) => AwaitDurableEntriesAppliedAsync(batchPartitionId, entries, entryLogIndices, cancellationToken),
-            fenceKey,
-            fenceGeneration);
+            fences);
 
         if (!writeAggregator.TryEnqueue(submission))
             return NotCommittedOnePhaseReply;
@@ -806,7 +810,7 @@ internal sealed class DurableReplicationGateway
     }
 
     private async Task<(bool BatchCommitted, bool PrepareAcknowledged)> ReplicateDurableBundleLocal(
-        int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, string fenceKey, long fenceGeneration, CancellationToken cancellationToken)
+        int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, IReadOnlyList<RangeFence> fences, CancellationToken cancellationToken)
     {
         TaskCompletionSource<bool> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -824,8 +828,7 @@ internal sealed class DurableReplicationGateway
             // The anchor bundle is the transaction's first prepare barrier; the record init rides in it.
             WriteSubmissionStage.Prepare,
             (batchPartitionId, entries, entryLogIndices) => AwaitDurableEntriesAppliedAsync(batchPartitionId, entries, entryLogIndices, cancellationToken),
-            fenceKey,
-            fenceGeneration);
+            fences);
 
         if (!writeAggregator.TryEnqueue(submission))
             return (false, false);
@@ -909,7 +912,7 @@ internal sealed class DurableReplicationGateway
                 // Terminal: cross-node settlement of an already-prepared transaction must never be starved by
                 // local ordinary-write saturation. (Wiring the origin's class across the wire is a follow-up.)
                 // The untyped wire carries no stage either — only an older sender uses it — so attribute Other.
-                return await ReplicateDurableLocal(partitionId, logType, payload, Writes.WriteAdmissionClass.Terminal, WriteSubmissionStage.Other, fenceKey: null, fenceGeneration: 0, cancellationToken).ConfigureAwait(false);
+                return await ReplicateDurableLocal(partitionId, logType, payload, Writes.WriteAdmissionClass.Terminal, WriteSubmissionStage.Other, fences: [], cancellationToken).ConfigureAwait(false);
 
             case DurableOpCommit:
                 return await replicator.ApplyDurableCommit(partitionId, PreparedIntentStore.DeserializeIntents(payload)[0]).ConfigureAwait(false);

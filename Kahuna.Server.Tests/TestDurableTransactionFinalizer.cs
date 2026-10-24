@@ -68,7 +68,7 @@ public sealed class TestDurableTransactionFinalizer
         // proposal. BatchCommitted reflects whether the proposal reached Raft; PrepareAcknowledged reflects whether
         // the anchor prepare took ownership of its key (the store folds a rejection to false).
         public Task<(bool BatchCommitted, bool PrepareAcknowledged)> ReplicateBundle(
-            int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, string fenceKey, long fenceGeneration, CancellationToken ct)
+            int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, IReadOnlyList<RangeFence> fences, CancellationToken ct)
         {
             Calls.Enqueue((partitionId, BundleType));
 
@@ -102,7 +102,7 @@ public sealed class TestDurableTransactionFinalizer
 
         List<DurablePartitionPrepare> partitions = participants
             .GroupBy(p => p.Partition)
-            .Select(g => new DurablePartitionPrepare(g.Key, 0L, g.Select(p => Intent(txId, epoch, p.Key, revision, baseRevision) with { ManifestHash = hash }).ToList()))
+            .Select(g => new DurablePartitionPrepare(g.Key, [], g.Select(p => Intent(txId, epoch, p.Key, revision, baseRevision) with { ManifestHash = hash }).ToList()))
             .ToList();
 
         return new DurableFinalizeInput(txId, epoch, "coord", participants[0].Key, participants[0].Partition,
@@ -992,7 +992,7 @@ public sealed class TestDurableTransactionFinalizer
         List<TransactionParticipantRef> manifest = [new TransactionParticipantRef("idx/name/bob", KeyValueDurability.Persistent)];
         long hash = TransactionManifest.ComputeHash(txId, 1, "coord/anchor", Ts(1100), manifest);
         List<DurablePartitionPrepare> partitions =
-            [new DurablePartitionPrepare(8, 0L, [Intent(txId, 1, "idx/name/bob") with { ManifestHash = hash }])];
+            [new DurablePartitionPrepare(8, [], [Intent(txId, 1, "idx/name/bob") with { ManifestHash = hash }])];
         DurableFinalizeInput input = new(txId, 1, "coord", "coord/anchor", AnchorPartitionId: 3,
             AnchorGeneration: 0L, Ts(1100), DecisionDeadline: Ts(9000), hash, manifest, partitions, CreatedAt: Ts(1000));
 
@@ -1130,7 +1130,7 @@ public sealed class TestDurableTransactionFinalizer
     // intents that excluded them are gone (killed node, expired lease, a stall outliving the locks).
     private static DurableTransactionFinalizer.ReplicateOnePhaseBundleDelegate OnePhase(
         TransactionRecordStore records, PreparedIntentStore intents, Action? beforeApply = null) =>
-        (partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fenceKey, fenceGeneration, expectedTerm, ct) =>
+        (partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, ct) =>
         {
             beforeApply?.Invoke();
 
@@ -1183,12 +1183,12 @@ public sealed class TestDurableTransactionFinalizer
         DurableTransactionFinalizer.ReplicateOnePhaseBundleDelegate apply = OnePhase(records, intents);
         DurableTransactionFinalizer finalizer = new(
             records, intents, seam.Replicate,
-            replicateOnePhaseBundle: async (partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fenceKey, fenceGeneration, expectedTerm, ct) =>
+            replicateOnePhaseBundle: async (partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, ct) =>
             {
                 // Models in-flight time ahead of the aggregator hand-off, so the attempt's pre-bundle share has
                 // a floor this test can assert on.
                 await Task.Delay(20, ct);
-                DurableOnePhaseReply? reply = await apply(partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fenceKey, fenceGeneration, expectedTerm, ct);
+                DurableOnePhaseReply? reply = await apply(partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, ct);
                 return reply!.Value with { BundleMs = bundleSentinelMs };
             });
 
@@ -1226,11 +1226,11 @@ public sealed class TestDurableTransactionFinalizer
         DurableTransactionFinalizer.ReplicateOnePhaseBundleDelegate apply = OnePhase(records, intents);
         DurableTransactionFinalizer finalizer = new(
             records, intents, seam.Replicate,
-            replicateOnePhaseBundle: async (partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fenceKey, fenceGeneration, expectedTerm, ct) =>
+            replicateOnePhaseBundle: async (partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, ct) =>
             {
                 // Models both wire directions of the forward to a remote anchor leader.
                 await Task.Delay(60, ct);
-                DurableOnePhaseReply? reply = await apply(partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fenceKey, fenceGeneration, expectedTerm, ct);
+                DurableOnePhaseReply? reply = await apply(partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, ct);
                 return reply!.Value with { BundleMs = bundleSentinelMs, Forwarded = true };
             });
 
@@ -1263,7 +1263,7 @@ public sealed class TestDurableTransactionFinalizer
         bool proposed = false;
         DurableTransactionFinalizer finalizer = new(
             records, intents, seam.Replicate,
-            replicateOnePhaseBundle: (_, _, _, _, _, _, _, _, _, _, _) =>
+            replicateOnePhaseBundle: (_, _, _, _, _, _, _, _, _, _) =>
             {
                 proposed = true;
                 return Task.FromResult<DurableOnePhaseReply?>(null);
@@ -1355,7 +1355,7 @@ public sealed class TestDurableTransactionFinalizer
 
         DurableTransactionFinalizer finalizer = new(
             records, intents, seam.Replicate,
-            replicateOnePhaseBundle: (_, _, _, _, _, _, _, _, _, _, _) => Task.FromResult<DurableOnePhaseReply?>(null));
+            replicateOnePhaseBundle: (_, _, _, _, _, _, _, _, _, _) => Task.FromResult<DurableOnePhaseReply?>(null));
 
         using MetricCapture gate = new("outcome", "kahuna.durable_tx.one_phase_gate");
         using MetricCapture fallback = new("reason", "kahuna.durable_tx.one_phase_fallbacks");
@@ -1430,9 +1430,9 @@ public sealed class TestDurableTransactionFinalizer
         DurableTransactionFinalizer.ReplicateOnePhaseBundleDelegate once = OnePhase(records, intents);
         DurableTransactionFinalizer finalizer = new(
             records, intents, seam.Replicate,
-            replicateOnePhaseBundle: async (partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fenceKey, fenceGeneration, expectedTerm, ct) =>
+            replicateOnePhaseBundle: async (partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, ct) =>
             {
-                DurableOnePhaseReply? first = await once(partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fenceKey, fenceGeneration, expectedTerm, ct);
+                DurableOnePhaseReply? first = await once(partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, ct);
                 // The duplicate: the same three entries replayed in order against the already-applied stores.
                 records.Replicate(partitionId, new RaftLog { LogType = ReplicationTypes.TransactionRecord, LogData = initDelta });
                 intents.ApplyDeltaAckPrepares(partitionId, new RaftLog { LogType = ReplicationTypes.PreparedIntent, LogData = prepareDelta });
@@ -1560,10 +1560,10 @@ public sealed class TestDurableTransactionFinalizer
         DurableTransactionFinalizer.ReplicateOnePhaseBundleDelegate onePhaseSeam = OnePhase(records, intents);
         DurableTransactionFinalizer finalizer = new(
             records, intents, seam.Replicate,
-            replicateOnePhaseBundle: (partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fenceKey, fenceGeneration, expectedTerm, ct) =>
+            replicateOnePhaseBundle: (partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, ct) =>
             {
                 onePhaseInvoked = true;
-                return onePhaseSeam(partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fenceKey, fenceGeneration, expectedTerm, ct);
+                return onePhaseSeam(partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, ct);
             });
 
         DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(

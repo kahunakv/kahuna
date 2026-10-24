@@ -2802,7 +2802,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
 
         DurableBundleWireReply? reply = await keyValues.DurableBundleLocal(
             request.PartitionId, entries, terminal: request.AdmissionClass == 1, stage: request.Stage,
-            string.IsNullOrEmpty(request.FenceKey) ? null : request.FenceKey, request.FenceGeneration, context.CancellationToken);
+            RangeFenceWire.Read(request.Fences, request.FenceKey, request.FenceGeneration), context.CancellationToken);
 
         // A null reply here means the receiver could not run the bundle at all (an unresolved leadership); the
         // origin reads a not-committed batch and retries.
@@ -2820,7 +2820,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
 
         DurableDecisionWireReply? reply = await keyValues.DurableDecisionLocal(
             request.PartitionId, request.DecisionDelta.ToByteArray(), transactionId, request.Epoch,
-            string.IsNullOrEmpty(request.FenceKey) ? null : request.FenceKey, request.FenceGeneration, context.CancellationToken);
+            RangeFenceWire.Read(request.Fences, request.FenceKey, request.FenceGeneration), context.CancellationToken);
 
         return new GrpcDurableDecisionResponse
         {
@@ -2841,7 +2841,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         DurableOnePhaseWireReply? reply = await keyValues.DurableOnePhaseLocal(
             request.PartitionId, request.RecordInitDelta.ToByteArray(), request.AnchorPrepareDelta.ToByteArray(),
             request.DecisionDelta.ToByteArray(), transactionId, request.Epoch, opId,
-            string.IsNullOrEmpty(request.FenceKey) ? null : request.FenceKey, request.FenceGeneration, request.ExpectedTerm, context.CancellationToken);
+            RangeFenceWire.Read(request.Fences, request.FenceKey, request.FenceGeneration), request.ExpectedTerm, context.CancellationToken);
 
         return new GrpcDurableOnePhaseResponse
         {

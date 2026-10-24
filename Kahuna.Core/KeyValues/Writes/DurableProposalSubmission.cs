@@ -9,7 +9,7 @@ namespace Kahuna.Server.KeyValues.Writes;
 /// completion resolves a task the finalizer awaits — committed means the batch reached Raft, released means it did
 /// not (retryable), and the finalizer maps that to the transaction outcome. Multiple entries form an atomic ordered
 /// bundle (e.g. anchor init+prepare). Durable records target a partition resolved at freeze and replicate at
-/// generation zero, so they carry no key-range fence.
+/// Kommander generation zero; the key-range fences they carry are Kahuna's own routing fences, re-checked at dispatch.
 /// </summary>
 internal sealed class DurableProposalSubmission : IProposalSubmission
 {
@@ -28,13 +28,12 @@ internal sealed class DurableProposalSubmission : IProposalSubmission
     // Written before the producer's task resolves (the TrySetResult publishes it), read by the producer after.
     private DurableCompletionAnswer answer = DurableCompletionAnswer.NotCommitted;
 
-    // The logical key + range-descriptor generation this submission's partition was resolved against at freeze. A
-    // null key opts out of the fence (post-decision settle/materialize, recovery, and state-transfer imports,
-    // which must apply regardless of topology); a non-null key re-fences at dispatch so a split/merge since freeze
-    // releases the submission retryably instead of appending to a partition the range no longer routes to.
-    private readonly string? fenceKey;
-
-    private readonly long fenceGeneration;
+    // The dispatch fences: one key per range descriptor (or hash space) this submission's partition was resolved
+    // through at freeze, each at the generation that key resolved to. Empty opts out of the fence (post-decision
+    // settle/materialize, recovery, and state-transfer imports, which must apply regardless of topology); a fenced
+    // submission is re-resolved at dispatch and released retryably when any of its descriptors moved, instead of
+    // appending to a partition the range no longer routes to.
+    private readonly IReadOnlyList<RangeFence> fences;
 
     public int PartitionId { get; }
 
@@ -57,8 +56,7 @@ internal sealed class DurableProposalSubmission : IProposalSubmission
         WriteAdmissionClass admissionClass,
         WriteSubmissionStage stage,
         Func<int, IReadOnlyList<RaftProposalEntry>, IReadOnlyList<long>?, Task<DurableCompletionAnswer>>? applyOnCommit = null,
-        string? fenceKey = null,
-        long fenceGeneration = 0)
+        IReadOnlyList<RangeFence>? fences = null)
     {
         PartitionId = partitionId;
         AdmissionClass = admissionClass;
@@ -66,8 +64,7 @@ internal sealed class DurableProposalSubmission : IProposalSubmission
         Entries = entries;
         this.completion = completion;
         this.applyOnCommit = applyOnCommit;
-        this.fenceKey = fenceKey;
-        this.fenceGeneration = fenceGeneration;
+        this.fences = fences ?? [];
 
         int bytes = 0;
         for (int i = 0; i < entries.Count; i++)
@@ -90,7 +87,19 @@ internal sealed class DurableProposalSubmission : IProposalSubmission
     /// producer treats as a clean retry.</summary>
     public bool BatchObserved => answer is DurableCompletionAnswer.Acknowledged or DurableCompletionAnswer.Refused;
 
-    public bool IsStale(IWriteRangeFence fence) => fenceKey is not null && fence.IsStale(fenceKey, fenceGeneration, PartitionId);
+    /// <summary>Stale when any fenced key's descriptor moved since freeze: every space the submission touches is
+    /// probed with its own key and generation, so a group that spans several key spaces is neither released for a
+    /// mismatched pair nor blind to a move of its second space.</summary>
+    public bool IsStale(IWriteRangeFence fence)
+    {
+        for (int i = 0; i < fences.Count; i++)
+        {
+            if (fence.IsStale(fences[i].Key, fences[i].Generation, PartitionId))
+                return true;
+        }
+
+        return false;
+    }
 
     /// <summary>The batch committed: wait for the ordered apply of this submission's records (never applying them
     /// here), then resolve the producer with the answer. Never blocks the scheduler's lane: a wait that is not
