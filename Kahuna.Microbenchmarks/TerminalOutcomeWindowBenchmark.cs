@@ -17,7 +17,7 @@ namespace Kahuna.Microbenchmarks;
 /// </summary>
 [MemoryDiagnoser]
 [ThreadingDiagnoser]
-public class TerminalOutcomeWindowBenchmark
+public class TerminalOutcomeWindowBenchmark : IDisposable
 {
     private const int Max = 10_000;
     private const int PerCaller = 2_000;
@@ -70,4 +70,10 @@ public class TerminalOutcomeWindowBenchmark
 
     [IterationCleanup]
     public void Cleanup() => start.Dispose();
+
+    public void Dispose()
+    {
+        start?.Dispose();
+        GC.SuppressFinalize(this);
+    }
 }

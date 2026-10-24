@@ -35,7 +35,7 @@ namespace Kahuna.Microbenchmarks;
 /// </summary>
 [MemoryDiagnoser]
 [ShortRunJob]
-public class ScanPageBenchmark
+public class ScanPageBenchmark : IDisposable
 {
     [Params(1_000, 10_000, 100_000)]
     public int N;
@@ -85,10 +85,19 @@ public class ScanPageBenchmark
             drainedMirror.TryRemove(key, out _);
     }
 
+    [GlobalCleanup]
+    public void Cleanup() => Dispose();
+
+    public void Dispose()
+    {
+        backend?.Dispose();
+        GC.SuppressFinalize(this);
+    }
+
     // ── overlay range read, limit 100, every row in the overlay ────────────────
 
     [Benchmark(Baseline = true)]
-    public int OverlayRangeRead_Old()
+    public int OverlayRangeReadOld()
     {
         List<KeyValuePair<string, UnflushedKeyValueWrite>> matches = [];
         foreach (KeyValuePair<string, UnflushedKeyValueWrite> kv in mirror)
@@ -101,15 +110,15 @@ public class ScanPageBenchmark
     }
 
     [Benchmark]
-    public int OverlayRangeRead_New() => backend.GetKeyValueByRange("k/", null, PageSize).Count;
+    public int OverlayRangeReadNew() => backend.GetKeyValueByRange("k/", null, PageSize).Count;
 
     [Benchmark]
-    public int OverlayAbsentPrefix_New() => overlay.Collect("absent/", null, PageSize, null).Count;
+    public int OverlayAbsentPrefixNew() => overlay.Collect("absent/", null, PageSize, null).Count;
 
     // ── prepared-intent window capture, one row ────────────────────────────────
 
     [Benchmark]
-    public int IntentWindow_Old()
+    public int IntentWindowOld()
     {
         List<PreparedIntent> result = [];
         foreach (PreparedIntent intent in intentMirror.Values)
@@ -127,16 +136,16 @@ public class ScanPageBenchmark
     }
 
     [Benchmark]
-    public int IntentWindow_Previous() => WalkWholeMap(intentMirror, "k/00000000", true, "k/00000000", true);
+    public int IntentWindowPrevious() => WalkWholeMap(intentMirror, "k/00000000", true, "k/00000000", true);
 
     [Benchmark]
-    public int IntentWindow_New() => store.SnapshotScanWindow("k/00000000", true, "k/00000000", true).Count;
+    public int IntentWindowNew() => store.SnapshotScanWindow("k/00000000", true, "k/00000000", true).Count;
 
     [Benchmark]
-    public int IntentWindowDrained_Previous() => WalkWholeMap(drainedMirror, "k/00000000", true, "k/00000000", true);
+    public int IntentWindowDrainedPrevious() => WalkWholeMap(drainedMirror, "k/00000000", true, "k/00000000", true);
 
     [Benchmark]
-    public int IntentWindowDrained_New() => drainedStore.SnapshotScanWindow("k/00000000", true, "k/00000000", true).Count;
+    public int IntentWindowDrainedNew() => drainedStore.SnapshotScanWindow("k/00000000", true, "k/00000000", true).Count;
 
     /// <summary>The whole-map walk the scan window used before the ordered key index: every live intent, two compares each.</summary>
     private static int WalkWholeMap(ConcurrentDictionary<string, PreparedIntent> map, string startKey, bool startInclusive, string endKey, bool endInclusive)
@@ -227,10 +236,10 @@ public class IntentScanMergeBenchmark
     }
 
     [Benchmark(Baseline = true)]
-    public int Merge_Old() => OldMerge(rows, intents, default, default, N, false, null).Items.Count;
+    public int MergeOld() => OldMerge(rows, intents, default, default, N, false, null).Items.Count;
 
     [Benchmark]
-    public int Merge_New() => PreparedIntentScanMerge.Merge(rows, intents, default, default, N, false, null).Items.Count;
+    public int MergeNew() => PreparedIntentScanMerge.Merge(rows, intents, default, default, N, false, null).Items.Count;
 
     private static PreparedIntentScanMerge.ScanMergeResult OldMerge(
         List<(string Key, ReadOnlyKeyValueEntry Entry)> items,

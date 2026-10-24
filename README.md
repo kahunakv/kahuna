@@ -6,9 +6,9 @@ Distributed systems are difficult to build correctly. Execution can be non-deter
 
 Kahuna is an open-source project. It gives developers ready-made solutions for three common problems in distributed systems:
 
-- Distributed locking
-- A distributed key/value store
-- A distributed sequencer
+- Distributed locking with fencing tokens and leases
+- Consistent key/value store with transactions and watchers
+- Distributed sequencer for ordered IDs
 
 ### **Distributed Locking**
 

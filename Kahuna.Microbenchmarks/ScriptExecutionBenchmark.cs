@@ -31,7 +31,7 @@ namespace Kahuna.Microbenchmarks;
 /// are allocation counts that a wall-clock number hides behind Raft and disk latency.</para>
 /// </summary>
 [MemoryDiagnoser]
-public class ScriptExecutionBenchmark
+public class ScriptExecutionBenchmark : IAsyncDisposable
 {
     private EmbeddedKahunaNode node = null!;
     private string walPath = "";
@@ -155,9 +155,14 @@ public class ScriptExecutionBenchmark
     }
 
     [GlobalCleanup]
-    public async Task Cleanup()
+    public Task Cleanup() => DisposeAsync().AsTask();
+
+    public async ValueTask DisposeAsync()
     {
-        await node.DisposeAsync();
+        GC.SuppressFinalize(this);
+
+        if (node is not null)
+            await node.DisposeAsync();
 
         try
         {

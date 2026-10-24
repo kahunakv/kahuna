@@ -143,8 +143,8 @@ public class RangeScanPageBenchmark : IDisposable
         ring = new KeyValueActorRing([actor], [instance.GetContext().PublishedHeads]);
 
         // One page of each shape before measuring, so the actor's code paths are warm.
-        BoundedSeek_11Rows().GetAwaiter().GetResult();
-        CursorPage_512Rows().GetAwaiter().GetResult();
+        BoundedSeek11Rows().GetAwaiter().GetResult();
+        CursorPage512Rows().GetAwaiter().GetResult();
     }
 
     private static void Seed(IPersistenceBackend backend)
@@ -169,7 +169,7 @@ public class RangeScanPageBenchmark : IDisposable
 
     /// <summary>One index key's 11 rows: the bounded seek a join probe issues, page size 512.</summary>
     [Benchmark]
-    public Task<int> BoundedSeek_11Rows()
+    public Task<int> BoundedSeek11Rows()
     {
         int key = next++ % Keys;
         string start = $"{Prefix}k{key:D4}/";
@@ -179,7 +179,7 @@ public class RangeScanPageBenchmark : IDisposable
 
     /// <summary>A 512-row page of a prefix scan continued from a cursor (an exclusive start at a row that is present).</summary>
     [Benchmark]
-    public Task<int> CursorPage_512Rows()
+    public Task<int> CursorPage512Rows()
     {
         int key = next++ % (Keys - (PageSize / RowsPerKey) - 1);
         return Scan(RowKey(key, RowsPerKey - 1), false, null, false);
