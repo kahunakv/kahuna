@@ -1123,7 +1123,8 @@ public class GrpcCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
         KeyValueDurability durability,
         CancellationToken cancellationToken,
         string coordinatorKey = "",
-        TransactionOperationId operationId = default
+        TransactionOperationId operationId = default,
+        KeyValueReadMode readMode = KeyValueReadMode.Default
     )
     {
         GrpcTryGetKeyValueRequest request = new()
@@ -1139,7 +1140,8 @@ public class GrpcCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             Durability = (GrpcKeyValueDurability)durability,
             CoordinatorKey = coordinatorKey,
             OperationIdHigh = operationId.High,
-            OperationIdLow = operationId.Low
+            OperationIdLow = operationId.Low,
+            ReadMode = (GrpcKeyValueReadMode)readMode
         };
 
         for (int unavailableRetries = 0; unavailableRetries < 2; unavailableRetries++)
@@ -1734,7 +1736,8 @@ public class GrpcCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
         KeyValueDurability durability,
         CancellationToken cancellationToken,
         string coordinatorKey = "",
-        TransactionOperationId operationId = default
+        TransactionOperationId operationId = default,
+        KeyValueReadMode readMode = KeyValueReadMode.Default
     )
     {
         // Intentionally unary: range scan returns a paginated result set; it carries its own
@@ -1754,7 +1757,8 @@ public class GrpcCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             Durability = (GrpcKeyValueDurability)durability,
             CoordinatorKey = coordinatorKey,
             OperationIdHigh = operationId.High,
-            OperationIdLow = operationId.Low
+            OperationIdLow = operationId.Low,
+            ReadMode = (GrpcKeyValueReadMode)readMode
         };
 
         if (startKey is not null) request.StartKey = startKey;
@@ -1814,7 +1818,8 @@ public class GrpcCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
         int pageSize,
         HLCTimestamp readTimestamp,
         KeyValueDurability durability,
-        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken,
+        KeyValueReadMode readMode = KeyValueReadMode.Default
     )
     {
         GrpcGetByRangeRequest request = new()
@@ -1829,7 +1834,8 @@ public class GrpcCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             ReadTimestampNode = readTimestamp.N,
             ReadTimestampPhysical = readTimestamp.L,
             ReadTimestampCounter = readTimestamp.C,
-            Durability = (GrpcKeyValueDurability)durability
+            Durability = (GrpcKeyValueDurability)durability,
+            ReadMode = (GrpcKeyValueReadMode)readMode
         };
 
         if (startKey is not null) request.StartKey = startKey;

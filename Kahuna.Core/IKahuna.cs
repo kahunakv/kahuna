@@ -50,7 +50,13 @@ public interface IKahuna
     /// result per requested key, unordered — callers correlate by key and durability.</summary>
     public Task<List<(KeyValueResponseType type, string key, KeyValueDurability durability)>> LocateAndTryCheckManyWriteIntents(HLCTimestamp transactionId, List<KeyValueConflictProbe> keys, CancellationToken cancellationToken);
 
-    public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default);
+    /// <summary>
+    /// Reads one key at <paramref name="readTimestamp"/> (latest when Zero). <paramref name="readMode"/> says how the
+    /// read treats the transaction's own state: <see cref="KeyValueReadMode.StatementSnapshot"/> shows the
+    /// transaction's staged writes at any timestamp and ignores the read pins earlier reads left, so each statement
+    /// of a transaction reads one consistent view at its own timestamp; it is <c>InvalidInput</c> without a timestamp.
+    /// </summary>
+    public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default);
 
     public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryGetManyValues(HLCTimestamp transactionId, HLCTimestamp readTimestamp, List<(string key, long revision, KeyValueDurability durability)> keys, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default);
 
@@ -62,9 +68,10 @@ public interface IKahuna
     /// read; within a partition the first refusal stops the batch, the refused key answers the refusal and its holder,
     /// and the keys after it answer <c>MustRetry</c> unlocked. Returns one result per key, in input order; a key's
     /// <see cref="KeyValueProbeResult.Locked"/> says whether it holds the lock. A request of more than the configured
-    /// maximum keys, or of keys of several key spaces, is refused as a whole with <c>InvalidInput</c>.
+    /// maximum keys, or of keys of several key spaces, is refused as a whole with <c>InvalidInput</c>, as is a
+    /// <see cref="KeyValueReadMode.StatementSnapshot"/> probe without a read timestamp.
     /// </summary>
-    public Task<KeyValueProbeResult[]> LocateAndTryProbeMany(HLCTimestamp transactionId, HLCTimestamp readTimestamp, IReadOnlyList<string> keys, KeyValueProbeLock lockMode, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default);
+    public Task<KeyValueProbeResult[]> LocateAndTryProbeMany(HLCTimestamp transactionId, HLCTimestamp readTimestamp, IReadOnlyList<string> keys, KeyValueProbeLock lockMode, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default);
 
     public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryExistsManyValues(HLCTimestamp transactionId, HLCTimestamp readTimestamp, List<(string key, long revision, KeyValueDurability durability)> keys, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default);
 
@@ -87,8 +94,11 @@ public interface IKahuna
     /// skips that intent as one that cannot commit inside the snapshot. Each page mints anew, so a paged
     /// walk is not one consistent cut; use it where a live intent must refuse the page, not for a
     /// point-in-time read.</para>
+    ///
+    /// <para><paramref name="readMode"/> says how the page treats the transaction's own state; see
+    /// <see cref="LocateAndTryGetValue"/>.</para>
     /// </summary>
-    public Task<KeyValueGetByRangeResult> LocateAndGetByRange(HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default, bool snapshotAtLeader = false);
+    public Task<KeyValueGetByRangeResult> LocateAndGetByRange(HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default, bool snapshotAtLeader = false, KeyValueReadMode readMode = KeyValueReadMode.Default);
 
     /// <summary>
     /// Streams all key-value entries whose keys start with <paramref name="prefix"/> as an
@@ -113,7 +123,7 @@ public interface IKahuna
     /// <see cref="LocateAndScanRange"/> from its <see cref="KeyValueProbeRangeResult.ResumeKey"/>, exclusive. A probe of
     /// more than the configured maximum seeks or entries is refused as a whole with <c>InvalidInput</c>.
     /// </summary>
-    public Task<KeyValueProbeRangeResult[]> LocateAndTryProbeManyRanges(HLCTimestamp transactionId, HLCTimestamp readTimestamp, string prefix, IReadOnlyList<KeyValueProbeRange> seeks, KeyValueProbeLock lockMode, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default);
+    public Task<KeyValueProbeRangeResult[]> LocateAndTryProbeManyRanges(HLCTimestamp transactionId, HLCTimestamp readTimestamp, string prefix, IReadOnlyList<KeyValueProbeRange> seeks, KeyValueProbeLock lockMode, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default);
 
     public IAsyncEnumerable<(string Key, ReadOnlyKeyValueEntry Entry)> LocateAndScanRange(
         HLCTimestamp txId,
@@ -128,7 +138,8 @@ public interface IKahuna
         CancellationToken ct,
         string coordinatorKey = "",
         TransactionOperationId operationId = default,
-        KeyValueScanObservationSink? observations = null);
+        KeyValueScanObservationSink? observations = null,
+        KeyValueReadMode readMode = KeyValueReadMode.Default);
 
     public Task<(KeyValueResponseType, long, HLCTimestamp)> TrySetKeyValue(HLCTimestamp transactionId, string key, byte[]? value, byte[]? compareValue, long compareRevision, KeyValueFlags flags, int expiresMs, KeyValueDurability durability, long routedGeneration = 0);
 
@@ -138,7 +149,7 @@ public interface IKahuna
 
     public Task<List<KahunaDeleteKeyValueResponseItem>> DeleteManyNodeKeyValue(List<KahunaDeleteKeyValueRequestItem> items);
 
-    public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryGetValue(HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability);
+    public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryGetValue(HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, KeyValueReadMode readMode = KeyValueReadMode.Default);
 
     public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryGetManyValues(HLCTimestamp transactionId, HLCTimestamp readTimestamp, List<(string key, long revision, KeyValueDurability durability)> keys);
 

@@ -420,7 +420,7 @@ public sealed class TestInterNodeCoalescing
         public override Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
             HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp,
             KeyValueDurability durability, CancellationToken cancellationToken,
-            string coordinatorKey = "", TransactionOperationId operationId = default)
+            string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default)
             => Task.FromResult<(KeyValueResponseType, ReadOnlyKeyValueEntry?)>((
                 KeyValueResponseType.Get,
                 new ReadOnlyKeyValueEntry([1, 2, 3], 1, HLCTimestamp.Zero, HLCTimestamp.Zero, new HLCTimestamp(1, 7000, 4), KeyValueState.Set)));

@@ -228,6 +228,9 @@ message GrpcTryGetKeyValueRequest {
   string CoordinatorKey = 10;
   uint64 OperationIdHigh = 11;
   uint64 OperationIdLow = 12;
+  // How the read treats the transaction's own state at ReadTimestamp. An older receiver ignores it and
+  // serves the default shape.
+  GrpcKeyValueReadMode ReadMode = 13;
 }
 
 message GrpcTryGetKeyValueResponse {
@@ -324,6 +327,9 @@ message GrpcTryProbeManyRequest {
   GrpcKeyValueDurability Durability = 8;
   GrpcProbeLockMode LockMode = 9;
   int32 ExpiresMs = 10;
+  // How each key's read treats the transaction's own state at the read timestamp. An older receiver
+  // ignores it and serves the default shape.
+  GrpcKeyValueReadMode ReadMode = 11;
 }
 
 enum GrpcProbeLockMode {
@@ -331,6 +337,15 @@ enum GrpcProbeLockMode {
   GRPC_PROBE_LOCK_SHARED = 1;
   // Replay of a probe whose locks a completed operation recorded: renew a held lock over the same bounds, never take one.
   GRPC_PROBE_LOCK_SHARED_REENTRY_ONLY = 2;
+}
+
+// How a read at a timestamp treats the reading transaction's own state. Mirrors KeyValueReadMode.
+enum GrpcKeyValueReadMode {
+  // Latest read or as-of read as before: a latest read pins what it observes, an as-of read shows no own write.
+  GRPC_READ_MODE_DEFAULT = 0;
+  // One timestamp per statement: own staged writes visible, every other key at the timestamp, earlier read
+  // observations neither served, checked nor created. Requires a read timestamp.
+  GRPC_READ_MODE_STATEMENT_SNAPSHOT = 1;
 }
 
 message GrpcTryProbeManyResponse {
@@ -380,6 +395,9 @@ message GrpcTryProbeManyRangesRequest {
   GrpcKeyValueDurability Durability = 9;
   GrpcProbeLockMode LockMode = 10;
   int32 ExpiresMs = 11;
+  // How each seek treats the transaction's own state at the read timestamp. An older receiver ignores it
+  // and serves the default shape.
+  GrpcKeyValueReadMode ReadMode = 12;
 }
 
 message GrpcProbeRange {
@@ -940,6 +958,9 @@ message GrpcGetByRangeRequest {
   // Mint the page's read snapshot on the serving leader instead of using ReadTimestamp.
   // Internal to inter-node forwarding; clients leave it unset.
   bool SnapshotAtLeader = 17;
+  // How the page treats the transaction's own state at ReadTimestamp. An older receiver ignores it and
+  // serves the default shape.
+  GrpcKeyValueReadMode ReadMode = 18;
 }
 
 // What one range-scan page cost the serving node. Advisory: it never changes paging or results.

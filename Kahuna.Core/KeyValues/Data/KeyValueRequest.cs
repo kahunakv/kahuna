@@ -82,6 +82,14 @@ public sealed class KeyValueRequest : IConsistentHashable
     public HLCTimestamp ReadTimestamp { get; internal set; }
 
     /// <summary>
+    /// How a point read, a batched probe, a range page or a batched range probe treats the reading transaction's
+    /// own state at <see cref="ReadTimestamp"/>. <see cref="KeyValueReadMode.StatementSnapshot"/> shows the
+    /// transaction's own staged writes and ignores its read pins; it is malformed without a read timestamp
+    /// (see <see cref="KeyValueReadModeChecks"/>). Unused by every other request type.
+    /// </summary>
+    public KeyValueReadMode ReadMode { get; internal set; }
+
+    /// <summary>
     /// Prefix scans: when set, entries whose newest visible state is <see cref="KeyValueState.Deleted"/>
     /// are returned with that state instead of being filtered out. The cluster-wide scan union needs
     /// tombstones to travel so a node that has applied a committed delete can suppress a stale live
@@ -312,6 +320,7 @@ public sealed class KeyValueRequest : IConsistentHashable
         RangeLockImportList = null;
         Limit = 0;
         ReadTimestamp = HLCTimestamp.Zero;
+        ReadMode = KeyValueReadMode.Default;
         IncludeTombstones = false;
         ForeignDecisionHint = default;
         ForeignScanDecisions = null;

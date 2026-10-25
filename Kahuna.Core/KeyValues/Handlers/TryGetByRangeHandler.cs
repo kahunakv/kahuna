@@ -24,6 +24,12 @@ internal sealed class TryGetByRangeHandler : BaseHandler
 
     public ValueTask<KeyValueResponse> Execute(KeyValueRequest message)
     {
+        // A statement read without a timestamp has no snapshot to read at and would silently become a pinning
+        // latest scan, so the request is refused rather than reinterpreted.
+        if (!KeyValueReadModeChecks.IsWellFormed(message.ReadMode, message.ReadTimestamp))
+            return ValueTask.FromResult(new KeyValueResponse(KeyValueResponseType.InvalidInput,
+                new KeyValueGetByRangeResult(KeyValueResponseType.InvalidInput, [], null, false)));
+
         if (message.Durability == KeyValueDurability.Ephemeral)
             return GetByRangeEphemeral(message);
 
@@ -51,6 +57,9 @@ internal sealed class TryGetByRangeHandler : BaseHandler
         // Zero ⟹ "latest" (legacy / non-paged behaviour, no snapshot filtering).
         HLCTimestamp snapshotTs = message.ReadTimestamp.IsNull() ? currentTime : message.ReadTimestamp;
 
+        // A statement read serves the transaction's own staged writes and nothing else of its MVCC state.
+        bool statementRead = KeyValueReadModeChecks.IsStatementRead(message.ReadMode, message.TransactionId, message.ReadTimestamp);
+
         (string memStart, bool memStartIncl, string? memEnd, bool memEndIncl) = ComputeBounds(message);
 
         List<(string, ReadOnlyKeyValueEntry)> items = [];
@@ -77,7 +86,9 @@ internal sealed class TryGetByRangeHandler : BaseHandler
             inspected++;
             tally.EntriesInspected++;
 
-            KeyValueResponse response = await Get(currentTime, message.TransactionId, key, message.Durability, snapshotTs, snapshotRead: !message.ReadTimestamp.IsNull());
+            KeyValueResponse response = await Get(
+                currentTime, message.TransactionId, key, message.Durability, snapshotTs,
+                snapshotRead: !message.ReadTimestamp.IsNull(), stagedWritesOnly: statementRead);
 
             if (response.Type == KeyValueResponseType.DoesNotExist)
             {
@@ -147,7 +158,7 @@ internal sealed class TryGetByRangeHandler : BaseHandler
                 PreparedIntentScanMerge.ScanMergeResult merge = PreparedIntentScanMerge.Merge(
                     items, ranged, snapshotTs, currentTime, limit, kvHasMore, kvCeilingKey,
                     i => DurableReadVisibility.ScanDecision(context, message.ForeignScanDecisions, i),
-                    k => DurableSnapshotSource.ReaderHasOwnVersion(context, k, message.TransactionId),
+                    k => DurableSnapshotSource.ReaderHasOwnVersion(context, k, message.TransactionId, statementRead),
                     i => DurableSnapshotSource.HeadSupersedesIntent(
                         context, i, excludedHeads: null, message.ReadTimestamp.IsNull() ? HLCTimestamp.Zero : message.ReadTimestamp));
                 if (merge.MustRetry)
@@ -247,7 +258,8 @@ internal sealed class TryGetByRangeHandler : BaseHandler
             message.TransactionId, snapshotTs, currentTime,
             isSnapshotRead: !message.ReadTimestamp.IsNull(),
             memItems, memEnd, memEndIncl, memBatch, memMaybeMore, diskCursor,
-            promise, message.ForeignScanDecisions);
+            promise, message.ForeignScanDecisions,
+            stagedWritesOnly: KeyValueReadModeChecks.IsStatementRead(message.ReadMode, message.TransactionId, message.ReadTimestamp));
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -514,6 +526,8 @@ internal sealed class TryGetByRangeHandler : BaseHandler
     /// <paramref name="snapshotRead"/> is <c>true</c> when the caller supplied an explicit AS-OF
     /// timestamp (<c>message.ReadTimestamp != Zero</c>); when <c>false</c> an ordinary RYOW/MVCC
     /// scan is in progress and the transactional block runs normally.
+    /// <paramref name="stagedWritesOnly"/> is <c>true</c> for a statement read: the transaction's MVCC entry
+    /// is served only when it holds a staged write, and a read pin is skipped as if the key were never read.
     /// </summary>
     private async Task<KeyValueResponse> Get(
         HLCTimestamp currentTime,
@@ -522,7 +536,8 @@ internal sealed class TryGetByRangeHandler : BaseHandler
         KeyValueDurability durability,
         HLCTimestamp readTimestamp,
         ReadOnlyKeyValueEntry? keyValueEntry = null,
-        bool snapshotRead = false)
+        bool snapshotRead = false,
+        bool stagedWritesOnly = false)
     {
         // populateCache: false — this is a read-only scan. Inserting disk entries into the
         // store here would mutate the BTree while GetByRangePersistent is lazily enumerating it.
@@ -564,11 +579,15 @@ internal sealed class TryGetByRangeHandler : BaseHandler
             // Check for an existing MVCC entry first. This covers RYOW (own uncommitted writes)
             // and prior read-snapshots for OCC conflict detection. Runs for both AS-OF and
             // non-AS-OF scans: an own write must be visible regardless of the snapshot timestamp.
+            // A statement read takes only a staged write from here; its read pins read as committed
+            // state at the timestamp below, so a later statement sees later commits and is never
+            // aborted for a pin an earlier statement left.
             if (entry is not null)
             {
                 entry.MvccEntries ??= new();
 
-                if (entry.MvccEntries.TryGetValue(transactionId, out KeyValueMvccEntry? mvccEntry))
+                if (entry.MvccEntries.TryGetValue(transactionId, out KeyValueMvccEntry? mvccEntry)
+                    && (!stagedWritesOnly || mvccEntry.StagedUnder is not null))
                 {
                     if (entry.Revision > mvccEntry.Revision)
                         return KeyValueStaticResponses.AbortedResponse;

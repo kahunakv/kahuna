@@ -88,10 +88,11 @@ public sealed partial class KahunaManager
         KeyValueDurability durability,
         CancellationToken cancellationToken,
         string coordinatorKey = "",
-        TransactionOperationId operationId = default
+        TransactionOperationId operationId = default,
+        KeyValueReadMode readMode = KeyValueReadMode.Default
     )
     {
-        return keyValues.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken, coordinatorKey, operationId);
+        return keyValues.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken, coordinatorKey, operationId, readMode);
     }
 
     public Task<KeyValueProbeResult[]> LocateAndTryProbeMany(
@@ -103,10 +104,11 @@ public sealed partial class KahunaManager
         KeyValueDurability durability,
         CancellationToken cancellationToken,
         string coordinatorKey = "",
-        TransactionOperationId operationId = default
+        TransactionOperationId operationId = default,
+        KeyValueReadMode readMode = KeyValueReadMode.Default
     )
     {
-        return keyValues.LocateAndTryProbeMany(transactionId, readTimestamp, keys, lockMode, expiresMs, durability, cancellationToken, coordinatorKey, operationId);
+        return keyValues.LocateAndTryProbeMany(transactionId, readTimestamp, keys, lockMode, expiresMs, durability, cancellationToken, coordinatorKey, operationId, readMode);
     }
 
     public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryGetManyValues(
@@ -372,9 +374,10 @@ public sealed partial class KahunaManager
         CancellationToken cancellationToken,
         string coordinatorKey = "",
         TransactionOperationId operationId = default,
-        bool snapshotAtLeader = false)
+        bool snapshotAtLeader = false,
+        KeyValueReadMode readMode = KeyValueReadMode.Default)
     {
-        return keyValues.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken, coordinatorKey, operationId, snapshotAtLeader);
+        return keyValues.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken, coordinatorKey, operationId, snapshotAtLeader, readMode);
     }
 
     public Task<KeyValueProbeRangeResult[]> LocateAndTryProbeManyRanges(
@@ -387,10 +390,11 @@ public sealed partial class KahunaManager
         KeyValueDurability durability,
         CancellationToken cancellationToken,
         string coordinatorKey = "",
-        TransactionOperationId operationId = default
+        TransactionOperationId operationId = default,
+        KeyValueReadMode readMode = KeyValueReadMode.Default
     )
     {
-        return keyValues.LocateAndTryProbeManyRanges(transactionId, readTimestamp, prefix, seeks, lockMode, expiresMs, durability, cancellationToken, coordinatorKey, operationId);
+        return keyValues.LocateAndTryProbeManyRanges(transactionId, readTimestamp, prefix, seeks, lockMode, expiresMs, durability, cancellationToken, coordinatorKey, operationId, readMode);
     }
 
     public IAsyncEnumerable<(string Key, ReadOnlyKeyValueEntry Entry)> LocateAndScanRange(
@@ -406,9 +410,10 @@ public sealed partial class KahunaManager
         CancellationToken ct,
         string coordinatorKey = "",
         TransactionOperationId operationId = default,
-        KeyValueScanObservationSink? observations = null)
+        KeyValueScanObservationSink? observations = null,
+        KeyValueReadMode readMode = KeyValueReadMode.Default)
     {
-        return keyValues.LocateAndScanRange(txId, prefix, startKey, startInclusive, endKey, endInclusive, pageSize, readTimestamp, durability, ct, coordinatorKey, operationId, observations);
+        return keyValues.LocateAndScanRange(txId, prefix, startKey, startInclusive, endKey, endInclusive, pageSize, readTimestamp, durability, ct, coordinatorKey, operationId, observations, readMode);
     }
 
     /// <summary>
@@ -477,10 +482,11 @@ public sealed partial class KahunaManager
         string key,
         long revision,
         HLCTimestamp readTimestamp,
-        KeyValueDurability durability
+        KeyValueDurability durability,
+        KeyValueReadMode readMode = KeyValueReadMode.Default
     )
     {
-        return keyValues.TryGetValue(transactionId, key, revision, readTimestamp, durability);
+        return keyValues.TryGetValue(transactionId, key, revision, readTimestamp, durability, readMode);
     }
 
     public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryGetManyValues(

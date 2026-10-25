@@ -599,7 +599,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             (KeyValueDurability)request.Durability,
             context.CancellationToken,
             request.CoordinatorKey,
-            new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
+            new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow),
+            (KeyValueReadMode)request.ReadMode
         );
         
         if (keyValueContext is not null)
@@ -678,7 +679,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             (KeyValueProbeLock)request.LockMode,
             request.ExpiresMs,
             (KeyValueDurability)request.Durability,
-            context.CancellationToken
+            context.CancellationToken,
+            readMode: (KeyValueReadMode)request.ReadMode
         );
 
         GrpcTryProbeManyResponse response = new();
@@ -704,7 +706,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             (KeyValueProbeLock)request.LockMode,
             request.ExpiresMs,
             (KeyValueDurability)request.Durability,
-            context.CancellationToken
+            context.CancellationToken,
+            readMode: (KeyValueReadMode)request.ReadMode
         );
 
         GrpcTryProbeManyRangesResponse response = new();
@@ -1963,7 +1966,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 readTimestamp,
                 (KeyValueDurability)request.Durability,
                 context.CancellationToken,
-                snapshotAtLeader: request.SnapshotAtLeader);
+                snapshotAtLeader: request.SnapshotAtLeader,
+                readMode: (KeyValueReadMode)request.ReadMode);
 
             GrpcGetByRangePageResponse pageResponse = new()
             {
@@ -2021,7 +2025,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             context.CancellationToken,
             request.CoordinatorKey,
             new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow),
-            request.SnapshotAtLeader);
+            request.SnapshotAtLeader,
+            (KeyValueReadMode)request.ReadMode);
 
         GrpcGetByRangeResponse response = new()
         {

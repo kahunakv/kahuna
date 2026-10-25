@@ -55,6 +55,12 @@ internal sealed class RangeScanContinuation : ReadContinuation
     private readonly HLCTimestamp currentTime;
     private readonly bool isSnapshotRead;
 
+    /// <summary>
+    /// True for a statement read: the transaction's MVCC entry on a key is served only when it holds a staged
+    /// write, and a read pin is skipped as if the key were never read, so the page reads it at the snapshot.
+    /// </summary>
+    private readonly bool stagedWritesOnly;
+
     // Heads of rows this scan evaluated and left out of its page, kept across disk pages for the intent merge.
     // Allocated only while prepared intents linger (see DurableSnapshotSource.RecordExcludedHead).
     private Dictionary<string, ExcludedHead>? excludedHeads;
@@ -160,7 +166,8 @@ internal sealed class RangeScanContinuation : ReadContinuation
         bool memMaybeMore,
         string diskCursor,
         KeyValueReplyRef promise,
-        IReadOnlyDictionary<(HLCTimestamp TransactionId, long Epoch), TransactionDecision>? routedDecisions = null) : base(promise)
+        IReadOnlyDictionary<(HLCTimestamp TransactionId, long Epoch), TransactionDecision>? routedDecisions = null,
+        bool stagedWritesOnly = false) : base(promise)
     {
         this.prefix = prefix;
         this.limit = limit;
@@ -181,6 +188,7 @@ internal sealed class RangeScanContinuation : ReadContinuation
         this.memMaybeMore = memMaybeMore;
         this.diskCursor = diskCursor;
         this.routedDecisions = routedDecisions;
+        this.stagedWritesOnly = stagedWritesOnly;
         this.accumulated = [];
 
         // The first page seeks at the request's start key; when that start is exclusive, the row at the
@@ -549,7 +557,7 @@ internal sealed class RangeScanContinuation : ReadContinuation
                 PreparedIntentScanMerge.ScanMergeResult merge = PreparedIntentScanMerge.Merge(
                     accumulated, ranged, snapshotTs, currentTime, limit, kvHasMore, kvCeilingKey,
                     i => DurableReadVisibility.ScanDecision(context, routedDecisions, i),
-                    k => DurableSnapshotSource.ReaderHasOwnVersion(context, k, transactionId),
+                    k => DurableSnapshotSource.ReaderHasOwnVersion(context, k, transactionId, stagedWritesOnly),
                     i => DurableSnapshotSource.HeadSupersedesIntent(context, i, excludedHeads, isSnapshotRead ? snapshotTs : HLCTimestamp.Zero));
                 if (merge.MustRetry)
                     return new(KeyValueResponseType.MustRetry,
@@ -751,14 +759,17 @@ internal sealed class RangeScanContinuation : ReadContinuation
                 return KeyValueStaticResponses.WaitingForReplicationResponse;
         }
 
-        // Transactional MVCC: read-your-own-writes and OCC snapshot tracking.
+        // Transactional MVCC: read-your-own-writes and OCC snapshot tracking. A statement read takes only a
+        // staged write from here; its read pins read as committed state at the snapshot below, so a later
+        // statement sees later commits and is never aborted for a pin an earlier statement left.
         if (transactionId != HLCTimestamp.Zero)
         {
             if (entry is not null)
             {
                 entry.MvccEntries ??= new();
 
-                if (entry.MvccEntries.TryGetValue(transactionId, out KeyValueMvccEntry? existing))
+                if (entry.MvccEntries.TryGetValue(transactionId, out KeyValueMvccEntry? existing)
+                    && (!stagedWritesOnly || existing.StagedUnder is not null))
                 {
                     if (entry.Revision > existing.Revision)
                         return KeyValueStaticResponses.AbortedResponse;

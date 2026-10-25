@@ -238,10 +238,16 @@ internal sealed class LocatorScanOperations
         HLCTimestamp readTimestamp,
         KeyValueDurability durability,
         CancellationToken cancellationToken,
-        bool snapshotAtLeader = false)
+        bool snapshotAtLeader = false,
+        KeyValueReadMode readMode = KeyValueReadMode.Default)
     {
         if (string.IsNullOrEmpty(prefix))
             return new(KeyValueResponseType.Errored, [], null, false);
+
+        // A statement read without a timestamp has no snapshot to read at; refused before it is routed.
+        // A leader-minted snapshot supplies the timestamp on the serving node, so it is well formed here.
+        if (!snapshotAtLeader && !KeyValueReadModeChecks.IsWellFormed(readMode, readTimestamp))
+            return new(KeyValueResponseType.InvalidInput, [], null, false);
 
         // Fast path: unsplit space (or hash space) — single partition, no fan-out overhead.
         if (RangeRouting.IsPrefixOpSafe(keySpaceRegistry, manager.RangeMapStore.Current, prefix))
@@ -249,7 +255,7 @@ internal sealed class LocatorScanOperations
             int singlePartitionId = routing.RoutePrefixKey(prefix);
 
             if (!raft.Joined || await routing.ConfirmLeadershipForRead(singlePartitionId, cancellationToken))
-                return await manager.GetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, ServedPageSnapshot(readTimestamp, snapshotAtLeader), durability);
+                return await manager.GetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, ServedPageSnapshot(readTimestamp, snapshotAtLeader), durability, readMode);
 
             string? singleLeader = await routing.TryWaitForLeader(singlePartitionId, cancellationToken);
             if (singleLeader is null || singleLeader == raft.GetLocalEndpoint())
@@ -257,7 +263,7 @@ internal sealed class LocatorScanOperations
 
             logger.LogGetRangeKeyValueRedirected(prefix, singlePartitionId, singleLeader);
 
-            return MarkServedRemotely(await interNodeCommunication.GetByRange(singleLeader, transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken, snapshotAtLeader));
+            return MarkServedRemotely(await interNodeCommunication.GetByRange(singleLeader, transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken, snapshotAtLeader, readMode));
         }
 
         // Multi-range path: key-range space has been split; fan out across intersecting descriptors.
@@ -291,7 +297,7 @@ internal sealed class LocatorScanOperations
             KeyValueGetByRangeResult part = await QueryDescriptorRange(
                 descriptor.PartitionId, transactionId, prefix,
                 clStart, clStartInc, clEnd, clEndInc,
-                pageLimit, readTimestamp, durability, cancellationToken, snapshotAtLeader);
+                pageLimit, readTimestamp, durability, cancellationToken, snapshotAtLeader, readMode);
 
             observation = KeyValueScanObservation.Combine(observation, part.Observation);
 
@@ -352,16 +358,17 @@ internal sealed class LocatorScanOperations
         HLCTimestamp readTimestamp,
         KeyValueDurability durability,
         CancellationToken cancellationToken,
-        bool snapshotAtLeader = false)
+        bool snapshotAtLeader = false,
+        KeyValueReadMode readMode = KeyValueReadMode.Default)
     {
         if (!raft.Joined || await routing.ConfirmLeadershipForRead(partitionId, cancellationToken))
-            return await manager.GetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, ServedPageSnapshot(readTimestamp, snapshotAtLeader), durability);
+            return await manager.GetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, ServedPageSnapshot(readTimestamp, snapshotAtLeader), durability, readMode);
 
         string? leader = await routing.TryWaitForLeader(partitionId, cancellationToken);
         if (leader is null || leader == raft.GetLocalEndpoint())
             return new(KeyValueResponseType.MustRetry, [], null, false);
 
-        return MarkServedRemotely(await interNodeCommunication.GetByRange(leader, transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken, snapshotAtLeader));
+        return MarkServedRemotely(await interNodeCommunication.GetByRange(leader, transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken, snapshotAtLeader, readMode));
     }
 
     /// <summary>

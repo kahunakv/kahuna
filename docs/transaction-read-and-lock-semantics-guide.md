@@ -63,6 +63,39 @@ History suppression (`SetNoRevision`) and reclaimed revisions also limit histori
 A [snapshot hold](mvcc-snapshot-floor-guide.md) protects retained history; it does not turn a caller's
 arbitrary timestamp into a safe cluster cut or recreate already-pruned history.
 
+## Statement reads
+
+A fixed-timestamp read inside a transaction has two shapes, selected by the `readMode` parameter of
+the point read, the batched probe, the range page, the streamed scan and the batched range probe.
+
+`KeyValueReadMode.Default` is the shape described above. A default point read or probe at a timestamp
+serves the committed state at that timestamp and does not show the transaction's own staged writes.
+A default scan at a timestamp shows the transaction's own staged writes, serves a key the transaction
+read before from its pin, and answers `Aborted` when the committed head moved past that pin.
+
+`KeyValueReadMode.StatementSnapshot` gives each statement of a transaction one consistent view at one
+timestamp, which the caller mints once per statement:
+
+- The transaction's own staged writes are visible on every path: a staged value is served, a staged
+  tombstone reads as absent, and a key the transaction staged but never committed appears in a scan.
+- Every other key answers with the committed state at the timestamp, under the fixed-timestamp rules
+  above: the safe-time wait behind a foreign write intent, the history read, and the fail-closed
+  `MustRetry` answers.
+- A pin an earlier read left on a key is neither served nor checked, and the read leaves no pin behind.
+  A later statement at a later timestamp sees later commits and is never aborted for a pin. The pins
+  themselves are untouched, so a default latest read of the same key still answers `Aborted` when the
+  head moved past its pin.
+- A registered statement read records the revision it served into the read set, as a latest read does,
+  so an optimistic commit is refused when another transaction committed the key after the read. A key
+  the transaction itself wrote is validated as a write and never enters the read set. Two registered
+  statement reads of one key that served different revisions make the read set unstable, and the commit
+  is refused, as for latest reads. A registered default fixed-timestamp read records nothing.
+
+A statement read without a read timestamp is `InvalidInput` on every path. Outside a transaction the
+mode changes nothing. The mode travels on the gRPC and REST requests and on the inter-node forward; a
+node that predates the field serves the default shape, so a consumer must know that every node carries
+the field before it relies on the mode.
+
 ## Transaction locks
 
 These are key/value transaction locks, separate from the

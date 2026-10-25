@@ -99,10 +99,21 @@ internal static class DurableSnapshotSource
     /// intent has already been cleared.
     /// </summary>
     public static bool ReaderHasOwnVersion(KeyValueContext context, string key, HLCTimestamp readerTransactionId)
+        => ReaderHasOwnVersion(context, key, readerTransactionId, stagedWritesOnly: false);
+
+    /// <summary>
+    /// <see cref="ReaderHasOwnVersion(KeyValueContext, string, HLCTimestamp)"/>, restricted to a staged write when
+    /// <paramref name="stagedWritesOnly"/> is true: a statement read serves the transaction's own writes but not
+    /// its read pins, so a pin must not keep a committed foreign intent that is visible at the read timestamp
+    /// out of the page. A staged write is an MVCC entry whose <see cref="KeyValueMvccEntry.StagedUnder"/> is set;
+    /// every staged set, tombstone and extend sets it, and a pin leaves it null.
+    /// </summary>
+    public static bool ReaderHasOwnVersion(KeyValueContext context, string key, HLCTimestamp readerTransactionId, bool stagedWritesOnly)
         => readerTransactionId != HLCTimestamp.Zero
            && context.Store.TryGetValue(key, out KeyValueEntry? entry)
            && entry.MvccEntries is { } mvcc
-           && mvcc.ContainsKey(readerTransactionId);
+           && mvcc.TryGetValue(readerTransactionId, out KeyValueMvccEntry? own)
+           && (!stagedWritesOnly || own.StagedUnder is not null);
 
     /// <summary>
     /// True when a committed head of <paramref name="intent"/>'s key that already replaced the intent is known, so

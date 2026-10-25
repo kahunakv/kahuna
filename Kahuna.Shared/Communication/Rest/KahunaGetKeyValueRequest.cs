@@ -25,6 +25,12 @@ public sealed class KahunaGetKeyValueRequest
     [JsonPropertyName("durability")]
     public KeyValueDurability Durability { get; set; }
 
+    /// <summary>
+    /// How the read treats the transaction's own state at <see cref="ReadTimestamp"/>. Absent means the default.
+    /// </summary>
+    [JsonPropertyName("readMode")]
+    public KeyValueReadMode ReadMode { get; set; }
+
     [JsonPropertyName("coordinatorKey")]
     public string? CoordinatorKey { get; set; }
 

@@ -320,13 +320,20 @@ internal sealed class RoutedScanOperations
         CancellationToken cancellationToken) =>
         locator.LocateAndGetByBucket(transactionId, prefixedKey, HLCTimestamp.Zero, durability, beforeQuery, afterDescriptor, cancellationToken);
 
-    public Task<KeyValueGetByRangeResult> LocateAndGetByRange(HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default, bool snapshotAtLeader = false)
+    public Task<KeyValueGetByRangeResult> LocateAndGetByRange(HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default, bool snapshotAtLeader = false, KeyValueReadMode readMode = KeyValueReadMode.Default)
     {
-        if (string.IsNullOrEmpty(coordinatorKey))
-            return locator.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken, snapshotAtLeader);
+        // A statement read without a timestamp has no snapshot to read at; refused before it registers or routes.
+        // A leader-minted snapshot supplies the timestamp on the serving node, so it is well formed here.
+        if (!snapshotAtLeader && !KeyValueReadModeChecks.IsWellFormed(readMode, readTimestamp))
+            return Task.FromResult(new KeyValueGetByRangeResult(KeyValueResponseType.InvalidInput, [], null, false));
 
-        // A single-shot registered scan folds observations exactly when it is a latest read.
-        return RegisterAndGetByRange(transactionId, coordinatorKey, operationId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, readTimestamp.IsNull(), cancellationToken, snapshotAtLeader);
+        if (string.IsNullOrEmpty(coordinatorKey))
+            return locator.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken, snapshotAtLeader, readMode);
+
+        // A single-shot registered scan folds observations when it is a latest read or a statement read: both are
+        // the transaction's own reads, and the rows they serve are what commit validation compares against.
+        return RegisterAndGetByRange(transactionId, coordinatorKey, operationId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability,
+            RoutedReadOperations.RecordsReadObservation(readTimestamp, readMode), cancellationToken, snapshotAtLeader, readMode);
     }
 
     /// <summary>
@@ -346,11 +353,11 @@ internal sealed class RoutedScanOperations
         HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string prefix,
         string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit,
         HLCTimestamp readTimestamp, KeyValueDurability durability, bool recordObservations, CancellationToken cancellationToken,
-        bool snapshotAtLeader = false)
+        bool snapshotAtLeader = false, KeyValueReadMode readMode = KeyValueReadMode.Default)
     {
         (OperationRegistrationOutcome outcome, _, _, _, _, _) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.Scan,
-                OperationDigest.ForRangeScan(prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability), cancellationToken);
+                OperationDigest.ForRangeScan(prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, readMode), cancellationToken);
 
         // Pending means an earlier attempt scanned but its completion did not land: re-drive it from the retry
         // cache, then re-scan below as under an already-completed id.
@@ -368,7 +375,7 @@ internal sealed class RoutedScanOperations
                 // An already-completed scan re-executes the read without re-folding observations: the
                 // first-recorded observations are authoritative for commit validation even if this
                 // re-execution returns a newer value.
-                return await locator.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken, snapshotAtLeader);
+                return await locator.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken, snapshotAtLeader, readMode);
             case OperationRegistrationOutcome.RejectedCapacity:
                 return new KeyValueGetByRangeResult(KeyValueResponseType.MustRetry, [], null, false);
             case OperationRegistrationOutcome.RejectedSessionBudget:
@@ -384,7 +391,7 @@ internal sealed class RoutedScanOperations
         // This frame is the registration's only completer, so a throw from the work must release it.
         try
         {
-            result = await locator.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken, snapshotAtLeader);
+            result = await locator.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken, snapshotAtLeader, readMode);
         }
         catch
         {
@@ -437,18 +444,22 @@ internal sealed class RoutedScanOperations
         KeyValueDurability durability,
         CancellationToken cancellationToken,
         string coordinatorKey = "",
-        TransactionOperationId operationId = default
+        TransactionOperationId operationId = default,
+        KeyValueReadMode readMode = KeyValueReadMode.Default
     )
     {
+        if (!KeyValueReadModeChecks.IsWellFormed(readMode, readTimestamp))
+            return Task.FromResult(BuildProbeRangesRejection(seeks.Count, KeyValueResponseType.InvalidInput));
+
         RegistrationRouting routing = ClassifyRegistration(transactionId, coordinatorKey, operationId);
         if (routing is RegistrationRouting.Legacy)
-            return locator.LocateAndTryProbeManyRanges(transactionId, readTimestamp, prefix, seeks, lockMode, expiresMs, durability, cancellationToken);
+            return locator.LocateAndTryProbeManyRanges(transactionId, readTimestamp, prefix, seeks, lockMode, expiresMs, durability, cancellationToken, readMode);
 
         // The re-entry-only mode is the replay a registered probe derives for itself; a caller never asks for it.
         if (routing is RegistrationRouting.Malformed || lockMode == KeyValueProbeLock.SharedReentryOnly)
             return Task.FromResult(BuildProbeRangesRejection(seeks.Count, KeyValueResponseType.InvalidInput));
 
-        return RegisterAndTryProbeManyRanges(transactionId, coordinatorKey, operationId, readTimestamp, prefix, seeks, lockMode, expiresMs, durability, cancellationToken);
+        return RegisterAndTryProbeManyRanges(transactionId, coordinatorKey, operationId, readTimestamp, prefix, seeks, lockMode, expiresMs, durability, readMode, cancellationToken);
     }
 
     private static KeyValueProbeRangeResult[] BuildProbeRangesRejection(int count, KeyValueResponseType type)
@@ -478,9 +489,9 @@ internal sealed class RoutedScanOperations
     private async Task<KeyValueProbeRangeResult[]> RegisterAndTryProbeManyRanges(
         HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId,
         HLCTimestamp readTimestamp, string prefix, IReadOnlyList<KeyValueProbeRange> seeks, KeyValueProbeLock lockMode,
-        int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
+        int expiresMs, KeyValueDurability durability, KeyValueReadMode readMode, CancellationToken cancellationToken)
     {
-        byte[] digest = OperationDigest.ForProbeManyRanges(prefix, seeks, readTimestamp, lockMode, expiresMs, durability);
+        byte[] digest = OperationDigest.ForProbeManyRanges(prefix, seeks, readTimestamp, lockMode, expiresMs, durability, readMode);
 
         (OperationRegistrationOutcome outcome, _, _, _, _, TransactionConflictPolicy sessionPolicy) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.ProbeManyRanges, digest, cancellationToken);
@@ -528,7 +539,7 @@ internal sealed class RoutedScanOperations
         try
         {
             using (LockGrantScope.Begin(out grants))
-                results = await locator.LocateAndTryProbeManyRanges(transactionId, readTimestamp, prefix, seeks, effectiveLock, expiresMs, durability, cancellationToken);
+                results = await locator.LocateAndTryProbeManyRanges(transactionId, readTimestamp, prefix, seeks, effectiveLock, expiresMs, durability, cancellationToken, readMode);
         }
         catch
         {
@@ -544,6 +555,7 @@ internal sealed class RoutedScanOperations
         List<KeyValueTransactionReadKey>? observations = null;
         List<(RangeLockKey Range, RangeLockMode Mode)>? acquired = null;
         bool served = false;
+        bool foldsReads = RoutedReadOperations.RecordsReadObservation(readTimestamp, readMode);
 
         for (int i = 0; i < results.Length; i++)
         {
@@ -560,8 +572,9 @@ internal sealed class RoutedScanOperations
 
             served = true;
 
-            // A snapshot probe owns no live transactional MVCC, so its entries contribute no read dependencies.
-            if (!readTimestamp.IsNull())
+            // A plain as-of probe owns no live transactional MVCC, so its entries contribute no read dependencies;
+            // a latest probe and a statement probe fold theirs (see RoutedReadOperations.RecordsReadObservation).
+            if (!foldsReads)
                 continue;
 
             foreach ((string itemKey, ReadOnlyKeyValueEntry entry) in result.Items)
@@ -576,9 +589,10 @@ internal sealed class RoutedScanOperations
             }
         }
 
-        // A latest probe that served no seek and took no lock has no effect: cancel the registration so a same-id retry
-        // registers as new. A lock is an effect even when every read under it waited, so it always completes.
-        KeyValueResponseType cachedType = readTimestamp.IsNull() && !served && acquired is null
+        // A folding probe that served no seek and took no lock has no effect: cancel the registration so a same-id
+        // retry registers as new and can still fold. A lock is an effect even when every read under it waited, so it
+        // always completes.
+        KeyValueResponseType cachedType = foldsReads && !served && acquired is null
             ? KeyValueResponseType.MustRetry
             : KeyValueResponseType.Get;
 
@@ -626,8 +640,16 @@ internal sealed class RoutedScanOperations
         [EnumeratorCancellation] CancellationToken ct,
         string coordinatorKey = "",
         TransactionOperationId operationId = default,
-        KeyValueScanObservationSink? observations = null)
+        KeyValueScanObservationSink? observations = null,
+        KeyValueReadMode readMode = KeyValueReadMode.Default)
     {
+        // A statement scan without a timestamp has no snapshot to read at: the first page would latch a fresh
+        // snapshot of its own and the scan would silently become a pinning latest scan. Refused up front.
+        if (!KeyValueReadModeChecks.IsWellFormed(readMode, readTimestamp))
+            throw new KahunaServerException(
+                $"Range scan over '{prefix}' asked for a statement read without a read timestamp.",
+                KeyValueResponseType.InvalidInput);
+
         string? cursorKey       = startKey;
         bool    cursorInclusive = startInclusive;
         // Seed from caller's T when supplied; Zero means "capture on first successful page".
@@ -644,11 +666,12 @@ internal sealed class RoutedScanOperations
         // so it needs a distinct, deterministic operationId derived from the caller's base id and the page
         // number. An empty coordinatorKey means "legacy raw paging" and never registers.
         bool registered         = !string.IsNullOrEmpty(coordinatorKey);
-        // Fold every page's rows as read dependencies exactly when the caller asked for a latest scan.
-        // A latest scan latches a snapshot on page 0 for a consistent view, so pages 1+ read as of that
-        // pinned timestamp — but they are still latest-scan observations and must fold. A genuine snapshot
-        // scan (caller pinned readTimestamp) folds nothing.
-        bool foldObservations   = readTimestamp.IsNull();
+        // Fold every page's rows as read dependencies when the caller asked for a latest scan or a statement
+        // scan. A latest scan latches a snapshot on page 0 for a consistent view, so pages 1+ read as of that
+        // pinned timestamp — but they are still latest-scan observations and must fold. A statement scan reads
+        // every page at the statement's timestamp and folds the rows it served. A plain as-of scan (caller
+        // pinned readTimestamp) folds nothing.
+        bool foldObservations   = RoutedReadOperations.RecordsReadObservation(readTimestamp, readMode);
         int pageIndex           = 0;
         // What the current page's refused attempts cost, and how many this loop retried. Reset with the
         // back-off when a page is served.
@@ -664,12 +687,12 @@ internal sealed class RoutedScanOperations
                     txId, coordinatorKey, operationId.Derive(pageIndex), prefix,
                     cursorKey, cursorInclusive,
                     endKey, endInclusive,
-                    pageSize, snapshotTs, durability, foldObservations, ct)
+                    pageSize, snapshotTs, durability, foldObservations, ct, readMode: readMode)
                 : await locator.LocateAndGetByRange(
                     txId, prefix,
                     cursorKey, cursorInclusive,
                     endKey, endInclusive,
-                    pageSize, snapshotTs, durability, ct);
+                    pageSize, snapshotTs, durability, ct, readMode: readMode);
 
             if (TestScanPageInterceptor is not null)
                 page = TestScanPageInterceptor(pageIndex, page);

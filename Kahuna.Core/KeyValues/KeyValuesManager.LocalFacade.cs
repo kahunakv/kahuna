@@ -62,9 +62,10 @@ internal sealed partial class KeyValuesManager
         string key,
         long revision,
         HLCTimestamp readTimestamp,
-        KeyValueDurability durability
+        KeyValueDurability durability,
+        KeyValueReadMode readMode = KeyValueReadMode.Default
     ) =>
-        localKeyValueReads.TryGetValue(transactionId, key, revision, readTimestamp, durability);
+        localKeyValueReads.TryGetValue(transactionId, key, revision, readTimestamp, durability, readMode);
 
     /// <summary>
     /// <see cref="TryGetValue"/> plus which step answered it (the published head record or an actor round trip),
@@ -75,9 +76,10 @@ internal sealed partial class KeyValuesManager
         string key,
         long revision,
         HLCTimestamp readTimestamp,
-        KeyValueDurability durability
+        KeyValueDurability durability,
+        KeyValueReadMode readMode = KeyValueReadMode.Default
     ) =>
-        localKeyValueReads.TryGetValueLocal(transactionId, key, revision, readTimestamp, durability);
+        localKeyValueReads.TryGetValueLocal(transactionId, key, revision, readTimestamp, durability, readMode);
 
     public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryExistsValue(
         HLCTimestamp transactionId,
@@ -101,9 +103,10 @@ internal sealed partial class KeyValuesManager
         IReadOnlyList<string> keys,
         KeyValueProbeLock lockMode,
         int expiresMs,
-        KeyValueDurability durability
+        KeyValueDurability durability,
+        KeyValueReadMode readMode = KeyValueReadMode.Default
     ) =>
-        localKeyValueReads.TryProbeMany(transactionId, readTimestamp, keys, lockMode, expiresMs, durability);
+        localKeyValueReads.TryProbeMany(transactionId, readTimestamp, keys, lockMode, expiresMs, durability, readMode);
 
     public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryExistsManyValues(
         HLCTimestamp transactionId,
@@ -340,8 +343,9 @@ internal sealed partial class KeyValuesManager
         bool endInclusive,
         int limit,
         HLCTimestamp readTimestamp,
-        KeyValueDurability durability) =>
-        localScans.GetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability);
+        KeyValueDurability durability,
+        KeyValueReadMode readMode = KeyValueReadMode.Default) =>
+        localScans.GetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, readMode);
 
     public Task<KeyValueProbeRangeResult[]> TryProbeManyRanges(
         HLCTimestamp transactionId,
@@ -350,8 +354,9 @@ internal sealed partial class KeyValuesManager
         IReadOnlyList<KeyValueProbeRange> seeks,
         KeyValueProbeLock lockMode,
         int expiresMs,
-        KeyValueDurability durability) =>
-        localScans.TryProbeManyRanges(transactionId, readTimestamp, prefix, seeks, lockMode, expiresMs, durability);
+        KeyValueDurability durability,
+        KeyValueReadMode readMode = KeyValueReadMode.Default) =>
+        localScans.TryProbeManyRanges(transactionId, readTimestamp, prefix, seeks, lockMode, expiresMs, durability, readMode);
 
 
     public Task<(KeyValueResponseType, TransactionHandle)> LocateAndStartTransaction(KeyValueTransactionOptions options, CancellationToken cancellationToken) =>

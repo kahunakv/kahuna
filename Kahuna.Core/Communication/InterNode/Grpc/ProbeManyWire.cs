@@ -22,7 +22,8 @@ internal static class ProbeManyWire
         IReadOnlyList<string> keys,
         KeyValueProbeLock lockMode,
         int expiresMs,
-        KeyValueDurability durability)
+        KeyValueDurability durability,
+        KeyValueReadMode readMode = KeyValueReadMode.Default)
     {
         GrpcTryProbeManyRequest request = new()
         {
@@ -34,7 +35,8 @@ internal static class ProbeManyWire
             ReadTimestampCounter = readTimestamp.C,
             Durability = (GrpcKeyValueDurability)durability,
             LockMode = (GrpcProbeLockMode)lockMode,
-            ExpiresMs = expiresMs
+            ExpiresMs = expiresMs,
+            ReadMode = (GrpcKeyValueReadMode)readMode
         };
 
         Reserve(request.Keys, keys.Count);

@@ -326,7 +326,8 @@ public static class KeyValuesHandlers
                 request.Durability,
                 cancellationToken,
                 request.CoordinatorKey ?? "",
-                new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
+                new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow),
+                request.ReadMode
             );
 
             KahunaRouteHint? getRoute = RouteHintWriter.Rest(capture, KahunaRoutingDomain.KeyValue, request.Key);
@@ -544,7 +545,8 @@ public static class KeyValuesHandlers
                 request.Durability,
                 cancellationToken,
                 request.CoordinatorKey ?? "",
-                new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
+                new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow),
+                readMode: request.ReadMode
             );
 
             return new KahunaGetByRangeResponse

@@ -1010,7 +1010,8 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
         KeyValueDurability durability,
         CancellationToken cancellationToken,
         string coordinatorKey = "",
-        TransactionOperationId operationId = default
+        TransactionOperationId operationId = default,
+        KeyValueReadMode readMode = KeyValueReadMode.Default
     )
     {
         KahunaGetKeyValueRequest request = new()
@@ -1020,6 +1021,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             Revision = revision,
             ReadTimestamp = readTimestamp,
             Durability = durability,
+            ReadMode = readMode,
             CoordinatorKey = coordinatorKey,
             OperationIdHigh = operationId.High,
             OperationIdLow = operationId.Low
@@ -1519,7 +1521,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
         ).ConfigureAwait(false);
     }
 
-    public async Task<KeyValueGetByRangePageResult> GetByRange(string url, HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
+    public async Task<KeyValueGetByRangePageResult> GetByRange(string url, HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default)
     {
         KahunaGetByRangeRequest request = new()
         {
@@ -1532,6 +1534,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             Limit = limit,
             ReadTimestamp = readTimestamp,
             Durability = durability,
+            ReadMode = readMode,
             CoordinatorKey = coordinatorKey,
             OperationIdHigh = operationId.High,
             OperationIdLow = operationId.Low
@@ -1562,7 +1565,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
     /// The cursor also carries the snapshot the first page fixed, so the whole scan observes one view
     /// even though it spans several HTTP round-trips.
     /// </summary>
-    public async IAsyncEnumerable<KeyValueGetByBucketItem> ScanByRange(string url, HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int pageSize, HLCTimestamp readTimestamp, KeyValueDurability durability, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    public async IAsyncEnumerable<KeyValueGetByBucketItem> ScanByRange(string url, HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int pageSize, HLCTimestamp readTimestamp, KeyValueDurability durability, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken, KeyValueReadMode readMode = KeyValueReadMode.Default)
     {
         KahunaGetByRangeRequest request = new()
         {
@@ -1574,7 +1577,8 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             EndInclusive = endInclusive,
             Limit = pageSize,
             ReadTimestamp = readTimestamp,
-            Durability = durability
+            Durability = durability,
+            ReadMode = readMode
         };
 
         while (true)

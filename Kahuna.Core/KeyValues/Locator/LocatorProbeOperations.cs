@@ -79,12 +79,13 @@ internal sealed class LocatorProbeOperations
         KeyValueProbeLock lockMode,
         int expiresMs,
         KeyValueDurability durability,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        KeyValueReadMode readMode = KeyValueReadMode.Default
     )
     {
         KeyValueProbeResult[] results = new KeyValueProbeResult[keys.Count];
 
-        if (!IsWellFormedProbe(transactionId, keys, lockMode, expiresMs))
+        if (!IsWellFormedProbe(transactionId, keys, lockMode, expiresMs) || !KeyValueReadModeChecks.IsWellFormed(readMode, readTimestamp))
         {
             Array.Fill(results, KeyValueProbeResult.MustRetry with { Type = KeyValueResponseType.InvalidInput });
             return results;
@@ -179,7 +180,7 @@ internal sealed class LocatorProbeOperations
             }
 
             KeyValueProbeResult[] answers = await manager.TryProbeMany(
-                transactionId, readTimestamp, Subset(keys, positions), lockMode, expiresMs, durability);
+                transactionId, readTimestamp, Subset(keys, positions), lockMode, expiresMs, durability, readMode);
 
             string? firstLocked = null;
             for (int j = 0; j < positions.Count; j++)
@@ -199,7 +200,7 @@ internal sealed class LocatorProbeOperations
                 logger.LogDebug("PROBE-MANY {Count} keys redirected to {Leader}", positions.Count, leader);
 
             KeyValueProbeResult[] answers = await interNodeCommunication.TryProbeMany(
-                leader, transactionId, readTimestamp, Subset(keys, positions), lockMode, expiresMs, durability, cancellationToken);
+                leader, transactionId, readTimestamp, Subset(keys, positions), lockMode, expiresMs, durability, cancellationToken, readMode);
 
             for (int j = 0; j < positions.Count; j++)
                 results[positions[j]] = j < answers.Length ? answers[j] : KeyValueProbeResult.MustRetry;
@@ -306,13 +307,15 @@ internal sealed class LocatorProbeOperations
         KeyValueProbeLock lockMode,
         int expiresMs,
         KeyValueDurability durability,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        KeyValueReadMode readMode = KeyValueReadMode.Default
     )
     {
         KeyValueProbeRangeResult[] results = new KeyValueProbeRangeResult[seeks.Count];
 
         if (!Handlers.TryProbeManyRangesHandler.IsWellFormed(
-                prefix, seeks, transactionId, lockMode, expiresMs, configuration.MaxProbeBatchSize, configuration.MaxProbeRangeEntries))
+                prefix, seeks, transactionId, lockMode, expiresMs, configuration.MaxProbeBatchSize, configuration.MaxProbeRangeEntries,
+                readMode, readTimestamp))
         {
             Array.Fill(results, KeyValueProbeRangeResult.MustRetry with { Type = KeyValueResponseType.InvalidInput });
             return results;
@@ -448,7 +451,7 @@ internal sealed class LocatorProbeOperations
             }
 
             KeyValueProbeRangeResult[] answers = await manager.TryProbeManyRanges(
-                transactionId, readTimestamp, prefix, Subset(seeks, positions), lockMode, expiresMs, durability);
+                transactionId, readTimestamp, prefix, Subset(seeks, positions), lockMode, expiresMs, durability, readMode);
 
             bool anyLocked = false;
             string? routingKey = null;
@@ -482,7 +485,7 @@ internal sealed class LocatorProbeOperations
                 logger.LogDebug("PROBE-MANY-RANGES {Count} seeks under {Prefix} redirected to {Leader}", positions.Count, prefix, leader);
 
             KeyValueProbeRangeResult[] answers = await interNodeCommunication.TryProbeManyRanges(
-                leader, transactionId, readTimestamp, prefix, Subset(seeks, positions), lockMode, expiresMs, durability, cancellationToken);
+                leader, transactionId, readTimestamp, prefix, Subset(seeks, positions), lockMode, expiresMs, durability, cancellationToken, readMode);
 
             for (int j = 0; j < positions.Count; j++)
                 results[positions[j]] = j < answers.Length ? answers[j] : KeyValueProbeRangeResult.MustRetry;
@@ -516,7 +519,7 @@ internal sealed class LocatorProbeOperations
 
             KeyValueGetByRangeResult page = await scans.LocateAndGetByRange(
                 transactionId, prefix, seek.StartKey, seek.StartInclusive, seek.EndKey, seek.EndInclusive,
-                seek.Limit, readTimestamp, durability, cancellationToken);
+                seek.Limit, readTimestamp, durability, cancellationToken, readMode: readMode);
 
             results[position] = Handlers.ProbeRangesContinuation.FromPage(page, locked);
         }

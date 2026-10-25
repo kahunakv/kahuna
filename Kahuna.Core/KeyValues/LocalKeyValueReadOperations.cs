@@ -91,23 +91,26 @@ internal sealed class LocalKeyValueReadOperations
         string key,
         long revision,
         HLCTimestamp readTimestamp,
-        KeyValueDurability durability
+        KeyValueDurability durability,
+        KeyValueReadMode readMode = KeyValueReadMode.Default
     )
     {
-        LocalPointRead read = await TryGetValueLocal(transactionId, key, revision, readTimestamp, durability);
+        LocalPointRead read = await TryGetValueLocal(transactionId, key, revision, readTimestamp, durability, readMode);
         return (read.Type, read.Entry);
     }
 
     /// <summary>
     /// <see cref="TryGetValue"/>, reporting whether the answer came from the owning actor's published head
-    /// record (no actor message) or from a mailbox round trip.
+    /// record (no actor message) or from a mailbox round trip. A read with a timestamp, so every statement
+    /// read, always takes the actor path: the published record answers latest reads only.
     /// </summary>
     public async Task<LocalPointRead> TryGetValueLocal(
         HLCTimestamp transactionId,
         string key,
         long revision,
         HLCTimestamp readTimestamp,
-        KeyValueDurability durability
+        KeyValueDurability durability,
+        KeyValueReadMode readMode = KeyValueReadMode.Default
     )
     {
         if (IsGatedKey(key))
@@ -116,7 +119,7 @@ internal sealed class LocalKeyValueReadOperations
         if (publishedHeads.TryRead(transactionId, key, revision, readTimestamp, durability, out ReadOnlyKeyValueEntry? published))
             return new(KeyValueResponseType.Get, published, true);
 
-        (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await TryGetValueFromActor(transactionId, key, revision, readTimestamp, durability);
+        (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await TryGetValueFromActor(transactionId, key, revision, readTimestamp, durability, readMode);
         return new(type, entry, false);
     }
 
@@ -125,7 +128,8 @@ internal sealed class LocalKeyValueReadOperations
         string key,
         long revision,
         HLCTimestamp readTimestamp,
-        KeyValueDurability durability
+        KeyValueDurability durability,
+        KeyValueReadMode readMode
     )
     {
         KeyValueRequest request = KeyValueRequestPool.Rent(
@@ -146,6 +150,7 @@ internal sealed class LocalKeyValueReadOperations
         );
 
         request.ReadTimestamp = readTimestamp;
+        request.ReadMode = readMode;
 
         try
         {
@@ -389,7 +394,8 @@ internal sealed class LocalKeyValueReadOperations
         IReadOnlyList<string> keys,
         KeyValueProbeLock lockMode,
         int expiresMs,
-        KeyValueDurability durability
+        KeyValueDurability durability,
+        KeyValueReadMode readMode = KeyValueReadMode.Default
     )
     {
         KeyValueProbeResult[] results = new KeyValueProbeResult[keys.Count];
@@ -434,7 +440,7 @@ internal sealed class LocalKeyValueReadOperations
                         batchHints[j] = hints![index];
                 }
 
-                KeyValueResponse? response = await AskProbe(router, transactionId, readTimestamp, batchKeys, batchHints, lockMode, expiresMs, durability);
+                KeyValueResponse? response = await AskProbe(router, transactionId, readTimestamp, batchKeys, batchHints, lockMode, expiresMs, durability, readMode);
 
                 if (response?.ProbeResults is not { } answers || answers.Length != count)
                 {
@@ -549,7 +555,8 @@ internal sealed class LocalKeyValueReadOperations
         Transactions.Data.ForeignDecisionHint[]? hints,
         KeyValueProbeLock lockMode,
         int expiresMs,
-        KeyValueDurability durability)
+        KeyValueDurability durability,
+        KeyValueReadMode readMode)
     {
         // The first key routes the request: every key of a key space hashes to the same actor.
         KeyValueRequest request = KeyValueRequestPool.Rent(
@@ -557,6 +564,7 @@ internal sealed class LocalKeyValueReadOperations
             KeyValueFlags.None, expiresMs, HLCTimestamp.Zero, durability, 0, 0, default);
 
         request.ReadTimestamp = readTimestamp;
+        request.ReadMode = readMode;
         request.ProbeKeys = keys;
         request.ProbeHints = hints;
         request.ProbeLock = lockMode;

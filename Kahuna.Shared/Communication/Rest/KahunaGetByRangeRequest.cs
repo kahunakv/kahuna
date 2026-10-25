@@ -43,6 +43,13 @@ public sealed class KahunaGetByRangeRequest
     public KeyValueDurability Durability { get; set; }
 
     /// <summary>
+    /// How the page treats the transaction's own state at <see cref="ReadTimestamp"/>. Absent means the default.
+    /// A caller that resumes a scan from a cursor sends the mode again with every page.
+    /// </summary>
+    [JsonPropertyName("readMode")]
+    public KeyValueReadMode ReadMode { get; set; }
+
+    /// <summary>
     /// Opaque resume token from a previous page's <c>nextCursor</c>. Null starts a fresh scan.
     /// </summary>
     [JsonPropertyName("cursor")]

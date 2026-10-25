@@ -293,7 +293,8 @@ internal sealed class LocalScanOperations
         bool endInclusive,
         int limit,
         HLCTimestamp readTimestamp,
-        KeyValueDurability durability)
+        KeyValueDurability durability,
+        KeyValueReadMode readMode = KeyValueReadMode.Default)
     {
         KeyValueRequest request = KeyValueRequestPool.RentRange(
             transactionId,
@@ -305,7 +306,8 @@ internal sealed class LocalScanOperations
             limit,
             readTimestamp,
             durability,
-            default
+            default,
+            readMode
         );
 
         bool attemptedRoutedResolve = false;
@@ -417,7 +419,8 @@ internal sealed class LocalScanOperations
         IReadOnlyList<KeyValueProbeRange> seeks,
         KeyValueProbeLock lockMode,
         int expiresMs,
-        KeyValueDurability durability
+        KeyValueDurability durability,
+        KeyValueReadMode readMode = KeyValueReadMode.Default
     )
     {
         KeyValueProbeRangeResult[] results = new KeyValueProbeRangeResult[seeks.Count];
@@ -445,7 +448,7 @@ internal sealed class LocalScanOperations
             for (int j = 0; j < count; j++)
                 batch[j] = seeks[pending is null ? j : pending[j]];
 
-            KeyValueResponse? response = await AskProbeRanges(router, transactionId, readTimestamp, prefix, batch, routed, lockMode, expiresMs, durability);
+            KeyValueResponse? response = await AskProbeRanges(router, transactionId, readTimestamp, prefix, batch, routed, lockMode, expiresMs, durability, readMode);
 
             if (response?.ProbeRangeResults is not { } answers || answers.Length != count)
             {
@@ -563,7 +566,8 @@ internal sealed class LocalScanOperations
         IReadOnlyDictionary<(HLCTimestamp TransactionId, long Epoch), TransactionDecision>? routed,
         KeyValueProbeLock lockMode,
         int expiresMs,
-        KeyValueDurability durability)
+        KeyValueDurability durability,
+        KeyValueReadMode readMode)
     {
         // The prefix routes the request: it hashes to the actor that owns its key space.
         KeyValueRequest request = KeyValueRequestPool.Rent(
@@ -571,6 +575,7 @@ internal sealed class LocalScanOperations
             KeyValueFlags.None, expiresMs, HLCTimestamp.Zero, durability, 0, 0, default);
 
         request.ReadTimestamp = readTimestamp;
+        request.ReadMode = readMode;
         request.ProbeRanges = seeks;
         request.ProbeLock = lockMode;
         request.ForeignScanDecisions = routed;

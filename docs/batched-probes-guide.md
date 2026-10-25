@@ -38,6 +38,12 @@ the read timestamp; zero selects latest reads. Pass a fixed HLC timestamp when t
 historical snapshot, with the same snapshot-retention requirements as single reads. Batching alone
 does not turn independent latest point reads across partitions into one atomic snapshot.
 
+The optional `readMode` parameter selects how a fixed-timestamp probe treats the transaction's own
+state. `KeyValueReadMode.StatementSnapshot` shows the transaction's own staged writes and ignores the
+pins its earlier reads left, so every statement reads one view at its own timestamp; see
+[statement reads](transaction-read-and-lock-semantics-guide.md#statement-reads). The default keeps
+the shape every caller had before. A statement probe without a read timestamp is `InvalidInput`.
+
 ## Bounded range reads
 
 ```csharp

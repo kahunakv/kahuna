@@ -106,6 +106,7 @@ internal sealed class TryProbeManyHandler : BaseHandler
                 KeyValueRequestType.TryGet, message.TransactionId, HLCTimestamp.Zero, key, null, null, -1,
                 KeyValueFlags.None, 0, HLCTimestamp.Zero, message.Durability, 0, 0, default);
             readView.ReadTimestamp = message.ReadTimestamp;
+            readView.ReadMode = message.ReadMode;
             readView.ForeignDecisionHint = hint;
 
             PointReadStep step;
@@ -141,8 +142,8 @@ internal sealed class TryProbeManyHandler : BaseHandler
 
     /// <summary>
     /// The request shape a batched probe must have: one to <paramref name="maxKeys"/> non-empty keys of one key
-    /// space, and a transaction when it locks. A key with no <c>'/'</c> is its own key space and hashes to an actor
-    /// of its own, so it can only be probed alone.
+    /// space, a transaction when it locks, and a read timestamp when it is a statement read. A key with no
+    /// <c>'/'</c> is its own key space and hashes to an actor of its own, so it can only be probed alone.
     /// </summary>
     internal static bool IsWellFormed(KeyValueRequest message, string[] keys, int maxKeys)
     {
@@ -150,6 +151,9 @@ internal sealed class TryProbeManyHandler : BaseHandler
             return false;
 
         if (message.ProbeLock != KeyValueProbeLock.None && (message.TransactionId == HLCTimestamp.Zero || message.ExpiresMs < 0))
+            return false;
+
+        if (!KeyValueReadModeChecks.IsWellFormed(message.ReadMode, message.ReadTimestamp))
             return false;
 
         if (message.ProbeHints is { } hints && hints.Length != keys.Length)

@@ -640,14 +640,15 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         long revision,
         HLCTimestamp readTimestamp,
         KeyValueDurability durability,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        KeyValueReadMode readMode = KeyValueReadMode.Default
     )
     {
         if (TryGetNode(node, out IKahuna? kahunaNode))
         {
             using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
 
-            return await kahunaNode.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken);
+            return await kahunaNode.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken, readMode: readMode);
         }
 
         throw Unreachable(node);
@@ -740,7 +741,8 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         KeyValueProbeLock lockMode,
         int expiresMs,
         KeyValueDurability durability,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        KeyValueReadMode readMode = KeyValueReadMode.Default
     )
     {
         if (TryGetNode(node, out IKahuna? kahunaNode))
@@ -748,7 +750,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
 
             KeyValueProbeResult[] results = await kahunaNode.LocateAndTryProbeMany(
-                transactionId, readTimestamp, keys, lockMode, expiresMs, durability, cancellationToken);
+                transactionId, readTimestamp, keys, lockMode, expiresMs, durability, cancellationToken, readMode: readMode);
 
             // Test seam: count the forwarded probes, so a test can prove a remote group travelled as one message.
             if (ProbeManyForwarded is { } observe)
@@ -775,7 +777,8 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         KeyValueProbeLock lockMode,
         int expiresMs,
         KeyValueDurability durability,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        KeyValueReadMode readMode = KeyValueReadMode.Default
     )
     {
         if (TryGetNode(node, out IKahuna? kahunaNode))
@@ -783,7 +786,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
 
             KeyValueProbeRangeResult[] results = await kahunaNode.LocateAndTryProbeManyRanges(
-                transactionId, readTimestamp, prefix, seeks, lockMode, expiresMs, durability, cancellationToken);
+                transactionId, readTimestamp, prefix, seeks, lockMode, expiresMs, durability, cancellationToken, readMode: readMode);
 
             // Test seam: count the forwarded range probes, so a test can prove a remote group travelled as one message.
             if (ProbeManyRangesForwarded is { } observe)
@@ -1624,7 +1627,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         throw Unreachable(node);
     }
 
-    public async Task<KeyValueGetByRangeResult> GetByRange(string node, HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, bool snapshotAtLeader = false)
+    public async Task<KeyValueGetByRangeResult> GetByRange(string node, HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, bool snapshotAtLeader = false, KeyValueReadMode readMode = KeyValueReadMode.Default)
     {
         Interlocked.Increment(ref getByRangeCallCount);
 
@@ -1635,7 +1638,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             // forwarding onward, mirroring the gRPC server-batcher receive path.
             using Kahuna.Server.ForwardedRequestScope.Scope forwardedScope = Kahuna.Server.ForwardedRequestScope.Enter();
 
-            return await kahunaNode.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken, snapshotAtLeader: snapshotAtLeader);
+            return await kahunaNode.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken, snapshotAtLeader: snapshotAtLeader, readMode: readMode);
         }
 
         throw Unreachable(node);

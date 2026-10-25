@@ -46,7 +46,7 @@ internal sealed class TryProbeManyRangesHandler : BaseHandler
         KeyValueProbeRange[]? seeks = message.ProbeRanges;
 
         if (seeks is null || !IsWellFormed(message.Key, seeks, message.TransactionId, message.ProbeLock, message.ExpiresMs,
-                context.Configuration.MaxProbeBatchSize, context.Configuration.MaxProbeRangeEntries))
+                context.Configuration.MaxProbeBatchSize, context.Configuration.MaxProbeRangeEntries, message.ReadMode, message.ReadTimestamp))
             return KeyValueStaticResponses.InvalidInputResponse;
 
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
@@ -60,6 +60,7 @@ internal sealed class TryProbeManyRangesHandler : BaseHandler
             KeyValueRequestType.GetByRange, message.TransactionId, HLCTimestamp.Zero, prefix, null, null, -1,
             KeyValueFlags.None, 0, HLCTimestamp.Zero, message.Durability, 0, 0, default);
         readView.ReadTimestamp = message.ReadTimestamp;
+        readView.ReadMode = message.ReadMode;
         readView.ForeignScanDecisions = message.ForeignScanDecisions;
 
         KeyValueRequest? lockView = message.ProbeLock == KeyValueProbeLock.Shared ? NewLockView(message) : null;
@@ -163,17 +164,21 @@ internal sealed class TryProbeManyRangesHandler : BaseHandler
 
     /// <summary>
     /// The request shape a batched range probe must have: a prefix, one to <paramref name="maxSeeks"/> seeks of at
-    /// least one entry each and at most <paramref name="maxEntries"/> entries over all of them, and a transaction and a
-    /// lease when it locks. Shared with the locator, which refuses a malformed probe before it routes it.
+    /// least one entry each and at most <paramref name="maxEntries"/> entries over all of them, a transaction and a
+    /// lease when it locks, and a read timestamp when it is a statement read. Shared with the locator, which refuses
+    /// a malformed probe before it routes it.
     /// </summary>
     internal static bool IsWellFormed(
         string? prefix, IReadOnlyList<KeyValueProbeRange> seeks, HLCTimestamp transactionId, KeyValueProbeLock lockMode,
-        int expiresMs, int maxSeeks, int maxEntries)
+        int expiresMs, int maxSeeks, int maxEntries, KeyValueReadMode readMode, HLCTimestamp readTimestamp)
     {
         if (string.IsNullOrEmpty(prefix) || seeks.Count == 0 || seeks.Count > maxSeeks)
             return false;
 
         if (lockMode != KeyValueProbeLock.None && (transactionId == HLCTimestamp.Zero || expiresMs < 0))
+            return false;
+
+        if (!KeyValueReadModeChecks.IsWellFormed(readMode, readTimestamp))
             return false;
 
         long entries = 0;

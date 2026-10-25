@@ -103,7 +103,8 @@ internal static class KeyValueRequestPool
         int limit,
         HLCTimestamp readTimestamp,
         KeyValueDurability durability,
-        KeyValueReplyRef promise)
+        KeyValueReplyRef promise,
+        KeyValueReadMode readMode = KeyValueReadMode.Default)
     {
         KeyValueRequest request = Rent(
             KeyValueRequestType.GetByRange,
@@ -128,6 +129,7 @@ internal static class KeyValueRequestPool
         request.EndInclusive   = endInclusive;
         request.Limit          = limit;
         request.ReadTimestamp  = readTimestamp;
+        request.ReadMode       = readMode;
 
         return request;
     }

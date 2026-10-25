@@ -85,9 +85,10 @@ internal sealed partial class KeyValuesManager
         KeyValueDurability durability,
         CancellationToken cancellationToken,
         string coordinatorKey = "",
-        TransactionOperationId operationId = default
+        TransactionOperationId operationId = default,
+        KeyValueReadMode readMode = KeyValueReadMode.Default
     ) =>
-        routedReads.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken, coordinatorKey, operationId);
+        routedReads.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken, coordinatorKey, operationId, readMode);
 
     public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryExistsValue(
         HLCTimestamp transactionId,
@@ -128,9 +129,10 @@ internal sealed partial class KeyValuesManager
         KeyValueDurability durability,
         CancellationToken cancellationToken,
         string coordinatorKey = "",
-        TransactionOperationId operationId = default
+        TransactionOperationId operationId = default,
+        KeyValueReadMode readMode = KeyValueReadMode.Default
     ) =>
-        routedReads.LocateAndTryProbeMany(transactionId, readTimestamp, keys, lockMode, expiresMs, durability, cancellationToken, coordinatorKey, operationId);
+        routedReads.LocateAndTryProbeMany(transactionId, readTimestamp, keys, lockMode, expiresMs, durability, cancellationToken, coordinatorKey, operationId, readMode);
 
     public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryGetManyValues(
         HLCTimestamp transactionId,
@@ -368,8 +370,8 @@ internal sealed partial class KeyValuesManager
         CancellationToken cancellationToken) =>
         routedScans.LocateAndGetByBucketWithHooks(transactionId, prefixedKey, durability, beforeQuery, afterDescriptor, cancellationToken);
 
-    public Task<KeyValueGetByRangeResult> LocateAndGetByRange(HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default, bool snapshotAtLeader = false) =>
-        routedScans.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken, coordinatorKey, operationId, snapshotAtLeader);
+    public Task<KeyValueGetByRangeResult> LocateAndGetByRange(HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default, bool snapshotAtLeader = false, KeyValueReadMode readMode = KeyValueReadMode.Default) =>
+        routedScans.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken, coordinatorKey, operationId, snapshotAtLeader, readMode);
 
     public Task<KeyValueProbeRangeResult[]> LocateAndTryProbeManyRanges(
         HLCTimestamp transactionId,
@@ -381,9 +383,10 @@ internal sealed partial class KeyValuesManager
         KeyValueDurability durability,
         CancellationToken cancellationToken,
         string coordinatorKey = "",
-        TransactionOperationId operationId = default
+        TransactionOperationId operationId = default,
+        KeyValueReadMode readMode = KeyValueReadMode.Default
     ) =>
-        routedScans.LocateAndTryProbeManyRanges(transactionId, readTimestamp, prefix, seeks, lockMode, expiresMs, durability, cancellationToken, coordinatorKey, operationId);
+        routedScans.LocateAndTryProbeManyRanges(transactionId, readTimestamp, prefix, seeks, lockMode, expiresMs, durability, cancellationToken, coordinatorKey, operationId, readMode);
 
     public IAsyncEnumerable<(string Key, ReadOnlyKeyValueEntry Entry)> LocateAndScanRange(
         HLCTimestamp txId,
@@ -398,7 +401,8 @@ internal sealed partial class KeyValuesManager
         CancellationToken ct,
         string coordinatorKey = "",
         TransactionOperationId operationId = default,
-        KeyValueScanObservationSink? observations = null) =>
-        routedScans.LocateAndScanRange(txId, prefix, startKey, startInclusive, endKey, endInclusive, pageSize, readTimestamp, durability, ct, coordinatorKey, operationId, observations);
+        KeyValueScanObservationSink? observations = null,
+        KeyValueReadMode readMode = KeyValueReadMode.Default) =>
+        routedScans.LocateAndScanRange(txId, prefix, startKey, startInclusive, endKey, endInclusive, pageSize, readTimestamp, durability, ct, coordinatorKey, operationId, observations, readMode);
 
 }

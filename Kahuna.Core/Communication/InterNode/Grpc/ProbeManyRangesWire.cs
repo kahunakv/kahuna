@@ -23,7 +23,8 @@ internal static class ProbeManyRangesWire
         IReadOnlyList<KeyValueProbeRange> seeks,
         KeyValueProbeLock lockMode,
         int expiresMs,
-        KeyValueDurability durability)
+        KeyValueDurability durability,
+        KeyValueReadMode readMode = KeyValueReadMode.Default)
     {
         GrpcTryProbeManyRangesRequest request = new()
         {
@@ -36,7 +37,8 @@ internal static class ProbeManyRangesWire
             Prefix = prefix,
             Durability = (GrpcKeyValueDurability)durability,
             LockMode = (GrpcProbeLockMode)lockMode,
-            ExpiresMs = expiresMs
+            ExpiresMs = expiresMs,
+            ReadMode = (GrpcKeyValueReadMode)readMode
         };
 
         Reserve(request.Seeks, seeks.Count);

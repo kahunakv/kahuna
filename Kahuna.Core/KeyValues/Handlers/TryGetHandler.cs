@@ -22,6 +22,11 @@ internal sealed class TryGetHandler : BaseHandler
         if (message.CompareRevision > -1)
             return ExecuteByRevision(message);
 
+        // A statement read without a timestamp has no snapshot to read at and would silently become a pinning
+        // latest read, so the request is refused rather than reinterpreted.
+        if (!KeyValueReadModeChecks.IsWellFormed(message.ReadMode, message.ReadTimestamp))
+            return KeyValueStaticResponses.InvalidInputResponse;
+
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock
             .TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
 
@@ -71,8 +76,16 @@ internal sealed class TryGetHandler : BaseHandler
         // A transactional latest read without an MVCC entry yet skips the overlay too: the MVCC path records its
         // pin from the committed intent (DurableSnapshotSource), which the overlay would answer from and leave no
         // pin behind — and without a pin a later read or write of the key cannot detect a competing commit early.
-        bool readerHasOwnMvcc = message.TransactionId != HLCTimestamp.Zero
-            && entry?.MvccEntries is { } readerMvcc && readerMvcc.ContainsKey(message.TransactionId);
+        //
+        // A statement read (one timestamp per statement, see KeyValueReadMode.StatementSnapshot) owns only its
+        // staged writes: a read pin an earlier statement left on the key is neither served nor checked, so for it
+        // the overlay and the snapshot rules below run at the read timestamp exactly as for a key it never read.
+        KeyValueMvccEntry? ownMvcc = null;
+        if (message.TransactionId != HLCTimestamp.Zero && entry?.MvccEntries is { } readerMvcc)
+            readerMvcc.TryGetValue(message.TransactionId, out ownMvcc);
+
+        bool statementRead = KeyValueReadModeChecks.IsStatementRead(message.ReadMode, message.TransactionId, message.ReadTimestamp);
+        bool readerHasOwnMvcc = ownMvcc is not null && (!statementRead || ownMvcc.StagedUnder is not null);
         bool transactionalLatestRead = message.TransactionId != HLCTimestamp.Zero && message.ReadTimestamp.IsNull();
 
         PreparedIntent? foreignIntent = null;
@@ -261,6 +274,26 @@ internal sealed class TryGetHandler : BaseHandler
             return new KeyValueResponse(KeyValueResponseType.Get, new ReadOnlyKeyValueEntry(
                 mvccEntry.Value, mvccEntry.Revision, mvccEntry.Expires,
                 mvccEntry.LastUsed, mvccEntry.LastModified, mvccEntry.State));
+        }
+
+        // ── Statement read of a key this transaction staged a write on ──────────────────
+        // The staged write is the transaction's own view of the key whatever the read timestamp says, and it is
+        // answered exactly as the latest path answers it: a head that moved past the staged base means the
+        // transaction already lost the key, which is better learned here than at commit. Only a staged write
+        // qualifies (StagedUnder is set by every staged set, tombstone and extend); a pin was skipped above and
+        // the key reads as committed state at the timestamp below.
+        if (statementRead && ownMvcc is { StagedUnder: not null })
+        {
+            if (entry!.Revision > ownMvcc.Revision)
+                return KeyValueStaticResponses.AbortedResponse;
+
+            if (ownMvcc.State is KeyValueState.Undefined or KeyValueState.Deleted
+                || (ownMvcc.Expires != HLCTimestamp.Zero && ownMvcc.Expires - currentTime < TimeSpan.Zero))
+                return KeyValueStaticResponses.DoesNotExistContextResponse;
+
+            return new KeyValueResponse(KeyValueResponseType.Get, new ReadOnlyKeyValueEntry(
+                ownMvcc.Value, ownMvcc.Revision, ownMvcc.Expires,
+                ownMvcc.LastUsed, ownMvcc.LastModified, ownMvcc.State));
         }
 
         // ── Snapshot visibility: serve the revision at-or-before readTimestamp ──────────

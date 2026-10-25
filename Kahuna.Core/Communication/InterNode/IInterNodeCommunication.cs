@@ -48,7 +48,7 @@ public interface IInterNodeCommunication
 
     public Task<(KeyValueResponseType, long, HLCTimestamp)> TryExtendKeyValue(string node, HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken);
 
-    public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryGetValue(string node, HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken);
+    public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryGetValue(string node, HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, KeyValueReadMode readMode = KeyValueReadMode.Default);
 
     public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryExistsValue(string node, HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken);
 
@@ -58,13 +58,13 @@ public interface IInterNodeCommunication
     /// Forwards a batched probe to the node that leads its keys' partitions, which routes the keys again on
     /// arrival. Returns one result per key, in order. A transport failure answers <c>MustRetry</c> for every key.
     /// </summary>
-    public Task<KeyValueProbeResult[]> TryProbeMany(string node, HLCTimestamp transactionId, HLCTimestamp readTimestamp, string[] keys, KeyValueProbeLock lockMode, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken);
+    public Task<KeyValueProbeResult[]> TryProbeMany(string node, HLCTimestamp transactionId, HLCTimestamp readTimestamp, string[] keys, KeyValueProbeLock lockMode, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, KeyValueReadMode readMode = KeyValueReadMode.Default);
 
     /// <summary>
     /// Forwards a batched range probe to the node that leads its seeks' partitions, which routes the seeks again on
     /// arrival. Returns one result per seek, in order. A transport failure answers <c>MustRetry</c> for every seek.
     /// </summary>
-    public Task<KeyValueProbeRangeResult[]> TryProbeManyRanges(string node, HLCTimestamp transactionId, HLCTimestamp readTimestamp, string prefix, KeyValueProbeRange[] seeks, KeyValueProbeLock lockMode, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken);
+    public Task<KeyValueProbeRangeResult[]> TryProbeManyRanges(string node, HLCTimestamp transactionId, HLCTimestamp readTimestamp, string prefix, KeyValueProbeRange[] seeks, KeyValueProbeLock lockMode, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, KeyValueReadMode readMode = KeyValueReadMode.Default);
 
     public Task TryExistsManyNodeValues(string node, HLCTimestamp transactionId, HLCTimestamp readTimestamp, List<(string key, long revision, KeyValueDurability durability)> keys, Lock lockSync, List<(KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> responses, CancellationToken cancellationToken);
 
@@ -161,7 +161,7 @@ public interface IInterNodeCommunication
     /// serving node mints the page's snapshot on its own clock and ignores <paramref name="readTimestamp"/>;
     /// see <see cref="IKahuna.LocateAndGetByRange"/>.
     /// </summary>
-    public Task<KeyValueGetByRangeResult> GetByRange(string node, HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, bool snapshotAtLeader = false);
+    public Task<KeyValueGetByRangeResult> GetByRange(string node, HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, bool snapshotAtLeader = false, KeyValueReadMode readMode = KeyValueReadMode.Default);
     
     public Task<KeyValueGetByBucketResult> ScanByPrefix(string node, string prefixedKey, HLCTimestamp readTimestamp, KeyValueDurability durability, bool includeTombstones, CancellationToken cancellationToken);
     

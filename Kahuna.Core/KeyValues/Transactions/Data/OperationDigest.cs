@@ -220,7 +220,7 @@ internal static class OperationDigest
         return hash.GetHashAndReset();
     }
 
-    internal static byte[] ForRangeScan(string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability)
+    internal static byte[] ForRangeScan(string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, KeyValueReadMode readMode = KeyValueReadMode.Default)
     {
         XxHash128 hash = AcquireHash();
         AppendTag(hash, OperationKind.Scan);
@@ -228,6 +228,7 @@ internal static class OperationDigest
         AppendInt(hash, limit);
         AppendHlc(hash, readTimestamp);
         AppendInt(hash, (int)durability);
+        AppendReadMode(hash, readMode);
         return hash.GetHashAndReset();
     }
 
@@ -257,7 +258,7 @@ internal static class OperationDigest
     /// operation, so the digest binds every key in submission order, the snapshot, the lock mode, the lock lease and
     /// the durability. A same-operation-id retry must resend the identical request.
     /// </summary>
-    internal static byte[] ForProbeMany(IReadOnlyList<string> keys, HLCTimestamp readTimestamp, KeyValueProbeLock lockMode, int expiresMs, KeyValueDurability durability)
+    internal static byte[] ForProbeMany(IReadOnlyList<string> keys, HLCTimestamp readTimestamp, KeyValueProbeLock lockMode, int expiresMs, KeyValueDurability durability, KeyValueReadMode readMode = KeyValueReadMode.Default)
     {
         XxHash128 hash = AcquireHash();
         AppendTag(hash, OperationKind.ProbeMany);
@@ -268,6 +269,7 @@ internal static class OperationDigest
         AppendInt(hash, (int)lockMode);
         AppendInt(hash, expiresMs);
         AppendInt(hash, (int)durability);
+        AppendReadMode(hash, readMode);
         return hash.GetHashAndReset();
     }
 
@@ -279,7 +281,7 @@ internal static class OperationDigest
     /// </summary>
     internal static byte[] ForProbeManyRanges(
         string prefix, IReadOnlyList<KeyValueProbeRange> seeks, HLCTimestamp readTimestamp, KeyValueProbeLock lockMode,
-        int expiresMs, KeyValueDurability durability)
+        int expiresMs, KeyValueDurability durability, KeyValueReadMode readMode = KeyValueReadMode.Default)
     {
         XxHash128 hash = AcquireHash();
         AppendTag(hash, OperationKind.ProbeManyRanges);
@@ -293,6 +295,7 @@ internal static class OperationDigest
         AppendInt(hash, (int)lockMode);
         AppendInt(hash, expiresMs);
         AppendInt(hash, (int)durability);
+        AppendReadMode(hash, readMode);
         return hash.GetHashAndReset();
     }
 
@@ -302,7 +305,7 @@ internal static class OperationDigest
     internal static byte[] ForExistsMany(IReadOnlyList<(string key, long revision, KeyValueDurability durability)> keys, HLCTimestamp readTimestamp) =>
         ForManyRead(OperationKind.ExistsMany, keys, readTimestamp);
 
-    internal static byte[] ForRead(OperationKind kind, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability)
+    internal static byte[] ForRead(OperationKind kind, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, KeyValueReadMode readMode = KeyValueReadMode.Default)
     {
         XxHash128 hash = AcquireHash();
         AppendTag(hash, kind);
@@ -310,7 +313,19 @@ internal static class OperationDigest
         AppendLong(hash, revision);
         AppendHlc(hash, readTimestamp);
         AppendInt(hash, (int)durability);
+        AppendReadMode(hash, readMode);
         return hash.GetHashAndReset();
+    }
+
+    /// <summary>
+    /// Binds the read mode of a read so a same-operation-id retry in another mode is a different declaration.
+    /// The default mode appends nothing, so the digest of every read declared before the mode existed is
+    /// unchanged and a retry across a rolling upgrade still matches its first attempt.
+    /// </summary>
+    private static void AppendReadMode(XxHash128 hash, KeyValueReadMode readMode)
+    {
+        if (readMode != KeyValueReadMode.Default)
+            AppendInt(hash, (int)readMode);
     }
 
     /// <summary>Binds the complete hybrid logical clock — node, physical, counter — so two reads that differ

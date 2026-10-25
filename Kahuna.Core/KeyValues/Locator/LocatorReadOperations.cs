@@ -58,10 +58,11 @@ internal sealed class LocatorReadOperations
         long revision,
         HLCTimestamp readTimestamp,
         KeyValueDurability durability,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        KeyValueReadMode readMode = KeyValueReadMode.Default
     )
     {
-        if (string.IsNullOrEmpty(key))
+        if (string.IsNullOrEmpty(key) || !KeyValueReadModeChecks.IsWellFormed(readMode, readTimestamp))
             return (KeyValueResponseType.InvalidInput, null);
 
         int partitionId = routing.RouteKey(key);
@@ -81,7 +82,7 @@ internal sealed class LocatorReadOperations
         if (confirmed)
         {
             routing.RecordLocalKeyRoute(key, partitionId);
-            LocalPointRead local = await manager.TryGetValueLocal(transactionId, key, revision, readTimestamp, durability);
+            LocalPointRead local = await manager.TryGetValueLocal(transactionId, key, revision, readTimestamp, durability, readMode);
             KeyValueReadMetrics.RecordActor(confirmEnd, Stopwatch.GetTimestamp(), local.ServedFromPublishedHead);
             return (local.Type, local.Entry);
         }
@@ -96,7 +97,7 @@ internal sealed class LocatorReadOperations
 
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
 
-        (KeyValueResponseType, ReadOnlyKeyValueEntry?) response = await interNodeCommunication.TryGetValue(leader, transactionId, key, revision, readTimestamp, durability, cancellationToken);
+        (KeyValueResponseType, ReadOnlyKeyValueEntry?) response = await interNodeCommunication.TryGetValue(leader, transactionId, key, revision, readTimestamp, durability, cancellationToken, readMode);
 
         if (logger.IsEnabled(LogLevel.Debug))
             logger.LogGetKeyValueRedirected(key, partitionId, leader, stopwatch.GetElapsedMilliseconds());

@@ -35,10 +35,10 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
     public async Task<(bool, byte[]?, long, HLCTimestamp, int)> TryGetKeyValue(
         string url, HLCTimestamp transactionId, string key, long revision,
         HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken,
-        string coordinatorKey = "", TransactionOperationId operationId = default)
+        string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default)
     {
         (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) =
-            await kahuna.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken, coordinatorKey, operationId);
+            await kahuna.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken, coordinatorKey, operationId, readMode);
 
         if (type == KeyValueResponseType.Get && entry is not null)
             return (true, entry.Value, entry.Revision, entry.LastModified, 0);
@@ -61,11 +61,11 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
         string url, HLCTimestamp transactionId, string prefix,
         string? startKey, bool startInclusive, string? endKey, bool endInclusive,
         int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken,
-        string coordinatorKey = "", TransactionOperationId operationId = default)
+        string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default)
     {
         KeyValueGetByRangeResult result = await kahuna.LocateAndGetByRange(
             transactionId, prefix, startKey, startInclusive, endKey, endInclusive,
-            limit, readTimestamp, durability, cancellationToken, coordinatorKey, operationId);
+            limit, readTimestamp, durability, cancellationToken, coordinatorKey, operationId, readMode: readMode);
 
         return new()
         {
@@ -106,11 +106,12 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
         string url, HLCTimestamp transactionId, string prefix,
         string? startKey, bool startInclusive, string? endKey, bool endInclusive,
         int pageSize, HLCTimestamp readTimestamp, KeyValueDurability durability,
-        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken,
+        KeyValueReadMode readMode = KeyValueReadMode.Default)
     {
         await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
             transactionId, prefix, startKey, startInclusive, endKey, endInclusive,
-            pageSize, readTimestamp, durability, cancellationToken))
+            pageSize, readTimestamp, durability, cancellationToken, readMode: readMode))
         {
             yield return new KeyValueGetByBucketItem
             {

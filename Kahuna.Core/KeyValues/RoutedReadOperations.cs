@@ -78,19 +78,20 @@ internal sealed class RoutedReadOperations
         KeyValueDurability durability,
         CancellationToken cancellationToken,
         string coordinatorKey = "",
-        TransactionOperationId operationId = default
+        TransactionOperationId operationId = default,
+        KeyValueReadMode readMode = KeyValueReadMode.Default
     )
     {
-        if (ReservedKeys.IsReserved(key))
+        if (ReservedKeys.IsReserved(key) || !KeyValueReadModeChecks.IsWellFormed(readMode, readTimestamp))
             return Task.FromResult((KeyValueResponseType.InvalidInput, (ReadOnlyKeyValueEntry?)null));
 
         RegistrationRouting routing = ClassifyRegistration(transactionId, coordinatorKey, operationId);
         if (routing is RegistrationRouting.Legacy)
-            return TryGetValueDirect(transactionId, key, revision, readTimestamp, durability, cancellationToken);
+            return TryGetValueDirect(transactionId, key, revision, readTimestamp, durability, readMode, cancellationToken);
         if (routing is RegistrationRouting.Malformed)
             return Task.FromResult((KeyValueResponseType.InvalidInput, (ReadOnlyKeyValueEntry?)null));
 
-        return RegisterAndTryReadValue(OperationKind.Get, transactionId, coordinatorKey, operationId, key, revision, readTimestamp, durability, cancellationToken);
+        return RegisterAndTryReadValue(OperationKind.Get, transactionId, coordinatorKey, operationId, key, revision, readTimestamp, durability, cancellationToken, readMode);
     }
 
     /// <summary>
@@ -98,13 +99,23 @@ internal sealed class RoutedReadOperations
     /// as a whole so the <c>direct</c> total series exists beside the <c>registered</c> one.
     /// </summary>
     private async Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryGetValueDirect(
-        HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
+        HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, KeyValueReadMode readMode, CancellationToken cancellationToken)
     {
         long start = Stopwatch.GetTimestamp();
-        (KeyValueResponseType, ReadOnlyKeyValueEntry?) result = await locator.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken);
+        (KeyValueResponseType, ReadOnlyKeyValueEntry?) result = await locator.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken, readMode);
         KeyValueReadMetrics.RecordTotal(start, Stopwatch.GetTimestamp(), registered: false);
         return result;
     }
+
+    /// <summary>
+    /// Whether a registered read at <paramref name="readTimestamp"/> records what it observed into the read set. A
+    /// latest read always does. A statement read (<see cref="KeyValueReadMode.StatementSnapshot"/>) does too: it is
+    /// one of the transaction's own reads, served at the statement's timestamp, and the revision it served is what
+    /// commit validation compares against the head. Only a plain as-of read is pinned to a past state the
+    /// transaction never depends on, so it records nothing.
+    /// </summary>
+    internal static bool RecordsReadObservation(HLCTimestamp readTimestamp, KeyValueReadMode readMode) =>
+        readTimestamp.IsNull() || readMode == KeyValueReadMode.StatementSnapshot;
 
     /// <summary>
     /// Register-remote wrapper for a transaction-scoped read: registers the read for finalize fencing
@@ -115,9 +126,10 @@ internal sealed class RoutedReadOperations
     /// </summary>
     private async Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> RegisterAndTryReadValue(
         OperationKind kind, HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string key,
-        long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
+        long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken,
+        KeyValueReadMode readMode = KeyValueReadMode.Default)
     {
-        byte[] digest = OperationDigest.ForRead(kind, key, revision, readTimestamp, durability);
+        byte[] digest = OperationDigest.ForRead(kind, key, revision, readTimestamp, durability, readMode);
 
         long start = Stopwatch.GetTimestamp();
 
@@ -156,7 +168,7 @@ internal sealed class RoutedReadOperations
         {
             (type, entry) = kind == OperationKind.Exists
                 ? await locator.LocateAndTryExistsValue(transactionId, key, revision, readTimestamp, durability, cancellationToken)
-                : await locator.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken);
+                : await locator.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken, readMode);
         }
         catch
         {
@@ -173,15 +185,14 @@ internal sealed class RoutedReadOperations
 
         bool exists = entry is not null && type is KeyValueResponseType.Get or KeyValueResponseType.Exists;
 
-        // A snapshot read is pinned to a past timestamp: it owns no live transactional MVCC entry and so
+        // A plain as-of read is pinned to a past timestamp: it owns no live transactional MVCC entry and so
         // contributes no read dependency to validate at commit. It still completes for finalize fencing and
-        // idempotent replay, but records no observation into the read set.
-        bool snapshotRead = !readTimestamp.IsNull();
-
+        // idempotent replay, but records no observation into the read set. A latest read and a statement read
+        // record the revision they served (see RecordsReadObservation).
         OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
-        payload.Read = snapshotRead
-            ? null
-            : new KeyValueTransactionReadKey { Key = key, Durability = durability, Exists = exists, Revision = exists ? entry!.Revision : -1 };
+        payload.Read = RecordsReadObservation(readTimestamp, readMode)
+            ? new KeyValueTransactionReadKey { Key = key, Durability = durability, Exists = exists, Revision = exists ? entry!.Revision : -1 }
+            : null;
         payload.Durability = durability;
         payload.CachedType = type;
         payload.CachedRevision = exists ? entry!.Revision : 0;
@@ -334,18 +345,22 @@ internal sealed class RoutedReadOperations
         KeyValueDurability durability,
         CancellationToken cancellationToken,
         string coordinatorKey = "",
-        TransactionOperationId operationId = default
+        TransactionOperationId operationId = default,
+        KeyValueReadMode readMode = KeyValueReadMode.Default
     )
     {
+        if (!KeyValueReadModeChecks.IsWellFormed(readMode, readTimestamp))
+            return Task.FromResult(BuildProbeRejection(keys.Count, KeyValueResponseType.InvalidInput));
+
         RegistrationRouting routing = ClassifyRegistration(transactionId, coordinatorKey, operationId);
         if (routing is RegistrationRouting.Legacy)
-            return locator.LocateAndTryProbeMany(transactionId, readTimestamp, keys, lockMode, expiresMs, durability, cancellationToken);
+            return locator.LocateAndTryProbeMany(transactionId, readTimestamp, keys, lockMode, expiresMs, durability, cancellationToken, readMode);
 
         // The re-entry-only mode is the replay a registered probe derives for itself; a caller never asks for it.
         if (routing is RegistrationRouting.Malformed || lockMode == KeyValueProbeLock.SharedReentryOnly)
             return Task.FromResult(BuildProbeRejection(keys.Count, KeyValueResponseType.InvalidInput));
 
-        return RegisterAndTryProbeMany(transactionId, coordinatorKey, operationId, readTimestamp, keys, lockMode, expiresMs, durability, cancellationToken);
+        return RegisterAndTryProbeMany(transactionId, coordinatorKey, operationId, readTimestamp, keys, lockMode, expiresMs, durability, readMode, cancellationToken);
     }
 
     private static KeyValueProbeResult[] BuildProbeRejection(int count, KeyValueResponseType type)
@@ -375,9 +390,9 @@ internal sealed class RoutedReadOperations
     private async Task<KeyValueProbeResult[]> RegisterAndTryProbeMany(
         HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId,
         HLCTimestamp readTimestamp, IReadOnlyList<string> keys, KeyValueProbeLock lockMode, int expiresMs,
-        KeyValueDurability durability, CancellationToken cancellationToken)
+        KeyValueDurability durability, KeyValueReadMode readMode, CancellationToken cancellationToken)
     {
-        byte[] digest = OperationDigest.ForProbeMany(keys, readTimestamp, lockMode, expiresMs, durability);
+        byte[] digest = OperationDigest.ForProbeMany(keys, readTimestamp, lockMode, expiresMs, durability, readMode);
 
         (OperationRegistrationOutcome outcome, _, _, _, _, TransactionConflictPolicy sessionPolicy) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.ProbeMany, digest, cancellationToken);
@@ -425,7 +440,7 @@ internal sealed class RoutedReadOperations
         try
         {
             using (LockGrantScope.Begin(out grants))
-                results = await locator.LocateAndTryProbeMany(transactionId, readTimestamp, keys, effectiveLock, expiresMs, durability, cancellationToken);
+                results = await locator.LocateAndTryProbeMany(transactionId, readTimestamp, keys, effectiveLock, expiresMs, durability, cancellationToken, readMode);
         }
         catch
         {
@@ -441,6 +456,7 @@ internal sealed class RoutedReadOperations
         List<KeyValueTransactionReadKey>? observations = null;
         List<(RangeLockKey Range, RangeLockMode Mode)>? acquired = null;
         string keySpace = KeyValueKeySpace.OfKey(keys[0]) ?? keys[0];
+        bool foldsReads = RecordsReadObservation(readTimestamp, readMode);
 
         for (int i = 0; i < results.Length; i++)
         {
@@ -449,9 +465,10 @@ internal sealed class RoutedReadOperations
             if (result.Locked)
                 (acquired ??= []).Add((new RangeLockKey(keySpace, keys[i], true, keys[i], true, durability), RangeLockMode.Shared));
 
-            // A snapshot read owns no live transactional MVCC entry, so it records no observation. Only confirmed
-            // answers fold, by the allow-list a batch get uses: any other type means the key's state is unknown.
-            if (!readTimestamp.IsNull() || result.Type is not (KeyValueResponseType.Get or KeyValueResponseType.DoesNotExist))
+            // A plain as-of read owns no live transactional MVCC entry, so it records no observation; a latest read
+            // and a statement read do (see RecordsReadObservation). Only confirmed answers fold, by the allow-list a
+            // batch get uses: any other type means the key's state is unknown.
+            if (!foldsReads || result.Type is not (KeyValueResponseType.Get or KeyValueResponseType.DoesNotExist))
                 continue;
 
             bool exists = result.Entry is not null && result.Type == KeyValueResponseType.Get;
@@ -464,10 +481,10 @@ internal sealed class RoutedReadOperations
             });
         }
 
-        // A latest probe that neither confirmed a read nor took a lock has no effect: cancel the registration so a
-        // same-id retry registers as new (the transient-cancel path of a batch get). A lock is an effect even when
-        // every read on it waited, so it always completes.
-        KeyValueResponseType cachedType = readTimestamp.IsNull() && observations is null && acquired is null
+        // A folding probe that neither confirmed a read nor took a lock has no effect: cancel the registration so a
+        // same-id retry registers as new (the transient-cancel path of a batch get) and can still fold. A lock is an
+        // effect even when every read on it waited, so it always completes.
+        KeyValueResponseType cachedType = foldsReads && observations is null && acquired is null
             ? KeyValueResponseType.MustRetry
             : KeyValueResponseType.Get;
 
