@@ -145,14 +145,18 @@ internal sealed class LocatorRouting
 
     /// <summary>
     /// True when <paramref name="key"/> lands in the part of <paramref name="descriptor"/> that is
-    /// currently refusing writes. Reading the clock costs a mint, so the deadline is tested for being
-    /// set at all first — a range that is not being moved, which is every range almost all the time,
-    /// never pays for it.
+    /// currently refusing writes (see <see cref="RangeRouting.IsQuiescedForWrite"/>).
     /// </summary>
     internal bool IsRangeQuiesced(RangeDescriptor? descriptor, string key) =>
-        descriptor is not null
-        && descriptor.QuiescedUntil != HLCTimestamp.Zero
-        && descriptor.IsQuiescedAt(key, raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId()));
+        RangeRouting.IsQuiescedForWrite(descriptor, key, raft);
+
+    /// <summary>
+    /// As <see cref="IsRangeQuiesced"/> for a caller that holds only the key: resolves the key's descriptor
+    /// on this node's applied map first. A hash-routed key, and a key-range key no descriptor covers here,
+    /// are not quiesced.
+    /// </summary>
+    internal bool IsKeyQuiesced(string key) =>
+        RangeRouting.IsQuiescedForWrite(RangeRouting.FindDescriptor(keySpaceRegistry, manager.RangeMapStore.Current, key), key, raft);
 
     /// <summary>Routes a per-key operation via <see cref="RangeRouting.Locate"/>.</summary>
     internal int RouteKey(string key) =>

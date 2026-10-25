@@ -47,6 +47,14 @@ internal interface IProposalSubmission
     /// return false.</summary>
     bool IsStale(IWriteRangeFence fence);
 
+    /// <summary>Producer-owned flush-time quiesce check: true releases the submission retryably because a key it
+    /// writes lies in a range whose data is being moved to another partition (see
+    /// <see cref="IWriteRangeFence.IsQuiesced"/>). Only a submission that would add new state to the range
+    /// answers true — a durable transaction's decision, settlement and materialization must flow while a range
+    /// is quiesced, since the move waits for the range's undecided intents to settle. Producers with no fence
+    /// return false.</summary>
+    bool IsQuiesced(IWriteRangeFence fence);
+
     /// <summary>Whether the commit admission window refuses this submission's entries at
     /// <paramref name="entryTime"/>, the time Kommander stamped on the proposal that carried them. Every replica's
     /// apply judges the same entries by the same time and turns a refused entry into a no-op, so the scheduler

@@ -282,6 +282,11 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     // the frozen target (protocol tests, deployments without key-range routing).
     private readonly Func<string, int>? resolveCurrentPartition;
 
+    // Whether a key lies in a range quiesced for a data move, as the coordinator's node sees it: a refused
+    // participant whose key is quiesced was released by its leader's dispatch fence, and is answered as a clean
+    // retry instead of being helped or backed off. Null means no classification (protocol tests).
+    private readonly Func<string, bool>? isKeyQuiesced;
+
     // Mints a fresh HLC immediately before the terminal transition, used as the attempt's AttemptHlc so elapsed
     // prepare/validate time can actually trip the frozen decision deadline. Null keeps the deprecated behaviour of
     // reusing the operation id as the attempt HLC — used only by protocol tests that supply an explicit late opId.
@@ -340,6 +345,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         ReplicateOnePhaseBundleDelegate? replicateOnePhaseBundle = null,
         ValidateStagedBasesDelegate? validateStagedBases = null,
         Func<string, int>? resolveCurrentPartition = null,
+        Func<string, bool>? isKeyQuiesced = null,
         ReplicateDecisionDelegate? replicateDecision = null,
         LookupRecordRoutedDelegate? lookupRecordRouted = null,
         ConfirmReplicaFenceDelegate? confirmReplicaFence = null,
@@ -364,6 +370,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         this.validateStagedBases = validateStagedBases;
         this.confirmReplicaFence = confirmReplicaFence;
         this.resolveCurrentPartition = resolveCurrentPartition;
+        this.isKeyQuiesced = isKeyQuiesced;
         this.replicateDecision = replicateDecision;
         this.lookupRecordRouted = lookupRecordRouted;
         this.recordStore = recordStore;
@@ -715,6 +722,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         bool retryCancelled = false;
         bool staleBase = false;
         bool rangeMoved = false;
+        bool rangeQuiesced = false;
         bool identitySettled = false;
         bool admissionRefused = false;
         bool deadlineLapsed = false;
@@ -746,6 +754,10 @@ internal sealed class DurableTransactionFinalizer : IDisposable
                         rangeMoved = true;
                         break;
 
+                    case Writes.PrepareRejectionKind.RangeQuiesced:
+                        rangeQuiesced = true;
+                        break;
+
                     case Writes.PrepareRejectionKind.Settled:
                         identitySettled = true;
                         break;
@@ -758,7 +770,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
                 unacknowledged.Add(i);
             }
 
-            if (staleBase || rangeMoved || identitySettled || admissionRefused)
+            if (staleBase || rangeMoved || rangeQuiesced || identitySettled || admissionRefused)
                 break;
 
             // The round budget of a live or unclassified conflict is spent: give up before another helping pass.
@@ -889,6 +901,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
                 : staleBase ? PrepareRetryLoopOutcome.StaleBase
                 : admissionRefused ? PrepareRetryLoopOutcome.AdmissionRefused
                 : rangeMoved ? PrepareRetryLoopOutcome.RangeMoved
+                : rangeQuiesced ? PrepareRetryLoopOutcome.RangeQuiesced
                 : deadlineLapsed ? PrepareRetryLoopOutcome.DeadlineLapsed
                 : PrepareRetryLoopOutcome.Exhausted);
         }
@@ -900,6 +913,15 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         // retry from a fresh freeze is truthful; the abandoned-attempt fence covers a client that gives up instead.
         if (!allPrepared && rangeMoved && !staleBase && !identitySettled)
             return Retry() with { DecisionDeadline = lease.Deadline };
+
+        // A refused participant's key lies in a range quiesced for a data move: its leader released the prepare
+        // at dispatch rather than append it after the move's catch-up copy. Nothing decided is durable, and the
+        // same frozen input prepares once the window ends (the move cuts over or its deadline lapses), so the
+        // attempt answers a clean retry at once instead of spending helping passes and backoff on a window no
+        // other transaction holds.
+        if (!allPrepared && rangeQuiesced && !staleBase && !identitySettled)
+            return Retry(CommitRefusalClass.RangeQuiesced, "A written key lies in a key range whose data is being moved to another partition; retry after the move")
+                with { DecisionDeadline = lease.Deadline };
 
         // Settlement lag outlived the deadline with renewal off (a mixed-version rollout): nothing is decided, and
         // the attempt answers MustRetry with its prepares installed, leaving the conclusion to a same-identity
@@ -1795,7 +1817,8 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     /// for this transaction's keys (recorded at the prepare's apply, locally or mirrored from a remote leader's
     /// typed answer; a stale base outranks a held key), else a range that no longer routes one of the group's
     /// fenced keys to the frozen partition (every space the group touches is probed, not only the first key's),
-    /// else <see cref="Writes.PrepareRejectionKind.None"/> — no verdict, retried as before.
+    /// else a key of the group that lies in a range quiesced for a data move (the leader's dispatch fence released
+    /// the prepare), else <see cref="Writes.PrepareRejectionKind.None"/> — no verdict, retried as before.
     /// </summary>
     private Writes.PrepareRejectionKind ClassifyPrepareRefusal(DurableFinalizeInput input, DurablePartitionPrepare partition)
     {
@@ -1810,30 +1833,54 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         if (dominant != Writes.PrepareRejectionKind.None)
             return dominant;
 
-        if (resolveCurrentPartition is null)
-            return Writes.PrepareRejectionKind.None;
-
-        // The fences name one key per descriptor the group touches, so they are the cheapest complete probe; a
-        // group frozen without fences is probed through its intents, since whether the frozen partition still
-        // owns the keys does not depend on the dispatch fence.
-        if (partition.Fences.Count > 0)
+        if (resolveCurrentPartition is not null)
         {
-            for (int i = 0; i < partition.Fences.Count; i++)
+            // The fences name every key-range key of the group (and one key per hash space), so they are a
+            // complete probe; a group frozen without fences is probed through its intents, since whether the
+            // frozen partition still owns the keys does not depend on the dispatch fence.
+            if (partition.Fences.Count > 0)
             {
-                if (ResolveCurrentPartitionSafe(partition.Fences[i].Key, partition.PartitionId) != partition.PartitionId)
-                    return Writes.PrepareRejectionKind.RangeMoved;
+                for (int i = 0; i < partition.Fences.Count; i++)
+                {
+                    if (ResolveCurrentPartitionSafe(partition.Fences[i].Key, partition.PartitionId) != partition.PartitionId)
+                        return Writes.PrepareRejectionKind.RangeMoved;
+                }
             }
-
-            return Writes.PrepareRejectionKind.None;
+            else
+            {
+                for (int i = 0; i < partition.Intents.Count; i++)
+                {
+                    if (ResolveCurrentPartitionSafe(partition.Intents[i].Key, partition.PartitionId) != partition.PartitionId)
+                        return Writes.PrepareRejectionKind.RangeMoved;
+                }
+            }
         }
 
-        for (int i = 0; i < partition.Intents.Count; i++)
+        // The range still routes the group here but part of it is being moved: the leader released the prepare
+        // instead of appending it inside the move's window. Asked after the route check, since a range that
+        // already cut over is final for this freeze where a quiesce only ends.
+        if (isKeyQuiesced is not null)
         {
-            if (ResolveCurrentPartitionSafe(partition.Intents[i].Key, partition.PartitionId) != partition.PartitionId)
-                return Writes.PrepareRejectionKind.RangeMoved;
+            for (int i = 0; i < partition.Intents.Count; i++)
+            {
+                if (IsKeyQuiescedSafe(partition.Intents[i].Key))
+                    return Writes.PrepareRejectionKind.RangeQuiesced;
+            }
         }
 
         return Writes.PrepareRejectionKind.None;
+    }
+
+    private bool IsKeyQuiescedSafe(string key)
+    {
+        try
+        {
+            return isKeyQuiesced?.Invoke(key) ?? false;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private int ResolveCurrentPartitionSafe(string key, int frozenPartitionId)

@@ -25,6 +25,7 @@ public sealed class TestUnflushedBacklogGate
     private sealed class StubFence : IWriteRangeFence
     {
         public bool IsStale(string key, long admittedGeneration, int admittedPartitionId) => false;
+        public bool IsQuiesced(string key) => false;
     }
 
     private sealed class SucceedingExecutor : IPartitionBatchExecutor
@@ -52,6 +53,7 @@ public sealed class TestUnflushedBacklogGate
         public IReadOnlyList<RaftProposalEntry> Entries { get; } = [new RaftProposalEntry(ReplicationTypes.KeyValues, new byte[8], AutoCommit: true, ExpectedGeneration: 0)];
         public long EnqueueTicks { get; set; }
         public bool IsStale(IWriteRangeFence fence) => false;
+        public bool IsQuiesced(IWriteRangeFence fence) => false;
         public void Complete(IReadOnlyList<long>? entryLogIndices) => Done.TrySetResult(true);
         public void Release(bool transient) => Done.TrySetResult(false);
     }

@@ -28,7 +28,9 @@ public sealed class TestPartitionWriteAggregator
     private sealed class StubFence : IWriteRangeFence
     {
         public readonly HashSet<string> StaleKeys = [];
+        public readonly HashSet<string> QuiescedKeys = [];
         public bool IsStale(string key, long admittedGeneration, int admittedPartitionId) => StaleKeys.Contains(key);
+        public bool IsQuiesced(string key) => QuiescedKeys.Contains(key);
     }
 
     /// <summary>A neutral test submission: carries the batching surface and records its own terminal completion
@@ -59,6 +61,7 @@ public sealed class TestPartitionWriteAggregator
         }
 
         public bool IsStale(IWriteRangeFence fence) => fence.IsStale(key, 0, PartitionId);
+        public bool IsQuiesced(IWriteRangeFence fence) => fence.IsQuiesced(key);
         public void Complete(IReadOnlyList<long>? entryLogIndices) => sink?.Completed.TryAdd(ProposalId, 1);
         public void Release(bool transient) => sink?.Released.TryAdd(ProposalId, transient);
     }
@@ -87,6 +90,7 @@ public sealed class TestPartitionWriteAggregator
         }
 
         public bool IsStale(IWriteRangeFence fence) => false;
+        public bool IsQuiesced(IWriteRangeFence fence) => false;
         public void Complete(IReadOnlyList<long>? entryLogIndices) => sink?.Completed.TryAdd(ProposalId, 1);
         public void Release(bool transient) => sink?.Released.TryAdd(ProposalId, transient);
     }
@@ -1459,6 +1463,41 @@ public sealed class TestPartitionWriteAggregator
         Assert.True(router.Completed.ContainsKey(1) && router.Completed.ContainsKey(3));
         Assert.Single(exec.Calls);
         Assert.Equal(2, exec.Calls.First().Count);             // only the two valid siblings were proposed
+    }
+
+    /// <summary>
+    /// An item whose key lies in a range quiesced for a data move is released retryably at dispatch, on its
+    /// own and under its own release reason, while its siblings in the same batch are proposed. This is the
+    /// partition leader's authoritative quiesce check for a write that reached the scheduler: it holds whichever
+    /// node admitted the write, and on a leader that never held the in-memory range lock.
+    /// </summary>
+    [Fact]
+    public async Task Aggregator_QuiescedRangeItem_ReleasedIndividually_SiblingsCommit()
+    {
+        using MetricCapture releases = new("reason", "kahuna.kv.write.rejections");
+
+        RecordingExecutor exec = new();
+        RecordingRouter router = new();
+        StubFence fence = new();
+        fence.QuiescedKeys.Add("moving"); // this key's range is being moved to another partition
+
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
+        {
+            MaxBatchItems = 3,
+            LingerMs = 10_000
+        }, fence);
+
+        agg.TryEnqueue(Item(4, 1, key: "ok1", sink: router));
+        agg.TryEnqueue(Item(4, 2, key: "moving", sink: router));
+        agg.TryEnqueue(Item(4, 3, key: "ok3", sink: router));
+
+        await WaitUntil(() => router.Completed.Count == 2);
+
+        Assert.True(router.Released.TryGetValue(2, out bool transient) && transient); // released, retryable
+        Assert.True(router.Completed.ContainsKey(1) && router.Completed.ContainsKey(3));
+        Assert.Single(exec.Calls);
+        Assert.Equal(2, exec.Calls.First().Count);
+        Assert.True(releases.Total("kahuna.kv.write.rejections", "range_quiesced") >= 1);
     }
 
     [Fact]

@@ -73,6 +73,8 @@ internal sealed class LockProposalSubmission : IProposalSubmission
     /// <summary>Hash-routed resources never move between admission and flush.</summary>
     public bool IsStale(IWriteRangeFence fence) => false;
 
+    public bool IsQuiesced(IWriteRangeFence fence) => false;
+
     /// <summary>Batch committed: send <c>CompleteProposal</c> to the owning lock actor — the only component that
     /// mutates the entry and resolves the caller's promise. The entry's own committed log index travels with it so
     /// the background write can be resolved against the durability floor once it flushes. The pooled request

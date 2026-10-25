@@ -498,7 +498,17 @@ internal sealed class TransactionCoordinator : IDisposable
             // possibly still in flight): releasing the locks then would let a conflicting writer interleave
             // ahead of a commit that can still land, so the working set is held until a retry resolves the
             // attempt or the reaper/rollback fences it through the record CAS.
-            if (context.UnresolvedDurableFinalize is null)
+            //
+            // And EXCEPT when the commit was refused before anything durable because a written key lies in a
+            // range quiesced for a data move: that answer promises a retry under the same handle once the
+            // short window ends, which needs the staged writes and the locks that guard them still in place.
+            // The staged-intent lease and the session's own deadline bound a client that never comes back,
+            // and a retry that lands after the range cut over fails its lock proof and intent probe as any
+            // moved range does.
+            bool heldForRetry = context.UnresolvedDurableFinalize is not null
+                || context.Result is { Type: KeyValueResponseType.MustRetry, Refusal: CommitRefusalClass.RangeQuiesced };
+
+            if (!heldForRetry)
             {
                 if (context.AsyncRelease)
                     _ = ReleaseWorkingSet(context);
@@ -1606,6 +1616,10 @@ internal sealed class TransactionCoordinator : IDisposable
     /// <summary>Test access to the lazily built finalizer, for installing its interleaving hooks.</summary>
     internal DurableTransactionFinalizer DurableFinalizerForTests => DurableFinalizer;
 
+    /// <summary>Test-only: skips the coordinator's range-quiesce admission gate so a prepare into a quiesced
+    /// range reaches its partition leader, where the dispatch fence must refuse it on its own.</summary>
+    internal bool TestSkipRangeQuiesceAdmissionGate;
+
     // Deferred-settlement background resolutions in flight. Tracked so Dispose can drain them (bounded) before
     // teardown and cancel any straggler; a lost run is finished by recovery regardless, so this is best-effort.
     private readonly CancellationTokenSource deferredResolutionCts = new();
@@ -1656,6 +1670,10 @@ internal sealed class TransactionCoordinator : IDisposable
         // decision and a (deferred or retried) materialization moves the key's ownership, and materializing
         // into the frozen partition would hide the committed value from every reader of the new range.
         resolveCurrentPartition: key => manager.LocateDurablePartition(key).PartitionId,
+        // A participant whose prepare the leader released against a range quiesce is answered as a clean retry
+        // from the retry loop's first classification, rather than helped and backed off against a window no
+        // other transaction holds.
+        isKeyQuiesced: manager.IsKeyQuiesced,
         // The terminal decision replicates WITHOUT the sender-side record projection: a decision forwarded to
         // a remote anchor leader can lose to one that already won there (a routed presumed abort racing this
         // commit, or the reverse), and projecting the losing delta would diverge this node's record store from
@@ -1872,6 +1890,30 @@ internal sealed class TransactionCoordinator : IDisposable
             return ApplyDurableOutcome(context, fenceRan ? fenced with { LateCommitRejected = true } : fenced);
         }
 
+        // Admission gate 0 — range quiesce: refuse before anything durable when a key this attempt would prepare,
+        // or the anchor its record would be initialized on, lies in a key range whose data is being moved to
+        // another partition. The move's catch-up copy runs inside that window, so a prepare appended after it is
+        // stranded on the source once the range routes elsewhere. The in-memory range lock the mover holds
+        // fences the same window through the commit probe, but that lock is leader-local and a leadership change
+        // on the source partition drops it; the quiesce rides the replicated range map and is judged here on this
+        // node's own copy, whichever node the coordinator runs on. The binding check is the partition leader's
+        // dispatch fence, which asks the same question of the leader's own map just before appending; this gate
+        // keeps the doomed prepare off the wire and names the refusal. A retry under the same handle proceeds
+        // once the window ends (the move cuts over or its deadline lapses). A re-driven attempt whose prepares
+        // are already durable is refused too: the move waits for those intents to decide before it copies, so the
+        // decision is delayed by the window at most, never deadlocked against it.
+        if (!TestSkipRangeQuiesceAdmissionGate && FindQuiescedKey(input) is { } quiescedKey)
+        {
+            DurableTransactionMetrics.RangeQuiesceRefusals.Add(1);
+            context.Result = new KeyValueTransactionResult
+            {
+                Type = KeyValueResponseType.MustRetry,
+                Reason = $"Key {quiescedKey} lies in a key range whose data is being moved to another partition; retry",
+                Refusal = CommitRefusalClass.RangeQuiesced
+            };
+            return DurableFinalizeResult.MustRetry;
+        }
+
         // Admission gate 1 — resident prepared-intent count/bytes: refuse before preparing if this transaction's
         // intents would push resident prepared-intent state past its node bound, so slow settlement cannot let it
         // grow without limit. A read-only check (no reservation to unwind), so it runs before the slot reserve.
@@ -1973,6 +2015,28 @@ internal sealed class TransactionCoordinator : IDisposable
         }
 
         return ApplyDurableOutcome(context, outcome);
+    }
+
+    /// <summary>
+    /// The first key of <paramref name="input"/> that lies in a range quiesced for a data move, as this node's
+    /// applied range map sees it — the record anchor first (its record initialization would be stranded on the
+    /// source just as a prepare would), then every key the attempt would prepare — or null when none is.
+    /// </summary>
+    private string? FindQuiescedKey(DurableFinalizeInput input)
+    {
+        if (manager.IsKeyQuiesced(input.RecordAnchorKey))
+            return input.RecordAnchorKey;
+
+        foreach (DurablePartitionPrepare partition in input.Partitions)
+        {
+            foreach (PreparedIntent intent in partition.Intents)
+            {
+                if (manager.IsKeyQuiesced(intent.Key))
+                    return intent.Key;
+            }
+        }
+
+        return null;
     }
 
     /// <summary>

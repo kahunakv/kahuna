@@ -70,5 +70,11 @@ public enum CommitRefusalClass
     /// <summary>Retryable: the commit timestamp fell outside the commit admission window of a participant's log
     /// entry. It was minted too long before its prepare reached the log, or the coordinator's clock ran more than
     /// 5 s ahead of the participant's leader. Nothing was committed; a retry mints a new commit timestamp.</summary>
-    CommitTimestampOutsideWindow = 16
+    CommitTimestampOutsideWindow = 16,
+
+    /// <summary>Retryable: a written key, or the transaction's record anchor, lies in a key range whose data is
+    /// being moved to another partition (a split or merge in its copy window). Nothing was prepared. The window
+    /// is short and bounded by a deadline; the same commit can be retried after a short backoff, and is then
+    /// routed to the partition that owns the range.</summary>
+    RangeQuiesced = 17
 }

@@ -400,12 +400,29 @@ Step by step:
      on the source partition: a newly promoted leader holds no lock but still refuses writes into
      a range whose contents are being copied elsewhere.
 
-   It is checked in two places. `KeyValueLocator` bounces a set pre-route, which keeps a doomed
-   write off the wire; `RangeRouting.ResolveForDirectWrite` refuses it on the partition leader at
-   admission, which is the binding one — every direct persistent write passes through it just
-   before proposing, whichever node the client happened to talk to. `DirectWriteRouting` reports
-   *which* guard refused (`Quiesced` vs `GenerationFenced`), because the two cover opposite sides
-   of the cutover and conflating them hides which fired.
+   It is checked in two places for a **direct write**. `KeyValueLocator` bounces a set pre-route,
+   which keeps a doomed write off the wire; `RangeRouting.ResolveForDirectWrite` refuses it on the
+   partition leader at admission, which is the binding one — every direct persistent write passes
+   through it just before proposing, whichever node the client happened to talk to.
+   `DirectWriteRouting` reports *which* guard refused (`Quiesced` vs `GenerationFenced`), because
+   the two cover opposite sides of the cutover and conflating them hides which fired.
+
+   A **transactional commit** (the durable-intent path) is checked in two places of its own, with
+   the same division of labour. The coordinator refuses the commit before anything is prepared when
+   a written key, or the record anchor, lies in the quiesced part of a range on its node's map:
+   `MustRetry` with the refusal class `RangeQuiesced`, nothing durable, the same handle retried once
+   the window ends. The binding check is the partition write scheduler's dispatch fence
+   (`RangeMapWriteFence.IsQuiesced`): a prepare, re-prepare, one-phase bundle or record
+   initialization is released retryably on the partition leader, against the leader's own map, just
+   before it would be appended — so it holds for a coordinator whose map had not applied the quiesce
+   yet, and on a source leader promoted mid-move that holds no range lock. Decisions, settlement and
+   materialization are never refused by a quiesce: the move waits for the range's undecided intents
+   to decide and settle before it copies, so refusing them would stall the move against the very
+   transactions it waits for. Every key-range key a transaction writes carries its own dispatch fence
+   (`DurableFinalizeInputBuilder`), because a split quiesces one half of a descriptor and a group can
+   hold keys on both sides of the split point: a commit confined to the staying half goes through
+   during the window. Releases are counted under `kahuna.kv.write.rejections{reason="range_quiesced"}`
+   and coordinator refusals under `kahuna.durable_tx.range_quiesce_refusals`.
 
    The quiesce carries a **deadline**, not a flag: a split executor that dies mid-window leaves a
    range that reopens on its own rather than one that refuses writes forever. The release is scoped
@@ -796,7 +813,7 @@ Everything lives under `Kahuna.Core/KeyValues/Ranges/` unless noted.
 | `RoutingMode.cs` | The `Hash` / `KeyRange` enum. |
 | `KeySpaceRegistry.cs` | Per-key-space mode lookup (prefix before last `/`). |
 | `DataPartitionRouter.cs` | Kahuna's hash assignment over user partitions `[1, N]`. |
-| `RangeRouting.cs` | The single routing funnel: `Locate`, `IsKeyRange`, `TryFenceKeyRange`, and the leader-side `ResolveForDirectWrite` (quiesce + generation fence). |
+| `RangeRouting.cs` | The single routing funnel: `Locate`, `IsKeyRange`, `FindDescriptor` / `IsQuiescedForWrite` (the one quiesce check behind every write path), the leader-side `ResolveForDirectWrite` (quiesce + generation fence) and the dispatch-time `HasKeyRangeMovedSinceAdmission`. |
 | `KvStateMachineTransfer.cs` | `ExportRangeAsync` / `ImportRangeAsync`; paged, checksummed snapshot transfer. |
 | `RangeSplitter.cs` | The split transaction: create → transfer → quiesce → atomic cutover. |
 | `RangeSplitPolicy.cs` | Split-key selection (median / hot-tail), thresholds, min-size guard. |

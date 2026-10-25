@@ -277,7 +277,7 @@ internal sealed class KeyValuesManagerBuilder
                 // backlog is over budget (see PersistenceBacklogMonitor).
                 UnflushedBacklogGate = backlogMonitor is null ? null : () => backlogMonitor.IsOverBudget
             },
-            new Writes.RangeMapWriteFence(keySpaceRegistry, rangeMapStore),
+            new Writes.RangeMapWriteFence(keySpaceRegistry, rangeMapStore, raft),
             logger
         );
 

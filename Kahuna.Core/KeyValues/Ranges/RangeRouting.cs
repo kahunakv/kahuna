@@ -1,3 +1,4 @@
+using Kommander;
 using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues.Ranges;
@@ -48,9 +49,10 @@ internal static class RangeRouting
     /// <list type="bullet">
     /// <item><b>KeyRange</b> space → the descriptor from <paramref name="rangeMap"/> whose half-open
     /// ordinal interval contains the key; returns <c>(descriptor.PartitionId, descriptor.Generation)</c>.
-    /// The generation is the Kahuna routing fence, validated against the current range map by
-    /// <see cref="TryFenceKeyRange"/> (and in the 2PC prepare handler) so a request routed at a stale
-    /// generation after a split is rejected with MustRetry. It is <b>not</b> Kommander's physical-partition
+    /// The generation is the Kahuna routing fence: a direct write is re-fenced against the live map by
+    /// <see cref="ResolveForDirectWrite"/> on the partition leader at admission, and a durable prepare by
+    /// the partition write scheduler's dispatch fence (<c>RangeMapWriteFence</c>), so a request routed at a
+    /// stale generation after a split is rejected with MustRetry. It is <b>not</b> Kommander's physical-partition
     /// <c>ReplicateLogs(expectedGeneration:)</c> fence — that is an independent namespace Kahuna does not sync
     /// from descriptors, so the descriptor generation must never be passed there.</item>
     /// <item><b>Hash</b> space (default; system + <c>{db}/meta</c>) → <c>(DataPartitionRouter.Locate(key), 0)</c>.
@@ -236,48 +238,37 @@ internal static class RangeRouting
     }
 
     /// <summary>
-    /// The generation fence for a <b>key-range</b> key, evaluated on the leader
-    /// just before replicating a write. Resolves the current descriptor and compares it to the
-    /// generation the request routed on. Returns <c>false</c> (⇒ caller surfaces <c>MustRetry</c>)
-    /// when the range moved or split since routing — no covering descriptor, or a generation bump.
-    /// On success, <paramref name="partitionId"/> is the descriptor's current partition.
-    /// <para>Call <see cref="IsKeyRange"/> first; hash keys are not fenced.</para>
+    /// The descriptor a <b>key-range</b> key resolves through on <paramref name="rangeMap"/>, or null for a
+    /// hash-routed key and for a key-range key no descriptor covers. For a caller that needs only the range's
+    /// state — whether it is quiesced for a data move — and not a routing decision. The same single
+    /// classification as <see cref="Locate"/>, so the two cannot disagree about which range a key is in.
     /// </summary>
-    public static bool TryFenceKeyRange(RangeMap rangeMap, string key, long routedGeneration, out int partitionId) =>
-        TryFenceKeyRange(rangeMap, key, routedGeneration, out partitionId, out _);
+    public static RangeDescriptor? FindDescriptor(KeySpaceRegistry registry, RangeMap rangeMap, string key)
+    {
+        int separator = key.LastIndexOf('/');
+        ReadOnlySpan<char> keySpace = separator < 0 ? key.AsSpan() : key.AsSpan(0, separator);
+
+        return registry.GetMode(keySpace) == RoutingMode.KeyRange ? rangeMap.Find(keySpace, key) : null;
+    }
 
     /// <summary>
-    /// As <see cref="TryFenceKeyRange(RangeMap,string,long,out int)"/>, but also outputs the live descriptor
-    /// <paramref name="generation"/> resolved during the check. Callers that defer the write (the direct-write
-    /// aggregator, which re-fences at flush time after a linger) capture this generation at admission so the
-    /// later fence can detect a range move even for writes that carried no routed generation (delete/extend).
-    /// On failure both outputs are zero.
+    /// True when <paramref name="key"/> lands in the part of <paramref name="descriptor"/> that is refusing
+    /// writes now because its data is being moved to another partition. The one definition behind every
+    /// write-side quiesce check (the locator's pre-route bounce, the leader's direct-write admission, the
+    /// coordinator's commit admission and the write scheduler's dispatch fence), so they cannot drift.
+    /// Reading the clock costs a mint, so the deadline is tested for being set at all first: a range that is
+    /// not being moved, which is every range almost all the time, never pays for it.
     /// </summary>
-    public static bool TryFenceKeyRange(RangeMap rangeMap, string key, long routedGeneration, out int partitionId, out long generation)
-    {
-        RangeDescriptor? descriptor = rangeMap.FindCovering(key);
-
-        if (descriptor is null)
-        {
-            partitionId = 0;
-            generation = 0;
-            return false;
-        }
-
-        partitionId = descriptor.PartitionId;
-        generation = descriptor.Generation;
-
-        // routedGeneration 0 = the request didn't carry a routed generation (pre-switch path); route
-        // to the current descriptor without fencing. A non-zero routed generation must match.
-        return routedGeneration == 0 || descriptor.Generation == routedGeneration;
-    }
+    public static bool IsQuiescedForWrite(RangeDescriptor? descriptor, string key, IRaft raft) =>
+        descriptor is not null
+        && descriptor.QuiescedUntil != HLCTimestamp.Zero
+        && descriptor.IsQuiescedAt(key, raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId()));
 
     /// <summary>
     /// Flush-time staleness check for a key-range write that was resolved at admission and then deferred.
     /// Returns true when the descriptor covering <paramref name="key"/> has moved since admission — no
     /// covering descriptor now, a different generation, or a different partition than the write was admitted
-    /// against. Unlike <see cref="TryFenceKeyRange(RangeMap,string,long,out int)"/> this makes no
-    /// generation-zero exception: <paramref name="admittedGeneration"/> is the live descriptor generation
+    /// against. This makes no generation-zero exception: <paramref name="admittedGeneration"/> is the live descriptor generation
     /// captured at admission, so zero is a concrete value to match, not "fence disabled". The partition is
     /// compared as well so a move that somehow did not bump the generation is still caught.
     /// <para>Call <see cref="IsKeyRange"/> first; hash keys never move.</para>

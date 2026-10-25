@@ -580,7 +580,9 @@ The commit answer (`TransactionCommitAnswer` from `LocateAndCommitTransaction`, 
 fields of the gRPC and REST commit replies) also names **which arm refused** through `CommitRefusalClass`:
 `Conflict`, `StagedBaseMoved`, `DecisionDeadline`, `PrepareExhausted`, `LostLock`, `LostStagedIntent`,
 `StagedChainBreak`, `PresumedAbort`, `ExplicitRollback`, `InvalidWorkingSet` or `Faulted` on an `Aborted`;
-`SettlementLag`, `Unresolved` or `AdmissionCapacity` on a `MustRetry`; `UnknownTransaction` on an `Errored`.
+`SettlementLag`, `Unresolved`, `AdmissionCapacity` or `RangeQuiesced` (a written key or the record anchor lies in
+a key range whose data is being moved to another partition; retry after a short backoff) on a `MustRetry`;
+`UnknownTransaction` on an `Errored`.
 The answer deconstructs to the `(type, anchor)` pair it answered before the class existed, so a caller that
 only reads the outcome is unchanged; the client SDK puts the class and reason in the exception message of a
 refused commit.
@@ -614,7 +616,7 @@ whole script. A script that ends by its own control flow (`ROLLBACK`, `RETURN`, 
 | `MaxTransactionTimeout` / `DefaultTransactionTimeout` | Session lifetime (and the orphaned-snapshot reclamation horizon) |
 
 Observability: `kahuna.durable_tx.resident_prepared_intents`, `…resident_prepared_intent_bytes`,
-`…outstanding`, `…resident_records`, `…admission_rejections`, `…late_commit_rejections`,
+`…outstanding`, `…resident_records`, `…admission_rejections`, `…range_quiesce_refusals`, `…late_commit_rejections`,
 `…late_commit_conclusions{outcome}`, `…retries_past_deadline{outcome}`, `…deadline_extensions{outcome}`,
 `…prepare_retry_loops{outcome}`,
 `…replica_fence_lagging_replicas`, `…replica_fence_lag_transitions{state,reason}`, `…replica_fence_lagging_asks{kind}`.

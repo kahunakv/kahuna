@@ -366,8 +366,12 @@ Instruments are published on the `Kahuna` meter with low-cardinality tags only (
 outcome string — never a key, partition id, or transaction id):
 
 - **Counters** — admitted writes; rejections (tagged `queue_full` / `stopping` / `fence_stale` /
-  `queue_expired` / `unflushed_backlog`); dispatched batches; dispatched log entries; batch outcomes
-  (`success` / `transient` / `permanent`).
+  `range_quiesced` / `queue_expired` / `unflushed_backlog`); dispatched batches; dispatched log
+  entries; batch outcomes (`success` / `transient` / `permanent`). A `range_quiesced` release is a
+  submission that would have added state to a key range whose data is being moved to another
+  partition (a prepare, a one-phase bundle, a record initialization, or a direct write that waited in
+  the aggregator while the quiesce arrived); it is released retryably, and the move's decisions and
+  settlement are never released for it.
 - **Histograms** — entries per batch, serialized bytes per batch, oldest-item queue age, and Raft-call
   duration (`kahuna.kv.write.raft_duration`, measured on the high-resolution `Stopwatch` clock: a
   coarse tick clock under-read the few-millisecond rounds a post-completion hold produces by 4–5×).

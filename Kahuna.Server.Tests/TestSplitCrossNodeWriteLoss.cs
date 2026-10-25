@@ -1,6 +1,7 @@
 using System.Text;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Ranges;
+using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
 using Kommander;
 using Kommander.System;
@@ -389,6 +390,226 @@ public sealed class TestSplitCrossNodeWriteLoss : BaseCluster
         Assert.NotEqual(
             HLCTimestamp.Zero,
             driver.RangeMapStore.Current.Find(Space, Space + "/z0")!.QuiescedUntil);
+    }
+
+    // ── transactional commits into a quiesced range, with no range lock anywhere ──
+
+    /// <summary>Starts a durable pessimistic session through <paramref name="kahuna"/> and stages one write per
+    /// key in it. The writes are staged <b>before</b> any quiesce exists: the locator bounces a staged write
+    /// into a quiesced range on its own, and these tests are about the commit, not the staging.</summary>
+    private static async Task<TransactionHandle> StageSession(KahunaManager kahuna, string[] keys, string value, CancellationToken ct)
+    {
+        (KeyValueResponseType started, TransactionHandle handle) = await kahuna.LocateAndStartTransaction(
+            new KeyValueTransactionOptions
+            {
+                Locking = KeyValueTransactionLocking.Pessimistic,
+                DecisionDurability = DecisionDurability.Durable,
+                Timeout = 30_000
+            }, ct);
+        Assert.Equal(KeyValueResponseType.Set, started);
+
+        foreach (string key in keys)
+        {
+            (KeyValueResponseType set, _, _) = await RetryOnMustRetryAsync(
+                () => kahuna.LocateAndTrySetKeyValue(
+                    handle.TransactionId, key, V(value), null, -1, KeyValueFlags.Set, 0,
+                    KeyValueDurability.Persistent, ct, 0, handle.CoordinatorKey, TransactionOperationId.NewRandom()),
+                r => r.Item1);
+            Assert.Equal(KeyValueResponseType.Set, set);
+        }
+
+        return handle;
+    }
+
+    /// <summary>Publishes a quiesce over <c>[start, end)</c> of the space with no split running and no range
+    /// lock held anywhere — the state a source leader promoted mid-move is left in — and waits until every
+    /// node's map shows it.</summary>
+    private static async Task<HLCTimestamp> QuiesceWithoutLock(
+        IRaft[] rafts, KahunaManager[] kahunas, KahunaManager driver, string? start, string? end, string probeKey, CancellationToken ct)
+    {
+        HLCTimestamp owner = rafts[0].HybridLogicalClock.TrySendOrLocalEvent(rafts[0].GetLocalNodeId());
+        HLCTimestamp until = rafts[0].HybridLogicalClock.TrySendOrLocalEvent(rafts[0].GetLocalNodeId()) + 60_000;
+
+        Assert.True(await driver.RangeMapStore.QuiesceRangeAsync(Space, start, end, owner, until, ct));
+
+        foreach (KahunaManager kahuna in kahunas)
+        {
+            KahunaManager observer = kahuna;
+            await WaitUntilAsync(
+                () => observer.RangeMapStore.Current.Find(Space, probeKey)?.QuiescedUntil != HLCTimestamp.Zero,
+                timeoutMs: 15_000);
+        }
+
+        return owner;
+    }
+
+    private static async Task AssertValueEverywhere(KahunaManager[] kahunas, string key, string expected, CancellationToken ct)
+    {
+        foreach (KahunaManager kahuna in kahunas)
+        {
+            (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await RetryOnMustRetryAsync(
+                () => kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+                r => r.Item1, timeoutMs: 30_000);
+
+            Assert.Equal(KeyValueResponseType.Get, type);
+            Assert.Equal(expected, Encoding.UTF8.GetString(entry!.Value!));
+        }
+    }
+
+    private static async Task AssertAbsentEverywhere(KahunaManager[] kahunas, string key, CancellationToken ct)
+    {
+        foreach (KahunaManager kahuna in kahunas)
+        {
+            (KeyValueResponseType type, _) = await RetryOnMustRetryAsync(
+                () => kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+                r => r.Item1, timeoutMs: 30_000);
+
+            Assert.Equal(KeyValueResponseType.DoesNotExist, type);
+        }
+    }
+
+    /// <summary>
+    /// The transactional counterpart of the direct-write leader-independence test: a durable commit whose write
+    /// lands in a quiesced range is refused as retryable from every node while <b>no node holds a range lock</b>.
+    /// The in-memory lock is the only thing the commit probe knows about, and a leadership change on the source
+    /// partition drops it; the replicated descriptor quiesce is what has to hold then. Each write is staged before
+    /// the quiesce is published, so the staging's own pre-route bounce plays no part — only the commit is judged.
+    /// The refusal must name the quiesce, nothing may have landed, and the same handles must commit once the owner
+    /// reopens the range.
+    /// </summary>
+    [Fact]
+    public async Task QuiescedRange_WithNoRangeLockHeld_RefusesTransactionalCommitsFromEveryNode()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        using MetricCapture refusals = new("reason", "kahuna.durable_tx.range_quiesce_refusals");
+
+        (IRaft[] rafts, KahunaManager[] kahunas, KahunaManager driver, _) = await Setup(ct);
+
+        TransactionHandle[] handles = new TransactionHandle[kahunas.Length];
+        for (int i = 0; i < kahunas.Length; i++)
+            handles[i] = await StageSession(kahunas[i], [$"{Space}/z-tx{i}"], "blocked", ct);
+
+        HLCTimestamp owner = await QuiesceWithoutLock(rafts, kahunas, driver, null, null, Space + "/z0", ct);
+
+        for (int i = 0; i < kahunas.Length; i++)
+        {
+            TransactionCommitAnswer answer = await kahunas[i].LocateAndCommitTransaction(handles[i], ct);
+
+            Assert.Equal(KeyValueResponseType.MustRetry, answer.Type);
+            Assert.Equal(CommitRefusalClass.RangeQuiesced, answer.Refusal);
+        }
+
+        Assert.True(refusals.Total("kahuna.durable_tx.range_quiesce_refusals") >= kahunas.Length);
+
+        // Refused means nothing landed, on any node, through any route.
+        for (int i = 0; i < kahunas.Length; i++)
+            await AssertAbsentEverywhere(kahunas, $"{Space}/z-tx{i}", ct);
+
+        // The owner's release reopens the range, and the very same handles commit.
+        Assert.True(await driver.RangeMapStore.ReleaseQuiesceAsync(owner, ct));
+
+        for (int i = 0; i < kahunas.Length; i++)
+        {
+            TransactionCommitAnswer committed = await RetryOnMustRetryAsync(
+                () => kahunas[i].LocateAndCommitTransaction(handles[i], ct), a => a.Type, timeoutMs: 30_000);
+
+            Assert.Equal(KeyValueResponseType.Committed, committed.Type);
+        }
+
+        for (int i = 0; i < kahunas.Length; i++)
+            await AssertValueEverywhere(kahunas, $"{Space}/z-tx{i}", "blocked", ct);
+    }
+
+    /// <summary>
+    /// A split quiesces only the half it moves, and the commit gate judges a transaction by the keys it writes,
+    /// not by the descriptor they live in: a commit confined to the staying half goes through during the window,
+    /// while a commit that touches both halves is refused whole — its staying-half write must not land either,
+    /// since the refusal happens before anything is prepared.
+    /// </summary>
+    [Fact]
+    public async Task QuiescedRange_PartialOverlap_RefusesOnlyCommitsThatTouchTheMovingHalf()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft[] rafts, KahunaManager[] kahunas, KahunaManager driver, _) = await Setup(ct);
+
+        TransactionHandle staying = await StageSession(kahunas[1], [Space + "/a-stay"], "stayed", ct);
+        TransactionHandle straddling = await StageSession(kahunas[2], [Space + "/a-both", Space + "/z-both"], "straddled", ct);
+
+        // Quiesce the moving half only: [SplitKey, +inf).
+        HLCTimestamp owner = await QuiesceWithoutLock(rafts, kahunas, driver, SplitKey, null, Space + "/z0", ct);
+
+        TransactionCommitAnswer stayed = await RetryOnMustRetryAsync(
+            () => kahunas[1].LocateAndCommitTransaction(staying, ct), a => a.Type, timeoutMs: 30_000);
+        Assert.Equal(KeyValueResponseType.Committed, stayed.Type);
+
+        TransactionCommitAnswer refused = await kahunas[2].LocateAndCommitTransaction(straddling, ct);
+        Assert.Equal(KeyValueResponseType.MustRetry, refused.Type);
+        Assert.Equal(CommitRefusalClass.RangeQuiesced, refused.Refusal);
+
+        // Still inside the window: the staying-half write committed, the straddling transaction left nothing.
+        Assert.NotEqual(HLCTimestamp.Zero, driver.RangeMapStore.Current.Find(Space, Space + "/z0")!.QuiescedUntil);
+        await AssertAbsentEverywhere(kahunas, Space + "/a-both", ct);
+        await AssertAbsentEverywhere(kahunas, Space + "/z-both", ct);
+
+        Assert.True(await driver.RangeMapStore.ReleaseQuiesceAsync(owner, ct));
+
+        TransactionCommitAnswer afterRelease = await RetryOnMustRetryAsync(
+            () => kahunas[2].LocateAndCommitTransaction(straddling, ct), a => a.Type, timeoutMs: 30_000);
+        Assert.Equal(KeyValueResponseType.Committed, afterRelease.Type);
+
+        await AssertValueEverywhere(kahunas, Space + "/a-stay", "stayed", ct);
+        await AssertValueEverywhere(kahunas, Space + "/a-both", "straddled", ct);
+        await AssertValueEverywhere(kahunas, Space + "/z-both", "straddled", ct);
+    }
+
+    /// <summary>
+    /// The binding layer on its own: with the coordinator's admission gate switched off on every node, the
+    /// prepare reaches the partition leader, and the write scheduler's dispatch fence must release it against
+    /// the leader's own map — the check that holds when the coordinator routed on a map that had not applied
+    /// the quiesce yet. The release is counted under its own reason, the commit answers retryable, nothing
+    /// lands, and the same handle commits once the range reopens.
+    /// </summary>
+    [Fact]
+    public async Task QuiescedRange_CoordinatorGateBypassed_LeaderDispatchFenceRefusesThePrepare()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        using MetricCapture releases = new("reason", "kahuna.kv.write.rejections");
+
+        (IRaft[] rafts, KahunaManager[] kahunas, KahunaManager driver, _) = await Setup(ct);
+
+        foreach (KahunaManager kahuna in kahunas)
+            kahuna.KeyValues.Coordinator.TestSkipRangeQuiesceAdmissionGate = true;
+
+        try
+        {
+            TransactionHandle handle = await StageSession(kahunas[1], [Space + "/z-leader"], "fenced", ct);
+
+            HLCTimestamp owner = await QuiesceWithoutLock(rafts, kahunas, driver, null, null, Space + "/z0", ct);
+
+            TransactionCommitAnswer refused = await kahunas[1].LocateAndCommitTransaction(handle, ct);
+
+            Assert.Equal(KeyValueResponseType.MustRetry, refused.Type);
+            Assert.True(releases.Total("kahuna.kv.write.rejections", "range_quiesced") >= 1,
+                "the partition leader's dispatch fence did not release the prepare");
+
+            await AssertAbsentEverywhere(kahunas, Space + "/z-leader", ct);
+
+            Assert.True(await driver.RangeMapStore.ReleaseQuiesceAsync(owner, ct));
+
+            TransactionCommitAnswer committed = await RetryOnMustRetryAsync(
+                () => kahunas[1].LocateAndCommitTransaction(handle, ct), a => a.Type, timeoutMs: 30_000);
+            Assert.Equal(KeyValueResponseType.Committed, committed.Type);
+
+            await AssertValueEverywhere(kahunas, Space + "/z-leader", "fenced", ct);
+        }
+        finally
+        {
+            foreach (KahunaManager kahuna in kahunas)
+                kahuna.KeyValues.Coordinator.TestSkipRangeQuiesceAdmissionGate = false;
+        }
     }
 
     // ── continuous writes from every node across the whole split ─────────────────

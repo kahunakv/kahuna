@@ -28,11 +28,12 @@ internal sealed class DurableProposalSubmission : IProposalSubmission
     // Written before the producer's task resolves (the TrySetResult publishes it), read by the producer after.
     private DurableCompletionAnswer answer = DurableCompletionAnswer.NotCommitted;
 
-    // The dispatch fences: one key per range descriptor (or hash space) this submission's partition was resolved
-    // through at freeze, each at the generation that key resolved to. Empty opts out of the fence (post-decision
-    // settle/materialize, recovery, and state-transfer imports, which must apply regardless of topology); a fenced
-    // submission is re-resolved at dispatch and released retryably when any of its descriptors moved, instead of
-    // appending to a partition the range no longer routes to.
+    // The dispatch fences: every key-range key this submission's partition group writes, and one key per hash
+    // space it touches, each at the generation the key resolved to at freeze. Empty opts out of the fence
+    // (post-decision settle/materialize, recovery, and state-transfer imports, which must apply regardless of
+    // topology); a fenced submission is re-resolved at dispatch and released retryably when any of its
+    // descriptors moved, or when a key it would add lies in a range that is quiesced for a data move, instead of
+    // appending to a partition the range no longer routes to or is about to stop routing to.
     private readonly IReadOnlyList<RangeFence> fences;
 
     public int PartitionId { get; }
@@ -95,6 +96,29 @@ internal sealed class DurableProposalSubmission : IProposalSubmission
         for (int i = 0; i < fences.Count; i++)
         {
             if (fence.IsStale(fences[i].Key, fences[i].Generation, PartitionId))
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Quiesced when this submission would add new state to a range whose data is being moved — a prepare, a
+    /// re-prepare, a one-phase bundle or a standalone record initialization whose fenced key lies in the quiesced
+    /// part of its range. Every fenced key is asked, because a split quiesces only the half it is moving and a
+    /// group can hold keys on both sides of the split point. A decision, a settlement or a materialization is
+    /// never quiesced: the move waits for the range's undecided intents to decide and settle before its
+    /// catch-up copy, so refusing those would stall the move against the very transactions it waits for.
+    /// </summary>
+    public bool IsQuiesced(IWriteRangeFence fence)
+    {
+        if (Stage is not (WriteSubmissionStage.Prepare or WriteSubmissionStage.RePrepare
+            or WriteSubmissionStage.OnePhase or WriteSubmissionStage.RecordInit))
+            return false;
+
+        for (int i = 0; i < fences.Count; i++)
+        {
+            if (fence.IsQuiesced(fences[i].Key))
                 return true;
         }
 

@@ -106,6 +106,11 @@ internal sealed class KeyValueProposalRequest : IProposalSubmission
     /// never stale.</summary>
     public bool IsStale(IWriteRangeFence fence) => fence.IsStale(Key, FenceGeneration, PartitionId);
 
+    /// <summary>Key-range quiesce: release the write if its range started refusing writes for a data move while the
+    /// write waited in the aggregator. The leader's admission check already refused a write into a quiesced range;
+    /// this catches one admitted just before the quiesce reached this node. Hash spaces are never quiesced.</summary>
+    public bool IsQuiesced(IWriteRangeFence fence) => fence.IsQuiesced(Key);
+
     /// <summary>The same verdict every replica's apply reaches for this record (see <see cref="CommitAdmission"/>).
     /// A batch that reports no time cannot be judged here, so a write that carries a bound is released retryably
     /// rather than completed against an apply that may have refused it.</summary>

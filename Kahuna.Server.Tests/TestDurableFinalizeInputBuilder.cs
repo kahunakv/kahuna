@@ -11,7 +11,8 @@ namespace Kahuna.Server.Tests;
 /// Unit tests for <see cref="DurableFinalizeInputBuilder"/> — the freeze that turns a transaction's modified keys
 /// and staged values into a <see cref="DurableFinalizeInput"/>: all-persistent gating, anchor + manifest,
 /// per-partition grouping, delete-vs-set state derivation, the lossless-or-fall-back guard, and the dispatch
-/// fences each partition group carries (one key per descriptor, at that key's own generation).
+/// fences each partition group carries (every key-range key, and one key per hash space, at that key's own
+/// generation).
 /// </summary>
 public sealed class TestDurableFinalizeInputBuilder
 {
@@ -23,8 +24,8 @@ public sealed class TestDurableFinalizeInputBuilder
     private static readonly HLCTimestamp Deadline = Ts(31100);
 
     // Deterministic key→partition mapping for the tests: every key resolves at generation 7 through the
-    // whole-space descriptor of its own space.
-    private static DurableKeyRoute Locate(string key) => new(key.StartsWith("idx/", StringComparison.Ordinal) ? 8 : 5, 7L, RangeStartKey: null);
+    // whole-space key-range descriptor of its own space.
+    private static DurableKeyRoute Locate(string key) => new(key.StartsWith("idx/", StringComparison.Ordinal) ? 8 : 5, 7L, RangeStartKey: null, IsKeyRange: true);
 
     private static bool Build(
         (string, KeyValueDurability)[] modifiedKeys,
@@ -272,8 +273,8 @@ public sealed class TestDurableFinalizeInputBuilder
         // range at every dispatch and refused the commit on every round.
         Dictionary<string, DurableKeyRoute> routes = new(StringComparer.Ordinal)
         {
-            ["rows/1"] = new(3, 1L, RangeStartKey: null),
-            ["db/meta/t"] = new(3, 0L, RangeStartKey: null)
+            ["rows/1"] = new(3, 1L, RangeStartKey: null, IsKeyRange: true),
+            ["db/meta/t"] = new(3, 0L, RangeStartKey: null, IsKeyRange: false)
         };
 
         Assert.True(Build(Persistent("rows/1", "db/meta/t"), StagedSets("rows/1", "db/meta/t"), "rows/1", Routes(routes), out DurableFinalizeInput? input));
@@ -296,8 +297,8 @@ public sealed class TestDurableFinalizeInputBuilder
         // fences are the same pairs.
         Dictionary<string, DurableKeyRoute> routes = new(StringComparer.Ordinal)
         {
-            ["rows/1"] = new(3, 1L, RangeStartKey: null),
-            ["db/meta/t"] = new(3, 0L, RangeStartKey: null)
+            ["rows/1"] = new(3, 1L, RangeStartKey: null, IsKeyRange: true),
+            ["db/meta/t"] = new(3, 0L, RangeStartKey: null, IsKeyRange: false)
         };
 
         Assert.True(Build(Persistent("rows/1", "db/meta/t"), StagedSets("rows/1", "db/meta/t"), "rows/1", Routes(routes), out DurableFinalizeInput? rowsFirst));
@@ -314,8 +315,8 @@ public sealed class TestDurableFinalizeInputBuilder
         // Two key-range spaces on one partition, at generations 1 and 2 (only one of them split so far).
         Dictionary<string, DurableKeyRoute> routes = new(StringComparer.Ordinal)
         {
-            ["t:r/1"] = new(2, 1L, RangeStartKey: null),
-            ["t:i:5/abc"] = new(2, 2L, RangeStartKey: null)
+            ["t:r/1"] = new(2, 1L, RangeStartKey: null, IsKeyRange: true),
+            ["t:i:5/abc"] = new(2, 2L, RangeStartKey: null, IsKeyRange: true)
         };
 
         Assert.True(Build(Persistent("t:r/1", "t:i:5/abc"), StagedSets("t:r/1", "t:i:5/abc"), "t:r/1", Routes(routes), out DurableFinalizeInput? input));
@@ -327,33 +328,60 @@ public sealed class TestDurableFinalizeInputBuilder
     }
 
     [Fact]
-    public void TwoDescriptorsOfOneSpace_FenceEachDescriptor()
+    public void TwoDescriptorsOfOneSpace_FenceEveryKeyAtItsOwnGeneration()
     {
         // The space split: keys below "m" and keys from "m" live on two descriptors of the same partition at
-        // different generations. A fence per descriptor sees a later move of either half.
+        // different generations. Every key is fenced at the generation of its own descriptor, so a later move
+        // of either half is seen, and a quiesce of one half is judged key by key.
         Dictionary<string, DurableKeyRoute> routes = new(StringComparer.Ordinal)
         {
-            ["rows/a"] = new(4, 2L, RangeStartKey: null),
-            ["rows/b"] = new(4, 2L, RangeStartKey: null),
-            ["rows/m"] = new(4, 5L, RangeStartKey: "rows/m"),
-            ["rows/z"] = new(4, 5L, RangeStartKey: "rows/m")
+            ["rows/a"] = new(4, 2L, RangeStartKey: null, IsKeyRange: true),
+            ["rows/b"] = new(4, 2L, RangeStartKey: null, IsKeyRange: true),
+            ["rows/m"] = new(4, 5L, RangeStartKey: "rows/m", IsKeyRange: true),
+            ["rows/z"] = new(4, 5L, RangeStartKey: "rows/m", IsKeyRange: true)
         };
 
         Assert.True(Build(Persistent("rows/a", "rows/b", "rows/m", "rows/z"), StagedSets("rows/a", "rows/b", "rows/m", "rows/z"), "rows/a", Routes(routes), out DurableFinalizeInput? input));
 
         DurablePartitionPrepare group = Assert.Single(input!.Partitions);
-        Assert.Equal(2, group.Fences.Count);
+        Assert.Equal(4, group.Fences.Count);
         Assert.Contains(new RangeFence("rows/a", 2L), group.Fences);
+        Assert.Contains(new RangeFence("rows/b", 2L), group.Fences);
         Assert.Contains(new RangeFence("rows/m", 5L), group.Fences);
+        Assert.Contains(new RangeFence("rows/z", 5L), group.Fences);
     }
 
     [Fact]
-    public void KeysOfOneDescriptor_ShareOneFence()
+    public void KeyRangeKeysOfOneDescriptor_CarryOneFenceEach()
     {
+        // A split quiesces only the half of a descriptor it moves, so whether the group may be appended to its
+        // partition is decided key by key at dispatch: one fence per key-range key, not one per descriptor.
         Assert.True(Build(Persistent("acct/1", "acct/2", "acct/3"), StagedSets("acct/1", "acct/2", "acct/3"), "acct/1", Locate, out DurableFinalizeInput? input));
 
         DurablePartitionPrepare group = Assert.Single(input!.Partitions);
-        Assert.Equal(new RangeFence("acct/1", 7L), Assert.Single(group.Fences));
+        Assert.Equal(3, group.Fences.Count);
+        Assert.Contains(new RangeFence("acct/1", 7L), group.Fences);
+        Assert.Contains(new RangeFence("acct/2", 7L), group.Fences);
+        Assert.Contains(new RangeFence("acct/3", 7L), group.Fences);
+    }
+
+    [Fact]
+    public void HashKeysOfOneSpace_ShareOneFence()
+    {
+        // A hash space has no descriptor to move or quiesce: one key stands for the whole space, at generation zero.
+        Dictionary<string, DurableKeyRoute> routes = new(StringComparer.Ordinal)
+        {
+            ["db/meta/t1"] = new(3, 0L, RangeStartKey: null, IsKeyRange: false),
+            ["db/meta/t2"] = new(3, 0L, RangeStartKey: null, IsKeyRange: false),
+            ["db/meta/t3"] = new(3, 0L, RangeStartKey: null, IsKeyRange: false)
+        };
+
+        Assert.True(Build(Persistent("db/meta/t1", "db/meta/t2", "db/meta/t3"), StagedSets("db/meta/t1", "db/meta/t2", "db/meta/t3"), "db/meta/t1", Routes(routes), out DurableFinalizeInput? input));
+
+        DurablePartitionPrepare group = Assert.Single(input!.Partitions);
+        RangeFence fence = Assert.Single(group.Fences);
+        Assert.Equal(0L, fence.Generation);
+        Assert.StartsWith("db/meta/", fence.Key, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -363,8 +391,8 @@ public sealed class TestDurableFinalizeInputBuilder
         // bundle carries the record initialization, so it is fenced against the anchor descriptor as well.
         Dictionary<string, DurableKeyRoute> routes = new(StringComparer.Ordinal)
         {
-            ["rows/1"] = new(5, 1L, RangeStartKey: null),
-            ["coord/tx-1"] = new(5, 4L, RangeStartKey: null)
+            ["rows/1"] = new(5, 1L, RangeStartKey: null, IsKeyRange: true),
+            ["coord/tx-1"] = new(5, 4L, RangeStartKey: null, IsKeyRange: true)
         };
 
         Assert.True(Build(Persistent("rows/1"), StagedSets("rows/1"), "coord/tx-1", Routes(routes), out DurableFinalizeInput? input));
@@ -384,8 +412,8 @@ public sealed class TestDurableFinalizeInputBuilder
     {
         Dictionary<string, DurableKeyRoute> routes = new(StringComparer.Ordinal)
         {
-            ["rows/1"] = new(5, 1L, RangeStartKey: null),
-            ["coord/tx-1"] = new(9, 4L, RangeStartKey: null)
+            ["rows/1"] = new(5, 1L, RangeStartKey: null, IsKeyRange: true),
+            ["coord/tx-1"] = new(9, 4L, RangeStartKey: null, IsKeyRange: true)
         };
 
         Assert.True(Build(Persistent("rows/1"), StagedSets("rows/1"), "coord/tx-1", Routes(routes), out DurableFinalizeInput? input));

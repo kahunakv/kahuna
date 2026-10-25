@@ -344,6 +344,10 @@ internal sealed partial class KeyValuesManager : IDisposable
     /// <summary>Resolves a key to the data partition its durable records are anchored on.</summary>
     internal Transactions.DurableKeyRoute LocateDurablePartition(string key) => durableReplication.LocateDurablePartition(key);
 
+    /// <summary>True when a key lies in a range, or the part of one, that refuses writes now because its data is
+    /// being moved to another partition, as this node's applied range map sees it.</summary>
+    internal bool IsKeyQuiesced(string key) => durableReplication.IsKeyQuiesced(key);
+
     /// <summary>Replicates a durable entry through the partition write scheduler.</summary>
     internal Task<bool> ReplicateDurableThroughScheduler(int partitionId, string logType, byte[] data, Writes.WriteAdmissionClass admissionClass, Writes.WriteSubmissionStage stage, CancellationToken cancellationToken) =>
         durableReplication.ReplicateDurableThroughScheduler(partitionId, logType, data, admissionClass, stage, cancellationToken);

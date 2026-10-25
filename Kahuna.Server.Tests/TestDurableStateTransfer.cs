@@ -189,7 +189,9 @@ public sealed class TestDurableStateTransfer : BaseCluster
     private sealed class StubFence : IWriteRangeFence
     {
         public readonly HashSet<string> StaleKeys = [];
+        public readonly HashSet<string> QuiescedKeys = [];
         public bool IsStale(string key, long admittedGeneration, int admittedPartitionId) => StaleKeys.Contains(key);
+        public bool IsQuiesced(string key) => QuiescedKeys.Contains(key);
     }
 
     /// <summary>
@@ -242,6 +244,43 @@ public sealed class TestDurableStateTransfer : BaseCluster
         Assert.False(unchanged.IsStale(fence));
     }
 
+    /// <summary>
+    /// A durable submission is released for a range quiesce only when it would add new state to the range: a
+    /// prepare, a re-prepare, a one-phase bundle or a standalone record initialization whose fenced key lies in
+    /// the quiesced part of its range. A decision, a settlement or a materialization of the same key dispatches,
+    /// because a range move waits for the range's undecided intents to decide and settle before it copies, and
+    /// refusing those would stall the move against the transactions it waits for.
+    /// </summary>
+    [Theory]
+    [InlineData(WriteSubmissionStage.Prepare, true)]
+    [InlineData(WriteSubmissionStage.RePrepare, true)]
+    [InlineData(WriteSubmissionStage.OnePhase, true)]
+    [InlineData(WriteSubmissionStage.RecordInit, true)]
+    [InlineData(WriteSubmissionStage.Decision, false)]
+    [InlineData(WriteSubmissionStage.Materialize, false)]
+    [InlineData(WriteSubmissionStage.Settle, false)]
+    [InlineData(WriteSubmissionStage.Other, false)]
+    public void DurableSubmission_IsQuiescedOnlyWhenItAddsStateToAQuiescedRange(WriteSubmissionStage stage, bool expectQuiesced)
+    {
+        StubFence fence = new();
+        fence.QuiescedKeys.Add("rows/moving");
+        RaftProposalEntry[] entries = [new(ReplicationTypes.PreparedIntent, [1], AutoCommit: true, ExpectedGeneration: 0)];
+
+        DurableProposalSubmission intoQuiesced = new(3, entries, new TaskCompletionSource<bool>(), WriteAdmissionClass.Ordinary, stage, applyOnCommit: null,
+            fences: [new RangeFence("rows/staying", 2), new RangeFence("rows/moving", 2)]);
+        Assert.Equal(expectQuiesced, intoQuiesced.IsQuiesced(fence));
+
+        // The quiesce is judged on the keys the submission would write, not on the range as a whole: a group
+        // whose keys all lie outside the quiesced part dispatches whatever its stage.
+        DurableProposalSubmission outsideQuiesced = new(3, entries, new TaskCompletionSource<bool>(), WriteAdmissionClass.Ordinary, stage, applyOnCommit: null,
+            fences: [new RangeFence("rows/staying", 2)]);
+        Assert.False(outsideQuiesced.IsQuiesced(fence));
+
+        // An unfenced submission (post-decision settle, recovery, state-transfer import) never asks.
+        DurableProposalSubmission unfenced = new(3, entries, new TaskCompletionSource<bool>(), WriteAdmissionClass.Ordinary, stage, applyOnCommit: null, fences: null);
+        Assert.False(unfenced.IsQuiesced(fence));
+    }
+
     private sealed class RecordingFence : IWriteRangeFence
     {
         public readonly HashSet<string> StaleKeys = [];
@@ -253,5 +292,7 @@ public sealed class TestDurableStateTransfer : BaseCluster
             Probes.Add((key, admittedGeneration, admittedPartitionId));
             return StaleKeys.Contains(key);
         }
+
+        public bool IsQuiesced(string key) => false;
     }
 }

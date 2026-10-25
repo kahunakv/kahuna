@@ -1,15 +1,15 @@
 using Kahuna.Server.KeyValues.Ranges;
+using Kommander.Time;
 using Xunit;
 
 namespace Kahuna.Server.Tests;
 
 /// <summary>
-/// Production-semantics tests for the direct-write range fence. A direct (auto-commit) key-range write is
-/// resolved and fenced at admission, then may sit in the partition aggregator through a linger before it is
-/// proposed. The generation captured at admission — even for a write that carried no routed generation, such
-/// as a delete or extend — must let the flush-time fence detect a range that split, moved, or was dropped
-/// while the write waited. These drive the real <see cref="RangeRouting"/> logic over a real
-/// <see cref="RangeMap"/>; no cluster.
+/// Production-semantics tests for the write-side range fence over a real <see cref="RangeMap"/>; no cluster.
+/// A key-range write is resolved at admission and may wait in the partition write scheduler through a linger
+/// before it is proposed, so the dispatch fence must detect, from the generation and partition captured at
+/// admission, a range that split, moved or was dropped while the write waited — and, for a submission that
+/// would add new state, a range that started refusing writes because its data is being moved.
 /// </summary>
 public sealed class TestWriteRangeFence
 {
@@ -20,34 +20,11 @@ public sealed class TestWriteRangeFence
     private static RangeMap MapAt(int partitionId, long generation) =>
         new([new RangeDescriptor { KeySpace = Space, StartKey = null, EndKey = null, PartitionId = partitionId, Generation = generation }]);
 
-    [Fact]
-    public void Admission_CapturesLiveGeneration_EvenWhenWriteCarriedNone()
+    private static KeySpaceRegistry RangedRegistry()
     {
-        // A delete/extend routes with no generation (0). Admission must still capture the live descriptor
-        // generation so the deferred flush fence has a real value to compare — not the 0 that disables it.
-        RangeMap map = MapAt(partitionId: 2, generation: 5);
-
-        Assert.True(RangeRouting.TryFenceKeyRange(map, K("a"), routedGeneration: 0, out int partitionId, out long generation));
-        Assert.Equal(2, partitionId);
-        Assert.Equal(5, generation);
-    }
-
-    [Fact]
-    public void Admission_MatchingRoutedGeneration_PassesAndCaptures()
-    {
-        RangeMap map = MapAt(partitionId: 2, generation: 5);
-
-        Assert.True(RangeRouting.TryFenceKeyRange(map, K("a"), routedGeneration: 5, out int partitionId, out long generation));
-        Assert.Equal(2, partitionId);
-        Assert.Equal(5, generation);
-    }
-
-    [Fact]
-    public void Admission_StaleRoutedGeneration_Rejected()
-    {
-        RangeMap map = MapAt(partitionId: 2, generation: 5);
-
-        Assert.False(RangeRouting.TryFenceKeyRange(map, K("a"), routedGeneration: 4, out _, out _));
+        KeySpaceRegistry registry = new();
+        registry.RegisterKeyRange(Space);
+        return registry;
     }
 
     [Fact]
@@ -61,14 +38,11 @@ public sealed class TestWriteRangeFence
     [Fact]
     public void Flush_GenerationBumpedSinceAdmission_Stale()
     {
-        // The delete/extend fix end to end: admitted at gen 5 (captured from a gen-0 write), the range then
-        // splits and the generation bumps. The flush fence must now catch it; before the fix a gen-0 write
-        // disabled the fence and would have been proposed to the pre-split partition.
-        RangeMap admitted = MapAt(partitionId: 2, generation: 5);
-        Assert.True(RangeRouting.TryFenceKeyRange(admitted, K("a"), routedGeneration: 0, out int partitionId, out long generation));
-
+        // Admitted at generation 5, then the range splits and the generation bumps: the flush fence catches it,
+        // even for a delete or extend that carried no routed generation and captured the live one at admission.
         RangeMap afterSplit = MapAt(partitionId: 2, generation: 6);
-        Assert.True(RangeRouting.HasKeyRangeMovedSinceAdmission(afterSplit, K("a"), generation, partitionId));
+
+        Assert.True(RangeRouting.HasKeyRangeMovedSinceAdmission(afterSplit, K("a"), admittedGeneration: 5, admittedPartitionId: 2));
     }
 
     [Fact]
@@ -85,5 +59,83 @@ public sealed class TestWriteRangeFence
     public void Flush_DescriptorDropped_Stale()
     {
         Assert.True(RangeRouting.HasKeyRangeMovedSinceAdmission(RangeMap.Empty, K("a"), admittedGeneration: 5, admittedPartitionId: 2));
+    }
+
+    // ── the descriptor behind a quiesce check ───────────────────────────────────
+
+    [Fact]
+    public void FindDescriptor_KeyRangeKey_ResolvesItsCoveringDescriptor()
+    {
+        RangeMap map = new([
+            new RangeDescriptor { KeySpace = Space, StartKey = null, EndKey = K("m"), PartitionId = 2, Generation = 3 },
+            new RangeDescriptor { KeySpace = Space, StartKey = K("m"), EndKey = null, PartitionId = 7, Generation = 3 }
+        ]);
+
+        RangeDescriptor? low = RangeRouting.FindDescriptor(RangedRegistry(), map, K("a"));
+        RangeDescriptor? high = RangeRouting.FindDescriptor(RangedRegistry(), map, K("z"));
+
+        Assert.Equal(2, low?.PartitionId);
+        Assert.Equal(7, high?.PartitionId);
+    }
+
+    [Fact]
+    public void FindDescriptor_HashKey_IsNull()
+    {
+        // A hash-routed space has no descriptor to be quiesced: the fence asks nothing about it, even when a
+        // descriptor of the same name happens to be in the map.
+        RangeMap map = MapAt(partitionId: 2, generation: 5);
+
+        Assert.Null(RangeRouting.FindDescriptor(new KeySpaceRegistry(), map, K("a")));
+    }
+
+    [Fact]
+    public void FindDescriptor_KeyRangeKeyWithNoCoveringDescriptor_IsNull()
+    {
+        Assert.Null(RangeRouting.FindDescriptor(RangedRegistry(), RangeMap.Empty, K("a")));
+    }
+
+    // ── the quiesced sub-interval the fence judges a key against ────────────────
+
+    private static RangeDescriptor QuiescedFrom(string? quiesceStart, string? quiesceEnd, HLCTimestamp until) => new()
+    {
+        KeySpace = Space,
+        PartitionId = 2,
+        Generation = 5,
+        QuiescedUntil = until,
+        QuiesceOwner = new HLCTimestamp(0, 1, 0),
+        QuiesceStartKey = quiesceStart,
+        QuiesceEndKey = quiesceEnd
+    };
+
+    [Fact]
+    public void Quiesce_JudgesTheKeyAgainstTheMovingHalfOnly()
+    {
+        // A split moves [m, +inf) and quiesces exactly that half: a write below the split point is admitted
+        // while one at or above it is refused, for the same descriptor and the same deadline.
+        HLCTimestamp now = new(0, 1_000, 0);
+        RangeDescriptor descriptor = QuiescedFrom(K("m"), null, until: new HLCTimestamp(0, 31_000, 0));
+
+        Assert.False(descriptor.IsQuiescedAt(K("a"), now));
+        Assert.True(descriptor.IsQuiescedAt(K("m"), now));
+        Assert.True(descriptor.IsQuiescedAt(K("z"), now));
+    }
+
+    [Fact]
+    public void Quiesce_LapsedDeadline_ReadsAsOpen()
+    {
+        // The deadline is what ends a window whose owner died: a stale stamp left on the descriptor admits writes.
+        RangeDescriptor descriptor = QuiescedFrom(null, null, until: new HLCTimestamp(0, 1_000, 0));
+
+        Assert.True(descriptor.IsQuiescedAt(K("a"), new HLCTimestamp(0, 999, 0)));
+        Assert.False(descriptor.IsQuiescedAt(K("a"), new HLCTimestamp(0, 1_000, 0)));
+        Assert.False(descriptor.IsQuiescedAt(K("a"), new HLCTimestamp(0, 5_000, 0)));
+    }
+
+    [Fact]
+    public void Quiesce_NoDeadline_ReadsAsOpen()
+    {
+        RangeDescriptor descriptor = QuiescedFrom(null, null, until: HLCTimestamp.Zero);
+
+        Assert.False(descriptor.IsQuiescedAt(K("a"), new HLCTimestamp(0, 1, 0)));
     }
 }

@@ -38,7 +38,11 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// through <see cref="RangeMapStore.QuiesceRangeAsync"/>) rides the replicated range map, so it
 /// reaches every node and, unlike the lock, survives a leadership change on P: a promoted leader
 /// holds no in-memory lock but still refuses writes into <c>[K,E)</c>. A refused client retries
-/// after cutover and is then routed to P'.
+/// after cutover and is then routed to P'. The descriptor quiesce fences both write paths: a direct
+/// write at the locator and at the leader's admission (<see cref="RangeRouting.ResolveForDirectWrite"/>),
+/// and a durable transactional commit at the coordinator before anything is prepared and at the
+/// partition write scheduler's dispatch fence on the leader, where a prepare into the quiesced
+/// part of the range is released retryably instead of appended after the catch-up copy.
 /// </para>
 ///
 /// <para>

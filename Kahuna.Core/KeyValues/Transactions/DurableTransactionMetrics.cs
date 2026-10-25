@@ -24,6 +24,10 @@ internal enum PrepareRetryLoopOutcome
     RangeMoved,
     Settled,
 
+    /// <summary>A refused participant's key lies in a range quiesced for a data move: the finalize answered a
+    /// clean MustRetry at once, to be re-driven once the window ends.</summary>
+    RangeQuiesced,
+
     /// <summary>Every refusal was a decided-but-unsettled predecessor and the decision deadline (with every
     /// renewal the record accepted) arrived first: the finalize answered MustRetry without recording an abort.</summary>
     DeadlineLapsed,
@@ -1532,6 +1536,7 @@ internal static class DurableTransactionMetrics
     private static readonly KeyValuePair<string, object?> LoopOutcomeDeadlineLapsed = new("outcome", "deadline_lapsed");
     private static readonly KeyValuePair<string, object?> LoopOutcomeRecordDecided = new("outcome", "record_decided");
     private static readonly KeyValuePair<string, object?> LoopOutcomeAdmissionRefused = new("outcome", "admission_refused");
+    private static readonly KeyValuePair<string, object?> LoopOutcomeRangeQuiesced = new("outcome", "range_quiesced");
 
     internal static void PrepareRetryLoopEnded(PrepareRetryLoopOutcome outcome) =>
         PrepareRetryLoops.Add(1, outcome switch
@@ -1544,6 +1549,7 @@ internal static class DurableTransactionMetrics
             PrepareRetryLoopOutcome.DeadlineLapsed => LoopOutcomeDeadlineLapsed,
             PrepareRetryLoopOutcome.RecordDecided => LoopOutcomeRecordDecided,
             PrepareRetryLoopOutcome.AdmissionRefused => LoopOutcomeAdmissionRefused,
+            PrepareRetryLoopOutcome.RangeQuiesced => LoopOutcomeRangeQuiesced,
             _ => LoopOutcomeExhausted
         });
 
@@ -1875,6 +1881,18 @@ internal static class DurableTransactionMetrics
         Meter.CreateCounter<long>(
             "kahuna.durable_tx.admission_rejections",
             description: "Durable transactions refused admission at the outstanding-decision cap.");
+
+    /// <summary>
+    /// Durable commits the coordinator refused before preparing anything because a written key, or the record
+    /// anchor, lies in a key range quiesced for a data move (a split or merge inside its copy window). Each is a
+    /// retryable <c>MustRetry</c> with the <c>RangeQuiesced</c> refusal class. A sustained rate on one range means
+    /// a move is holding its window open for long; the partition write scheduler's <c>range_quiesced</c> releases
+    /// count the prepares that reached a leader before this gate saw the quiesce.
+    /// </summary>
+    internal static readonly Counter<long> RangeQuiesceRefusals =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.range_quiesce_refusals",
+            description: "Durable commits refused before any prepare because a written key or the record anchor lies in a key range quiesced for a data move.");
 
     /// <summary>
     /// Completion receipts dropped by the age backstop rather than by a coordinator acknowledgement. These are

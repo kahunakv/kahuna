@@ -225,6 +225,11 @@ internal sealed class KeyValueLocator
     internal (int PartitionId, long Generation, bool IsKeyRange, Ranges.RangeDescriptor? Descriptor) LocateRangeWithMode(string key) =>
         routing.LocateRangeWithMode(key);
 
+    /// <summary>True when <paramref name="key"/> lies in the quiesced part of a range whose data is being moved
+    /// (see <see cref="LocatorRouting.IsKeyQuiesced"/>).</summary>
+    internal bool IsKeyQuiesced(string key) =>
+        routing.IsKeyQuiesced(key);
+
     public bool TryLocateRange(string key, out int partitionId) =>
         routing.TryLocateRange(key, out partitionId);
 

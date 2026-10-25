@@ -25,10 +25,12 @@ namespace Kahuna.Server.KeyValues.Transactions;
 /// staged-base compare-and-set — or the unknown-base sentinel for a blind write; it is never consulted for the
 /// committed value (the materializer replays only value/revision/expiry/NoRevision).</para>
 ///
-/// <para>Dispatch fences: each partition group carries one <see cref="RangeFence"/> per range descriptor its keys
-/// resolved through (and one per hash-routed key space, at generation zero), each pairing a key with the
-/// generation <b>that same key</b> resolved to. A partition whose keys span several key spaces — a key-range row
-/// space beside a hash-routed meta space, or two key-range spaces at different generations — therefore fences
+/// <para>Dispatch fences: each partition group carries one <see cref="RangeFence"/> per <b>key-range key</b> it
+/// writes, and one per hash-routed key space it touches (at generation zero), each pairing a key with the
+/// generation <b>that same key</b> resolved to. Every key-range key is fenced on its own because a range move
+/// quiesces a sub-interval of a descriptor (a split moves one half), so whether the group may still be appended to
+/// its partition is a question the dispatch fence can only answer key by key; a hash space has no descriptor to
+/// move or quiesce, so one key stands for it. A partition whose keys span several key spaces therefore fences
 /// every space it touches, and never a key of one space against the generation of another: that mismatch read as
 /// a moved range on every dispatch and refused the commit on every round.</para>
 /// </summary>
@@ -68,9 +70,8 @@ internal static class DurableFinalizeInputBuilder
         Dictionary<int, List<PreparedIntent>> byPartition = [];
         Dictionary<int, List<RangeFence>> fencesByPartition = [];
 
-        // One fence per distinct descriptor per partition. A descriptor is identified by its key space and start
-        // bound; a hash-routed key space has no descriptor and dedupes on (space, null), so the whole space is
-        // fenced once at generation zero.
+        // One fence per key-range key and one per hash-routed key space, per partition: a hash space has no
+        // descriptor and dedupes on its space name, so it is fenced once at generation zero.
         HashSet<FenceIdentity> fenced = [];
 
         foreach ((string key, KeyValueDurability _) in modifiedKeys)
@@ -157,11 +158,11 @@ internal static class DurableFinalizeInputBuilder
         return true;
     }
 
-    /// <summary>Adds <paramref name="key"/> at its own resolved generation as a fence of its partition, once per
-    /// descriptor (or hash space) the partition's keys touch.</summary>
+    /// <summary>Adds <paramref name="key"/> at its own resolved generation as a fence of its partition: every
+    /// key-range key once, and one key per hash space the partition's keys touch.</summary>
     private static void AddFence(List<RangeFence> fences, HashSet<FenceIdentity> fenced, int partitionId, string keySpace, DurableKeyRoute route, string key)
     {
-        if (fenced.Add(new FenceIdentity(partitionId, keySpace, route.RangeStartKey)))
+        if (fenced.Add(new FenceIdentity(partitionId, route.IsKeyRange ? key : keySpace, route.IsKeyRange)))
             fences.Add(new RangeFence(key, route.Generation));
     }
 
@@ -175,7 +176,8 @@ internal static class DurableFinalizeInputBuilder
         return index == -1 ? null : key[..index];
     }
 
-    /// <summary>What one dispatch fence stands for: a range descriptor (its key space and start bound) on a
-    /// partition, or a hash-routed key space (null start bound) on it. Ordinal on every string.</summary>
-    private readonly record struct FenceIdentity(int PartitionId, string KeySpace, string? RangeStartKey);
+    /// <summary>What one dispatch fence stands for: a key-range key on a partition, or a hash-routed key space
+    /// on it. The flag keeps a hash space apart from a key-range key that happens to spell the same string.
+    /// Ordinal on the string.</summary>
+    private readonly record struct FenceIdentity(int PartitionId, string Scope, bool IsKeyRange);
 }

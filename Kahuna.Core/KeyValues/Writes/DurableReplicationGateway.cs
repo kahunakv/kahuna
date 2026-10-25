@@ -57,13 +57,17 @@ internal sealed class DurableReplicationGateway
     private readonly DurableOrderedApplyAwaiter orderedApply;
 
     /// <summary>Where <paramref name="key"/> routes now: its data partition, the descriptor generation it resolved
-    /// through (zero for a hash-routed key) and, for a key-range key, the descriptor's start bound, so a freeze can
-    /// fence one key per descriptor its partition group touches.</summary>
+    /// through (zero for a hash-routed key), for a key-range key the descriptor's start bound, and whether it is
+    /// key-range routed, so a freeze fences every key-range key of a partition group and each hash space once.</summary>
     internal Transactions.DurableKeyRoute LocateDurablePartition(string key)
     {
-        (int partitionId, long generation, bool _, Ranges.RangeDescriptor? descriptor) = locator.LocateRangeWithMode(key);
-        return new Transactions.DurableKeyRoute(partitionId, generation, descriptor?.StartKey);
+        (int partitionId, long generation, bool isKeyRange, Ranges.RangeDescriptor? descriptor) = locator.LocateRangeWithMode(key);
+        return new Transactions.DurableKeyRoute(partitionId, generation, descriptor?.StartKey, isKeyRange);
     }
+
+    /// <summary>True when <paramref name="key"/> lies in a range, or the part of one, that is refusing writes now
+    /// because its data is being moved to another partition, as this node's applied map sees it.</summary>
+    internal bool IsKeyQuiesced(string key) => locator.IsKeyQuiesced(key);
 
     // Instance-owned transport counts, beside the process-wide meter counters: in-process test clusters share
     // the static meter across every node, so a per-node figure (how many calls ONE coordinator made for ONE

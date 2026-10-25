@@ -296,8 +296,10 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
 
             foreach (IProposalSubmission item in selected)
             {
-                // Release queue-age-expired items and key-range items whose descriptor moved since admission,
-                // individually and retryably, rather than proposing them or letting them fail their siblings.
+                // Release queue-age-expired items, key-range items whose descriptor moved since admission, and
+                // items that would add state to a range that is quiesced for a data move, individually and
+                // retryably, rather than proposing them or letting them fail their siblings. A moved range is
+                // asked first: it is final for the item's frozen routing, where a quiesce is a window that ends.
                 if (now - item.EnqueueTicks > options.MaxQueueDelayMs)
                 {
                     PartitionWriteAggregatorMetrics.ReleasedQueueExpired();
@@ -306,6 +308,11 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
                 else if (item.IsStale(fence))
                 {
                     PartitionWriteAggregatorMetrics.ReleasedFenceStale();
+                    ReleaseItem(partitionId, item, transient: true);
+                }
+                else if (item.IsQuiesced(fence))
+                {
+                    PartitionWriteAggregatorMetrics.ReleasedRangeQuiesced();
                     ReleaseItem(partitionId, item, transient: true);
                 }
                 else

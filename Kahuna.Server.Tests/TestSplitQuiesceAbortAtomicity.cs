@@ -182,12 +182,14 @@ public sealed class TestSplitQuiesceAbortAtomicity : BaseCluster
     }
 
     /// <summary>
-    /// The retryable-abort replay shape from the 1.4.6 run (row 1261): an interactive transfer
-    /// stages both legs, then a split takes the quiesce over leg 2's range, and the commit's 2PC
-    /// prepares leg 1 durably before leg 2's prepare refuses. The transaction ends retryably; the
-    /// client replays from BEGIN, exactly as instructed, and the replay commits. The transfer must
-    /// apply exactly once: leg 1 gains exactly one revision carrying the replay's value — a leaked
-    /// first leg from the aborted attempt shows up as a second revision the journal never counted.
+    /// The retryable replay shape from the 1.4.6 run (row 1261): an interactive transfer stages both
+    /// legs, then a split takes the quiesce over leg 2's range, and the commit meets it. The commit
+    /// answers retryably with nothing durable and the session kept, as the client contract for a
+    /// retryable commit is a retry under the same handle. Once the split cut over, that retry finds
+    /// leg 2's lock granted by a partition the key no longer routes to and ends terminally; the client
+    /// then replays from BEGIN, exactly as instructed, and the replay commits. The transfer must apply
+    /// exactly once: each leg gains exactly one revision carrying the committed value — a leaked first
+    /// leg from the refused attempt shows up as a second revision the journal never counted.
     /// </summary>
     [Fact]
     public async Task Interactive_RetryableAbortDuringQuiesce_ReplayAppliesExactlyOnce()
@@ -261,7 +263,41 @@ public sealed class TestSplitQuiesceAbortAtomicity : BaseCluster
         foreach (KahunaManager manager in kahunas)
             await manager.KeyValues.RecoverPreparedIntents(ct);
 
-        // The replay: a fresh transaction, from BEGIN, as the retryable outcome instructs.
+        // A retryable commit answer is retried under the same handle, as the client does. The quiesce
+        // refusal kept attempt A's session and locks for exactly that retry; after the cutover the
+        // retry's lock proof finds leg 2's lock granted by a partition the key no longer routes to and
+        // ends the attempt terminally, which releases what it held. A retry that lands before any
+        // cutover-dependent refusal commits the transfer itself; both are exactly-once outcomes.
+        KeyValueResponseType commitARetried = commitA;
+        for (int attempt = 0; attempt < 40 && commitARetried == KeyValueResponseType.MustRetry; attempt++)
+        {
+            await Task.Delay(100, ct);
+            (commitARetried, _) = await driver.LocateAndCommitTransaction(handle, ct);
+        }
+
+        Assert.NotEqual(KeyValueResponseType.MustRetry, commitARetried);
+
+        if (commitARetried == KeyValueResponseType.Committed)
+        {
+            foreach (KahunaManager manager in kahunas)
+            {
+                KahunaManager observer = manager;
+                await WaitUntilAsync(() =>
+                    observer.DurablePreparedIntentStore.Get(legOne) is null
+                    && observer.DurablePreparedIntentStore.Get(legTwo) is null, timeoutMs: 30_000);
+            }
+
+            (string? legOneCommitted, long legOneCommittedRevision) = await ReadKey(driver, legOne, ct);
+            (string? legTwoCommitted, long legTwoCommittedRevision) = await ReadKey(driver, legTwo, ct);
+
+            Assert.Equal("attempt-a", legOneCommitted);
+            Assert.Equal("attempt-a", legTwoCommitted);
+            Assert.Equal(legOneBaseRevision + 1, legOneCommittedRevision);
+            Assert.Equal(legTwoBaseRevision + 1, legTwoCommittedRevision);
+            return;
+        }
+
+        // The replay: a fresh transaction, from BEGIN, as the terminal outcome instructs.
         KeyValueResponseType commitB = KeyValueResponseType.MustRetry;
         for (int attempt = 0; attempt < 20 && commitB != KeyValueResponseType.Committed; attempt++)
         {
