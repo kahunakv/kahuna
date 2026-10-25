@@ -73,6 +73,12 @@ public sealed class EmbeddedKahunaCluster : IAsyncDisposable
     /// <summary>Number of partitions each node creates, including the meta partition 0.</summary>
     public int PartitionCount => nodeOptions[0].InitialPartitions + 1;
 
+    /// <summary>
+    /// The options the member at <paramref name="index"/> is built from. A change to them takes effect
+    /// at the member's next <see cref="RestartNodeAsync"/>; the running member is not affected.
+    /// </summary>
+    internal EmbeddedKahunaOptions GetNodeOptions(int index) => nodeOptions[CheckIndex(index)];
+
     /// <summary>The Raft endpoint of the member at <paramref name="index"/>.</summary>
     public string GetEndpoint(int index) => endpoints[CheckIndex(index)];
 

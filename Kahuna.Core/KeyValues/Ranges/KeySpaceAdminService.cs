@@ -34,6 +34,9 @@ internal sealed class KeySpaceAdminService
 
     private readonly RangeMergeTrigger rangeMergeTrigger;
 
+    /// <summary>The hash pool a seed descriptor is spread over; sized from the committed partition map.</summary>
+    private readonly DataPartitionRouter dataPartitionRouter;
+
     internal KeySpaceAdminService(
         KeyValuesRuntime runtime,
         KeyValuesManager manager,
@@ -48,6 +51,8 @@ internal sealed class KeySpaceAdminService
         this.rangeSplitTrigger = rangeSplitTrigger;
         this.rangeMerger = rangeMerger;
         this.rangeMergeTrigger = rangeMergeTrigger;
+
+        dataPartitionRouter = new(runtime.Raft);
     }
 
     // Aliases matching the field names the moved bodies use, so those bodies stay byte-for-byte as they were.
@@ -104,10 +109,10 @@ internal sealed class KeySpaceAdminService
     {
         // Key-range sharding needs at least one data partition (>= FirstDataPartitionId = 1). Since
         // the meta map shares the system partition (P0), even a single user partition (P1) can host
-        // ranged data, so InitialPartitions = 1 is fully supported. The guard only trips on a
-        // degenerate InitialPartitions = 0 misconfiguration, where it degrades to a no-op instead of
-        // seeding onto a non-existent partition.
-        if (raft.Configuration.InitialPartitions < RangeMapStore.FirstDataPartitionId)
+        // ranged data, so a hash pool of 1 is fully supported. The guard only trips on a degenerate
+        // pool of 0 (an InitialPartitions = 0 misconfiguration at bootstrap), where it degrades to a
+        // no-op instead of seeding onto a non-existent partition.
+        if (dataPartitionRouter.PoolSize < RangeMapStore.FirstDataPartitionId)
             return false;
 
         // Validate the space before anything replicates: the registry rejects an empty or schema-log space, and
@@ -208,11 +213,11 @@ internal sealed class KeySpaceAdminService
     // Return-value contract (mirrors IKahuna.RemoveKeyRangeAsync doc):
     //   true  — committed or idempotent no-op (MutateAsync re-replicates even an unchanged map).
     //   false (transient)  — quiesce window active; caller should retry after a short delay.
-    //   false (permanent)  — InitialPartitions < 1 or /meta suffix; space was never registered.
+    //   false (permanent)  — hash pool < 1 or /meta suffix; space was never registered.
     internal async Task<bool> RemoveKeyRangeAsync(string keySpace, CancellationToken cancellationToken = default)
     {
         // Permanent no-ops: key-range sharding is disabled or the space is a schema-log space.
-        if (raft.Configuration.InitialPartitions < RangeMapStore.FirstDataPartitionId)
+        if (dataPartitionRouter.PoolSize < RangeMapStore.FirstDataPartitionId)
             return false;
 
         if (keySpace.EndsWith("/meta", StringComparison.Ordinal))
@@ -264,18 +269,18 @@ internal sealed class KeySpaceAdminService
 
     /// <summary>
     /// Picks the data partition for a key space's initial descriptor: a deterministic hash over the
-    /// data-partition pool <c>[<see cref="RangeMapStore.FirstDataPartitionId"/>, InitialPartitions]</c>
+    /// data-partition pool <c>[<see cref="RangeMapStore.FirstDataPartitionId"/>, hash pool size]</c>
     /// (key-range data never lives on the reserved system/meta partition 0). Spreads different spaces'
     /// initial ranges across partitions instead of piling them all on partition 1.
     /// </summary>
     private int SeedPartitionFor(string keySpace)
     {
-        int poolSize = raft.Configuration.InitialPartitions;
+        int poolSize = dataPartitionRouter.PoolSize;
         int dataPartitions = poolSize - (RangeMapStore.FirstDataPartitionId - 1); // count of [1 .. poolSize]
         if (dataPartitions < 1)
             throw new KahunaServerException(
                 $"Key-range space '{keySpace}' requires at least {RangeMapStore.FirstDataPartitionId} partition(s) " +
-                $"(InitialPartitions={poolSize}); key-range data cannot live on the reserved partition 0.");
+                $"(hash pool={poolSize}); key-range data cannot live on the reserved partition 0.");
 
         // Seed by the key space's placement group (the prefix before its first '|', or the whole key
         // space), so key-range spaces that name one group start on the same partition — as their

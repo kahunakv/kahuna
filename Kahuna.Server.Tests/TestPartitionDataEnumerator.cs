@@ -87,7 +87,7 @@ public sealed class TestPartitionDataEnumerator
 
         Assert.True(backend.StoreLocks(lockItems));
 
-        return (new PartitionDataEnumerator(backend, () => map, HashPoolSize), allKeys, allLocks);
+        return (new PartitionDataEnumerator(backend, () => map, new DataPartitionRouter(HashPoolSize)), allKeys, allLocks);
     }
 
     private static async Task<List<string>> CollectKeys(PartitionDataEnumerator enumerator, int partitionId, int pageSize)

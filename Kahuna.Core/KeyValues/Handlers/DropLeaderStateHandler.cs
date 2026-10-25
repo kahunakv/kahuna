@@ -24,7 +24,7 @@ internal sealed class DropLeaderStateHandler : BaseHandler
     public KeyValueResponse Execute(KeyValueRequest message)
     {
         RangeMap map = context.RangeMapStore.Current;
-        int hashPoolSize = context.Raft.Configuration.InitialPartitions;
+        int hashPoolSize = HashPoolSize;
         int partitionId = message.PartitionId;
 
         int dropped = 0;

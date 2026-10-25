@@ -153,7 +153,8 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
 
     private readonly Func<RangeMap> currentMap;
 
-    private readonly int hashPoolSize;
+    /// <summary>The hash router; its pool, read from the committed partition map, classifies hash-routed keys.</summary>
+    private readonly DataPartitionRouter hashPool;
 
     /// <summary>Drains the background writer so the physical-family scan reflects every applied entry.</summary>
     private readonly Func<Task> drainPersistence;
@@ -174,7 +175,7 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
         TransactionRecordStore transactionRecordStore,
         PreparedIntentStore preparedIntentStore,
         Func<RangeMap> currentMap,
-        int hashPoolSize,
+        DataPartitionRouter hashPool,
         Func<Task> drainPersistence,
         string? storagePath,
         string storageRevision,
@@ -188,7 +189,7 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
         this.transactionRecordStore = transactionRecordStore;
         this.preparedIntentStore = preparedIntentStore;
         this.currentMap = currentMap;
-        this.hashPoolSize = hashPoolSize;
+        this.hashPool = hashPool;
         this.drainPersistence = drainPersistence;
         this.storagePath = storagePath;
         this.storageRevision = storageRevision;
@@ -200,7 +201,7 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
     public async Task<Stream> ExportPartitionState(int partitionId, long upToIndex, CancellationToken ct)
     {
         RangeMap map = currentMap();
-        Func<string, bool> isOwned = key => PartitionDataEnumerator.OwnerOfKey(map, key, hashPoolSize) == partitionId;
+        Func<string, bool> isOwned = OwnedKeyPredicate(map, partitionId);
 
         // Segmented and pooled: the snapshot grows one 64 KB segment at a time, so an export of any size
         // allocates no doubling-growth ladder of ever-larger large-object-heap buffers, and an export that
@@ -997,8 +998,11 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
 
     /// <summary>The ownership filter both the install and the un-host purge scope their durable-store purges
     /// with: a key (or record anchor) the given map assigns to <paramref name="partitionId"/>.</summary>
-    private Func<string, bool> OwnedKeyPredicate(RangeMap map, int partitionId) =>
-        key => PartitionDataEnumerator.OwnerOfKey(map, key, hashPoolSize) == partitionId;
+    private Func<string, bool> OwnedKeyPredicate(RangeMap map, int partitionId)
+    {
+        int hashPoolSize = hashPool.PoolSize;
+        return key => PartitionDataEnumerator.OwnerOfKey(map, key, hashPoolSize) == partitionId;
+    }
 
     // ── install marker ───────────────────────────────────────────────────────────
 

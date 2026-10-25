@@ -222,6 +222,9 @@ internal sealed partial class KeyValuesManager : IDisposable
 
     private readonly PartitionStateTransfer partitionStateTransfer;
 
+    /// <summary>The hash router shared by the services this manager builds; see <see cref="HashPoolSize"/>.</summary>
+    private readonly Ranges.DataPartitionRouter dataPartitionRouter;
+
     private readonly SnapshotFloorStore snapshotFloorStore;
 
     private readonly CompletionReceiptStore completionReceiptStore;
@@ -305,6 +308,12 @@ internal sealed partial class KeyValuesManager : IDisposable
 
     /// <summary>Test-only access to the Raft instance for HLC timestamp generation in tests.</summary>
     internal IRaft Raft => raft;
+
+    /// <summary>
+    /// Size of the hash pool, the user partitions <c>[1, HashPoolSize]</c> hash-routed keys map onto:
+    /// the bootstrap partition count of the committed partition map (see <see cref="Ranges.DataPartitionRouter"/>).
+    /// </summary>
+    internal int HashPoolSize => dataPartitionRouter.PoolSize;
 
     /// <summary>Test-only access to the inter-node communication for fault/latency injection.</summary>
     internal IInterNodeCommunication InterNodeCommunication => interNodeCommunication;
@@ -524,6 +533,7 @@ internal sealed partial class KeyValuesManager : IDisposable
         this.transactionRecordStore = built.transactionRecordStore;
         this.preparedIntentStore = built.preparedIntentStore;
         this.partitionStateTransfer = built.partitionStateTransfer;
+        this.dataPartitionRouter = built.dataPartitionRouter;
         this.writeAggregator = built.writeAggregator;
         this.routers = built.routers;
         this.snapshotHolds = built.snapshotHolds;

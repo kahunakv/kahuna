@@ -33,6 +33,9 @@ public sealed partial class KahunaManager
     /// <summary>The replicated range-descriptor map.</summary>
     internal RangeMapStore RangeMapStore => keyValues.RangeMapStore;
 
+    /// <summary>Size of the hash pool hash-routed keys map onto: the bootstrap partition count of the committed partition map.</summary>
+    internal int HashPoolSize => keyValues.HashPoolSize;
+
     /// <summary>The replicated, refcounted, leased MVCC snapshot-floor registry.</summary>
     internal SnapshotFloorStore SnapshotFloorStore => keyValues.SnapshotFloorStore;
 
@@ -66,12 +69,12 @@ public sealed partial class KahunaManager
             return ("InvalidInput",
                 $"Key space '{keySpace}' is a schema-log space and is never key-range routed.");
 
-        // Key-range data cannot live on the reserved meta/system partition, so a cluster configured
+        // Key-range data cannot live on the reserved meta/system partition, so a cluster bootstrapped
         // with no data partition can never hold a descriptor. Permanent, not a retryable failure.
-        if (keyValues.Raft.Configuration.InitialPartitions < RangeMapStore.FirstDataPartitionId)
+        if (keyValues.HashPoolSize < RangeMapStore.FirstDataPartitionId)
             return ("KeyRangeDisabled",
                 $"Key-range routing needs at least {RangeMapStore.FirstDataPartitionId} data partition; " +
-                $"this cluster is configured with {keyValues.Raft.Configuration.InitialPartitions}.");
+                $"this cluster has {keyValues.HashPoolSize}.");
 
         return null;
     }

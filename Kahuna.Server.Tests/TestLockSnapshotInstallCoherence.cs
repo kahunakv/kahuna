@@ -62,12 +62,12 @@ public sealed class TestLockSnapshotInstallCoherence
         RangeMap map = new([]);
 
         PartitionStateTransfer transfer = new(
-            new PartitionDataEnumerator(backend, () => map, Partitions),
+            new PartitionDataEnumerator(backend, () => map, new DataPartitionRouter(Partitions)),
             backend,
             new CompletionReceiptStore(),
             new TransactionRecordStore(),
             new PreparedIntentStore(),
-            () => map, Partitions,
+            () => map, new DataPartitionRouter(Partitions),
             () => Task.CompletedTask,
             storagePath: null, "rev", NullLogger<IKahuna>.Instance);
 

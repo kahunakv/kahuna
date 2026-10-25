@@ -56,9 +56,9 @@ internal static class RangeRouting
     /// <c>ReplicateLogs(expectedGeneration:)</c> fence — that is an independent namespace Kahuna does not sync
     /// from descriptors, so the descriptor generation must never be passed there.</item>
     /// <item><b>Hash</b> space (default; system + <c>{db}/meta</c>) → <c>(DataPartitionRouter.Locate(key), 0)</c>.
-    /// Kahuna owns hash assignment (Kommander partitions are <c>Unrouted</c>), mapping the key onto the
-    /// user partitions <c>[1, InitialPartitions]</c> (P1 included — hash data may share it with the meta
-    /// map). Generation <c>0</c> disables the fence — hash routing is static, nothing to fence against.</item>
+    /// Kahuna owns hash assignment (the partitions it creates are <c>Unrouted</c>), mapping the key onto the
+    /// user partitions <c>[1, PoolSize]</c> created at bootstrap (P1 included — hash data may share it with
+    /// the meta map). Generation <c>0</c> disables the fence — hash routing is static, nothing to fence against.</item>
     /// </list>
     /// </summary>
     /// <exception cref="RangeDescriptorMissingException">

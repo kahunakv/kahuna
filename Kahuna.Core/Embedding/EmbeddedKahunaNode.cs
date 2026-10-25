@@ -276,8 +276,11 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         // partition at any point during this loop, so each id is re-checked and a partition that
         // becomes non-hosted mid-wait is simply skipped: a range hosted elsewhere needs no local
         // leader, and requests for it are served by forwarding. With the replication factor off,
-        // every partition is hosted and this is exactly the historical wait.
-        for (int partitionId = 1; partitionId <= Raft.Configuration.InitialPartitions; partitionId++)
+        // every partition is hosted and this is exactly the historical wait. The pool comes from the
+        // committed map: a restart with another configured InitialPartitions waits on the partitions
+        // that exist, not on the configured count.
+        int hashPoolSize = ((KahunaManager)Kahuna).HashPoolSize;
+        for (int partitionId = 1; partitionId <= hashPoolSize; partitionId++)
         {
             if (!Raft.HostsPartition(partitionId))
                 continue;

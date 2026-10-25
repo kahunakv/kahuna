@@ -33,6 +33,9 @@ internal sealed class WatchProgressTickActor : IActor<WatchProgressTickRequest>
 
     private readonly int intervalMs;
 
+    /// <summary>The hash pool, sized from the committed partition map, that every tick covers.</summary>
+    private readonly DataPartitionRouter dataPartitionRouter;
+
     public WatchProgressTickActor(
         IActorContext<WatchProgressTickActor, WatchProgressTickRequest> context,
         IRaft raft,
@@ -46,6 +49,8 @@ internal sealed class WatchProgressTickActor : IActor<WatchProgressTickRequest>
         this.rangeMapStore = rangeMapStore;
         this.logger = logger;
         this.shutdown = shutdown;
+
+        dataPartitionRouter = new(raft);
 
         intervalMs = IntervalFor(watermarks.LagMs);
         TimeSpan interval = TimeSpan.FromMilliseconds(intervalMs);
@@ -101,7 +106,7 @@ internal sealed class WatchProgressTickActor : IActor<WatchProgressTickRequest>
     {
         SortedSet<int> partitions = [];
 
-        int poolSize = raft.Configuration.InitialPartitions;
+        int poolSize = dataPartitionRouter.PoolSize;
         for (int i = 0; i < poolSize; i++)
             partitions.Add(DataPartitionRouter.FirstUserPartitionId + i);
 

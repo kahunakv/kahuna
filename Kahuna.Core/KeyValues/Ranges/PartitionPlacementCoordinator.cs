@@ -132,6 +132,7 @@ internal sealed class PartitionPlacementCoordinator : IDisposable
         raft.OnPartitionMapChanged -= OnFirstPartitionMapApplied;
 
         LogPlacementBanner(appliedRanges);
+        WarnOnConfiguredHashPoolMismatch(appliedRanges);
 
         _ = Task.Run(async () =>
         {
@@ -172,6 +173,23 @@ internal sealed class PartitionPlacementCoordinator : IDisposable
             raft.Configuration.EnablePlacementRebalancer ? "enabled" : "disabled",
             hostedCount,
             totalCount);
+    }
+
+    /// <summary>
+    /// Warns, once at the first applied map, when the configured <c>InitialPartitions</c> differs from
+    /// the hash pool the committed map was bootstrapped with. Kommander writes the configured value
+    /// into the map at the first boot only and ignores it afterwards, and hash routing follows the
+    /// map (<see cref="DataPartitionRouter"/>), so a changed setting has no effect: an operator who
+    /// raised it to "add partitions" learns here that the pool did not grow, instead of from reads
+    /// that would have been routed to partitions that do not exist.
+    /// </summary>
+    private void WarnOnConfiguredHashPoolMismatch(IReadOnlyList<Kommander.System.RaftPartitionRange> appliedRanges)
+    {
+        int committedPool = DataPartitionRouter.HashPoolSizeOf(appliedRanges);
+        int configuredPool = raft.Configuration.InitialPartitions;
+
+        if (committedPool > 0 && committedPool != configuredPool)
+            logger.LogHashPoolConfigurationMismatch(committedPool, configuredPool);
     }
 
     /// <summary>

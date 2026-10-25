@@ -67,11 +67,11 @@ public sealed class TestUnhostedPartitionPurge : IDisposable
         TransactionRecordStore records = new();
         PreparedIntentStore intents = new();
 
-        PartitionDataEnumerator enumerator = new(backend, () => map, HashPoolSize);
+        PartitionDataEnumerator enumerator = new(backend, () => map, new DataPartitionRouter(HashPoolSize));
 
         PartitionStateTransfer transfer = new(
             enumerator, backend, receipts, records, intents,
-            () => map, HashPoolSize,
+            () => map, new DataPartitionRouter(HashPoolSize),
             () => Task.CompletedTask,
             tempDir, "rev", NullLogger<IKahuna>.Instance);
 

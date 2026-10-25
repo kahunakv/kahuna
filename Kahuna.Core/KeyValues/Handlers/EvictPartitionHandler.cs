@@ -30,7 +30,7 @@ internal sealed class EvictPartitionHandler : BaseHandler
     public KeyValueResponse Execute(KeyValueRequest message)
     {
         RangeMap map = context.RangeMapStore.Current;
-        int hashPoolSize = context.Raft.Configuration.InitialPartitions;
+        int hashPoolSize = HashPoolSize;
         int partitionId = message.PartitionId;
 
         List<string>? toEvict = null;

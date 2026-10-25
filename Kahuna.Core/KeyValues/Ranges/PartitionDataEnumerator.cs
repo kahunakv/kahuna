@@ -41,17 +41,17 @@ internal sealed class PartitionDataEnumerator
 
     private readonly Func<RangeMap> currentMap;
 
-    private readonly int hashPoolSize;
+    private readonly DataPartitionRouter hashPool;
 
     /// <param name="persistenceBackend">The node's backend (scans read the physical family).</param>
     /// <param name="currentMap">Supplier of the committed range map (captured once per enumeration).</param>
-    /// <param name="hashPoolSize">The hash pool size — <c>RaftConfiguration.InitialPartitions</c>,
-    /// the fixed set of partitions hash key spaces map onto.</param>
-    public PartitionDataEnumerator(IPersistenceBackend persistenceBackend, Func<RangeMap> currentMap, int hashPoolSize)
+    /// <param name="hashPool">The hash router; its pool is the fixed set of partitions hash key
+    /// spaces map onto, read from the committed partition map.</param>
+    public PartitionDataEnumerator(IPersistenceBackend persistenceBackend, Func<RangeMap> currentMap, DataPartitionRouter hashPool)
     {
         this.persistenceBackend = persistenceBackend;
         this.currentMap = currentMap;
-        this.hashPoolSize = hashPoolSize;
+        this.hashPool = hashPool;
     }
 
     /// <summary>
@@ -109,6 +109,7 @@ internal sealed class PartitionDataEnumerator
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         RangeMap map = currentMap();
+        int hashPoolSize = hashPool.PoolSize;
 
         string? cursor = null;
 
@@ -148,6 +149,8 @@ internal sealed class PartitionDataEnumerator
         int pageSize,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        int hashPoolSize = hashPool.PoolSize;
+
         string? cursor = null;
 
         while (true)

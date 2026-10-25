@@ -51,9 +51,9 @@ public sealed class TestPartitionStateInstallPeakMemory
         TransactionRecordStore records = new();
 
         PartitionStateTransfer transfer = new(
-            new PartitionDataEnumerator(backend, () => map, HashPoolSize), backend,
+            new PartitionDataEnumerator(backend, () => map, new DataPartitionRouter(HashPoolSize)), backend,
             receipts, records, new PreparedIntentStore(),
-            () => map, HashPoolSize,
+            () => map, new DataPartitionRouter(HashPoolSize),
             () => Task.CompletedTask,
             storagePath: null, storageRevision: "rev", NullLogger<IKahuna>.Instance);
 

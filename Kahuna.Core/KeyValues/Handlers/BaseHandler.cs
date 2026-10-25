@@ -127,6 +127,10 @@ internal abstract class BaseHandler
         dataPartitionRouter = new(context.Raft);
     }
 
+    /// <summary>Size of the hash pool, the user partitions <c>[1, HashPoolSize]</c> hash-routed keys map
+    /// onto; read from the committed partition map (see <see cref="DataPartitionRouter.PoolSize"/>).</summary>
+    protected int HashPoolSize => dataPartitionRouter.PoolSize;
+
     /// <summary>
     /// Arms the actor-enforced deadline on a resumable read continuation from the configured
     /// timeout, so the periodic collect sweep can expire it (resolving waiters with a retryable
@@ -236,7 +240,7 @@ internal abstract class BaseHandler
     /// <summary>
     /// Resolves <paramref name="key"/> to its owning partition id. Key-range spaces look up the
     /// live descriptor; hash spaces use <see cref="DataPartitionRouter"/> over the user partitions
-    /// <c>[1, InitialPartitions]</c>. Both routing call sites (locator and handlers) must call
+    /// <c>[1, HashPoolSize]</c>. Both routing call sites (locator and handlers) must call
     /// <see cref="RangeRouting.Locate"/> so they cannot drift.
     /// </summary>
     protected int ResolvePartition(string key)

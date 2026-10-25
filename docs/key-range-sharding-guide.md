@@ -234,19 +234,29 @@ the descriptor map; everything else hashes.
 
 `DataPartitionRouter.cs` is Kahuna's *own* hash assignment. Crucially, Kahuna owns this — it no
 longer delegates to Kommander's `GetPartitionKey`. It hashes a key over the user-partition pool
-`[1, InitialPartitions]` through `HashPlacement.BucketOfKey` (`Kahuna.Shared/Routing/HashPlacement.cs`):
+`[1, N]` through `HashPlacement.BucketOfKey` (`Kahuna.Shared/Routing/HashPlacement.cs`):
 the key's key space, reduced to its placement group, digested with Kommander's jump-consistent
 `HashUtils.ConsistentHash`. P0 hosts the meta map + coordinator and is **not** in the pool; every
 user partition from 1 upward carries hash data. Hash-mode descriptors return `Generation = 0` (no
 fence; hash spaces never split).
+
+**Where `N` comes from.** The pool is the set of user partitions Kommander created at the
+cluster's first boot. Kommander writes `InitialPartitions` into the committed partition map at
+that first boot and ignores the setting at every later boot, so the router reads the pool from
+the committed map (its hash-range entries) once the node has applied one, and from the setting
+only before that. Partitions a key-range split creates are `Unrouted` and never join the pool.
+Changing `InitialPartitions` on an existing deployment therefore changes nothing: the node logs
+a warning at startup that names the committed and the configured values, and keeps routing over
+the committed pool. (Routing over the configured value instead sent most placement groups to
+partitions that did not exist, which made their rows unreadable.)
 
 ### Placement groups (co-locating hash key spaces)
 
 Hash routing spreads *key spaces*, not keys: every key in `t:r` lands on one partition, and every
 key in `t:i:pk` lands on one partition — but an unrelated one, because the two key spaces hash
 independently. A consumer that stores a table's rows in one key space and its index entries in
-another therefore gets them on the same partition only by chance (one chance in
-`InitialPartitions`). That chance decides, per table, whether a primary-key update is a
+another therefore gets them on the same partition only by chance (one chance in the pool
+size). That chance decides, per table, whether a primary-key update is a
 single-partition transaction: the one-phase commit path admits a read-only dependency only when it
 sits on the anchor partition, so a table whose index landed elsewhere pays two barriers on every
 commit and reports `off_partition_read` on `kahuna.durable_tx.one_phase_gate`.

@@ -317,6 +317,9 @@ public static partial class KahunaLoggerExtensions
     [LoggerMessage(Level = LogLevel.Information, Message = "Started hosting {Count} partition(s): {PartitionIds}")]
     public static partial void LogHostedPartitionsGained(this ILogger<IKahuna> logger, int count, string partitionIds);
 
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Hash pool: the committed partition map was bootstrapped with {CommittedPool} data partition(s), but InitialPartitions is configured as {ConfiguredPool}. The partition count is fixed at the first boot: hash routing uses the committed count, and the configured value is ignored")]
+    public static partial void LogHashPoolConfigurationMismatch(this ILogger<IKahuna> logger, int committedPool, int configuredPool);
+
     [LoggerMessage(Level = LogLevel.Information, Message = "Stopped hosting {Count} partition(s): {PartitionIds}")]
     public static partial void LogHostedPartitionsLost(this ILogger<IKahuna> logger, int count, string partitionIds);
 

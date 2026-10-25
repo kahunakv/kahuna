@@ -108,6 +108,7 @@ internal sealed class KeyValuesManagerBuilder
     internal RangeMergeTrigger rangeMergeTrigger = null!;
     internal KeySpaceAdminService keySpaceAdmin = null!;
     internal KeyValueWatchService watchService = null!;
+    internal Ranges.DataPartitionRouter dataPartitionRouter = null!;
 
     internal KeyValuesManagerBuilder(
         KeyValuesManager manager,
@@ -144,9 +145,14 @@ internal sealed class KeyValuesManagerBuilder
         // for the generation fence.
         rangeMapStore = new(raft, configuration.StoragePath, configuration.StorageRevision, logger);
 
+        // The hash pool every classification of a hash-routed key below shares: its size is the bootstrap
+        // partition count of the committed map, so a restart with another configured InitialPartitions
+        // classifies exactly as the request path routes.
+        dataPartitionRouter = new(raft);
+
         // Per-partition data ownership over the node-global backend, for whole-partition snapshot
         // export and un-host purging. Classifies against the committed range map and the hash pool.
-        partitionDataEnumerator = new(persistenceBackend, () => rangeMapStore.Current, raft.Configuration.InitialPartitions);
+        partitionDataEnumerator = new(persistenceBackend, () => rangeMapStore.Current, dataPartitionRouter);
 
         // Snapshot-floor registry: replicated on the same meta partition as the range map.
         // When an external store is provided (shared with BackgroundWriterActor) use it directly;
@@ -217,7 +223,7 @@ internal sealed class KeyValuesManagerBuilder
             transactionRecordStore,
             preparedIntentStore,
             () => rangeMapStore.Current,
-            raft.Configuration.InitialPartitions,
+            dataPartitionRouter,
             () =>
             {
                 TaskCompletionSource<bool> flushed = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -646,10 +652,10 @@ internal sealed class KeyValuesManagerBuilder
         metaSystemStateTransfer = new(rangeMapStore, snapshotFloorStore, historyHoldStore);
 
         // A hold's partition must still exist: the hash pool, or a range descriptor's partition that is not retired.
-        int hashPoolSize = raft.Configuration.InitialPartitions;
+        Ranges.DataPartitionRouter hashPool = dataPartitionRouter;
         historyHoldStore.AttachPartitionLiveness(partitionId =>
         {
-            if (partitionId >= Ranges.DataPartitionRouter.FirstUserPartitionId && partitionId < Ranges.DataPartitionRouter.FirstUserPartitionId + hashPoolSize)
+            if (partitionId >= Ranges.DataPartitionRouter.FirstUserPartitionId && partitionId < Ranges.DataPartitionRouter.FirstUserPartitionId + hashPool.PoolSize)
                 return true;
 
             RangeMap map = rangeMapStore.Current;

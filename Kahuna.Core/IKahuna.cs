@@ -522,14 +522,14 @@ public interface IKahuna
     ///   </description></item>
     ///   <item><description>
     ///     <b><c>false</c> — permanent; do not retry.</b>
-    ///     Either <c>InitialPartitions &lt; 1</c> (key-range sharding is disabled for this
-    ///     cluster — the space was never registered) or <paramref name="keySpace"/> ends with
-    ///     <c>/meta</c> (schema-log spaces are never key-range-routed). In both cases the space
-    ///     was never registered, so there is nothing to remove.
+    ///     Either the cluster was bootstrapped with no data partition (key-range sharding is
+    ///     disabled for this cluster — the space was never registered) or <paramref name="keySpace"/>
+    ///     ends with <c>/meta</c> (schema-log spaces are never key-range-routed). In both cases the
+    ///     space was never registered, so there is nothing to remove.
     ///   </description></item>
     /// </list>
-    /// Callers that need to distinguish "retry" from "permanent no-op" can inspect cluster
-    /// configuration (<c>InitialPartitions</c>) or key-space name before calling.
+    /// Callers that need to distinguish "retry" from "permanent no-op" can inspect the published
+    /// routing metadata (its hash pool size) or the key-space name before calling.
     /// </returns>
     public Task<bool> RemoveKeyRangeAsync(string keySpace, CancellationToken cancellationToken = default);
 

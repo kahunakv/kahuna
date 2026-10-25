@@ -39,9 +39,9 @@ public sealed class TestPartitionStateExportAllocation
         RangeMap map = new([new RangeDescriptor { KeySpace = "ranged1", PartitionId = 2, Generation = 1 }]);
 
         return new PartitionStateTransfer(
-            new PartitionDataEnumerator(backend, () => map, HashPoolSize), backend,
+            new PartitionDataEnumerator(backend, () => map, new DataPartitionRouter(HashPoolSize)), backend,
             new CompletionReceiptStore(), new TransactionRecordStore(), new PreparedIntentStore(),
-            () => map, HashPoolSize,
+            () => map, new DataPartitionRouter(HashPoolSize),
             () => Task.CompletedTask,
             storagePath: null, storageRevision: "rev", NullLogger<IKahuna>.Instance);
     }

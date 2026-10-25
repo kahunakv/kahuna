@@ -80,12 +80,12 @@ public sealed class TestPartitionStateTransfer : IDisposable
         TransactionRecordStore records = new();
         PreparedIntentStore intents = new();
 
-        PartitionDataEnumerator enumerator = new(backend, () => map, HashPoolSize);
+        PartitionDataEnumerator enumerator = new(backend, () => map, new DataPartitionRouter(HashPoolSize));
 
         Node node = null!;
         PartitionStateTransfer transfer = new(
             enumerator, backend, receipts, records, intents,
-            () => map, HashPoolSize,
+            () => map, new DataPartitionRouter(HashPoolSize),
             () => { node!.DrainInvoked = true; onDrain?.Invoke(node!); return Task.CompletedTask; },
             storagePath, "rev", NullLogger<IKahuna>.Instance);
 

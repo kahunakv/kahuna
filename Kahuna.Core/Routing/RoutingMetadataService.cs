@@ -55,6 +55,9 @@ internal sealed class RoutingMetadataService
 
     private readonly ClientEndpointAdvertiser advertiser;
 
+    /// <summary>The hash pool published to clients; sized from the committed partition map, as the server routes.</summary>
+    private readonly DataPartitionRouter dataPartitionRouter;
+
     public RoutingMetadataService(
         IRaft raft,
         RangeMapStore rangeMapStore,
@@ -66,6 +69,8 @@ internal sealed class RoutingMetadataService
         this.rangeMapStore = rangeMapStore;
         this.keySpaceRegistry = keySpaceRegistry;
         this.advertiser = advertiser;
+
+        dataPartitionRouter = new(raft);
     }
 
     /// <summary>
@@ -91,7 +96,7 @@ internal sealed class RoutingMetadataService
             HashAlgorithm = HashAlgorithm,
             PrefixSeparator = PrefixSeparator,
             GroupSeparator = GroupSeparator,
-            HashPoolSize = raft.Configuration.InitialPartitions,
+            HashPoolSize = dataPartitionRouter.PoolSize,
             HashPartitionOffset = DataPartitionRouter.FirstUserPartitionId,
             SequenceStorageKeyFormat = SequenceActor.ReservedPrefix + "{0}",
             ReservedKeyPrefix = ReservedKeys.SystemPrefix,
@@ -153,7 +158,7 @@ internal sealed class RoutingMetadataService
     {
         SortedSet<int> partitions = [];
 
-        int poolSize = raft.Configuration.InitialPartitions;
+        int poolSize = dataPartitionRouter.PoolSize;
 
         for (int i = 0; i < poolSize; i++)
             partitions.Add(DataPartitionRouter.FirstUserPartitionId + i);

@@ -165,7 +165,7 @@ internal sealed class BackupFacade : IDisposable
             keyOwnership: partitions =>
             {
                 RangeMap map = keyValues.RangeMapStore.Current;
-                int hashPoolSize = raft.Configuration.InitialPartitions;
+                int hashPoolSize = keyValues.HashPoolSize;
                 return key => partitions.Contains(PartitionDataEnumerator.OwnerOfKey(map, key, hashPoolSize));
             },
             partScratchRoot: configuration.BackupScratchDir,
