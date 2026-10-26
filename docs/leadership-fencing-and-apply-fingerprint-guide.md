@@ -33,12 +33,21 @@ round (`ConfirmLeadershipAsync`). A leader that cannot confirm answers `MustRetr
 state without a proposal:
 
 - a set, delete or extend inside an interactive transaction (a staged MVCC entry plus a write intent),
-- an exclusive point, prefix or range lock, and its release,
+- an exclusive point, prefix or range lock grant,
 - a prepare, commit or rollback mutation ticket.
 
 These operations now pass the same read-index confirmation the reads pass. A cut-off leader that
 receives one answers `MustRetry`. The client retries against the current view, and nothing is left in
 the cut-off leader's memory.
+
+**A lock release is served for what the node holds, confirmed or not.** A release only drops state from
+the node's own memory, and a lock found there was granted there. A node whose leadership a quorum did
+not confirm still runs the release, but acknowledges only a lock of the transaction it actually holds;
+a release that finds nothing of the transaction answers `MustRetry`, because the lock may live on the
+leader the quorum did confirm. This matters right after a peer fails: the leader's ack round can stall
+for a moment, the commit-time lock proof then refuses the transaction as a lost lock, and the cleanup
+that follows must still drop the locks the refused transaction holds on that leader. Gated on the
+same confirmation, the cleanup was refused too, and the locks stayed until their lease ended.
 
 ### The check-quorum step-down
 
@@ -207,6 +216,16 @@ Refusing an actor-state mutation on partition 2: node n4:8082 believes it leads 
 
 One of these lines is the two-leader window itself. Expect a few during a failover. A stream of them
 on one node means that node is cut off from its voters and the step-down has not fired.
+
+A commit's cleanup that could not get a lock release acknowledged logs, at warning level:
+
+```
+Transaction HLC(1:…): a mandatory lock release after the commit finalize was not acknowledged; the lock stays until its lease ends
+```
+
+The lock named by the transaction lapses with its lease (`range_lock_expires_ms` for a range lock, the
+lock's own `expiresMs` otherwise), and writers into its range wait for it meanwhile. A node that was
+deposed in that window drops the lock earlier, when it learns of the loss.
 
 ---
 

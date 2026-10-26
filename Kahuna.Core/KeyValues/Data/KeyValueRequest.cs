@@ -204,6 +204,15 @@ public sealed class KeyValueRequest : IConsistentHashable
     internal bool ReturnToPoolOnReceive { get; set; }
 
     /// <summary>
+    /// A lock release that may only acknowledge what this actor holds of the transaction. Set by the locator
+    /// when the node believes it leads the partition but no quorum confirmed it: a lock the transaction holds
+    /// here is dropped as usual, while a release that finds nothing of the transaction answers
+    /// <see cref="KeyValueResponseType.MustRetry"/> instead of a clean answer, because a node whose leadership
+    /// is unconfirmed cannot vouch that the lock is not held by the leader a quorum did confirm.
+    /// </summary>
+    internal bool ReleaseOnlyIfHeld { get; set; }
+
+    /// <summary>
     /// Creates a type-only request (e.g. periodic cache collection).
     /// </summary>
     public KeyValueRequest(KeyValueRequestType type)
@@ -337,6 +346,7 @@ public sealed class KeyValueRequest : IConsistentHashable
         ProbeLock = KeyValueProbeLock.None;
         ProbeRanges = null;
         ReturnToPoolOnReceive = false;
+        ReleaseOnlyIfHeld = false;
     }
 
     public int GetHash()

@@ -25,7 +25,7 @@ internal sealed class TryReleaseExclusiveRangeLockHandler : BaseHandler
         string keySpace = KeyValueKeySpace.OfPrefix(message.Key);
 
         if (!context.LocksByRange.TryGetValue(keySpace, out List<KeyValueRangeLock>? locks))
-            return KeyValueStaticResponses.UnlockedResponse;
+            return NothingHeld(message);
 
         // Pass 1: exact-bounds match — preserves precision for same-tx multi-lock.
         KeyValueRangeLock? found = null;
@@ -61,7 +61,7 @@ internal sealed class TryReleaseExclusiveRangeLockHandler : BaseHandler
         }
 
         if (found is null)
-            return KeyValueStaticResponses.UnlockedResponse;
+            return NothingHeld(message);
 
         locks.Remove(found);
 
@@ -72,6 +72,13 @@ internal sealed class TryReleaseExclusiveRangeLockHandler : BaseHandler
 
         return KeyValueStaticResponses.UnlockedResponse;
     }
+
+    /// <summary>
+    /// The answer when the transaction holds no lock on the range here: clean, unless the release may only
+    /// acknowledge what is held (see <see cref="KeyValueRequest.ReleaseOnlyIfHeld"/>).
+    /// </summary>
+    private static KeyValueResponse NothingHeld(KeyValueRequest message) =>
+        message.ReleaseOnlyIfHeld ? KeyValueStaticResponses.MustRetryResponse : KeyValueStaticResponses.UnlockedResponse;
 
     private void ReleaseExistingLocksInRange(KeyValueRequest message)
     {

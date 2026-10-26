@@ -66,7 +66,8 @@ internal sealed class LocalMutationTicketOperations
     /// <returns></returns>
     public async Task<List<(KeyValueResponseType, string, KeyValueDurability)>> TryReleaseManyExclusiveLocks(
         HLCTimestamp transactionId, 
-        List<(string key, KeyValueDurability durability)> keys
+        List<(string key, KeyValueDurability durability)> keys,
+        bool onlyIfHeld = false
     )
     {
         List<(KeyValueResponseType, string, KeyValueDurability)> responses = new(keys.Count);
@@ -89,6 +90,8 @@ internal sealed class LocalMutationTicketOperations
                 0,
                 default
             );
+
+            request.ReleaseOnlyIfHeld = onlyIfHeld;
 
             try
             {

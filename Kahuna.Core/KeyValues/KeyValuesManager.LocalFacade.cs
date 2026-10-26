@@ -177,8 +177,20 @@ internal sealed partial class KeyValuesManager
     public Task<(KeyValueResponseType, string)> TryReleaseExclusiveLock(HLCTimestamp transactionId, string key, KeyValueDurability durability) =>
         localLocks.TryReleaseExclusiveLock(transactionId, key, durability);
 
+    /// <summary>
+    /// <see cref="TryReleaseExclusiveLock"/> on a node whose leadership no quorum confirmed: releases what this
+    /// node holds of the transaction and answers <see cref="KeyValueResponseType.MustRetry"/> when it holds
+    /// nothing on the key (see <see cref="KeyValueRequest.ReleaseOnlyIfHeld"/>).
+    /// </summary>
+    internal Task<(KeyValueResponseType, string)> TryReleaseExclusiveLockHeldHere(HLCTimestamp transactionId, string key, KeyValueDurability durability) =>
+        localLocks.TryReleaseExclusiveLock(transactionId, key, durability, onlyIfHeld: true);
+
     public Task<KeyValueResponseType> TryReleaseExclusivePrefixLock(HLCTimestamp transactionId, string prefixKey, KeyValueDurability durability) =>
         localLocks.TryReleaseExclusivePrefixLock(transactionId, prefixKey, durability);
+
+    /// <summary><see cref="TryReleaseExclusiveLockHeldHere"/> for a prefix lock.</summary>
+    internal Task<KeyValueResponseType> TryReleaseExclusivePrefixLockHeldHere(HLCTimestamp transactionId, string prefixKey, KeyValueDurability durability) =>
+        localLocks.TryReleaseExclusivePrefixLock(transactionId, prefixKey, durability, onlyIfHeld: true);
 
     public Task<(KeyValueResponseType, HLCTimestamp HolderTransactionId)> TryAcquireExclusiveRangeLock(
         HLCTimestamp transactionId,
@@ -208,6 +220,16 @@ internal sealed partial class KeyValuesManager
         KeyValueDurability durability
     ) =>
         localLocks.TryReleaseExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability);
+
+    /// <summary><see cref="TryReleaseExclusiveLockHeldHere"/> for a range lock.</summary>
+    internal Task<KeyValueResponseType> TryReleaseExclusiveRangeLockHeldHere(
+        HLCTimestamp transactionId,
+        string prefix,
+        string? startKey, bool startInclusive,
+        string? endKey,   bool endInclusive,
+        KeyValueDurability durability
+    ) =>
+        localLocks.TryReleaseExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability, onlyIfHeld: true);
 
     internal Task RecoverPreparedIntents(CancellationToken cancellationToken) =>
         durableMaintenance.RecoverPreparedIntents(cancellationToken);
@@ -262,6 +284,13 @@ internal sealed partial class KeyValuesManager
         List<(string key, KeyValueDurability durability)> keys
     ) =>
         localMutationTickets.TryReleaseManyExclusiveLocks(transactionId, keys);
+
+    /// <summary><see cref="TryReleaseExclusiveLockHeldHere"/> for a batch of point locks.</summary>
+    internal Task<List<(KeyValueResponseType, string, KeyValueDurability)>> TryReleaseManyExclusiveLocksHeldHere(
+        HLCTimestamp transactionId, 
+        List<(string key, KeyValueDurability durability)> keys
+    ) =>
+        localMutationTickets.TryReleaseManyExclusiveLocks(transactionId, keys, onlyIfHeld: true);
 
     public Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> TryPrepareMutations(
         HLCTimestamp transactionId,

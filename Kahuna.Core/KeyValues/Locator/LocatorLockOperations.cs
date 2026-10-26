@@ -272,8 +272,17 @@ internal sealed class LocatorLockOperations
         
         int partitionId = routing.RouteKey(key);
 
-        if (!raft.Joined || await routing.ConfirmLeadershipForActorMutation(partitionId, cancellationToken))
+        // Served here on a confirmed leadership, or on belief alone for what this node holds of the
+        // transaction (see LocatorRouting.AdmitLockRelease).
+        LockReleaseAdmission admission = raft.Joined
+            ? await routing.AdmitLockRelease(partitionId, cancellationToken)
+            : LockReleaseAdmission.Confirmed;
+
+        if (admission == LockReleaseAdmission.Confirmed)
             return await manager.TryReleaseExclusiveLock(transactionId, key, durability);
+
+        if (admission == LockReleaseAdmission.HeldOnly)
+            return await manager.TryReleaseExclusiveLockHeldHere(transactionId, key, durability);
             
         string? leader = await routing.TryWaitForLeader(partitionId, cancellationToken);
         if (leader is null || leader == raft.GetLocalEndpoint())
@@ -314,8 +323,17 @@ internal sealed class LocatorLockOperations
 
         int partitionId = routing.RoutePrefixKey(prefixKey);
 
-        if (!raft.Joined || await routing.ConfirmLeadershipForActorMutation(partitionId, cancellationToken))
+        // Served here on a confirmed leadership, or on belief alone for what this node holds of the
+        // transaction (see LocatorRouting.AdmitLockRelease).
+        LockReleaseAdmission admission = raft.Joined
+            ? await routing.AdmitLockRelease(partitionId, cancellationToken)
+            : LockReleaseAdmission.Confirmed;
+
+        if (admission == LockReleaseAdmission.Confirmed)
             return await manager.TryReleaseExclusivePrefixLock(transactionId, prefixKey, durability);
+
+        if (admission == LockReleaseAdmission.HeldOnly)
+            return await manager.TryReleaseExclusivePrefixLockHeldHere(transactionId, prefixKey, durability);
             
         string? leader = await routing.TryWaitForLeader(partitionId, cancellationToken);
         if (leader is null || leader == raft.GetLocalEndpoint())
@@ -614,8 +632,19 @@ internal sealed class LocatorLockOperations
         KeyValueDurability durability,
         CancellationToken cancellationToken)
     {
-        if (!raft.Joined || await routing.ConfirmLeadershipForActorMutation(partitionId, cancellationToken))
+        // Served here on a confirmed leadership, or on belief alone for what this node holds of the
+        // transaction: the commit-time lock proof refuses a transaction when the confirmation does not come,
+        // and the cleanup that follows the refusal must still release the range locks the transaction holds
+        // here (see LocatorRouting.AdmitLockRelease).
+        LockReleaseAdmission admission = raft.Joined
+            ? await routing.AdmitLockRelease(partitionId, cancellationToken)
+            : LockReleaseAdmission.Confirmed;
+
+        if (admission == LockReleaseAdmission.Confirmed)
             return await manager.TryReleaseExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability);
+
+        if (admission == LockReleaseAdmission.HeldOnly)
+            return await manager.TryReleaseExclusiveRangeLockHeldHere(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability);
 
         string? leader = await routing.TryWaitForLeader(partitionId, cancellationToken);
         if (leader is null || leader == raft.GetLocalEndpoint())
@@ -689,7 +718,11 @@ internal sealed class LocatorLockOperations
         
         if (leader == localNode)
         {
-            if (!await routing.ConfirmLeadershipForGroupMutation(leader, leaderByPartition, cancelationToken))
+            // Served here on a confirmed leadership, or on belief alone for what this node holds of the
+            // transaction (see LocatorRouting.AdmitLockRelease).
+            LockReleaseAdmission admission = await routing.AdmitGroupLockRelease(leader, leaderByPartition, cancelationToken);
+
+            if (admission == LockReleaseAdmission.NotHere)
             {
                 lock (lockSync)
                 {
@@ -700,7 +733,9 @@ internal sealed class LocatorLockOperations
                 return;
             }
 
-            List<(KeyValueResponseType type, string key, KeyValueDurability durability)> acquireResponses = await manager.TryReleaseManyExclusiveLocks(transactionId, xkeys);
+            List<(KeyValueResponseType type, string key, KeyValueDurability durability)> acquireResponses = admission == LockReleaseAdmission.Confirmed
+                ? await manager.TryReleaseManyExclusiveLocks(transactionId, xkeys)
+                : await manager.TryReleaseManyExclusiveLocksHeldHere(transactionId, xkeys);
 
             lock (lockSync)
             {

@@ -36,7 +36,14 @@ internal sealed class TryReleaseExclusiveLockHandler : BaseHandler
         KeyValueEntry? entry = await GetKeyValueEntry(message.Key, message.Durability, currentTime: currentTime);
 
         if (entry is null)
-            return KeyValueStaticResponses.DoesNotExistResponse;
+            return message.ReleaseOnlyIfHeld ? KeyValueStaticResponses.MustRetryResponse : KeyValueStaticResponses.DoesNotExistResponse;
+
+        // A release that may only acknowledge what is held answers before it changes anything when the
+        // transaction left nothing on the key: neither a write intent nor an MVCC entry of its own.
+        if (message.ReleaseOnlyIfHeld
+            && (entry.WriteIntent is null || entry.WriteIntent.TransactionId != message.TransactionId)
+            && (entry.MvccEntries is null || !entry.MvccEntries.ContainsKey(message.TransactionId)))
+            return KeyValueStaticResponses.MustRetryResponse;
 
         if (entry.MvccEntries is null)
             context.Logger.LogReleaseExclusiveLockMvccNull(message.Key);

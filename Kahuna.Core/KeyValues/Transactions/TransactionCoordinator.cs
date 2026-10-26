@@ -511,11 +511,39 @@ internal sealed class TransactionCoordinator : IDisposable
             if (!heldForRetry)
             {
                 if (context.AsyncRelease)
-                    _ = ReleaseWorkingSet(context);
+                    _ = ReleaseWorkingSetAfterCommit(context);
                 else
-                    await ReleaseWorkingSet(context);
+                    await ReleaseWorkingSetAfterCommit(context);
             }
         }
+    }
+
+    /// <summary>
+    /// The commit's cleanup of the working set. No commit outcome depends on it, and the session is finalized
+    /// whatever it answers, so a mandatory release that was not acknowledged is not retried from here: the lock
+    /// it left behind lapses with its lease, and the warning is what explains the writers that wait for it
+    /// meanwhile. A release is served for the locks the node holds even when no quorum confirms its leadership
+    /// (<c>LocatorRouting.AdmitLockRelease</c>), so the confirmation whose absence refused the commit as a lost
+    /// lock does not refuse the cleanup of the locks that refusal leaves behind.
+    /// </summary>
+    private async Task ReleaseWorkingSetAfterCommit(TransactionContext context)
+    {
+        bool acknowledged;
+
+        try
+        {
+            acknowledged = await ReleaseWorkingSet(context);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError("ReleaseWorkingSet after commit {TransactionId}: {Type} {Message}", context.TransactionId, ex.GetType().Name, ex.Message);
+            return;
+        }
+
+        if (!acknowledged)
+            logger.LogWarning(
+                "Transaction {TransactionId}: a mandatory lock release after the commit finalize was not acknowledged; the lock stays until its lease ends",
+                context.TransactionId);
     }
 
     /// <summary>

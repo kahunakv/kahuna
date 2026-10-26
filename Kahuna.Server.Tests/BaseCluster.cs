@@ -370,6 +370,9 @@ public abstract class BaseCluster : IAsyncLifetime
     /// or a compaction cadence low enough to force a snapshot install.</param>
     /// <param name="configureKahuna">Runs over the node's <see cref="KahunaConfiguration"/> after the defaults
     /// are set.</param>
+    /// <param name="wrapRaft">Wraps the node's <see cref="IRaft"/> before Kahuna receives it, so a fixture can
+    /// observe or fault one Raft answer (a leadership confirmation, say) while the cluster keeps running on the
+    /// real instance. The returned raft array and the node registry keep the real instance.</param>
     protected static (IRaft, IKahuna) BuildNode(
         MemoryInterNodeCommmunication interNodeComm,
         InMemoryCommunication raftComm,
@@ -383,7 +386,8 @@ public abstract class BaseCluster : IAsyncLifetime
         int replicationFactor = 0,
         bool enablePlacementRebalancer = false,
         Action<RaftConfiguration>? configureRaft = null,
-        Action<KahunaConfiguration>? configureKahuna = null)
+        Action<KahunaConfiguration>? configureKahuna = null,
+        Func<IRaft, IRaft>? wrapRaft = null)
     {
         IWAL wal = GetWAL(walStorage, raftLogger);
         ActorSystem actorSystem = new(logger: raftLogger);
@@ -455,7 +459,9 @@ public abstract class BaseCluster : IAsyncLifetime
         };
         configureKahuna?.Invoke(configuration);
 
-        KahunaManager kahuna = new(actorSystem, raft, configuration, interNodeComm, kahunaLogger);
+        IRaft kahunaRaft = wrapRaft?.Invoke(raft) ?? raft;
+
+        KahunaManager kahuna = new(actorSystem, kahunaRaft, configuration, interNodeComm, kahunaLogger);
 
         raft.OnLogRestored += kahuna.OnLogRestored;
         raft.OnReplicationReceived += kahuna.OnReplicationReceived;
@@ -484,11 +490,12 @@ public abstract class BaseCluster : IAsyncLifetime
         int replicationFactor = 0,
         bool enablePlacementRebalancer = false,
         Action<RaftConfiguration>? configureRaft = null,
-        Action<KahunaConfiguration>? configureKahuna = null)
+        Action<KahunaConfiguration>? configureKahuna = null,
+        Func<IRaft, IRaft>? wrapRaft = null)
     {
         (IRaft[] rafts, IKahuna[] kahunas, _, _) = await AssembleClusterWithTransports(
             nodeCount, walStorage, partitions, raftLogger, kahunaLogger,
-            replicationFactor, enablePlacementRebalancer, configureRaft, configureKahuna);
+            replicationFactor, enablePlacementRebalancer, configureRaft, configureKahuna, wrapRaft);
 
         return (rafts, kahunas);
     }
@@ -507,7 +514,8 @@ public abstract class BaseCluster : IAsyncLifetime
         int replicationFactor = 0,
         bool enablePlacementRebalancer = false,
         Action<RaftConfiguration>? configureRaft = null,
-        Action<KahunaConfiguration>? configureKahuna = null)
+        Action<KahunaConfiguration>? configureKahuna = null,
+        Func<IRaft, IRaft>? wrapRaft = null)
     {
         InMemoryCommunication raftComm = new();
         MemoryInterNodeCommmunication interComm = new();
@@ -523,7 +531,7 @@ public abstract class BaseCluster : IAsyncLifetime
             (rafts[i], kahunas[i]) = BuildNode(
                 interComm, raftComm, walStorage, i + 1, 8000 + i + 1,
                 endpoints.Where(e => e != self), raftLogger, kahunaLogger,
-                partitions, replicationFactor, enablePlacementRebalancer, configureRaft, configureKahuna);
+                partitions, replicationFactor, enablePlacementRebalancer, configureRaft, configureKahuna, wrapRaft);
         }
 
         interComm.SetNodes(endpoints.Zip(kahunas).ToDictionary(p => p.First, p => p.Second));

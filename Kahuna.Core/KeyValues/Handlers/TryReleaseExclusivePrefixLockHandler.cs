@@ -32,18 +32,20 @@ internal sealed class TryReleaseExclusivePrefixLockHandler : BaseHandler
         // The lock was recorded under the key space the prefix names (see the acquire handler).
         string keySpace = KeyValueKeySpace.OfPrefix(message.Key);
 
-        // Check if the prefix is already locked by the current transaction
-        if (context.LocksByPrefix.TryGetValue(keySpace, out KeyValueWriteIntent? writeIntent))
+        // Check if the prefix is locked by the current transaction
+        if (context.LocksByPrefix.TryGetValue(keySpace, out KeyValueWriteIntent? writeIntent)
+            && writeIntent.TransactionId == message.TransactionId)
         {
-            if (writeIntent.TransactionId == message.TransactionId)
-            {
-                ReleaseExistingLocksByPrefix(currentTime, message);
-                
-                context.LocksByPrefix.Remove(keySpace);
-            }
+            ReleaseExistingLocksByPrefix(currentTime, message);
+
+            context.LocksByPrefix.Remove(keySpace);
+
+            return KeyValueStaticResponses.UnlockedResponse;
         }
 
-        return KeyValueStaticResponses.UnlockedResponse;
+        // The transaction holds no lock on the prefix here: a clean answer, unless the release may only
+        // acknowledge what is held (see KeyValueRequest.ReleaseOnlyIfHeld).
+        return message.ReleaseOnlyIfHeld ? KeyValueStaticResponses.MustRetryResponse : KeyValueStaticResponses.UnlockedResponse;
     }
     
     /// <summary>

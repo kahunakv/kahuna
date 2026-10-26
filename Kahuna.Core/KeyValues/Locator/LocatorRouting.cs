@@ -353,8 +353,9 @@ internal sealed class LocatorRouting
     /// <summary>
     /// Gates an operation that mutates in-memory actor state <em>without</em> a Raft proposal on the
     /// same quorum-confirmed leadership check reads use. A transactional set/delete/extend stages an
-    /// MVCC entry plus its write intent, a point/prefix/range exclusive lock and its release live in
-    /// the actor, and a prepare/commit/rollback mutation ticket is answered from actor state: none of
+    /// MVCC entry plus its write intent, a point/prefix/range exclusive lock is granted from the actor
+    /// (its release has its own admission, see <see cref="AdmitLockRelease"/>), and a
+    /// prepare/commit/rollback mutation ticket is answered from actor state: none of
     /// them replicate, so "replication itself fails on a deposed leader" does not protect them. A
     /// leader cut off from its voters would stage a write, hand out a lock or release one from a
     /// memory no other node will ever see, and the client would take the answer as authoritative.
@@ -398,6 +399,62 @@ internal sealed class LocatorRouting
         return true;
     }
 
+    /// <summary>
+    /// How a lock release for <paramref name="partitionId"/> is served from this node. A release drops
+    /// belief-only state from this node's memory: a point, prefix or range lock and the write intents it
+    /// guards. On a confirmed leader it runs as any actor mutation does. When no quorum confirms the
+    /// leadership this node believes in, the release still runs, but it acknowledges only what this node
+    /// holds of the transaction (<c>KeyValueRequest.ReleaseOnlyIfHeld</c>): a lock found here was granted
+    /// here, since a lock lives in the memory of the leader that granted it, so dropping it is right whether
+    /// this node still leads or was deposed in between; a release that finds nothing answers MustRetry, since
+    /// a node whose leadership is unconfirmed cannot vouch that the lock is not held by the leader a quorum
+    /// did confirm.
+    ///
+    /// <para>The unconfirmed-but-held case is the window a leader is in while its ack round waits on a peer
+    /// that just failed. The commit-time lock proof refuses a transaction in that window for exactly that
+    /// reason, and a release gated on the same confirmation was refused with it, which left the refused
+    /// transaction's locks in memory until their lease ran out, with every writer into the range waiting for
+    /// them.</para>
+    /// </summary>
+    internal async ValueTask<LockReleaseAdmission> AdmitLockRelease(int partitionId, CancellationToken cancellationToken)
+    {
+        if (await ConfirmLeadershipIfHosted(partitionId, cancellationToken))
+            return LockReleaseAdmission.Confirmed;
+
+        return await AmILeaderQuickIfHosted(partitionId)
+            ? LockReleaseAdmission.HeldOnly
+            : LockReleaseAdmission.NotHere;
+    }
+
+    /// <summary>
+    /// <see cref="AdmitLockRelease"/> for a locally-led key group: the weakest admission over every distinct
+    /// partition the group's keys route to. Mirrors <see cref="ConfirmLeadershipForGroupMutation"/>.
+    /// </summary>
+    internal async ValueTask<LockReleaseAdmission> AdmitGroupLockRelease(
+        string leader,
+        Dictionary<int, string> leaderByPartition,
+        CancellationToken cancellationToken
+    )
+    {
+        LockReleaseAdmission weakest = LockReleaseAdmission.Confirmed;
+
+        foreach ((int partitionId, string partitionLeader) in leaderByPartition)
+        {
+            if (partitionLeader != leader)
+                continue;
+
+            LockReleaseAdmission admission = await AdmitLockRelease(partitionId, cancellationToken);
+
+            if (admission == LockReleaseAdmission.NotHere)
+                return LockReleaseAdmission.NotHere;
+
+            if (admission == LockReleaseAdmission.HeldOnly)
+                weakest = LockReleaseAdmission.HeldOnly;
+        }
+
+        return weakest;
+    }
+
     // Last warning per partition for the belief-only leader refusal, in Environment.TickCount64
     // milliseconds. A deposed leader receives every operation its stale routers still send it until
     // the cluster's view settles, and one warning per partition per cooldown is enough to place the
@@ -437,4 +494,18 @@ internal sealed class LocatorRouting
         beliefOnlyLeaderWarnedAt[partitionId] = now;
         logger.LogBeliefOnlyLeaderRefusedActorMutation(partitionId, raft.GetLocalEndpoint());
     }
+}
+
+/// <summary>How a lock release is served from this node (see <see cref="LocatorRouting.AdmitLockRelease"/>).</summary>
+internal enum LockReleaseAdmission
+{
+    /// <summary>A quorum confirmed that this node leads the partition: the release runs, and any answer is proof.</summary>
+    Confirmed,
+
+    /// <summary>This node believes it leads, but no quorum confirmed it: the release acknowledges only what this
+    /// node holds of the transaction.</summary>
+    HeldOnly,
+
+    /// <summary>This node does not lead the partition by its own belief: the release goes to the leader it resolves.</summary>
+    NotHere
 }

@@ -301,7 +301,7 @@ internal sealed class LocalLockOperations
     /// <param name="key"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, string)> TryReleaseExclusiveLock(HLCTimestamp transactionId, string key, KeyValueDurability durability)
+    public async Task<(KeyValueResponseType, string)> TryReleaseExclusiveLock(HLCTimestamp transactionId, string key, KeyValueDurability durability, bool onlyIfHeld = false)
     {
         KeyValueRequest request = KeyValueRequestPool.Rent(
             KeyValueRequestType.TryReleaseExclusiveLock, 
@@ -319,6 +319,8 @@ internal sealed class LocalLockOperations
             0,
             default
         );
+
+        request.ReleaseOnlyIfHeld = onlyIfHeld;
 
         try
         {
@@ -360,7 +362,7 @@ internal sealed class LocalLockOperations
     /// <param name="key"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<KeyValueResponseType> TryReleaseExclusivePrefixLock(HLCTimestamp transactionId, string prefixKey, KeyValueDurability durability)
+    public async Task<KeyValueResponseType> TryReleaseExclusivePrefixLock(HLCTimestamp transactionId, string prefixKey, KeyValueDurability durability, bool onlyIfHeld = false)
     {
         KeyValueRequest request = KeyValueRequestPool.Rent(
             KeyValueRequestType.TryReleaseExclusivePrefixLock, 
@@ -378,6 +380,8 @@ internal sealed class LocalLockOperations
             0,
             default
         );
+
+        request.ReleaseOnlyIfHeld = onlyIfHeld;
 
         try
         {
@@ -558,7 +562,8 @@ internal sealed class LocalLockOperations
         string prefix,
         string? startKey, bool startInclusive,
         string? endKey,   bool endInclusive,
-        KeyValueDurability durability
+        KeyValueDurability durability,
+        bool onlyIfHeld = false
     )
     {
         KeyValueRequest request = KeyValueRequestPool.Rent(
@@ -582,6 +587,7 @@ internal sealed class LocalLockOperations
         request.StartInclusive = startInclusive;
         request.EndKey         = endKey;
         request.EndInclusive   = endInclusive;
+        request.ReleaseOnlyIfHeld = onlyIfHeld;
 
         try
         {
