@@ -57,6 +57,8 @@ public sealed class TestServerConfigurationSurface
         AdvertisedClientScheme = "http://",
         DisablePeerEndpointAdvertisement = true,
         DisableRoutingHints = true,
+        StorageCompactionRateMbps = 13,
+        StorageMaxBackgroundCompactions = 3,
     };
 
     [Fact]
@@ -84,6 +86,38 @@ public sealed class TestServerConfigurationSurface
         Assert.Equal(7_000_000, configuration.BackupRestoreThrottleBytesPerSec);
         Assert.Equal(11_000_000, configuration.BackupCaptureThrottleBytesPerSec);
         Assert.Equal(TimeSpan.FromSeconds(21), configuration.BackupApplyBarrierTimeout);
+    }
+
+    [Fact]
+    public void StorageCompactionSettings_ReachBothNodeShapes_AndDefaultToTheBackendsOwn()
+    {
+        KahunaCommandLineOptions opts = NonDefaultOptions();
+        KahunaConfiguration server = ServerConfigurationFactory.Create(opts);
+        KahunaConfiguration embedded = EmbeddedKahunaNode.CreateKahunaConfiguration(
+            EmbeddedOptionsFactory.CreateEmbeddedOptions(opts), singleProcessRaftGroup: false);
+
+        foreach (KahunaConfiguration configuration in new[] { server, embedded })
+        {
+            Assert.Equal(13_000_000, configuration.StorageCompactionRateBytesPerSec);
+            Assert.Equal(3, configuration.StorageMaxBackgroundCompactions);
+        }
+
+        KahunaConfiguration defaults = new();
+        Assert.Equal(0, defaults.StorageCompactionRateBytesPerSec);
+        Assert.Equal(0, defaults.StorageMaxBackgroundCompactions);
+    }
+
+    [Theory]
+    [InlineData(-1, 0, "--storage-compaction-rate-mbps")]
+    [InlineData(0, -2, "--storage-max-background-compactions")]
+    public void NegativeStorageCompactionSettings_AreRefused(int rateMbps, int compactions, string flag)
+    {
+        KahunaCommandLineOptions opts = NonDefaultOptions();
+        opts.StorageCompactionRateMbps = rateMbps;
+        opts.StorageMaxBackgroundCompactions = compactions;
+
+        KahunaServerException ex = Assert.Throws<KahunaServerException>(() => ServerConfigurationFactory.Create(opts));
+        Assert.Contains(flag, ex.Message);
     }
 
     [Fact]

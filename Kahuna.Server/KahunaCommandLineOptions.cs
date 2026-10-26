@@ -101,6 +101,12 @@ public sealed class KahunaCommandLineOptions
     [Option("rocksdb-statistics", Required = false, HelpText = "Enable RocksDB statistics collection and periodic LOG dumps (adds per-operation overhead; for tuning/diagnosis). Default: disabled")]
     public bool RocksDbStatistics { get; set; }
 
+    [Option("storage-compaction-rate-mbps", Required = false, HelpText = "Throughput budget in MB/s for the store's flush and compaction writes, so compactions leave the disk to the store's synced writes; a fraction of what the disk commits in synced writes. 0 = unlimited.", Default = 0)]
+    public int StorageCompactionRateMbps { get; set; }
+
+    [Option("storage-max-background-compactions", Required = false, HelpText = "The most store compactions that run at once. 0 = the backend's default (rocksdb: max(2, CPUs / 2)).", Default = 0)]
+    public int StorageMaxBackgroundCompactions { get; set; }
+
     [Option("initial-cluster", Required = false, HelpText = "Initial cluster configuration for static discovery")]
     public IEnumerable<string>? InitialCluster { get; set; }
 

@@ -75,6 +75,8 @@ public static class EmbeddedOptionsFactory
         RocksDbSharedMemtableBudgetMb = opts.RocksDbSharedMemtableBudgetMb,
         RocksDbDirectReads = opts.GetRocksDbDirectReads(),
         RocksDbStatistics = opts.RocksDbStatistics,
+        StorageCompactionRateBytesPerSec = (long)opts.StorageCompactionRateMbps * 1_000_000,
+        StorageMaxBackgroundCompactions = opts.StorageMaxBackgroundCompactions,
         LocksWorkers = opts.LocksWorkers,
         KeyValueWorkers = opts.KeyValueWorkers,
         BackgroundWriterWorkers = opts.BackgroundWritersWorkers,

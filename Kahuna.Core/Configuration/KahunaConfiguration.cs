@@ -165,6 +165,21 @@ public sealed class KahunaConfiguration
     /// </summary>
     public bool RocksDbStatistics { get; set; }
 
+    /// <summary>
+    /// Throughput budget, in bytes per second, for the flush and compaction writes of the KV/locks store,
+    /// so that compactions running at once leave the disk to the store's synced writes. The WAL's writes are
+    /// not charged. A fraction of what the disk commits in synced writes; a budget too low for the write load
+    /// lets level 0 grow until writes stall. Zero = unlimited. The "rocksdb" backend gives it to a
+    /// RocksDB rate limiter; a storage extension may honor it too.
+    /// </summary>
+    public long StorageCompactionRateBytesPerSec { get; set; }
+
+    /// <summary>
+    /// The most compactions of the KV/locks store that run at once. Zero = the backend's default: max(2, CPUs / 2)
+    /// for "rocksdb". A storage extension may honor it too.
+    /// </summary>
+    public int StorageMaxBackgroundCompactions { get; set; }
+
     public TimeSpan ScriptCacheExpiration { get; set; }
 
     /// <summary>

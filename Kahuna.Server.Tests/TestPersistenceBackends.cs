@@ -533,6 +533,65 @@ public class TestPersistenceBackends
     }
 
     /// <summary>
+    /// A compaction budget and a compaction count apply at every open of the store: the store opens with
+    /// them, writes and reads, reopens in place through the storage-failure recovery and still writes, and
+    /// RocksDB's OPTIONS file records the count. A later open without them is back to the default count.
+    /// </summary>
+    [Fact]
+    public void TestRocksDbCompactionBudgetAndCountApplyAtEveryOpen()
+    {
+        string path = RocksDbTempPath();
+
+        using (RocksDbPersistenceBackend backend = new(path, "v1", compactionBytesPerSec: 10_000_000, maxBackgroundCompactions: 3))
+        {
+            Assert.True(backend.StoreKeyValues(MakeItems("svc", 50)));
+            Assert.True(backend.TryRecoverFromStorageFailure());
+            Assert.True(backend.StoreKeyValues(MakeItems("svc", 50, startIndex: 50)));
+            AssertOrderedAndBounded(backend.GetKeyValueByRange("svc", null, 1000), "svc", 100);
+            Assert.Contains("max_background_compactions=3", LatestRocksDbOptions(path));
+        }
+
+        using (RocksDbPersistenceBackend reopened = new(path, "v1"))
+        {
+            AssertOrderedAndBounded(reopened.GetKeyValueByRange("svc", null, 1000), "svc", 100);
+            Assert.Contains($"max_background_compactions={Math.Max(2, Environment.ProcessorCount / 2)}", LatestRocksDbOptions(path));
+        }
+    }
+
+    /// <summary>The RocksDB provider hands the node's storage compaction settings to the backend it opens.</summary>
+    [Fact]
+    public void TestRocksDbProviderPassesTheStorageCompactionSettings()
+    {
+        string path = RocksDbTempPath();
+        IPersistenceBackend backend = new Kahuna.Server.Persistence.Providers.RocksDbPersistenceBackendProvider().Open(new Kahuna.Server.Persistence.Providers.PersistenceBackendContext
+        {
+            StoragePath = path,
+            StorageRevision = "v1",
+            Configuration = new Kahuna.Server.Configuration.KahunaConfiguration { StorageCompactionRateBytesPerSec = 5_000_000, StorageMaxBackgroundCompactions = 5 },
+            Logger = Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance,
+        });
+
+        try
+        {
+            Assert.True(backend.StoreKeyValues(MakeItems("svc", 10)));
+            Assert.Contains("max_background_compactions=5", LatestRocksDbOptions(path));
+        }
+        finally
+        {
+            (backend as IDisposable)?.Dispose();
+        }
+    }
+
+    // The lines of the newest OPTIONS file RocksDB wrote for the store, trimmed.
+    private static List<string> LatestRocksDbOptions(string path)
+    {
+        string file = Directory.GetFiles(Path.Combine(path, "v1"), "OPTIONS-*")
+            .OrderBy(f => long.Parse(Path.GetFileName(f)["OPTIONS-".Length..], System.Globalization.CultureInfo.InvariantCulture))
+            .Last();
+        return [.. File.ReadAllLines(file).Select(line => line.Trim())];
+    }
+
+    /// <summary>
     /// The persisted durability floor is monotonic (parity with the SQLite backend's MAX()
     /// upsert): after a restart the background writer's advanced-only filter resets, so its first
     /// write can carry a floor below the persisted one — the backend must keep the higher value.

@@ -546,6 +546,8 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             StorageRevision = string.IsNullOrWhiteSpace(options.StorageRevision) ? Guid.NewGuid().ToString() : options.StorageRevision,
             RocksDbDirectReads = options.RocksDbDirectReads,
             RocksDbStatistics = options.RocksDbStatistics,
+            StorageCompactionRateBytesPerSec = options.StorageCompactionRateBytesPerSec,
+            StorageMaxBackgroundCompactions = options.StorageMaxBackgroundCompactions,
             DefaultTransactionTimeout = options.DefaultTransactionTimeout,
             MaxTransactionTimeout = options.MaxTransactionTimeout,
             DefaultAdmissionWaitMs = options.DefaultAdmissionWaitMs,

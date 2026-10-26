@@ -25,7 +25,9 @@ internal sealed class RocksDbPersistenceBackendProvider : IPersistenceBackendPro
             context.Configuration.RocksDbDirectReads,
             context.Configuration.RocksDbStatistics,
             context.Logger,
-            context.Configuration.BackupCaptureThrottleBytesPerSec);
+            context.Configuration.BackupCaptureThrottleBytesPerSec,
+            context.Configuration.StorageCompactionRateBytesPerSec,
+            context.Configuration.StorageMaxBackgroundCompactions);
 
     public IPersistenceBackend OpenAt(string directory, string revision, ILogger logger) => new RocksDbPersistenceBackend(directory, revision);
 

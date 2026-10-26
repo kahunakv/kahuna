@@ -157,6 +157,11 @@ public static class ConfigurationValidator
                     "or the ceiling could expire the write intent of a transaction that is still live. Use 0 to derive it.");
         }
 
+        if (configuration.StorageCompactionRateBytesPerSec < 0 || configuration.StorageMaxBackgroundCompactions < 0)
+            throw new KahunaServerException(
+                $"StorageCompactionRateBytesPerSec ({configuration.StorageCompactionRateBytesPerSec}, --storage-compaction-rate-mbps) and " +
+                $"StorageMaxBackgroundCompactions ({configuration.StorageMaxBackgroundCompactions}, --storage-max-background-compactions) must not be negative (0 means the default).");
+
         if (configuration.CommitAdmissionLagMs is < 0 or > 3_600_000)
             throw new KahunaServerException(
                 $"CommitAdmissionLagMs ({configuration.CommitAdmissionLagMs} ms) must be between 0 (off) and 3600000 ms.");

@@ -140,6 +140,12 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
 
     private readonly bool enableStatistics;
 
+    // The store's compaction budget (bytes/sec; 0 = unlimited) and its compaction count (0 = max(2, CPUs / 2)),
+    // applied at every open of the store, the recovery reopen included.
+    private readonly long compactionBytesPerSec;
+
+    private readonly int maxBackgroundCompactions;
+
     /// <summary>
     /// I/O budget, in bytes per second, for the trim of a checkpoint copy: the scan, the deletes and the full
     /// compactions. The copy shares the disk with the live store and the Raft WAL. 0 = unlimited.
@@ -416,9 +422,17 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// never dispose it — the composition root disposes it after both databases are closed. When null,
     /// behavior is byte-for-byte identical to the prior default (static 256 MB cache, no WBM).
     /// </param>
-    public RocksDbPersistenceBackend(string path = ".", string dbRevision = "v1", RocksDbSharedResources? sharedResources = null, bool directReads = true, bool enableStatistics = false, ILogger? logger = null, long checkpointTrimBytesPerSec = 0)
+    /// <param name="compactionBytesPerSec">
+    /// Throughput budget, in bytes per second, for the store's flush and compaction writes, given to a RocksDB
+    /// rate limiter that charges writes only; 0 = unlimited.
+    /// </param>
+    /// <param name="maxBackgroundCompactions">The most compactions that run at once; 0 = max(2, CPUs / 2).</param>
+    public RocksDbPersistenceBackend(string path = ".", string dbRevision = "v1", RocksDbSharedResources? sharedResources = null, bool directReads = true, bool enableStatistics = false, ILogger? logger = null, long checkpointTrimBytesPerSec = 0,
+        long compactionBytesPerSec = 0, int maxBackgroundCompactions = 0)
     {
         this.checkpointTrimBytesPerSec = Math.Max(0, checkpointTrimBytesPerSec);
+        this.compactionBytesPerSec = Math.Max(0, compactionBytesPerSec);
+        this.maxBackgroundCompactions = Math.Max(0, maxBackgroundCompactions);
         this.path = path;
         this.dbRevision = dbRevision;
         this.sharedResources = sharedResources;
@@ -540,7 +554,19 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             // single-threaded compactor under sustained load.
             .IncreaseParallelism(Math.Max(2, Environment.ProcessorCount))
             .SetMaxBackgroundFlushes(2)
-            .SetMaxBackgroundCompactions(Math.Max(2, Environment.ProcessorCount / 2));
+            .SetMaxBackgroundCompactions(maxBackgroundCompactions > 0 ? maxBackgroundCompactions : Math.Max(2, Environment.ProcessorCount / 2));
+
+        // A budget for the flush and compaction writes, so compactions running at once leave the disk to the
+        // store's synced writes. Writes only: reads and the WAL are not charged.
+        if (compactionBytesPerSec > 0)
+        {
+            IntPtr rateLimiter = Native.Instance.rocksdb_ratelimiter_create_with_mode(
+                compactionBytesPerSec, RateLimiterRefillPeriodMicros, RateLimiterFairness, RateLimiterModeWritesOnly, auto_tuned: 0);
+
+            // The options keep their own reference to the limiter; this releases the handle's.
+            Native.Instance.rocksdb_options_set_ratelimiter(dbOptions.Handle, rateLimiter);
+            Native.Instance.rocksdb_ratelimiter_destroy(rateLimiter);
+        }
 
         // Statistics carry a measurable per-operation cost, so they are opt-in for tuning/diagnosis only.
         // When enabled, RocksDB tracks counters (block-cache hit rate, write stalls, compaction bytes,
@@ -4173,6 +4199,9 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     private const long RateLimiterRefillPeriodMicros = 100_000;
 
     private const int RateLimiterFairness = 10;
+
+    // RateLimiter::Mode::kWritesOnly, RocksDB's default.
+    private const int RateLimiterModeWritesOnly = 1;
 
     // RateLimiter::Mode::kAllIo.
     private const int RateLimiterModeAllIo = 2;

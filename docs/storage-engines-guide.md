@@ -100,3 +100,28 @@ A backup records the storage type that wrote it. A restore opens the checkpoint 
 that type, so a node that restores a backup must have the same engine registered; one that does not
 refuses the restore with the engine's name. The checkpoint itself is the engine's own format: the backend's
 `CreateCheckpoint` and `CreateCheckpointAsOf` write it, and only that engine reads it back.
+
+## 5. Pacing an engine's compactions
+
+Two options bound the background work of the key-value and lock store. They are 0 by default, and with
+both unset every engine keeps its own behavior.
+
+| Option | Embedded option | What it does |
+| --- | --- | --- |
+| `--storage-compaction-rate-mbps` | `EmbeddedKahunaOptions.StorageCompactionRateBytesPerSec` (bytes per second; the option takes MB/s) | A throughput budget for the store's flush and compaction writes. The WAL's writes and the reads are not charged. 0: unlimited. |
+| `--storage-max-background-compactions` | `EmbeddedKahunaOptions.StorageMaxBackgroundCompactions` | The most compactions that run at once. 0: the engine's default. |
+
+The store's writes are synced, so the disk's sync throughput sets their latency, and the store shares it
+with its own flushes and compactions. Several compactions running at once can take most of a slow disk and
+leave the synced writes waiting, even though they do not add much work in total. A rate keeps them to a
+share. Choose a fraction of what the disk commits in synced writes, about a third to a half: too high a rate
+protects nothing, and a rate too low for the write load lets level 0 grow until writes slow down and stop.
+
+- **`rocksdb`** gives the rate to a RocksDB rate limiter that charges writes only (`kWritesOnly`, a 100 ms
+  refill period), as RocksDB's `rate_limiter`. Its compactions default to `max(2, CPUs / 2)`.
+- **`sqlite` and `memory`** do not compact, and ignore both.
+- **An engine added by an extension** reads both from `PersistenceBackendContext.Configuration` and may
+  honor them. The `solarium` engine's own documentation says what it does with them.
+
+`--backup-capture-throttle-mbps` is separate: it paces the disk work of a backup capture, the as-of trim of
+its image included, and not the live store.

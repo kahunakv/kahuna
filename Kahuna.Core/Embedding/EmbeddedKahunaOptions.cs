@@ -95,6 +95,12 @@ public sealed class EmbeddedKahunaOptions
     /// </summary>
     public bool RocksDbStatistics { get; set; }
 
+    /// <summary>Throughput budget (bytes/sec) for the store's flush and compaction writes; 0 = unlimited. See <see cref="KahunaConfiguration.StorageCompactionRateBytesPerSec"/>.</summary>
+    public long StorageCompactionRateBytesPerSec { get; set; }
+
+    /// <summary>The most store compactions that run at once; 0 = the backend's default. See <see cref="KahunaConfiguration.StorageMaxBackgroundCompactions"/>.</summary>
+    public int StorageMaxBackgroundCompactions { get; set; }
+
     /// <summary>
     /// Number of lock actors per ring (ephemeral and persistent each get this many). Each resource is
     /// consistent-hash routed to one of them and served single-threaded, so this is the shard count of
