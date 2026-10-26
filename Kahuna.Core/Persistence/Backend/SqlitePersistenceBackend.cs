@@ -38,18 +38,18 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
     /// </remarks>
     private const int MaxShards = 8;
        
+    private static readonly TimeSpan ShardLockTimeout = TimeSpan.FromSeconds(5);
+
     private readonly SemaphoreSlim semaphore = new(1, 1);
 
     /// <summary>
-    /// Manages a collection of SQLite database connections, organized by shard identifiers.
+    /// The opened shards, indexed by shard number. A slot is published once, under
+    /// <see cref="semaphore"/>, and read without it.
     /// </summary>
-    /// <remarks>
-    /// The <c>connections</c> dictionary stores tuples containing a <see cref="ReaderWriterLock"/>
-    /// and a <see cref="SqliteConnection"/> instance for each shard. This structure allows for
-    /// efficient concurrent access and connection management to ensure thread-safe operations
-    /// within the persistence backend.
-    /// </remarks>
-    private readonly Dictionary<int, (ReaderWriterLock, SqliteConnection)> connections = new();
+    private readonly SqliteShard?[] shards = new SqliteShard?[MaxShards];
+
+    // Set once by Dispose. Every shard open checks it; every lease re-checks its shard under the shard lock.
+    private int disposed;
     
     private readonly string path;
 
@@ -122,12 +122,10 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                 if (!File.Exists(Path.Combine(path, $"kahuna{shard}_{dbRevision}.db")))
                     continue;
 
-                (ReaderWriterLock rwLock, SqliteConnection connection) = TryOpenDatabaseByShard(shard);
-                rwLock.AcquireReaderLock(TimeSpan.FromSeconds(5));
-                try
+                using (ShardReadLease read = TryOpenDatabaseByShard(shard).EnterRead())
                 {
                     using SqliteCommand cmd = new(
-                        "SELECT node, physical, counter FROM pitr_meta WHERE k = @k", connection);
+                        "SELECT node, physical, counter FROM pitr_meta WHERE k = @k", read.Connection);
                     cmd.Parameters.AddWithValue("@k", PrunedFloorKey);
                     using SqliteDataReader reader = cmd.ExecuteReader();
                     if (reader.Read())
@@ -137,15 +135,11 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                             max = v;
                     }
                 }
-                finally
-                {
-                    rwLock.ReleaseReaderLock();
-                }
             }
             
             _prunedFloorCache = max;
         }
-        catch
+        catch (Exception ex) when (ex is not ObjectDisposedException)
         {
             _prunedFloorCorrupt = true;
         }
@@ -182,15 +176,9 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
     }
 
     /// <summary>
-    /// Attempts to open the database connection and acquire a reader-writer lock
-    /// for the specified resource.
+    /// Returns the opened shard that stores <paramref name="resource"/>, opening it on first use.
     /// </summary>
-    /// <param name="resource">The resource for which the database should be accessed. This is used to determine the appropriate shard.</param>
-    /// <returns>
-    /// A tuple containing a <see cref="ReaderWriterLock"/> for controlling concurrent access
-    /// and a <see cref="SqliteConnection"/> representing the database connection.
-    /// </returns>
-    private (ReaderWriterLock readerWriterLock, SqliteConnection connection) TryOpenDatabase(string resource)
+    private SqliteShard TryOpenDatabase(string resource)
     {
         int shard = (int)HashUtils.InversePrefixedHash(resource, '/', MaxShards);
         
@@ -198,34 +186,36 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
     }
 
     /// <summary>
-    /// Attempts to open the database connection and acquire a reader-writer lock
-    /// for the specified shard.
+    /// Returns the opened shard <paramref name="shard"/>, creating its database file and schema on first use.
     /// </summary>
-    /// <param name="shard">The shard identifier used to locate the appropriate database.</param>
-    /// <returns>
-    /// A tuple containing a <see cref="ReaderWriterLock"/> for managing concurrent access
-    /// and a <see cref="SqliteConnection"/> representing the database connection for the specified shard.
-    /// </returns>
-    private (ReaderWriterLock readerWriterLock, SqliteConnection connection) TryOpenDatabaseByShard(int shard)
+    /// <exception cref="ObjectDisposedException">The backend is disposed.</exception>
+    private SqliteShard TryOpenDatabaseByShard(int shard)
     {
-        if (connections.TryGetValue(shard, out (ReaderWriterLock readerWriterLock, SqliteConnection connection) sqlConnection))
-            return sqlConnection;
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+
+        SqliteShard? opened = Volatile.Read(ref shards[shard]);
+        if (opened is not null)
+            return opened;
         
+        semaphore.Wait();
+
         try
         {
-            semaphore.Wait();
+            // Re-checked under the semaphore: Dispose takes it once after setting the flag, so no shard
+            // is published after Dispose collected the slots.
+            ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
 
-            if (connections.TryGetValue(shard, out sqlConnection))
-                return sqlConnection;
+            opened = shards[shard];
+            if (opened is not null)
+                return opened;
             
             // Pooling=False ensures that SqliteConnection.Dispose() physically closes the
             // underlying file handle rather than returning it to the ADO.NET connection pool.
             // Without this, pool entries accumulate over the process lifetime — every
             // embedded node disposal leaves an open file descriptor.  Since
             // SqlitePersistenceBackend already manages connection lifetime explicitly
-            // (connections are kept open for the lifetime of this instance and shared
-            // across all callers via the `connections` dict), ADO.NET pooling adds no
-            // benefit and only causes FD leaks.
+            // (connections are kept open for the lifetime of this instance and owned by
+            // their SqliteShard), ADO.NET pooling adds no benefit and only causes FD leaks.
             string connectionString = $"Data Source={path}/kahuna{shard}_{dbRevision}.db;Pooling=False";
             SqliteConnection connection = new(connectionString);
 
@@ -355,17 +345,22 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
             using SqliteCommand command4 = new(pragmasQuery, connection);
             command4.ExecuteNonQuery();
 
-            ReaderWriterLock readerWriterLock = new();
-            
-            connections.Add(shard, (readerWriterLock, connection));
+            opened = new(connectionString, connection);
 
-            return (readerWriterLock, connection);
+            Volatile.Write(ref shards[shard], opened);
+
+            return opened;
         }
         finally
         {
             semaphore.Release();
         }
     }
+
+    /// <summary>
+    /// Takes the reader lock of shard <paramref name="shard"/> and a connection of its own for the read.
+    /// </summary>
+    internal ShardReadLease EnterRead(int shard) => TryOpenDatabaseByShard(shard).EnterRead();
 
     /// <summary>
     /// Persists a collection of lock-related request items to the database.
@@ -383,12 +378,10 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                 ON CONFLICT(partition) DO UPDATE SET floor = MAX(floor, @floor);
                 """;
 
-            (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabaseByShard(0);
-
-            readerWriterLock.AcquireWriterLock(TimeSpan.FromSeconds(5));
-
-            try
+            using (ShardWriteLease write = TryOpenDatabaseByShard(0).EnterWrite())
             {
+                SqliteConnection connection = write.Connection;
+
                 using SqliteTransaction transaction = connection.BeginTransaction();
 
                 using SqliteCommand command = new(upsert, connection);
@@ -407,14 +400,10 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
 
                 transaction.Commit();
             }
-            finally
-            {
-                readerWriterLock.ReleaseWriterLock();
-            }
 
             return true;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not ObjectDisposedException)
         {
             logger.LogError("StoreDurabilityFloors: {Type} {Message}", ex.GetType().Name, ex.Message);
             return false;
@@ -429,24 +418,18 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
             if (!File.Exists(Path.Combine(path, $"kahuna0_{dbRevision}.db")))
                 return true;
 
-            (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabaseByShard(0);
-
-            readerWriterLock.AcquireWriterLock(TimeSpan.FromSeconds(5));
-
-            try
+            using (ShardWriteLease write = TryOpenDatabaseByShard(0).EnterWrite())
             {
+                SqliteConnection connection = write.Connection;
+
                 using SqliteCommand command = new("DELETE FROM durability_floor WHERE partition = @partition", connection);
                 command.Parameters.AddWithValue("@partition", partitionId);
                 command.ExecuteNonQuery();
             }
-            finally
-            {
-                readerWriterLock.ReleaseWriterLock();
-            }
 
             return true;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not ObjectDisposedException)
         {
             logger.LogError("RemoveDurabilityFloor: {Type} {Message}", ex.GetType().Name, ex.Message);
             return false;
@@ -457,24 +440,18 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
     {
         try
         {
-            (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabaseByShard(0);
-
-            readerWriterLock.AcquireReaderLock(TimeSpan.FromSeconds(5));
-
-            try
+            using (ShardReadLease read = TryOpenDatabaseByShard(0).EnterRead())
             {
+                SqliteConnection connection = read.Connection;
+
                 using SqliteCommand command = new("SELECT floor FROM durability_floor WHERE partition = @partition", connection);
                 command.Parameters.AddWithValue("@partition", partitionId);
 
                 object? result = command.ExecuteScalar();
                 return result is long floor ? floor : -1;
             }
-            finally
-            {
-                readerWriterLock.ReleaseReaderLock();
-            }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not ObjectDisposedException)
         {
             logger.LogError("GetDurabilityFloor: {Type} {Message}", ex.GetType().Name, ex.Message);
             return -1;
@@ -522,11 +499,9 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
 
             foreach (KeyValuePair<int, List<PersistenceRequestItem>> kv in plan)
             {
-                (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabaseByShard(kv.Key);
-
-                try
+                using (ShardWriteLease write = TryOpenDatabaseByShard(kv.Key).EnterWrite())
                 {
-                    readerWriterLock.AcquireWriterLock(TimeSpan.FromSeconds(5));
+                    SqliteConnection connection = write.Connection;
 
                     using SqliteTransaction transaction = connection.BeginTransaction();
 
@@ -580,15 +555,11 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                         throw;
                     }
                 }
-                finally
-                {
-                    readerWriterLock.ReleaseWriterLock();
-                }
             }
 
             return true;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not ObjectDisposedException)
         {
             logger.LogError(ex, "StoreLock failed: {ExType}: {Message}", ex.GetType().Name, ex.Message);
         }
@@ -693,12 +664,10 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
 
             foreach (KeyValuePair<int, List<PersistenceRequestItem>> kv in plan)
             {
-                (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabaseByShard(kv.Key);
-
-                try
+                using (ShardWriteLease write = TryOpenDatabaseByShard(kv.Key).EnterWrite())
                 {
-                    readerWriterLock.AcquireWriterLock(TimeSpan.FromSeconds(5));
-                    
+                    SqliteConnection connection = write.Connection;
+
                     using SqliteTransaction transaction = connection.BeginTransaction();
                                         
                     try
@@ -753,15 +722,11 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                         throw;
                     }                                       
                 }
-                finally
-                {
-                    readerWriterLock.ReleaseWriterLock();
-                }    
             }
             
             return true;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not ObjectDisposedException)
         {
             logger.LogError(ex, "StoreKeyValue failed: {ExType}: {Message}", ex.GetType().Name, ex.Message);
         }
@@ -780,11 +745,9 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
     {
         try
         {
-            (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabase(resource);
-            
-            try
+            using (ShardReadLease read = TryOpenDatabase(resource).EnterRead())
             {
-                readerWriterLock.AcquireReaderLock(TimeSpan.FromSeconds(5));
+                SqliteConnection connection = read.Connection;
 
                 const string query = """
                 SELECT owner, expiresNode, expiresPhysical, expiresCounter, lastUsedNode, lastUsedPhysical, lastUsedCounter, 
@@ -820,12 +783,8 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                         ),
                         reader.IsDBNull(11) ? LockState.Locked : (LockState)reader.GetInt32(11));
             }
-            finally
-            {
-                readerWriterLock.ReleaseReaderLock();
-            }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not ObjectDisposedException)
         {
             logger.LogError(ex, "GetLock failed: {ExType}: {Message}", ex.GetType().Name, ex.Message);
         }
@@ -842,11 +801,9 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
     {
         try
         {
-            (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabase(keyName);
-
-            try
+            using (ShardReadLease read = TryOpenDatabase(keyName).EnterRead())
             {
-                readerWriterLock.AcquireReaderLock(TimeSpan.FromSeconds(5));
+                SqliteConnection connection = read.Connection;
 
                 //const string query = "SELECT value, revision, expiresPhysical, expiresCounter, state FROM keys WHERE key = @key AND revision = -1";
                 
@@ -884,12 +841,8 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                         ),
                         reader.IsDBNull(11) ? KeyValueState.Undefined : (KeyValueState)reader.GetInt32(11));
             }
-            finally
-            {
-                readerWriterLock.ReleaseReaderLock();
-            }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not ObjectDisposedException)
         {
             logger.LogError(ex, "GetKeyValue failed: {ExType}: {Message}", ex.GetType().Name, ex.Message);
         }
@@ -910,11 +863,9 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
     {
         try
         {
-            (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabase(keyName);
-
-            try
+            using (ShardReadLease read = TryOpenDatabase(keyName).EnterRead())
             {
-                readerWriterLock.AcquireReaderLock(TimeSpan.FromSeconds(5));
+                SqliteConnection connection = read.Connection;
 
                 const string query = """
                  SELECT value, expiresNode, expiresPhysical, expiresCounter, lastUsedNode, lastUsedPhysical, lastUsedCounter, 
@@ -951,12 +902,8 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                         ),
                         reader.IsDBNull(11) ? KeyValueState.Undefined : (KeyValueState)reader.GetInt32(11));
             }
-            finally
-            {
-                readerWriterLock.ReleaseReaderLock();
-            }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not ObjectDisposedException)
         {
             logger.LogError(ex, "GetKeyValueRevision failed: {ExType}: {Message}", ex.GetType().Name, ex.Message);
         }
@@ -968,11 +915,9 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
     {
         try
         {
-            (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabase(keyName);
-
-            try
+            using (ShardReadLease read = TryOpenDatabase(keyName).EnterRead())
             {
-                readerWriterLock.AcquireReaderLock(TimeSpan.FromSeconds(5));
+                SqliteConnection connection = read.Connection;
 
                 // HLC comparison encodes (L, C, N) lexicographic order: physical first, then counter, then node.
                 const string query = """
@@ -1021,12 +966,8 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                         ),
                         reader.IsDBNull(11) ? KeyValueState.Undefined : (KeyValueState)reader.GetInt32(11));
             }
-            finally
-            {
-                readerWriterLock.ReleaseReaderLock();
-            }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not ObjectDisposedException)
         {
             logger.LogError(ex, "GetKeyValueRevisionAtOrBefore failed: {ExType}: {Message}", ex.GetType().Name, ex.Message);
         }
@@ -1051,11 +992,9 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
         // TryOpenDatabase(prefix) would compute InversePrefixedHash(prefix) = ConsistentHash(prefix[..lastSlash]),
         // which is one level too high and maps to the wrong shard.
         int shard = HashUtils.ConsistentHash(prefixKeyName, MaxShards);
-        (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabaseByShard(shard);
-        
-        try
+        using (ShardReadLease read = TryOpenDatabaseByShard(shard).EnterRead())
         {
-            readerWriterLock.AcquireReaderLock(TimeSpan.FromSeconds(5));
+            SqliteConnection connection = read.Connection;
 
             const string query = """
              SELECT key, value, revision, expiresNode, expiresPhysical, expiresCounter, lastUsedNode, lastUsedPhysical, lastUsedCounter,
@@ -1094,10 +1033,6 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                     state: reader.IsDBNull(12) ? KeyValueState.Undefined : (KeyValueState)reader.GetInt32(12)
                 )));
         }
-        finally
-        {
-            readerWriterLock.ReleaseReaderLock();
-        }
 
         return results;
     }
@@ -1123,11 +1058,9 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
         List<(string, ReadOnlyKeyValueEntry)> results = [];
 
         int shard = HashUtils.ConsistentHash(prefix, MaxShards);
-        (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabaseByShard(shard);
-
-        try
+        using (ShardReadLease read = TryOpenDatabaseByShard(shard).EnterRead())
         {
-            readerWriterLock.AcquireReaderLock(TimeSpan.FromSeconds(5));
+            SqliteConnection connection = read.Connection;
 
             string seek = startKey ?? prefix;
             string? upper = GetPrefixUpperBound(prefix);
@@ -1194,10 +1127,6 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                     ),
                     state: reader.IsDBNull(12) ? KeyValueState.Undefined : (KeyValueState)reader.GetInt32(12)
                 )));
-        }
-        finally
-        {
-            readerWriterLock.ReleaseReaderLock();
         }
 
         return results;
@@ -1310,11 +1239,9 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
             if (!File.Exists(Path.Combine(path, $"kahuna{shard}_{dbRevision}.db")))
                 continue;
 
-            (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabaseByShard(shard);
-
-            try
+            using (ShardReadLease read = TryOpenDatabaseByShard(shard).EnterRead())
             {
-                readerWriterLock.AcquireReaderLock(TimeSpan.FromSeconds(5));
+                SqliteConnection connection = read.Connection;
 
                 using SqliteCommand command = new(query, connection);
                 command.Parameters.AddWithValue("@after", (object?)afterKey ?? DBNull.Value);
@@ -1324,10 +1251,6 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
 
                 while (reader.Read())
                     items.Add(map(reader));
-            }
-            finally
-            {
-                readerWriterLock.ReleaseReaderLock();
             }
 
             if (items.Count == limit)
@@ -1370,11 +1293,9 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
             if (!File.Exists(Path.Combine(path, $"kahuna{shard}_{dbRevision}.db")))
                 continue;
 
-            (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabaseByShard(shard);
-
-            try
+            using (ShardWriteLease write = TryOpenDatabaseByShard(shard).EnterWrite())
             {
-                readerWriterLock.AcquireWriterLock(TimeSpan.FromSeconds(5));
+                SqliteConnection connection = write.Connection;
 
                 using SqliteTransaction transaction = connection.BeginTransaction();
 
@@ -1386,10 +1307,6 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                 }
 
                 transaction.Commit();
-            }
-            finally
-            {
-                readerWriterLock.ReleaseWriterLock();
             }
         }
 
@@ -1455,11 +1372,9 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                     continue;
                 }
 
-                (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabaseByShard(shard);
-
-                try
+                using (ShardWriteLease write = TryOpenDatabaseByShard(shard).EnterWrite())
                 {
-                    readerWriterLock.AcquireWriterLock(TimeSpan.FromSeconds(5));
+                    SqliteConnection connection = write.Connection;
 
                     for (int i = 0; i < shardKeys.Count; i++)
                     {
@@ -1509,10 +1424,6 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                         }
                     }
                 }
-                finally
-                {
-                    readerWriterLock.ReleaseWriterLock();
-                }
             }
         }
         else
@@ -1535,11 +1446,9 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                     break;
                 }
 
-                (ReaderWriterLock readerWriterLock, SqliteConnection connection) = TryOpenDatabaseByShard(shard);
-
-                try
+                using (ShardWriteLease write = TryOpenDatabaseByShard(shard).EnterWrite())
                 {
-                    readerWriterLock.AcquireWriterLock(TimeSpan.FromSeconds(5));
+                    SqliteConnection connection = write.Connection;
 
                     int pageLimit = keyBudget - keysVisited;
                     List<string> page = GetRevisionCandidateKeys(connection, sweepKeyCursor, pageLimit);
@@ -1598,10 +1507,6 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                     }
                     // else: a full page was returned and the key budget is now spent; the loop top
                     // will pause and resume this same shard after sweepKeyCursor next pass.
-                }
-                finally
-                {
-                    readerWriterLock.ReleaseWriterLock();
                 }
             }
 
@@ -2030,22 +1935,12 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                 if (!File.Exists(shardFile))
                     continue;
 
-                (ReaderWriterLock rwLock, SqliteConnection connection) = TryOpenDatabaseByShard(shard);
                 string destFile = Path.Combine(tmpPath, $"kahuna{shard}_{dbRevision}.db");
 
-                bool lockTaken = false;
-                try
+                using (ShardWriteLease write = TryOpenDatabaseByShard(shard).EnterWrite())
                 {
-                    rwLock.AcquireWriterLock(TimeSpan.FromSeconds(5));
-                    lockTaken = true;
-
-                    using SqliteCommand cmd = new($"VACUUM INTO '{destFile.Replace("'", "''")}'", connection);
+                    using SqliteCommand cmd = new($"VACUUM INTO '{destFile.Replace("'", "''")}'", write.Connection);
                     cmd.ExecuteNonQuery();
-                }
-                finally
-                {
-                    if (lockTaken)
-                        rwLock.ReleaseWriterLock();
                 }
 
                 // Trim the copy (not the live DB) to the as-of cut. A separate connection to the
@@ -2301,29 +2196,231 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
             : HLCTimestamp.Zero;
     }
 
+    /// <summary>
+    /// Closes every opened shard. A shard that fails to close (a read still holds it past the lock
+    /// timeout, or a connection throws on close) does not stop the others; the failures are rethrown
+    /// together once every shard was tried. A second call does nothing.
+    /// </summary>
     public void Dispose()
     {
-        foreach (KeyValuePair<int, (ReaderWriterLock, SqliteConnection)> conn in connections)
+        if (Interlocked.Exchange(ref disposed, 1) != 0)
+            return;
+
+        // An open in flight holds the semaphore and publishes its shard before it releases it; any
+        // later open sees the flag. After this point the slots are final.
+        semaphore.Wait();
+        semaphore.Release();
+
+        List<Exception>? errors = null;
+
+        for (int i = 0; i < MaxShards; i++)
         {
-            bool lockTaken = false;
+            SqliteShard? shard = Volatile.Read(ref shards[i]);
+            if (shard is null)
+                continue;
 
             try
             {
-                conn.Value.Item1.AcquireWriterLock(TimeSpan.FromSeconds(5));
-                lockTaken = true;
-
-                conn.Value.Item2.Dispose();
+                shard.Close();
             }
-            finally
+            catch (Exception ex)
             {
-                if (lockTaken)
-                    conn.Value.Item1.ReleaseWriterLock();
+                (errors ??= []).Add(new InvalidOperationException($"SQLite shard {i} failed to close: {ex.Message}", ex));
             }
         }
 
-        GC.SuppressFinalize(this);
-
         semaphore.Dispose();
+
+        if (errors is not null)
+            throw new AggregateException("SqlitePersistenceBackend failed to close every shard.", errors);
+    }
+
+    /// <summary>
+    /// One shard database file and its connections.
+    /// </summary>
+    /// <remarks>
+    /// A <see cref="SqliteConnection"/> is not thread-safe: every command created or disposed on it
+    /// mutates the connection's command list without synchronization. Readers that run in parallel
+    /// under the shared reader lock must therefore never share a connection. The writer connection is
+    /// used only under the writer lock (it also owns the schema setup and the write transactions);
+    /// each read rents a connection of its own from a pool that grows to the peak number of
+    /// concurrent readers. In WAL mode the reader connections read the committed state in parallel,
+    /// and the reader/writer lock still keeps reads and writes of the shard mutually exclusive.
+    /// </remarks>
+    internal sealed class SqliteShard
+    {
+        public readonly ReaderWriterLock Lock = new();
+
+        private readonly string connectionString;
+
+        private readonly SqliteConnection writer;
+
+        private readonly Stack<SqliteConnection> idleReaders = new();
+
+        private readonly System.Threading.Lock idleReadersLock = new();
+
+        // Written under the writer lock by Close; read under the reader or writer lock.
+        private bool closed;
+
+        public SqliteShard(string connectionString, SqliteConnection writer)
+        {
+            this.connectionString = connectionString;
+            this.writer = writer;
+        }
+
+        public ShardReadLease EnterRead()
+        {
+            Lock.AcquireReaderLock(ShardLockTimeout);
+
+            try
+            {
+                ObjectDisposedException.ThrowIf(closed, typeof(SqlitePersistenceBackend));
+                return new(this, RentReader());
+            }
+            catch
+            {
+                Lock.ReleaseReaderLock();
+                throw;
+            }
+        }
+
+        public ShardWriteLease EnterWrite()
+        {
+            Lock.AcquireWriterLock(ShardLockTimeout);
+
+            if (closed)
+            {
+                Lock.ReleaseWriterLock();
+                throw new ObjectDisposedException(nameof(SqlitePersistenceBackend));
+            }
+
+            return new(this, writer);
+        }
+
+        private SqliteConnection RentReader()
+        {
+            lock (idleReadersLock)
+            {
+                if (idleReaders.TryPop(out SqliteConnection? idle))
+                    return idle;
+            }
+
+            SqliteConnection connection = new(connectionString);
+
+            try
+            {
+                connection.Open();
+
+                // journal_mode is a property of the file and synchronous only affects writes; sorts
+                // and temp b-trees of a read follow the same in-memory setting as the writer.
+                using SqliteCommand pragmas = new("PRAGMA temp_store=MEMORY;", connection);
+                pragmas.ExecuteNonQuery();
+            }
+            catch
+            {
+                connection.Dispose();
+                throw;
+            }
+
+            return connection;
+        }
+
+        public void ReturnReader(SqliteConnection connection)
+        {
+            lock (idleReadersLock)
+                idleReaders.Push(connection);
+        }
+
+        /// <summary>
+        /// Closes the shard's connections under its writer lock, so no read or write is in flight.
+        /// Every connection is tried even when one of them throws.
+        /// </summary>
+        public void Close()
+        {
+            Lock.AcquireWriterLock(ShardLockTimeout);
+
+            try
+            {
+                closed = true;
+
+                List<Exception>? errors = null;
+
+                // Under the writer lock every rented reader connection is back in the pool.
+                lock (idleReadersLock)
+                {
+                    while (idleReaders.TryPop(out SqliteConnection? reader))
+                    {
+                        try
+                        {
+                            reader.Dispose();
+                        }
+                        catch (Exception ex)
+                        {
+                            (errors ??= []).Add(ex);
+                        }
+                    }
+                }
+
+                // The writer closes last: closing the last connection checkpoints the WAL into the database.
+                try
+                {
+                    writer.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    (errors ??= []).Add(ex);
+                }
+
+                if (errors is not null)
+                    throw new AggregateException(errors);
+            }
+            finally
+            {
+                Lock.ReleaseWriterLock();
+            }
+        }
+    }
+
+    /// <summary>
+    /// A shard's reader lock plus a reader connection used by this read alone. Disposing it returns
+    /// the connection to the shard's pool and releases the lock; dispose it on the acquiring thread
+    /// (<see cref="ReaderWriterLock"/> is thread-affine).
+    /// </summary>
+    internal readonly struct ShardReadLease : IDisposable
+    {
+        private readonly SqliteShard shard;
+
+        public SqliteConnection Connection { get; }
+
+        public ShardReadLease(SqliteShard shard, SqliteConnection connection)
+        {
+            this.shard = shard;
+            Connection = connection;
+        }
+
+        public void Dispose()
+        {
+            shard.ReturnReader(Connection);
+            shard.Lock.ReleaseReaderLock();
+        }
+    }
+
+    /// <summary>
+    /// A shard's writer lock plus its writer connection. Disposing it releases the lock.
+    /// </summary>
+    internal readonly struct ShardWriteLease : IDisposable
+    {
+        private readonly SqliteShard shard;
+
+        public SqliteConnection Connection { get; }
+
+        public ShardWriteLease(SqliteShard shard, SqliteConnection connection)
+        {
+            this.shard = shard;
+            Connection = connection;
+        }
+
+        public void Dispose() => shard.Lock.ReleaseWriterLock();
     }
 
     /// <summary>
