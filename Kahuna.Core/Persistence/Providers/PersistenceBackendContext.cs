@@ -22,6 +22,13 @@ public sealed class PersistenceBackendContext
     /// <summary>The node's logger.</summary>
     public required ILogger Logger { get; init; }
 
+    /// <summary>
+    /// The memtable budget the store shares with the node's WAL, when <c>--storage-shared-memtable-budget-mb</c>
+    /// is above 0; null otherwise. The same instance reaches the WAL provider. An engine that has no memtables
+    /// ignores it.
+    /// </summary>
+    public SharedMemtableBudget? SharedMemtableBudget { get; init; }
+
 #if !KAHUNA_THREAD_FREE
     /// <summary>
     /// The block cache and write-buffer budget that the RocksDB backend shares with a RocksDB WAL, when the

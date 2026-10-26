@@ -86,14 +86,19 @@ public sealed class KahunaCommandLineOptions
     [Option("disable-wal-sync-writes", Required = false, HelpText = "Disable synchronous durable WAL writes for faster non-critical test/local runs")]
     public bool DisableWalSyncWrites { get; set; }
 
-    [Option("rocksdb-shared-memory", Required = false, HelpText = "Share one RocksDB block cache + write-buffer manager between the KV/locks backend and the Raft WAL (requires both storage and wal-storage = rocksdb). Default: disabled")]
+    [Option("rocksdb-shared-memory", Required = false, HelpText = "Share one RocksDB block cache + write-buffer manager between the KV/locks backend and the Raft WAL (requires both storage and wal-storage = rocksdb, and --storage-shared-memtable-budget-mb above 0). Default: disabled")]
     public bool RocksDbSharedMemory { get; set; }
 
     [Option("rocksdb-shared-memory-budget-mb", Required = false, HelpText = "Total shared RocksDB block-cache budget in MiB (memtable sub-budget lives inside it)", Default = 320)]
     public int RocksDbSharedMemoryBudgetMb { get; set; } = 320;
 
-    [Option("rocksdb-shared-memtable-budget-mb", Required = false, HelpText = "Shared RocksDB memtable sub-budget in MiB, cost-charged into the shared cache (must be <= budget)", Default = 128)]
-    public int RocksDbSharedMemtableBudgetMb { get; set; } = 128;
+    [Option("storage-shared-memtable-budget-mb", Required = false, HelpText = "One memtable budget in MiB that the Raft WAL and the KV/locks store share; past it, a memtable flushes early. 0 = none. rocksdb applies it with --rocksdb-shared-memory, cost-charged into the shared cache (must be <= that budget).", Default = 0)]
+    public int StorageSharedMemtableBudgetMb { get; set; }
+
+    // The former name of --storage-shared-memtable-budget-mb, kept so existing command lines still parse; it
+    // applies when the new option is not set.
+    [Option("rocksdb-shared-memtable-budget-mb", Required = false, Hidden = true)]
+    public int? RocksDbSharedMemtableBudgetMb { get; set; }
 
     [Option("disable-rocksdb-direct-reads", Required = false, HelpText = "Disable direct-I/O reads (default: enabled) and use buffered reads backed by the OS page cache")]
     public bool DisableRocksDbDirectReads { get; set; }
@@ -899,4 +904,11 @@ public sealed class KahunaCommandLineOptions
 
     public bool GetRocksDbDirectReads() =>
         DisableRocksDbDirectReads ? false : true;
+
+    /// <summary>
+    /// The shared memtable budget in MiB: <see cref="StorageSharedMemtableBudgetMb"/> when set, otherwise its
+    /// former name, <c>--rocksdb-shared-memtable-budget-mb</c>.
+    /// </summary>
+    public int GetStorageSharedMemtableBudgetMb() =>
+        StorageSharedMemtableBudgetMb != 0 ? StorageSharedMemtableBudgetMb : RocksDbSharedMemtableBudgetMb ?? 0;
 }

@@ -94,9 +94,15 @@ no-op even if the flag is set.
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--rocksdb-shared-memory` | off | Enable sharing (requires `--storage rocksdb` **and** `--wal-storage rocksdb`). |
+| `--rocksdb-shared-memory` | off | Enable sharing (requires `--storage rocksdb` **and** `--wal-storage rocksdb`, and a memtable budget). |
 | `--rocksdb-shared-memory-budget-mb` | `320` | Total shared block-cache budget in MiB. The memtable sub-budget lives inside it. |
-| `--rocksdb-shared-memtable-budget-mb` | `128` | Memtable sub-budget in MiB, cost-charged into the shared cache. Must be ≤ the total budget. |
+| `--storage-shared-memtable-budget-mb` | `0` | Memtable sub-budget in MiB, cost-charged into the shared cache. Must be above 0 with `--rocksdb-shared-memory`, and ≤ the total budget. |
+
+`--storage-shared-memtable-budget-mb` is the memtable budget that any WAL and store of a node share, not only
+RocksDB's (see the storage engines guide). It replaces `--rocksdb-shared-memtable-budget-mb`, which still
+parses and applies when the new option is not set. Its default is 0, so a node that passed only
+`--rocksdb-shared-memory` and relied on the former default of 128 now refuses to start until it names a
+budget: pass `--storage-shared-memtable-budget-mb 128` for the former behavior.
 
 Example:
 
@@ -105,7 +111,7 @@ kahuna-server \
   --storage rocksdb --wal-storage rocksdb \
   --rocksdb-shared-memory \
   --rocksdb-shared-memory-budget-mb 512 \
-  --rocksdb-shared-memtable-budget-mb 128
+  --storage-shared-memtable-budget-mb 128
 ```
 
 ### Embedded engine (in-process)
@@ -119,7 +125,7 @@ EmbeddedKahunaOptions options = new()
     WalStorage = "rocksdb",
     RocksDbSharedMemoryEnabled    = true,
     RocksDbSharedMemoryBudgetMb   = 512,
-    RocksDbSharedMemtableBudgetMb = 128,
+    StorageSharedMemtableBudgetMb = 128,
     // ... the rest of your options
 };
 
@@ -144,7 +150,8 @@ Practical guidance:
 
 - **Total budget** ≥ the old 256 MiB backend cache plus headroom for the combined memtables. `320` is the
   conservative default; raise it on nodes with memory to spare and hot read sets.
-- **Memtable sub-budget** should leave room for both databases' write bursts. `128` is the default. Too
+- **Memtable sub-budget** should leave room for both databases' write bursts. `128` was the default before
+  it became the engine-neutral `--storage-shared-memtable-budget-mb`, and is a sound start. Too
   small ⇒ constant flushing (and write coupling between the two databases); too large ⇒ less memory
   actually reclaimed. It must be ≤ the total budget (Kahuna refuses to start otherwise).
 - If write-path coupling ever becomes a problem, the safe fallback is to **share only the cache** (the

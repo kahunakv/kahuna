@@ -98,6 +98,10 @@ public sealed class TestStorageProviders : IDisposable
         Assert.Equal(walPath, walOpened.Path);
         Assert.Equal("w1", walOpened.Revision);
 
+        // No shared memtable budget unless the node sets one.
+        Assert.Null(opened.SharedMemtableBudget);
+        Assert.Null(walOpened.SharedMemtableBudget);
+
         // Both engines keep their data on disk, so the node created their directories.
         Assert.True(Directory.Exists(storagePath));
         Assert.True(Directory.Exists(walPath));
@@ -157,6 +161,42 @@ public sealed class TestStorageProviders : IDisposable
             queryMinInFlight: () => Task.FromResult(HLCTimestamp.Zero),
             storageProviders: providers,
             acquireRetentionHold: raft.AcquireRetentionHold);
+    }
+
+    /// <summary>
+    /// A node with a shared memtable budget hands one budget object to its WAL and to its store, so engines of
+    /// the same kind find one accounting object between them, and an engine's object is created once.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task TheNodesWalAndStore_ReceiveOneSharedMemtableBudget(bool standalone)
+    {
+        RecordingBackendProvider backendProvider = new("recorded");
+        RecordingWalProvider walProvider = new("recorded-wal");
+
+        EmbeddedKahunaOptions options = Options(storage: "recorded", walStorage: "recorded-wal");
+        options.StoragePath = Path.Combine(tempRoot, "store");
+        options.WalPath = Path.Combine(tempRoot, "wal");
+        options.StorageSharedMemtableBudgetMb = 24;
+        options.StorageProviders.Register(backendProvider);
+        options.StorageProviders.Register(walProvider);
+
+        await using (EmbeddedKahunaNode node = standalone
+            ? new(options, NullLoggerFactory.Instance)
+            : new(options, new Kahuna.Server.Communication.Internode.MemoryInterNodeCommmunication(), new Kommander.Communication.Memory.InMemoryCommunication(),
+                new Kommander.Discovery.StaticDiscovery([]), NullLoggerFactory.Instance))
+        {
+        }
+
+        SharedMemtableBudget walBudget = Assert.Single(walProvider.Opened).SharedMemtableBudget!;
+        SharedMemtableBudget storeBudget = Assert.Single(backendProvider.Opened).SharedMemtableBudget!;
+        Assert.Same(walBudget, storeBudget);
+        Assert.Equal(24L * 1024 * 1024, walBudget.Bytes);
+
+        object engineBudget = walBudget.GetOrAdd(bytes => new List<long> { bytes });
+        Assert.Same(engineBudget, storeBudget.GetOrAdd<List<long>>(_ => throw new InvalidOperationException("created twice")));
+        Assert.Equal([24L * 1024 * 1024], (List<long>)engineBudget);
     }
 
     private static EmbeddedKahunaOptions Options(string storage, string walStorage) => new()

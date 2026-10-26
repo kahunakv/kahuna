@@ -180,6 +180,27 @@ public sealed class KahunaConfiguration
     /// </summary>
     public int StorageMaxBackgroundCompactions { get; set; }
 
+    /// <summary>
+    /// One memtable budget, in bytes, that the node's Raft WAL and its KV/locks store share, so that their
+    /// memtables together stay under it: when they pass it, the engine flushes a memtable early. Zero = none,
+    /// and each keeps its own write buffers. The "rocksdb" pair applies it only with the shared block cache
+    /// (<c>--rocksdb-shared-memory</c>), which then requires it; a storage extension reads
+    /// <see cref="SharedMemtableBudget"/> from its provider context.
+    /// </summary>
+    public long StorageSharedMemtableBudgetBytes { get; set; }
+
+    private SharedMemtableBudget? sharedMemtableBudget;
+
+    /// <summary>
+    /// The budget of <see cref="StorageSharedMemtableBudgetBytes"/>, or null when it is 0. Created on the first
+    /// read and the same object afterwards, so the WAL and the store that a node opens from this configuration
+    /// share it; read it once the configuration is final.
+    /// </summary>
+    public SharedMemtableBudget? SharedMemtableBudget =>
+        StorageSharedMemtableBudgetBytes > 0
+            ? LazyInitializer.EnsureInitialized(ref sharedMemtableBudget, () => new SharedMemtableBudget(StorageSharedMemtableBudgetBytes))
+            : null;
+
     public TimeSpan ScriptCacheExpiration { get; set; }
 
     /// <summary>

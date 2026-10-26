@@ -22,6 +22,13 @@ public sealed class WalContext
     /// <summary>The Raft logger.</summary>
     public required ILogger<IRaft> Logger { get; init; }
 
+    /// <summary>
+    /// The memtable budget the WAL shares with the node's store, when <c>--storage-shared-memtable-budget-mb</c>
+    /// is above 0; null otherwise. The same instance reaches the backend provider. An engine that has no
+    /// memtables ignores it.
+    /// </summary>
+    public SharedMemtableBudget? SharedMemtableBudget { get; init; }
+
 #if !KAHUNA_THREAD_FREE
     /// <summary>
     /// The block cache and write-buffer budget that a RocksDB WAL shares with the RocksDB backend, when the

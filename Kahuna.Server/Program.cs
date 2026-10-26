@@ -116,16 +116,10 @@ else
     // budget. Registered as a singleton FIRST in this branch so the DI container disposes it LAST — after
     // the Raft/WAL and Kahuna singletons that borrow it. (Early disposal is safe anyway: each open DB holds
     // its own native refcount, so this only affects budget accounting, not crash-safety.)
-    RocksDbSharedResources? sharedResources = null;
+    RocksDbSharedResources? sharedResources = EmbeddedKahunaNode.CreateSharedResources(EmbeddedOptionsFactory.CreateEmbeddedOptions(opts));
 
-    if (opts.RocksDbSharedMemory && opts.Storage == "rocksdb" && opts.WalStorage == "rocksdb")
-    {
-        sharedResources = RocksDbSharedResources.CreateWithUnifiedBudget(
-            (long)opts.RocksDbSharedMemoryBudgetMb * 1024 * 1024,
-            (long)opts.RocksDbSharedMemtableBudgetMb * 1024 * 1024);
-
+    if (sharedResources is not null)
         builder.Services.AddSingleton(sharedResources);
-    }
 
     builder.Services.AddSingleton<IRaft>(services =>
     {
@@ -150,6 +144,8 @@ else
             SyncWrites = walSyncWrites,
             Logger = logger,
             SharedResources = sharedResources,
+            // The node's configuration, the one its store opens from, so the two share one budget object.
+            SharedMemtableBudget = services.GetRequiredService<KahunaConfiguration>().SharedMemtableBudget,
             RocksDbTuning = walTuning,
         });
 

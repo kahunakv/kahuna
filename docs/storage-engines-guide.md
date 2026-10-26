@@ -125,3 +125,21 @@ protects nothing, and a rate too low for the write load lets level 0 grow until 
 
 `--backup-capture-throttle-mbps` is separate: it paces the disk work of a backup capture, the as-of trim of
 its image included, and not the live store.
+
+## 6. Sharing one memtable budget
+
+`--storage-shared-memtable-budget-mb` (`EmbeddedKahunaOptions.StorageSharedMemtableBudgetMb`) gives the WAL
+and the store of a node one memtable budget: their memtables together stay under it, and an engine flushes
+a memtable early when they pass it. It is 0 by default, and each engine then keeps its own write buffers.
+
+The node creates one `SharedMemtableBudget` and hands the same instance to both providers, as
+`WalContext.SharedMemtableBudget` and `PersistenceBackendContext.SharedMemtableBudget` (null when the budget
+is 0). A WAL and a store of the same kind share an accounting object through it: each asks
+`GetOrAdd<T>(bytes => ...)` for its engine's own type, the first to ask creates it, and both get the same
+one. A pair of different kinds each gets its own object of the same size.
+
+- **`rocksdb`** applies it only with the shared block cache, `--rocksdb-shared-memory`, which charges the
+  memtables into the cache and therefore requires a budget above 0 (see the shared RocksDB memory guide).
+- **`sqlite` and `memory`** have no memtables, and ignore it.
+- **An engine added by an extension** reads it from the context. The `solarium` engine's own documentation
+  says what it does with it.

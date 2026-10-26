@@ -72,7 +72,7 @@ public static class EmbeddedOptionsFactory
         RaftWalShardUniversalCompaction = opts.RaftWalShardUniversalCompaction,
         RocksDbSharedMemoryEnabled = opts.RocksDbSharedMemory,
         RocksDbSharedMemoryBudgetMb = opts.RocksDbSharedMemoryBudgetMb,
-        RocksDbSharedMemtableBudgetMb = opts.RocksDbSharedMemtableBudgetMb,
+        StorageSharedMemtableBudgetMb = opts.GetStorageSharedMemtableBudgetMb(),
         RocksDbDirectReads = opts.GetRocksDbDirectReads(),
         RocksDbStatistics = opts.RocksDbStatistics,
         StorageCompactionRateBytesPerSec = (long)opts.StorageCompactionRateMbps * 1_000_000,

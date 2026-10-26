@@ -63,9 +63,10 @@ public sealed class EmbeddedKahunaOptions
     /// <summary>
     /// When true — and both <see cref="Storage"/> and <see cref="WalStorage"/> are "rocksdb" — the KV/locks
     /// backend and the Raft WAL share one block cache and one WriteBufferManager sized by
-    /// <see cref="RocksDbSharedMemoryBudgetMb"/> / <see cref="RocksDbSharedMemtableBudgetMb"/>, bounding
-    /// total RocksDB cache+memtable memory to one budget instead of two independent ones. Default false:
-    /// each database keeps its own resources, byte-for-byte the prior behavior.
+    /// <see cref="RocksDbSharedMemoryBudgetMb"/> / <see cref="StorageSharedMemtableBudgetMb"/>, bounding
+    /// total RocksDB cache+memtable memory to one budget instead of two independent ones. Requires
+    /// <see cref="StorageSharedMemtableBudgetMb"/> above 0. Default false: each database keeps its own
+    /// resources, byte-for-byte the prior behavior.
     /// </summary>
     public bool RocksDbSharedMemoryEnabled { get; set; }
 
@@ -77,10 +78,20 @@ public sealed class EmbeddedKahunaOptions
     public int RocksDbSharedMemoryBudgetMb { get; set; } = 320;
 
     /// <summary>
-    /// Memtable sub-budget in MiB, cost-charged into the shared cache; must be &lt;=
-    /// <see cref="RocksDbSharedMemoryBudgetMb"/>. Bounds total memtable memory across both databases.
+    /// One memtable budget in MiB that the Raft WAL and the KV/locks store share; 0 (the default) = none. See
+    /// <see cref="KahunaConfiguration.StorageSharedMemtableBudgetBytes"/>. With
+    /// <see cref="RocksDbSharedMemoryEnabled"/> it is the RocksDB memtable sub-budget, cost-charged into the
+    /// shared cache, and must be &lt;= <see cref="RocksDbSharedMemoryBudgetMb"/>.
     /// </summary>
-    public int RocksDbSharedMemtableBudgetMb { get; set; } = 128;
+    public int StorageSharedMemtableBudgetMb { get; set; }
+
+    /// <summary>The former name of <see cref="StorageSharedMemtableBudgetMb"/>, which it reads and sets.</summary>
+    [Obsolete("Use StorageSharedMemtableBudgetMb, which every engine pair that can share a memtable budget reads; it defaults to 0 (none).")]
+    public int RocksDbSharedMemtableBudgetMb
+    {
+        get => StorageSharedMemtableBudgetMb;
+        set => StorageSharedMemtableBudgetMb = value;
+    }
 
     /// <summary>
     /// When true (default), the RocksDB KV/locks backend reads SSTs with direct I/O, bypassing the OS
