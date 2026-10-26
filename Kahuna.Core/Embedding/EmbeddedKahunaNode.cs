@@ -126,9 +126,9 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             raftConfiguration,
             new StaticDiscovery(EmbeddedRaftCommunication.Witnesses),
 #if KAHUNA_THREAD_FREE
-            CreateWal(options, raftLogger, kahunaConfiguration.SharedMemtableBudget),
+            CreateWal(options, raftLogger, kahunaConfiguration.SharedMemory),
 #else
-            CreateWal(options, raftLogger, sharedResources, kahunaConfiguration.SharedMemtableBudget),
+            CreateWal(options, raftLogger, sharedResources, kahunaConfiguration.SharedMemory),
 #endif
             raftCommunication,
             new HybridLogicalClock(),
@@ -212,9 +212,9 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             raftConfiguration,
             discovery,
 #if KAHUNA_THREAD_FREE
-            CreateWal(options, raftLogger, kahunaConfiguration.SharedMemtableBudget),
+            CreateWal(options, raftLogger, kahunaConfiguration.SharedMemory),
 #else
-            CreateWal(options, raftLogger, sharedResources, kahunaConfiguration.SharedMemtableBudget),
+            CreateWal(options, raftLogger, sharedResources, kahunaConfiguration.SharedMemory),
 #endif
             raftComm,
             new HybridLogicalClock(),
@@ -444,7 +444,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
 #if KAHUNA_THREAD_FREE
     // The thread-free (browser) build registers only the in-memory WAL: Kommander's browser assembly has no
     // RocksDB or SQLite WAL.
-    private static IWAL CreateWal(EmbeddedKahunaOptions options, ILogger<IRaft> logger, SharedMemtableBudget? sharedMemtableBudget)
+    private static IWAL CreateWal(EmbeddedKahunaOptions options, ILogger<IRaft> logger, SharedStorageMemory? sharedMemory)
     {
         return options.StorageProviders.GetWal(options.WalStorage).Open(new WalContext
         {
@@ -452,12 +452,12 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             Revision = string.IsNullOrWhiteSpace(options.WalRevision) ? Guid.NewGuid().ToString() : options.WalRevision,
             SyncWrites = options.WalSyncWrites,
             Logger = logger,
-            SharedMemtableBudget = sharedMemtableBudget,
+            SharedMemory = sharedMemory,
         });
     }
 #else
     private static IWAL CreateWal(
-        EmbeddedKahunaOptions options, ILogger<IRaft> logger, RocksDbSharedResources? sharedResources, SharedMemtableBudget? sharedMemtableBudget)
+        EmbeddedKahunaOptions options, ILogger<IRaft> logger, RocksDbSharedResources? sharedResources, SharedStorageMemory? sharedMemory)
     {
         return options.StorageProviders.GetWal(options.WalStorage).Open(new WalContext
         {
@@ -466,7 +466,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             SyncWrites = options.WalSyncWrites,
             Logger = logger,
             SharedResources = sharedResources,
-            SharedMemtableBudget = sharedMemtableBudget,
+            SharedMemory = sharedMemory,
             RocksDbTuning = RaftWalTuningFactory.Build(options),
         });
     }
@@ -494,7 +494,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
     /// <see cref="EmbeddedKahunaOptions.RocksDbSharedMemoryEnabled"/> is set and both are RocksDB; null otherwise.
     /// The caller owns it and disposes it after both databases close.
     /// </summary>
-    /// <exception cref="KahunaServerException">Thrown when the shared memtable budget is not above 0.</exception>
+    /// <exception cref="KahunaServerException">Thrown when the shared cache or memtable budget is not above 0.</exception>
     internal static RocksDbSharedResources? CreateSharedResources(EmbeddedKahunaOptions options)
     {
         if (!options.RocksDbSharedMemoryEnabled)
@@ -503,14 +503,15 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         if (options.Storage != "rocksdb" || options.WalStorage != "rocksdb")
             return null;
 
-        // The write-buffer manager is created with the cache and charges its memtables into it, so the cache
-        // cannot be shared without a memtable budget.
-        if (options.StorageSharedMemtableBudgetMb <= 0)
+        // The write-buffer manager is created with the cache and charges its memtables into it, so RocksDB
+        // shares neither without both.
+        if (options.StorageSharedCacheMb <= 0 || options.StorageSharedMemtableBudgetMb <= 0)
             throw new KahunaServerException(
-                $"--rocksdb-shared-memory (RocksDbSharedMemoryEnabled) needs a shared memtable budget: set --storage-shared-memtable-budget-mb " +
-                $"(StorageSharedMemtableBudgetMb) above 0 and at most --rocksdb-shared-memory-budget-mb ({options.RocksDbSharedMemoryBudgetMb}), got {options.StorageSharedMemtableBudgetMb}.");
+                $"--rocksdb-shared-memory (RocksDbSharedMemoryEnabled) needs a shared cache and a shared memtable budget: set --storage-shared-cache-mb " +
+                $"(StorageSharedCacheMb, got {options.StorageSharedCacheMb}) above 0, and --storage-shared-memtable-budget-mb (StorageSharedMemtableBudgetMb, " +
+                $"got {options.StorageSharedMemtableBudgetMb}) above 0 and at most the cache.");
 
-        long totalBytes = (long)options.RocksDbSharedMemoryBudgetMb * 1024 * 1024;
+        long totalBytes = (long)options.StorageSharedCacheMb * 1024 * 1024;
         long memtableBytes = (long)options.StorageSharedMemtableBudgetMb * 1024 * 1024;
 
         return RocksDbSharedResources.CreateWithUnifiedBudget(totalBytes, memtableBytes);
@@ -567,6 +568,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             StorageCompactionRateBytesPerSec = options.StorageCompactionRateBytesPerSec,
             StorageMaxBackgroundCompactions = options.StorageMaxBackgroundCompactions,
             StorageSharedMemtableBudgetBytes = (long)options.StorageSharedMemtableBudgetMb * 1024 * 1024,
+            StorageSharedCacheBytes = (long)options.StorageSharedCacheMb * 1024 * 1024,
             DefaultTransactionTimeout = options.DefaultTransactionTimeout,
             MaxTransactionTimeout = options.MaxTransactionTimeout,
             DefaultAdmissionWaitMs = options.DefaultAdmissionWaitMs,

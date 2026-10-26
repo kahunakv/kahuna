@@ -145,7 +145,7 @@ else
             Logger = logger,
             SharedResources = sharedResources,
             // The node's configuration, the one its store opens from, so the two share one budget object.
-            SharedMemtableBudget = services.GetRequiredService<KahunaConfiguration>().SharedMemtableBudget,
+            SharedMemory = services.GetRequiredService<KahunaConfiguration>().SharedMemory,
             RocksDbTuning = walTuning,
         });
 

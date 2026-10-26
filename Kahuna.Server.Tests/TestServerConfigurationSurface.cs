@@ -60,6 +60,7 @@ public sealed class TestServerConfigurationSurface
         StorageCompactionRateMbps = 13,
         StorageMaxBackgroundCompactions = 3,
         StorageSharedMemtableBudgetMb = 48,
+        StorageSharedCacheMb = 96,
     };
 
     [Fact]
@@ -122,7 +123,7 @@ public sealed class TestServerConfigurationSurface
     }
 
     [Fact]
-    public void TheSharedMemtableBudget_ReachesBothNodeShapes_AndDefaultsToNone()
+    public void TheSharedMemory_ReachesBothNodeShapes_AndDefaultsToNone()
     {
         KahunaCommandLineOptions opts = NonDefaultOptions();
         KahunaConfiguration server = ServerConfigurationFactory.Create(opts);
@@ -132,17 +133,24 @@ public sealed class TestServerConfigurationSurface
         foreach (KahunaConfiguration configuration in new[] { server, embedded })
         {
             Assert.Equal(48L * 1024 * 1024, configuration.StorageSharedMemtableBudgetBytes);
-            Assert.Equal(48L * 1024 * 1024, configuration.SharedMemtableBudget!.Bytes);
+            Assert.Equal(96L * 1024 * 1024, configuration.StorageSharedCacheBytes);
+            Assert.Equal(48L * 1024 * 1024, configuration.SharedMemory!.MemtableBudgetBytes);
+            Assert.Equal(96L * 1024 * 1024, configuration.SharedMemory.CacheBytes);
 
             // The WAL and the store of a node read it from one configuration; both must get the same object.
-            Assert.Same(configuration.SharedMemtableBudget, configuration.SharedMemtableBudget);
+            Assert.Same(configuration.SharedMemory, configuration.SharedMemory);
         }
 
         KahunaCommandLineOptions parsed = CommandLine.Parser.Default
             .ParseArguments<KahunaCommandLineOptions>(["--storage-revision", "v1"]).Value;
         Assert.Equal(0, ServerConfigurationFactory.Create(parsed).StorageSharedMemtableBudgetBytes);
-        Assert.Null(ServerConfigurationFactory.Create(parsed).SharedMemtableBudget);
-        Assert.Null(EmbeddedKahunaNode.CreateKahunaConfiguration(new EmbeddedKahunaOptions(), singleProcessRaftGroup: true).SharedMemtableBudget);
+        Assert.Equal(0, ServerConfigurationFactory.Create(parsed).StorageSharedCacheBytes);
+        Assert.Null(ServerConfigurationFactory.Create(parsed).SharedMemory);
+
+        // Either size alone makes a shared memory.
+        Assert.Equal(64L * 1024 * 1024, new KahunaConfiguration { StorageSharedCacheBytes = 64L * 1024 * 1024 }.SharedMemory!.CacheBytes);
+        Assert.Equal(0, new KahunaConfiguration { StorageSharedCacheBytes = 64L * 1024 * 1024 }.SharedMemory!.MemtableBudgetBytes);
+        Assert.Null(EmbeddedKahunaNode.CreateKahunaConfiguration(new EmbeddedKahunaOptions(), singleProcessRaftGroup: true).SharedMemory);
     }
 
     [Theory]
@@ -157,37 +165,61 @@ public sealed class TestServerConfigurationSurface
         Assert.Equal(expectedMb * 1024L * 1024, ServerConfigurationFactory.Create(parsed).StorageSharedMemtableBudgetBytes);
     }
 
-    [Fact]
-    public void ANegativeSharedMemtableBudget_IsRefused()
+    [Theory]
+    [InlineData(new[] { "--rocksdb-shared-memory-budget-mb", "512" }, 512)]
+    [InlineData(new[] { "--rocksdb-shared-memory-budget-mb", "512", "--storage-shared-cache-mb", "320" }, 320)]
+    [InlineData(new[] { "--storage-shared-cache-mb", "320" }, 320)]
+    public void TheFormerRocksDbCacheFlag_SetsTheSharedCache_UnlessTheNewOneIsSet(string[] args, int expectedMb)
+    {
+        KahunaCommandLineOptions parsed = CommandLine.Parser.Default
+            .ParseArguments<KahunaCommandLineOptions>(["--storage-revision", "v1", .. args]).Value;
+
+        Assert.Equal(expectedMb * 1024L * 1024, ServerConfigurationFactory.Create(parsed).StorageSharedCacheBytes);
+    }
+
+    [Theory]
+    [InlineData(-1, 0, "--storage-shared-memtable-budget-mb")]
+    [InlineData(0, -1, "--storage-shared-cache-mb")]
+    [InlineData(128, 64, "at most")]
+    public void ANegativeSharedMemory_OrABudgetPastTheCache_IsRefused(int budgetMb, int cacheMb, string expected)
     {
         KahunaCommandLineOptions opts = NonDefaultOptions();
-        opts.StorageSharedMemtableBudgetMb = -1;
+        opts.StorageSharedMemtableBudgetMb = budgetMb;
+        opts.StorageSharedCacheMb = cacheMb;
 
         KahunaServerException ex = Assert.Throws<KahunaServerException>(() => ServerConfigurationFactory.Create(opts));
-        Assert.Contains("--storage-shared-memtable-budget-mb", ex.Message);
+        Assert.Contains(expected, ex.Message);
     }
 
     /// <summary>
-    /// The shared RocksDB cache charges its write-buffer manager's memtables into it, so it takes its memtable
-    /// budget from the shared memtable budget and refuses to start without one.
+    /// The shared RocksDB cache charges its write-buffer manager's memtables into it, so it takes its size and
+    /// its memtable budget from the shared memory and refuses to start without both.
     /// </summary>
     [Fact]
-    public void RocksDbSharedMemory_TakesTheSharedMemtableBudget_AndRefusesToStartWithoutOne()
+    public void RocksDbSharedMemory_TakesTheSharedCacheAndMemtableBudget_AndRefusesToStartWithoutThem()
     {
         EmbeddedKahunaOptions options = new()
         {
             Storage = "rocksdb",
             WalStorage = "rocksdb",
             RocksDbSharedMemoryEnabled = true,
-            RocksDbSharedMemoryBudgetMb = 64,
+            StorageSharedCacheMb = 64,
         };
 
         KahunaServerException ex = Assert.Throws<KahunaServerException>(() => EmbeddedKahunaNode.CreateSharedResources(options));
         Assert.Contains("--storage-shared-memtable-budget-mb", ex.Message);
 
+        options.StorageSharedCacheMb = 0;
         options.StorageSharedMemtableBudgetMb = 16;
+        ex = Assert.Throws<KahunaServerException>(() => EmbeddedKahunaNode.CreateSharedResources(options));
+        Assert.Contains("--storage-shared-cache-mb", ex.Message);
+
+        options.StorageSharedCacheMb = 64;
         using (Kommander.WAL.RocksDbSharedResources resources = EmbeddedKahunaNode.CreateSharedResources(options)!)
+        {
             Assert.Equal(16UL * 1024 * 1024, (ulong)RocksDbSharp.Native.Instance.rocksdb_write_buffer_manager_buffer_size(resources.WriteBufferManagerHandle));
+            Assert.Equal(64UL * 1024 * 1024, (ulong)RocksDbSharp.Native.Instance.rocksdb_cache_get_capacity(resources.BlockCache.Handle));
+        }
 
         // Sharing needs both databases on RocksDB; otherwise there is no bundle, budget or not.
         options.WalStorage = "memory";
@@ -282,11 +314,12 @@ public sealed class TestServerConfigurationSurface
             if (property.PropertyType == typeof(Kahuna.Extensibility.KahunaFunctionRegistry))
                 continue;
 
-            // Each build gets its own budget object; compare its size.
-            if (property.PropertyType == typeof(Kahuna.Server.Persistence.Providers.SharedMemtableBudget))
+            // Each build gets its own shared memory object; compare its sizes.
+            if (property.PropertyType == typeof(Kahuna.Server.Persistence.Providers.SharedStorageMemory))
             {
-                if (server.SharedMemtableBudget?.Bytes != embedded.SharedMemtableBudget?.Bytes)
-                    differences.Add($"{property.Name}: server={server.SharedMemtableBudget?.Bytes} embedded={embedded.SharedMemtableBudget?.Bytes}");
+                if (server.SharedMemory?.MemtableBudgetBytes != embedded.SharedMemory?.MemtableBudgetBytes
+                    || server.SharedMemory?.CacheBytes != embedded.SharedMemory?.CacheBytes)
+                    differences.Add($"{property.Name}: the shared memory sizes differ");
 
                 continue;
             }

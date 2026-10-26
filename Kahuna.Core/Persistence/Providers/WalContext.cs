@@ -27,7 +27,7 @@ public sealed class WalContext
     /// is above 0; null otherwise. The same instance reaches the backend provider. An engine that has no
     /// memtables ignores it.
     /// </summary>
-    public SharedMemtableBudget? SharedMemtableBudget { get; init; }
+    public SharedStorageMemory? SharedMemory { get; init; }
 
 #if !KAHUNA_THREAD_FREE
     /// <summary>

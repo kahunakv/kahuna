@@ -94,15 +94,16 @@ no-op even if the flag is set.
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--rocksdb-shared-memory` | off | Enable sharing (requires `--storage rocksdb` **and** `--wal-storage rocksdb`, and a memtable budget). |
-| `--rocksdb-shared-memory-budget-mb` | `320` | Total shared block-cache budget in MiB. The memtable sub-budget lives inside it. |
-| `--storage-shared-memtable-budget-mb` | `0` | Memtable sub-budget in MiB, cost-charged into the shared cache. Must be above 0 with `--rocksdb-shared-memory`, and ≤ the total budget. |
+| `--rocksdb-shared-memory` | off | Enable sharing (requires `--storage rocksdb` **and** `--wal-storage rocksdb`, a cache and a memtable budget). |
+| `--storage-shared-cache-mb` | `0` | Total shared block-cache budget in MiB. The memtable sub-budget lives inside it. Must be above 0 with `--rocksdb-shared-memory`. |
+| `--storage-shared-memtable-budget-mb` | `0` | Memtable sub-budget in MiB, cost-charged into the shared cache. Must be above 0 with `--rocksdb-shared-memory`, and ≤ the cache. |
 
-`--storage-shared-memtable-budget-mb` is the memtable budget that any WAL and store of a node share, not only
-RocksDB's (see the storage engines guide). It replaces `--rocksdb-shared-memtable-budget-mb`, which still
-parses and applies when the new option is not set. Its default is 0, so a node that passed only
-`--rocksdb-shared-memory` and relied on the former default of 128 now refuses to start until it names a
-budget: pass `--storage-shared-memtable-budget-mb 128` for the former behavior.
+`--storage-shared-cache-mb` and `--storage-shared-memtable-budget-mb` are the memory that any WAL and store of
+a node share, not only RocksDB's (see the storage engines guide). They replace `--rocksdb-shared-memory-budget-mb`
+and `--rocksdb-shared-memtable-budget-mb`, which still parse and apply when the new options are not set. Both
+default to 0, so a node that passed only `--rocksdb-shared-memory` and relied on the former defaults of 320 and
+128 now refuses to start until it names them: pass `--storage-shared-cache-mb 320 --storage-shared-memtable-budget-mb 128`
+for the former behavior.
 
 Example:
 
@@ -110,7 +111,7 @@ Example:
 kahuna-server \
   --storage rocksdb --wal-storage rocksdb \
   --rocksdb-shared-memory \
-  --rocksdb-shared-memory-budget-mb 512 \
+  --storage-shared-cache-mb 512 \
   --storage-shared-memtable-budget-mb 128
 ```
 
@@ -124,7 +125,7 @@ EmbeddedKahunaOptions options = new()
     Storage    = "rocksdb",
     WalStorage = "rocksdb",
     RocksDbSharedMemoryEnabled    = true,
-    RocksDbSharedMemoryBudgetMb   = 512,
+    StorageSharedCacheMb          = 512,
     StorageSharedMemtableBudgetMb = 128,
     // ... the rest of your options
 };
@@ -148,8 +149,9 @@ more frequent cross-CF / cross-database flushing.
 
 Practical guidance:
 
-- **Total budget** ≥ the old 256 MiB backend cache plus headroom for the combined memtables. `320` is the
-  conservative default; raise it on nodes with memory to spare and hot read sets.
+- **Total budget** ≥ the old 256 MiB backend cache plus headroom for the combined memtables. `320` was the
+  default before it became the engine-neutral `--storage-shared-cache-mb`, and is a conservative start; raise
+  it on nodes with memory to spare and hot read sets.
 - **Memtable sub-budget** should leave room for both databases' write bursts. `128` was the default before
   it became the engine-neutral `--storage-shared-memtable-budget-mb`, and is a sound start. Too
   small ⇒ constant flushing (and write coupling between the two databases); too large ⇒ less memory

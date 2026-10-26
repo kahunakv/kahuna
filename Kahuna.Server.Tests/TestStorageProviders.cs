@@ -99,8 +99,8 @@ public sealed class TestStorageProviders : IDisposable
         Assert.Equal("w1", walOpened.Revision);
 
         // No shared memtable budget unless the node sets one.
-        Assert.Null(opened.SharedMemtableBudget);
-        Assert.Null(walOpened.SharedMemtableBudget);
+        Assert.Null(opened.SharedMemory);
+        Assert.Null(walOpened.SharedMemory);
 
         // Both engines keep their data on disk, so the node created their directories.
         Assert.True(Directory.Exists(storagePath));
@@ -170,7 +170,7 @@ public sealed class TestStorageProviders : IDisposable
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public async Task TheNodesWalAndStore_ReceiveOneSharedMemtableBudget(bool standalone)
+    public async Task TheNodesWalAndStore_ReceiveOneSharedMemory(bool standalone)
     {
         RecordingBackendProvider backendProvider = new("recorded");
         RecordingWalProvider walProvider = new("recorded-wal");
@@ -179,6 +179,7 @@ public sealed class TestStorageProviders : IDisposable
         options.StoragePath = Path.Combine(tempRoot, "store");
         options.WalPath = Path.Combine(tempRoot, "wal");
         options.StorageSharedMemtableBudgetMb = 24;
+        options.StorageSharedCacheMb = 40;
         options.StorageProviders.Register(backendProvider);
         options.StorageProviders.Register(walProvider);
 
@@ -189,14 +190,15 @@ public sealed class TestStorageProviders : IDisposable
         {
         }
 
-        SharedMemtableBudget walBudget = Assert.Single(walProvider.Opened).SharedMemtableBudget!;
-        SharedMemtableBudget storeBudget = Assert.Single(backendProvider.Opened).SharedMemtableBudget!;
-        Assert.Same(walBudget, storeBudget);
-        Assert.Equal(24L * 1024 * 1024, walBudget.Bytes);
+        SharedStorageMemory walMemory = Assert.Single(walProvider.Opened).SharedMemory!;
+        SharedStorageMemory storeMemory = Assert.Single(backendProvider.Opened).SharedMemory!;
+        Assert.Same(walMemory, storeMemory);
+        Assert.Equal(24L * 1024 * 1024, walMemory.MemtableBudgetBytes);
+        Assert.Equal(40L * 1024 * 1024, walMemory.CacheBytes);
 
-        object engineBudget = walBudget.GetOrAdd(bytes => new List<long> { bytes });
-        Assert.Same(engineBudget, storeBudget.GetOrAdd<List<long>>(_ => throw new InvalidOperationException("created twice")));
-        Assert.Equal([24L * 1024 * 1024], (List<long>)engineBudget);
+        object engineResources = walMemory.GetOrAdd(memory => new List<long> { memory.MemtableBudgetBytes, memory.CacheBytes });
+        Assert.Same(engineResources, storeMemory.GetOrAdd<List<long>>(_ => throw new InvalidOperationException("created twice")));
+        Assert.Equal([24L * 1024 * 1024, 40L * 1024 * 1024], (List<long>)engineResources);
     }
 
     private static EmbeddedKahunaOptions Options(string storage, string walStorage) => new()

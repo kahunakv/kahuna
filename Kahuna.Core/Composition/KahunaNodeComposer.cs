@@ -49,7 +49,7 @@ internal static class KahunaNodeComposer
             StorageRevision = configuration.StorageRevision,
             Configuration = configuration,
             Logger = NullLogger.Instance,
-            SharedMemtableBudget = configuration.SharedMemtableBudget,
+            SharedMemory = configuration.SharedMemory,
         });
     }
 #else
@@ -62,7 +62,7 @@ internal static class KahunaNodeComposer
             Configuration = configuration,
             Logger = logger,
             SharedResources = sharedResources,
-            SharedMemtableBudget = configuration.SharedMemtableBudget,
+            SharedMemory = configuration.SharedMemory,
         });
     }
 #endif

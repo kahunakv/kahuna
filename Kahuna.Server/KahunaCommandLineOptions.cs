@@ -86,13 +86,18 @@ public sealed class KahunaCommandLineOptions
     [Option("disable-wal-sync-writes", Required = false, HelpText = "Disable synchronous durable WAL writes for faster non-critical test/local runs")]
     public bool DisableWalSyncWrites { get; set; }
 
-    [Option("rocksdb-shared-memory", Required = false, HelpText = "Share one RocksDB block cache + write-buffer manager between the KV/locks backend and the Raft WAL (requires both storage and wal-storage = rocksdb, and --storage-shared-memtable-budget-mb above 0). Default: disabled")]
+    [Option("rocksdb-shared-memory", Required = false, HelpText = "Share one RocksDB block cache + write-buffer manager between the KV/locks backend and the Raft WAL (requires both storage and wal-storage = rocksdb, and --storage-shared-cache-mb and --storage-shared-memtable-budget-mb above 0). Default: disabled")]
     public bool RocksDbSharedMemory { get; set; }
 
-    [Option("rocksdb-shared-memory-budget-mb", Required = false, HelpText = "Total shared RocksDB block-cache budget in MiB (memtable sub-budget lives inside it)", Default = 320)]
-    public int RocksDbSharedMemoryBudgetMb { get; set; } = 320;
+    [Option("storage-shared-cache-mb", Required = false, HelpText = "One cache in MiB that the Raft WAL and the KV/locks store share; a shared memtable budget is charged into it. 0 = none. rocksdb applies it as its shared block cache with --rocksdb-shared-memory.", Default = 0)]
+    public int StorageSharedCacheMb { get; set; }
 
-    [Option("storage-shared-memtable-budget-mb", Required = false, HelpText = "One memtable budget in MiB that the Raft WAL and the KV/locks store share; past it, a memtable flushes early. 0 = none. rocksdb applies it with --rocksdb-shared-memory, cost-charged into the shared cache (must be <= that budget).", Default = 0)]
+    // The former name of --storage-shared-cache-mb, kept so existing command lines still parse; it applies
+    // when the new option is not set.
+    [Option("rocksdb-shared-memory-budget-mb", Required = false, Hidden = true)]
+    public int? RocksDbSharedMemoryBudgetMb { get; set; }
+
+    [Option("storage-shared-memtable-budget-mb", Required = false, HelpText = "One memtable budget in MiB that the Raft WAL and the KV/locks store share; past it, a memtable flushes early. 0 = none. With --storage-shared-cache-mb it is charged into the cache and must be <= it. rocksdb applies it with --rocksdb-shared-memory.", Default = 0)]
     public int StorageSharedMemtableBudgetMb { get; set; }
 
     // The former name of --storage-shared-memtable-budget-mb, kept so existing command lines still parse; it
@@ -911,4 +916,11 @@ public sealed class KahunaCommandLineOptions
     /// </summary>
     public int GetStorageSharedMemtableBudgetMb() =>
         StorageSharedMemtableBudgetMb != 0 ? StorageSharedMemtableBudgetMb : RocksDbSharedMemtableBudgetMb ?? 0;
+
+    /// <summary>
+    /// The shared cache in MiB: <see cref="StorageSharedCacheMb"/> when set, otherwise its former name,
+    /// <c>--rocksdb-shared-memory-budget-mb</c>.
+    /// </summary>
+    public int GetStorageSharedCacheMb() =>
+        StorageSharedCacheMb != 0 ? StorageSharedCacheMb : RocksDbSharedMemoryBudgetMb ?? 0;
 }

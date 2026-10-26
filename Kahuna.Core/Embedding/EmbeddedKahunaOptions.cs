@@ -63,25 +63,32 @@ public sealed class EmbeddedKahunaOptions
     /// <summary>
     /// When true — and both <see cref="Storage"/> and <see cref="WalStorage"/> are "rocksdb" — the KV/locks
     /// backend and the Raft WAL share one block cache and one WriteBufferManager sized by
-    /// <see cref="RocksDbSharedMemoryBudgetMb"/> / <see cref="StorageSharedMemtableBudgetMb"/>, bounding
-    /// total RocksDB cache+memtable memory to one budget instead of two independent ones. Requires
-    /// <see cref="StorageSharedMemtableBudgetMb"/> above 0. Default false: each database keeps its own
-    /// resources, byte-for-byte the prior behavior.
+    /// <see cref="StorageSharedCacheMb"/> / <see cref="StorageSharedMemtableBudgetMb"/>, bounding
+    /// total RocksDB cache+memtable memory to one budget instead of two independent ones. Requires both
+    /// above 0. Default false: each database keeps its own resources, byte-for-byte the prior behavior.
     /// </summary>
     public bool RocksDbSharedMemoryEnabled { get; set; }
 
     /// <summary>
-    /// Total shared block-cache budget in MiB (the memtable sub-budget lives inside it). Only used when
-    /// <see cref="RocksDbSharedMemoryEnabled"/> is set. Size conservatively — at least the prior 256 MB
-    /// backend cache plus headroom for combined memtables.
+    /// One cache in MiB that the Raft WAL and the KV/locks store share; 0 (the default) = none. See
+    /// <see cref="KahunaConfiguration.StorageSharedCacheBytes"/>. With <see cref="RocksDbSharedMemoryEnabled"/> it
+    /// is the RocksDB shared block cache, which the memtable sub-budget lives inside. Size conservatively — at
+    /// least the RocksDB backend's own 256 MB cache plus headroom for the combined memtables.
     /// </summary>
-    public int RocksDbSharedMemoryBudgetMb { get; set; } = 320;
+    public int StorageSharedCacheMb { get; set; }
+
+    /// <summary>The former name of <see cref="StorageSharedCacheMb"/>, which it reads and sets.</summary>
+    [Obsolete("Use StorageSharedCacheMb, which every engine pair that can share a cache reads; it defaults to 0 (none).")]
+    public int RocksDbSharedMemoryBudgetMb
+    {
+        get => StorageSharedCacheMb;
+        set => StorageSharedCacheMb = value;
+    }
 
     /// <summary>
     /// One memtable budget in MiB that the Raft WAL and the KV/locks store share; 0 (the default) = none. See
-    /// <see cref="KahunaConfiguration.StorageSharedMemtableBudgetBytes"/>. With
-    /// <see cref="RocksDbSharedMemoryEnabled"/> it is the RocksDB memtable sub-budget, cost-charged into the
-    /// shared cache, and must be &lt;= <see cref="RocksDbSharedMemoryBudgetMb"/>.
+    /// <see cref="KahunaConfiguration.StorageSharedMemtableBudgetBytes"/>. With <see cref="StorageSharedCacheMb"/>
+    /// it is charged into the cache and must be &lt;= it.
     /// </summary>
     public int StorageSharedMemtableBudgetMb { get; set; }
 

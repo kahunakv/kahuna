@@ -71,7 +71,7 @@ public static class EmbeddedOptionsFactory
         RaftWalShardMaxBytesForLevelBaseMb = NullIfZero(opts.RaftWalShardMaxBytesForLevelBaseMb),
         RaftWalShardUniversalCompaction = opts.RaftWalShardUniversalCompaction,
         RocksDbSharedMemoryEnabled = opts.RocksDbSharedMemory,
-        RocksDbSharedMemoryBudgetMb = opts.RocksDbSharedMemoryBudgetMb,
+        StorageSharedCacheMb = opts.GetStorageSharedCacheMb(),
         StorageSharedMemtableBudgetMb = opts.GetStorageSharedMemtableBudgetMb(),
         RocksDbDirectReads = opts.GetRocksDbDirectReads(),
         RocksDbStatistics = opts.RocksDbStatistics,

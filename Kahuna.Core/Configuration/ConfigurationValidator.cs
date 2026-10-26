@@ -162,9 +162,16 @@ public static class ConfigurationValidator
                 $"StorageCompactionRateBytesPerSec ({configuration.StorageCompactionRateBytesPerSec}, --storage-compaction-rate-mbps) and " +
                 $"StorageMaxBackgroundCompactions ({configuration.StorageMaxBackgroundCompactions}, --storage-max-background-compactions) must not be negative (0 means the default).");
 
-        if (configuration.StorageSharedMemtableBudgetBytes < 0)
+        if (configuration.StorageSharedMemtableBudgetBytes < 0 || configuration.StorageSharedCacheBytes < 0)
             throw new KahunaServerException(
-                $"StorageSharedMemtableBudgetBytes ({configuration.StorageSharedMemtableBudgetBytes}, --storage-shared-memtable-budget-mb) must not be negative (0 means none).");
+                $"StorageSharedMemtableBudgetBytes ({configuration.StorageSharedMemtableBudgetBytes}, --storage-shared-memtable-budget-mb) and " +
+                $"StorageSharedCacheBytes ({configuration.StorageSharedCacheBytes}, --storage-shared-cache-mb) must not be negative (0 means none).");
+
+        // The memtable budget is charged into the cache when both are set, so it lives inside it.
+        if (configuration.StorageSharedCacheBytes > 0 && configuration.StorageSharedMemtableBudgetBytes > configuration.StorageSharedCacheBytes)
+            throw new KahunaServerException(
+                $"StorageSharedMemtableBudgetBytes ({configuration.StorageSharedMemtableBudgetBytes}, --storage-shared-memtable-budget-mb) must be at most " +
+                $"StorageSharedCacheBytes ({configuration.StorageSharedCacheBytes}, --storage-shared-cache-mb): the memtables are charged into the cache.");
 
         if (configuration.CommitAdmissionLagMs is < 0 or > 3_600_000)
             throw new KahunaServerException(
