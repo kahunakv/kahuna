@@ -161,7 +161,7 @@ internal sealed class ScriptActorTurn : IKeyValueActorTurn, IActorTurnFinalizer
     /// </summary>
     private async Task<bool> ReleaseWhatTheGeneralPathWouldRelease()
     {
-        context.MarkRenewalExcluded();
+        await context.ExcludeAndDrainRangeRenewalsAsync().ConfigureAwait(false);
 
         bool holdsLock = context.LocksAcquired is { Count: > 0 };
         bool touchedKey = holdsLock || context.ModifiedKeys is { Count: > 0 } || context.ReadKeys is { Count: > 0 };

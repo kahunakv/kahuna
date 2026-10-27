@@ -44,7 +44,7 @@ public sealed class TestRangeLockLeaseHandoff : BaseCluster
     /// through the drain</b>. Before the fix, <c>SnapshotRenewableRangeLocks</c> returned empty for a
     /// <c>Finalizing</c> session, so every renewal sweep was a no-op, the lock lapsed at its acquire TTL, and a
     /// conflicting acquire slipped through. After the fix, renewal continues through the drain until
-    /// <c>ReleaseWorkingSet</c> atomically takes ownership via <c>MarkRenewalExcluded</c>.
+    /// <c>ReleaseWorkingSet</c> atomically takes ownership via <c>ExcludeAndDrainRangeRenewalsAsync</c>.
     ///
     /// Runs on a single embedded node so the range lock, the coordinator session, and the conflict probe share
     /// one context with no leader election or split/merge remapping: the only thing that can keep the lock alive
@@ -114,7 +114,7 @@ public sealed class TestRangeLockLeaseHandoff : BaseCluster
         // letting this acquire succeed.
         Assert.Equal(KeyValueResponseType.AlreadyLocked, await ProbeConflictingAcquire(node, ct));
 
-        // Unblock the drain → ReleaseWorkingSet runs → MarkRenewalExcluded then releases the lock.
+        // Unblock the drain → ReleaseWorkingSet runs → excludes the session from renewal, then releases the lock.
         await node.LocateAndCompleteOperation(txA.CoordinatorKey, txA.TransactionId, pendingOp, new OperationCompletionPayload(), ct);
         Assert.Equal(KeyValueResponseType.RolledBack, await rollbackTask);
 
@@ -265,6 +265,66 @@ public sealed class TestRangeLockLeaseHandoff : BaseCluster
     }
 
     // ── harness ──────────────────────────────────────────────────────────────────────────────
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LateRenewalCannotResurrectLockAfterFinalization(bool commit)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        var (r1, r2, r3, k1, k2, k3, transport) =
+            await AssembleThreNodeClusterWithTransportAndConfig("memory", 8, raftLogger, kahunaLogger, cfg =>
+            {
+                cfg.CollectionInterval = TimeSpan.FromSeconds(30);
+                cfg.DefaultTransactionTimeout = 120_000;
+            });
+        TaskCompletionSource entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource resume = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        try
+        {
+            var (host, handles) = await SetupRemoteRoutedSessions([k1, k2, k3], transport, 1, 30_000, ct);
+            TransactionHandle handle = Assert.Single(handles);
+            TransactionContext context = host.KeyValues.Coordinator.sessions[handle.TransactionId];
+            RangeLockKey range = Assert.Single(context.RangeLocksAcquired!).Key;
+            int gated = 0;
+            transport.AcquireRangeLockHook = async (_, _, token) =>
+            {
+                if (Interlocked.CompareExchange(ref gated, 1, 0) != 0) return;
+                entered.TrySetResult();
+                await resume.Task.WaitAsync(token);
+            };
+            Task renewal = host.KeyValues.Coordinator.RenewSessionRangeLocks();
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(10), ct);
+            Task<KeyValueResponseType> finalize = commit
+                ? Commit()
+                : host.LocateAndRollbackTransaction(handle, ct);
+            // Without the drain, cleanup completes here while the renewal RPC is still paused, and the
+            // resumed acquire re-plants the lock after the release. With it, cleanup waits for the
+            // renewal and releases the lock only after that acquire landed.
+            await Task.WhenAny(finalize, Task.Delay(250, ct));
+            resume.TrySetResult();
+            await renewal.WaitAsync(TimeSpan.FromSeconds(10), ct);
+            Assert.Equal(commit ? KeyValueResponseType.Committed : KeyValueResponseType.RolledBack,
+                await finalize.WaitAsync(TimeSpan.FromSeconds(10), ct));
+            transport.AcquireRangeLockHook = null;
+            // A fresh transaction must be able to take the same range: the finalized session's lock is gone
+            // and no late renewal planted a new one. The probe tolerates transient MustRetry only.
+            (_, TransactionHandle probe) = await host.LocateAndStartTransaction(new(), ct);
+            try
+            {
+                KeyValueResponseType result = await AcquireRangeLockUntilLocked(host, probe, range.Prefix, 5_000, ct);
+                Assert.Equal(KeyValueResponseType.Locked, result);
+            }
+            finally { await host.LocateAndRollbackTransaction(probe, ct); }
+            async Task<KeyValueResponseType> Commit() => (await host.LocateAndCommitTransaction(handle, ct)).Type;
+        }
+        finally
+        {
+            resume.TrySetResult();
+            transport.AcquireRangeLockHook = null;
+            await LeaveAll([r1, r2, r3], ct);
+        }
+    }
 
     /// <summary>
     /// Starts sessions (each holding a range lock over a distinct prefix) on a node whose range-lock

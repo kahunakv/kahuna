@@ -1110,11 +1110,9 @@ internal sealed class TransactionCoordinator : IDisposable
     /// lock over its identical bounds/mode with the server renewal TTL — the participant treats a
     /// same-transaction, same-bounds re-acquire as a renewal that refreshes the expiry, not a second lock.
     /// A session past <c>Timeout + grace</c> is skipped so its locks lapse and the reaper reclaims it.
-    /// A session whose cleanup has started (<see cref="TransactionContext.MarkRenewalExcluded"/> called)
-    /// contributes an empty snapshot. A renewal whose snapshot was taken just before that flip can still
-    /// land its re-acquire after cleanup released the lock, briefly resurrecting it; that hold is bounded
-    /// by one renewal TTL (nothing renews it again) and errs toward over-protecting the range — the safe
-    /// direction, never an early lapse.
+    /// A session whose cleanup has started contributes an empty snapshot. Every dispatched acquire also
+    /// registers with its session; cleanup closes that admission and drains admitted renewals before
+    /// releasing locks. A delayed renewal therefore cannot recreate a finalized transaction's lock.
     /// The sweep runs under a self-imposed deadline (<c>RangeLockRenewalTtlMs / 2</c>) with bounded
     /// concurrency, and the deadline token is passed into each acquire so a slow or stuck participant is
     /// cancelled at the budget rather than blocking the reaper or overflowing the next tick.
@@ -1140,7 +1138,7 @@ internal sealed class TransactionCoordinator : IDisposable
             if ((deadline - now) <= TimeSpan.Zero)
                 continue;
 
-            // The snapshot is empty once MarkRenewalExcluded has been called (cleanup owns the locks).
+            // The snapshot is empty once cleanup closed renewal admission (cleanup owns the locks).
             // A Finalizing session whose drain is still in progress still returns its locks — renewal
             // continues through the drain so the predicate lock does not lapse mid-finalize.
             List<(RangeLockKey Range, RangeLockMode Mode)> renewable = context.SnapshotRenewableRangeLocks();
@@ -1166,10 +1164,14 @@ internal sealed class TransactionCoordinator : IDisposable
         async Task RenewOne(TransactionContext ctx, RangeLockKey range, RangeLockMode mode)
         {
             bool acquired = false;
+            bool renewalStarted = false;
             try
             {
                 await concurrencyGate.WaitAsync(sweepToken).ConfigureAwait(false);
                 acquired = true;
+                if (!ctx.TryBeginRangeRenewal())
+                    return;
+                renewalStarted = true;
 
                 // Pass the sweep deadline token into the acquire so a slow/stuck participant is cancelled at
                 // the budget instead of blocking Task.WhenAll (and therefore the reaper) indefinitely.
@@ -1207,6 +1209,8 @@ internal sealed class TransactionCoordinator : IDisposable
             }
             finally
             {
+                if (renewalStarted)
+                    ctx.EndRangeRenewal();
                 if (acquired)
                     concurrencyGate.Release();
             }
@@ -1395,10 +1399,11 @@ internal sealed class TransactionCoordinator : IDisposable
     /// </remarks>
     internal async Task<bool> ReleaseWorkingSet(TransactionContext context)
     {
-        // Exclude from renewal before releasing any lock: from this point cleanup owns the range locks,
-        // and no renewal snapshot will include this session. This closes the gap where renewal has stopped
-        // (lifecycle fence) but cleanup has not yet run, which would leave the predicate lock unprotected.
-        context.MarkRenewalExcluded();
+        // Exclude from renewal and drain in-flight renewals before releasing any lock: from this point cleanup
+        // owns the range locks, no renewal snapshot will include this session, and no re-acquire the sweep
+        // already sent can land after the release. This closes the gap where renewal has stopped (lifecycle
+        // fence) but cleanup has not yet run, which would leave the predicate lock unprotected.
+        await context.ExcludeAndDrainRangeRenewalsAsync().ConfigureAwait(false);
 
         // Every mandatory release this pass cannot get acknowledged is named on the context, so the commit's
         // detached retry resends exactly those (see RetryUnacknowledgedReleases). A pass that runs again, as

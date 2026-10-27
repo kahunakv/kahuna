@@ -135,7 +135,9 @@ waiting. A **decided** intent is different:
 The session's renewal sweep re-acquires range locks through current routing, with bounded concurrency
 and a deadline. Renewal is best-effort: failures, scheduling delays and failover can leave gaps.
 It continues through finalize drain until cleanup owns the lock set, and stops after session loss
-or the reap deadline. Durable prepares and the canonical decision, once replicated, are recovered
+or the reap deadline. Cleanup closes renewal admission and waits for renewals already in flight
+before it releases any lock, so a renewal queued before commit or rollback cannot plant the lock
+again afterwards. Durable prepares and the canonical decision, once replicated, are recovered
 separately from these in-memory locks.
 
 ## Failure and regression coverage

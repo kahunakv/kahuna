@@ -112,11 +112,12 @@ public sealed class TestSessionReaping
     /// <summary>
     /// A range lock held by a live session is renewable while the session is accepting operations. Entering the
     /// finalize fence (<see cref="SessionLifecycle.Finalizing"/>) does NOT stop renewal — the lease must stay
-    /// effective through the finalize drain. Renewal stops only when <see cref="TransactionContext.MarkRenewalExcluded"/>
-    /// is called at the top of <c>ReleaseWorkingSet</c>, the single hand-off point where cleanup takes ownership.
+    /// effective through the finalize drain. Renewal stops only when cleanup calls
+    /// <see cref="TransactionContext.ExcludeAndDrainRangeRenewalsAsync"/> at the top of <c>ReleaseWorkingSet</c>,
+    /// the single hand-off point where cleanup takes ownership.
     /// </summary>
     [Fact]
-    public void SnapshotRenewableRangeLocks_ReturnsHeldLockWhileAccepting_AndWhileFinalizing_EmptyOnlyAfterMarkRenewalExcluded()
+    public void SnapshotRenewableRangeLocks_ReturnsHeldLockWhileAccepting_AndWhileFinalizing_EmptyOnlyAfterCleanupExcludesRenewal()
     {
         TransactionContext ctx = NewSession();
 
@@ -137,20 +138,20 @@ public sealed class TestSessionReaping
         Assert.Equal(SessionLifecycle.Finalizing, ctx.Lifecycle);
         Assert.Single(ctx.SnapshotRenewableRangeLocks());
 
-        // Cleanup calls MarkRenewalExcluded before releasing: from this instant no renewal snapshot
+        // Cleanup closes renewal admission before releasing: from this instant no renewal snapshot
         // includes the session, and cleanup is the sole owner of the range lock.
-        ctx.MarkRenewalExcluded();
+        Assert.True(ctx.ExcludeAndDrainRangeRenewalsAsync().IsCompletedSuccessfully);
         Assert.Empty(ctx.SnapshotRenewableRangeLocks());
     }
 
     /// <summary>
     /// A session claimed by the reaper contributes renewable range locks until cleanup calls
-    /// <see cref="TransactionContext.MarkRenewalExcluded"/>. In practice the reaper only claims
+    /// <see cref="TransactionContext.ExcludeAndDrainRangeRenewalsAsync"/>. In practice the reaper only claims
     /// sessions past their reap deadline, so the renewal sweep's deadline guard already skips them;
     /// the flag hand-off is the authoritative stop.
     /// </summary>
     [Fact]
-    public void SnapshotRenewableRangeLocks_ReturnsHeldLockWhileReaping_EmptyAfterMarkRenewalExcluded()
+    public void SnapshotRenewableRangeLocks_ReturnsHeldLockWhileReaping_EmptyAfterCleanupExcludesRenewal()
     {
         TransactionContext ctx = NewSession();
 
@@ -164,9 +165,72 @@ public sealed class TestSessionReaping
         Assert.NotNull(ctx.TryEnterReap());
         Assert.Single(ctx.SnapshotRenewableRangeLocks());
 
-        // MarkRenewalExcluded (called at the top of ReleaseWorkingSet) is the authoritative hand-off.
-        ctx.MarkRenewalExcluded();
+        // The hand-off at the top of ReleaseWorkingSet is authoritative: it excludes the session from renewal.
+        Assert.True(ctx.ExcludeAndDrainRangeRenewalsAsync().IsCompletedSuccessfully);
         Assert.Empty(ctx.SnapshotRenewableRangeLocks());
+    }
+
+    /// <summary>
+    /// A renewal admitted before cleanup closes admission keeps cleanup waiting: the drain task stays pending
+    /// until every admitted renewal ends, so an acquire already sent lands before cleanup releases the lock.
+    /// From the instant admission closes, no further renewal may enter and the snapshot is empty.
+    /// </summary>
+    [Fact]
+    public void ExcludeAndDrainRangeRenewals_WaitsForAdmittedRenewals_ThenRefusesNewAdmission()
+    {
+        TransactionContext ctx = NewSession();
+
+        TransactionOperationId opId = TransactionOperationId.NewRandom();
+        Assert.Equal(OperationRegistrationOutcome.New, ctx.BeginOperation(opId, OperationKind.RangeLock, [1]).Outcome);
+        RangeLockKey range = new("pfx", null, true, null, false, KeyValueDurability.Persistent);
+        ctx.CompleteOperation(opId, new OperationCompletionPayload { AcquiredRangeLock = (range, RangeLockMode.Exclusive) }, response: null);
+        Assert.Single(ctx.SnapshotRenewableRangeLocks());
+
+        // Two renewals obtained their concurrency slot before cleanup started.
+        Assert.True(ctx.TryBeginRangeRenewal());
+        Assert.True(ctx.TryBeginRangeRenewal());
+
+        Task drain = ctx.ExcludeAndDrainRangeRenewalsAsync();
+        Assert.False(drain.IsCompleted);
+
+        // Admission is closed: a renewal that obtains its slot now sends nothing, and no snapshot includes the session.
+        Assert.False(ctx.TryBeginRangeRenewal());
+        Assert.Empty(ctx.SnapshotRenewableRangeLocks());
+
+        // The drain completes only when the last admitted renewal ends.
+        ctx.EndRangeRenewal();
+        Assert.False(drain.IsCompleted);
+        ctx.EndRangeRenewal();
+        Assert.True(drain.IsCompletedSuccessfully);
+
+        // A second cleanup pass (a rollback retry) finds nothing to wait for.
+        Assert.True(ctx.ExcludeAndDrainRangeRenewalsAsync().IsCompletedSuccessfully);
+        Assert.False(ctx.TryBeginRangeRenewal());
+    }
+
+    /// <summary>
+    /// With no admitted renewal, cleanup takes ownership at once: the drain is already complete, the
+    /// snapshot is empty, and a renewal that arrives afterwards is refused.
+    /// </summary>
+    [Fact]
+    public void ExcludeAndDrainRangeRenewals_CompletesAtOnceWhenNoRenewalIsActive()
+    {
+        TransactionContext ctx = NewSession();
+
+        TransactionOperationId opId = TransactionOperationId.NewRandom();
+        Assert.Equal(OperationRegistrationOutcome.New, ctx.BeginOperation(opId, OperationKind.RangeLock, [1]).Outcome);
+        RangeLockKey range = new("pfx", "a", true, "z", false, KeyValueDurability.Persistent);
+        ctx.CompleteOperation(opId, new OperationCompletionPayload { AcquiredRangeLock = (range, RangeLockMode.Shared) }, response: null);
+        Assert.Single(ctx.SnapshotRenewableRangeLocks());
+
+        // A renewal that entered and ended before cleanup leaves nothing behind.
+        Assert.True(ctx.TryBeginRangeRenewal());
+        ctx.EndRangeRenewal();
+
+        Task drain = ctx.ExcludeAndDrainRangeRenewalsAsync();
+        Assert.True(drain.IsCompletedSuccessfully);
+        Assert.Empty(ctx.SnapshotRenewableRangeLocks());
+        Assert.False(ctx.TryBeginRangeRenewal());
     }
 
     /// <summary>A session that holds no range locks has nothing to renew.</summary>

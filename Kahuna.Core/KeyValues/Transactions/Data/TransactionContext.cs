@@ -396,6 +396,8 @@ internal class TransactionContext
     private readonly object registryLock = new();
     private SessionLifecycle lifecycle = SessionLifecycle.AcceptingOperations;
     private bool renewalExcluded;
+    private int activeRangeRenewals;
+    private TaskCompletionSource? rangeRenewalsDrained;
     private bool readObservationConflict;
     private string? stagedChainBreak;
     private Dictionary<int, LockGrantTerm>? lockGrantTerms;
@@ -1027,23 +1029,61 @@ internal class TransactionContext
     }
 
     /// <summary>
-    /// Excludes this session from all future renewal snapshots. Called under <see cref="registryLock"/>
-    /// at the top of <c>ReleaseWorkingSet</c> — the single hand-off point where cleanup takes ownership of
-    /// the range locks. After this call <see cref="SnapshotRenewableRangeLocks"/> returns an empty list,
-    /// so no renewal tick can re-extend a lock that cleanup is in the process of releasing.
+    /// Hands this session's range locks from the renewal sweep to cleanup. Called at the top of
+    /// <c>ReleaseWorkingSet</c> and of the script actor's release path, before any lock is released.
+    /// Sets <see cref="renewalExcluded"/> under <see cref="registryLock"/>, so no later
+    /// <see cref="SnapshotRenewableRangeLocks"/> includes this session and <see cref="TryBeginRangeRenewal"/>
+    /// admits nothing more, then returns a task that completes once every renewal already admitted has ended.
+    /// Cleanup awaits that task before it releases: a re-acquire the sweep already sent cannot be recalled, so it
+    /// must land before the release that removes it. Without the wait a late re-acquire plants a fresh lock for a
+    /// finalized transaction, and nothing renews or releases that lock until the renewal TTL lapses.
     /// </summary>
-    internal void MarkRenewalExcluded()
+    internal Task ExcludeAndDrainRangeRenewalsAsync()
     {
         lock (registryLock)
+        {
             renewalExcluded = true;
+            if (activeRangeRenewals == 0)
+                return Task.CompletedTask;
+            rangeRenewalsDrained ??= new(TaskCreationOptions.RunContinuationsAsynchronously);
+            return rangeRenewalsDrained.Task;
+        }
+    }
+
+    /// <summary>
+    /// Admits one renewal re-acquire. The sweep calls this after it obtains its concurrency slot and before it
+    /// sends the acquire; a renewal refused here sends nothing. Returns false once cleanup closed admission
+    /// through <see cref="ExcludeAndDrainRangeRenewalsAsync"/>. Every admitted renewal must call
+    /// <see cref="EndRangeRenewal"/> exactly once, on every path.
+    /// </summary>
+    internal bool TryBeginRangeRenewal()
+    {
+        lock (registryLock)
+        {
+            if (renewalExcluded)
+                return false;
+            activeRangeRenewals++;
+            return true;
+        }
+    }
+
+    /// <summary>Ends an admitted renewal; completes the cleanup drain when it was the last one active.</summary>
+    internal void EndRangeRenewal()
+    {
+        lock (registryLock)
+        {
+            if (--activeRangeRenewals == 0)
+                rangeRenewalsDrained?.TrySetResult();
+        }
     }
 
     /// <summary>
     /// Returns a point-in-time copy of the range locks this session holds for renewal, gated on the
     /// <see cref="renewalExcluded"/> flag rather than the session lifecycle. A <see cref="SessionLifecycle.Finalizing"/>
     /// session whose drain is still in progress keeps renewing so the lease never lapses while
-    /// <c>WaitForPendingOperations</c> is blocking — renewal stops only when <see cref="MarkRenewalExcluded"/>
-    /// is called at the top of <c>ReleaseWorkingSet</c>, ensuring cleanup owns the lock from that instant.
+    /// <c>WaitForPendingOperations</c> is blocking — renewal stops only when cleanup calls
+    /// <see cref="ExcludeAndDrainRangeRenewalsAsync"/> at the top of <c>ReleaseWorkingSet</c>, ensuring cleanup
+    /// owns the lock from that instant.
     /// The reap-deadline guard in the renewal sweep independently stops renewing sessions past their timeout,
     /// so a stuck transaction can never hold locks indefinitely.
     /// </summary>
