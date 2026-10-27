@@ -154,14 +154,13 @@ internal sealed class LocalKeyValueReadOperations
 
         try
         {
-            // Exponential back-off loop, matching the LocateAndScanRange page-retry contract.
+            // Poll loop (ReadWaitBackoff), matching the LocateAndScanRange page-retry contract.
             // WaitingForReplication covers two cases:
             //   • Short replication lag (ReplicationIntent): typically resolves in < 10 ms.
             //   • Safe-time wait (pending write intent whose commit ts ≤ readTimestamp): can
-            //     last up to the intent TTL (DefaultTxCompleteTimeout ≈ 15 s). The exponential
-            //     back-off naturally amortises both: a replication lag resolves in the first 1-2
-            //     iterations; a safe-time wait resolves once the in-flight write commits or the
-            //     intent expires and the actor clears it.
+            //     last up to the intent TTL (DefaultTxCompleteTimeout ≈ 15 s). The poll serves
+            //     the read within one short sleep of either: the lag resolving, or the in-flight
+            //     write committing, rolling back, or its intent expiring and the actor clearing it.
             // The deadline is DefaultTxCompleteTimeout + 1 500 ms buffer.
             int backoffMs = 1;
             long deadline = Environment.TickCount64 + 16_500;
@@ -197,8 +196,7 @@ internal sealed class LocalKeyValueReadOperations
                     return (KeyValueResponseType.MustRetry, null);
 
                 Transactions.DurableTransactionMetrics.AddKvRetryWait("TryGetValue_4018");
-                await Task.Delay(backoffMs);
-                backoffMs = Math.Min(backoffMs * 2, 1000);
+                await Task.Delay(ReadWaitBackoff.Next(ref backoffMs, deadline));
             }
         }
         finally
@@ -287,8 +285,7 @@ internal sealed class LocalKeyValueReadOperations
                     return (KeyValueResponseType.MustRetry, null);
 
                 Transactions.DurableTransactionMetrics.AddKvRetryWait("TryExistsValue_4158");
-                await Task.Delay(backoffMs);
-                backoffMs = Math.Min(backoffMs * 2, 1000);
+                await Task.Delay(ReadWaitBackoff.Next(ref backoffMs, deadline));
             }
         }
         finally
@@ -510,8 +507,7 @@ internal sealed class LocalKeyValueReadOperations
                     continue; // a decision was resolved: ask again at once
 
                 Transactions.DurableTransactionMetrics.AddKvRetryWait("TryProbeMany");
-                await Task.Delay(backoffMs);
-                backoffMs = Math.Min(backoffMs * 2, 1000);
+                await Task.Delay(ReadWaitBackoff.Next(ref backoffMs, start + (lockWait ? ProbeLockWaitMs : ProbeReadWaitMs)));
             }
         }
         finally

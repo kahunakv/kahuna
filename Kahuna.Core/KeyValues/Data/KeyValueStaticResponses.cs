@@ -32,6 +32,10 @@ internal static class KeyValueStaticResponses
     
     internal static readonly KeyValueResponse MustRetryResponse = new(KeyValueResponseType.MustRetry);
 
+    /// <summary>MustRetry from a release that may only acknowledge what is held and found nothing of the
+    /// transaction; see <see cref="KeyValueResponse.NothingHeld"/>.</summary>
+    internal static readonly KeyValueResponse NothingHeldResponse = KeyValueResponse.NothingHeldHere();
+
     internal static readonly KeyValueResponse NotSetResponse = new(KeyValueResponseType.NotSet);
 
     internal static readonly KeyValueResponse InvalidInputResponse = new(KeyValueResponseType.InvalidInput);

@@ -131,6 +131,18 @@ public sealed class KeyValueResponse
         new(type) { HolderTransactionId = holder, BlockingKeys = blockingKeys };
 
     /// <summary>
+    /// True on the answer of a release that could only acknowledge what the node holds
+    /// (<c>KeyValueRequest.ReleaseOnlyIfHeld</c>) and found nothing of the transaction on the key, prefix or
+    /// range. The type is <see cref="KeyValueResponseType.MustRetry"/>, as for any answer the node cannot vouch
+    /// for; the flag tells this cause from a transient one (a busy actor, a replication intent in flight), so the
+    /// locator can carry the release to the other replicas instead of giving up on it.
+    /// </summary>
+    internal bool NothingHeld { get; private init; }
+
+    /// <summary>A retryable answer that says nothing of the transaction is held here; see <see cref="NothingHeld"/>.</summary>
+    internal static KeyValueResponse NothingHeldHere() => new(KeyValueResponseType.MustRetry) { NothingHeld = true };
+
+    /// <summary>
     /// Construtor
     /// </summary>
     /// <param name="type"></param>

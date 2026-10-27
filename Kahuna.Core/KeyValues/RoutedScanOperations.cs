@@ -599,6 +599,7 @@ internal sealed class RoutedScanOperations
         OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
         payload.ReadObservations = observations;
         payload.AcquiredRangeLocks = acquired;
+        payload.LockExpiresMs = acquired is null ? 0 : expiresMs;
         payload.LockGrantTerms = acquired is null ? null : grants.Take();
         payload.Durability = durability;
         payload.CachedType = cachedType;
@@ -617,7 +618,8 @@ internal sealed class RoutedScanOperations
     /// Pages are fetched via <see cref="LocateAndGetByRange"/>; the snapshot timestamp captured on page 0
     /// is carried in every cursor and reused on each subsequent page for consistent reads.
     /// Transient <see cref="KeyValueResponseType.MustRetry"/> / <see cref="KeyValueResponseType.WaitingForReplication"/>
-    /// responses cause the current page to be retried from the same cursor with exponential back-off.
+    /// responses cause the current page to be retried from the same cursor with the short poll of
+    /// <see cref="ReadWaitBackoff"/>, which never sleeps past the page retry budget.
     /// Any other non-<see cref="KeyValueResponseType.Get"/> page fails the scan with a
     /// <see cref="KahunaServerException"/> carrying the response type: the stream never ends early on a
     /// failure, so an exhausted enumeration always means the range was scanned completely.
@@ -731,8 +733,7 @@ internal sealed class RoutedScanOperations
                 }
 
                 Transactions.DurableTransactionMetrics.AddKvRetryWait("LocateAndScanRange_3201");
-                await Task.Delay(backoffMs, ct);
-                backoffMs = Math.Min(backoffMs * 2, 1000);
+                await Task.Delay(ReadWaitBackoff.Next(ref backoffMs, pageRetryDeadline), ct);
                 continue;
             }
 

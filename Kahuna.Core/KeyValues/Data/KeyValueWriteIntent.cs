@@ -87,27 +87,57 @@ internal sealed class KeyValueWriteIntent
 /// The safe-time rule a snapshot read applies to a live foreign write intent: the read must wait
 /// only when the intent's pending commit could become visible at or before the read's snapshot.
 ///
-/// A prepared intent answers from its known pending commit timestamp. An un-prepared intent
-/// (<see cref="KeyValueWriteIntent.CommitTimestamp"/> still Zero) has no commit timestamp yet, but
-/// one hard lower bound exists: every staged MVCC write is stamped from an HLC event that folded
-/// the writer's transaction id in (<c>TrySetHandler.ExecuteTransactional</c> uses
-/// <c>ReceiveEvent(node, TransactionId)</c>), and the prepare copies that stamp into
-/// <see cref="KeyValueWriteIntent.CommitTimestamp"/>. The eventual commit timestamp is therefore
-/// strictly above <see cref="KeyValueWriteIntent.TransactionId"/>.
+/// <para>A prepared intent answers from its known pending commit timestamp. An un-prepared intent
+/// (<see cref="KeyValueWriteIntent.CommitTimestamp"/> still Zero) has no commit timestamp yet, but its
+/// staged write bounds it from below. <c>TrySetHandler.ExecuteTransactional</c> and the transactional
+/// delete stamp the staged MVCC entry from the actor's clock, and that stamp is the lowest the commit can
+/// carry: the durable coordinator mints the commit timestamp strictly above every staged stamp
+/// (<c>TransactionCoordinator.MintDurableCommitTimestamp</c>), and the manual prepare copies the stamp
+/// itself into <see cref="KeyValueWriteIntent.CommitTimestamp"/>. A write staged above the snapshot
+/// therefore commits above it, and the read must not wait for it.</para>
 ///
-/// So a transaction that began after the read's snapshot can never commit inside that snapshot,
-/// and the read must not wait on its intent. This is what keeps a snapshot scan live under a
-/// saturating writer: without it, every retry of the scan meets the writer's newest in-flight
-/// intent, waits, and retries into the next one — a split's bulk copy or a split probe then
-/// starves forever even though no blocking write can ever land inside its snapshot.
+/// <para>Without a staged write on the key — a point, prefix or range lock that planted the intent before
+/// any write — the bound is the intent's <see cref="KeyValueWriteIntent.AcquiredAt"/>: a write the owner
+/// stages later on this key is stamped by the same clock, after the plant, so its commit lands above the
+/// plant time. An intent that carries no plant time falls back to the transaction id, which every stamp
+/// of the transaction is above.</para>
+///
+/// <para>The bound is the whole cost of the wait. A reader at <c>T</c> that waits for a writer which began
+/// before <c>T</c> but staged after it pays the writer's open time for a commit that can never land inside
+/// its snapshot; a heartbeat-style writer that begins a transaction, takes a lock, and only then writes
+/// made every snapshot scan of its table wait that way. The rule is also what keeps a snapshot scan live
+/// under a saturating writer: every retry of the scan meets the writer's newest in-flight intent, and
+/// without the bound it would wait, retry into the next one, and starve.</para>
 /// </summary>
 internal static class KeyValueWriteIntentSafeTime
 {
     /// <summary>
-    /// Returns whether the intent's pending commit could land at or before
-    /// <paramref name="readTimestamp"/> — that is, whether a snapshot read at that timestamp
-    /// must wait for the intent to resolve. Callers apply this only to a live intent owned by a
-    /// foreign transaction, on a read that carries a snapshot timestamp.
+    /// Returns whether the intent's pending commit could land at or before <paramref name="readTimestamp"/>:
+    /// whether a snapshot read at that timestamp must wait for the intent to resolve. Callers apply this only
+    /// to a live intent owned by a foreign transaction, on a read that carries a snapshot timestamp.
+    /// <paramref name="entry"/> is the key the intent sits on; its MVCC entry staged under the owner, when
+    /// there is one, supplies the tightest bound.
+    /// </summary>
+    internal static bool MayCommitAtOrBefore(KeyValueEntry entry, KeyValueWriteIntent intent, HLCTimestamp readTimestamp)
+    {
+        if (!intent.CommitTimestamp.IsNull())
+            return intent.CommitTimestamp.CompareTo(readTimestamp) <= 0;
+
+        // A staged write on this key: the commit carries this stamp (manual prepare) or a timestamp above it
+        // (durable finalize). Only an entry the owner staged under the intent counts; a read pin the owner left
+        // on the key carries the base's stamp and proves nothing.
+        if (entry.MvccEntries is not null
+            && entry.MvccEntries.TryGetValue(intent.TransactionId, out KeyValueMvccEntry? staged)
+            && staged.StagedUnder is not null)
+            return staged.LastModified.CompareTo(readTimestamp) <= 0;
+
+        return MayCommitAtOrBefore(intent, readTimestamp);
+    }
+
+    /// <summary>
+    /// The bound without a staged write on the key: the plant time of the intent when it carries one, the
+    /// transaction id otherwise (see the class summary). A Zero transaction id carries no proof, so the read
+    /// stays conservative and waits.
     /// </summary>
     internal static bool MayCommitAtOrBefore(KeyValueWriteIntent intent, HLCTimestamp readTimestamp)
     {
@@ -116,9 +146,11 @@ internal static class KeyValueWriteIntentSafeTime
         if (!commitTs.IsNull())
             return commitTs.CompareTo(readTimestamp) <= 0;
 
-        // Un-prepared: the eventual commit timestamp is strictly above the transaction id (see the
-        // class summary). A transaction id at or above the snapshot proves the commit lands after
-        // it. A Zero transaction id carries no proof, so the read stays conservative and waits.
+        HLCTimestamp plantedAt = intent.AcquiredAt;
+
+        if (!plantedAt.IsNull())
+            return plantedAt.CompareTo(readTimestamp) <= 0;
+
         HLCTimestamp transactionId = intent.TransactionId;
 
         return transactionId.IsNull() || transactionId.CompareTo(readTimestamp) < 0;

@@ -1012,7 +1012,7 @@ internal abstract class BaseHandler
             return false;
         }
 
-        return KeyValueWriteIntentSafeTime.MayCommitAtOrBefore(writeIntent, message.ReadTimestamp);
+        return KeyValueWriteIntentSafeTime.MayCommitAtOrBefore(entry, writeIntent, message.ReadTimestamp);
     }
 
     /// <summary>

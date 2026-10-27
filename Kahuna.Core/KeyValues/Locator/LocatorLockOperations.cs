@@ -2,6 +2,7 @@
 using Kommander;
 using Kommander.Time;
 using Kommander.Diagnostics;
+using Kommander.System;
 
 using System.Collections.Concurrent;
 using System.Diagnostics;
@@ -63,6 +64,10 @@ internal sealed class LocatorLockOperations
         if (string.IsNullOrEmpty(key))
             return (KeyValueResponseType.InvalidInput, key, durability, HLCTimestamp.Zero, PointLockBase.None);
 
+        // A lock granted by a stopping node would be dropped with the node, and its transaction refused later.
+        if (routing.RefusesWhileStopping())
+            return (KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero, PointLockBase.None);
+
         int partitionId = routing.RouteKey(key);
 
         if (!raft.Joined)
@@ -119,6 +124,9 @@ internal sealed class LocatorLockOperations
             return KeyValueResponseType.PrefixLockUnsupportedOnRangedSpace;
         }
 
+        if (routing.RefusesWhileStopping())
+            return KeyValueResponseType.MustRetry;
+
         int partitionId = routing.RoutePrefixKey(prefixKey);
 
         if (!raft.Joined)
@@ -158,6 +166,9 @@ internal sealed class LocatorLockOperations
         CancellationToken cancelationToken
     )
     {
+        if (routing.RefusesWhileStopping())
+            return [.. keys.Select(static k => (KeyValueResponseType.MustRetry, k.key, k.durability, HLCTimestamp.Zero, PointLockBase.None))];
+
         string localNode = raft.GetLocalEndpoint();
 
         Dictionary<string, List<(string key, int expiresMs, KeyValueDurability durability)>> acquisitionPlan = [];
@@ -282,7 +293,18 @@ internal sealed class LocatorLockOperations
             return await manager.TryReleaseExclusiveLock(transactionId, key, durability);
 
         if (admission == LockReleaseAdmission.HeldOnly)
-            return await manager.TryReleaseExclusiveLockHeldHere(transactionId, key, durability);
+        {
+            HeldHereRelease held = await manager.TryReleaseExclusiveLockHeldHere(transactionId, key, durability);
+            if (!held.NothingHeld)
+                return (held.Type, key);
+
+            return (await CarryReleaseToVoters(partitionId, async node =>
+            {
+                logger.LogReleaseLockKeyValueRedirected(key, partitionId, node);
+                (KeyValueResponseType type, string _) = await interNodeCommunication.TryReleaseExclusiveLock(node, transactionId, key, durability, cancellationToken);
+                return type;
+            }), key);
+        }
             
         string? leader = await routing.TryWaitForLeader(partitionId, cancellationToken);
         if (leader is null || leader == raft.GetLocalEndpoint())
@@ -333,7 +355,17 @@ internal sealed class LocatorLockOperations
             return await manager.TryReleaseExclusivePrefixLock(transactionId, prefixKey, durability);
 
         if (admission == LockReleaseAdmission.HeldOnly)
-            return await manager.TryReleaseExclusivePrefixLockHeldHere(transactionId, prefixKey, durability);
+        {
+            HeldHereRelease held = await manager.TryReleaseExclusivePrefixLockHeldHere(transactionId, prefixKey, durability);
+            if (!held.NothingHeld)
+                return held.Type;
+
+            return await CarryReleaseToVoters(partitionId, node =>
+            {
+                logger.LogReleasePrefixLockKeyValueRedirected(prefixKey, partitionId, node);
+                return interNodeCommunication.TryReleaseExclusivePrefixLock(node, transactionId, prefixKey, durability, cancellationToken);
+            });
+        }
             
         string? leader = await routing.TryWaitForLeader(partitionId, cancellationToken);
         if (leader is null || leader == raft.GetLocalEndpoint())
@@ -594,6 +626,9 @@ internal sealed class LocatorLockOperations
         RangeLockMode mode,
         CancellationToken cancellationToken)
     {
+        if (routing.RefusesWhileStopping())
+            return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero);
+
         long grantTerm = routing.LockGrantTermBeforeConfirmation(partitionId);
 
         if (!raft.Joined || await routing.ConfirmLeadershipForActorMutation(partitionId, cancellationToken))
@@ -644,7 +679,17 @@ internal sealed class LocatorLockOperations
             return await manager.TryReleaseExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability);
 
         if (admission == LockReleaseAdmission.HeldOnly)
-            return await manager.TryReleaseExclusiveRangeLockHeldHere(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability);
+        {
+            HeldHereRelease held = await manager.TryReleaseExclusiveRangeLockHeldHere(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability);
+            if (!held.NothingHeld)
+                return held.Type;
+
+            return await CarryReleaseToVoters(partitionId, node =>
+            {
+                logger.LogReleaseRangeLockKeyValueRedirected(prefix, partitionId, node);
+                return interNodeCommunication.TryReleaseExclusiveRangeLock(node, transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability, cancellationToken);
+            });
+        }
 
         string? leader = await routing.TryWaitForLeader(partitionId, cancellationToken);
         if (leader is null || leader == raft.GetLocalEndpoint())
@@ -733,19 +778,143 @@ internal sealed class LocatorLockOperations
                 return;
             }
 
-            List<(KeyValueResponseType type, string key, KeyValueDurability durability)> acquireResponses = admission == LockReleaseAdmission.Confirmed
-                ? await manager.TryReleaseManyExclusiveLocks(transactionId, xkeys)
-                : await manager.TryReleaseManyExclusiveLocksHeldHere(transactionId, xkeys);
+            if (admission == LockReleaseAdmission.Confirmed)
+            {
+                List<(KeyValueResponseType type, string key, KeyValueDurability durability)> acquireResponses = await manager.TryReleaseManyExclusiveLocks(transactionId, xkeys);
+
+                lock (lockSync)
+                {
+                    foreach ((KeyValueResponseType type, string key, KeyValueDurability durability) item in acquireResponses)
+                        responses.Add((item.type, item.key, item.durability));
+                }
+
+                return;
+            }
+
+            // Each key the node holds nothing of is carried to the other voters of its partition, as a single
+            // point release is; the keys it does hold are answered from here.
+            List<(KeyValueResponseType Type, string Key, KeyValueDurability Durability, bool NothingHeld)> heldResponses =
+                await manager.TryReleaseManyExclusiveLocksHeldHere(transactionId, xkeys);
+
+            List<Task<(KeyValueResponseType, string, KeyValueDurability)>>? carried = null;
 
             lock (lockSync)
             {
-                foreach ((KeyValueResponseType type, string key, KeyValueDurability durability) item in acquireResponses)
-                    responses.Add((item.type, item.key, item.durability));
+                foreach ((KeyValueResponseType type, string key, KeyValueDurability durability, bool nothingHeld) in heldResponses)
+                {
+                    if (nothingHeld)
+                        (carried ??= new(heldResponses.Count)).Add(CarryPointReleaseToVoters(transactionId, key, durability, cancelationToken));
+                    else
+                        responses.Add((type, key, durability));
+                }
+            }
+
+            if (carried is null)
+                return;
+
+            (KeyValueResponseType, string, KeyValueDurability)[] carriedResponses = await Task.WhenAll(carried);
+
+            lock (lockSync)
+            {
+                foreach ((KeyValueResponseType type, string key, KeyValueDurability durability) in carriedResponses)
+                    responses.Add((type, key, durability));
             }
 
             return;
         }
             
         await interNodeCommunication.TryReleaseNodeExclusiveLocks(leader, transactionId, xkeys, lockSync, responses, cancelationToken);
+    }
+    private async Task<(KeyValueResponseType, string, KeyValueDurability)> CarryPointReleaseToVoters(
+        HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken)
+    {
+        int partitionId = routing.RouteKey(key);
+
+        KeyValueResponseType type = await CarryReleaseToVoters(partitionId, async node =>
+        {
+            logger.LogReleaseLockKeyValueRedirected(key, partitionId, node);
+            (KeyValueResponseType carriedType, string _) = await interNodeCommunication.TryReleaseExclusiveLock(node, transactionId, key, durability, cancellationToken);
+            return carriedType;
+        });
+
+        return (type, key, durability);
+    }
+
+    /// <summary>
+    /// Carries a release that found nothing of the transaction on this node to the other voters of its
+    /// partition. This node believes it leads the partition but no quorum confirmed it, so the lock it was
+    /// asked to release may live on the leader a quorum did confirm, and only that leader can vouch that the
+    /// lock is gone. Each receiver serves the release under its own admission: a confirmed leader releases, and
+    /// its answer is proof also when it held nothing; an unconfirmed node drops what it holds and answers
+    /// MustRetry otherwise; a follower forwards once more to the leader it believes in, which the hop budget
+    /// allows and where the chain ends, so a stale node that receives it there answers MustRetry and cannot
+    /// forward again. The release is acknowledged when one receiver answers with proof; otherwise it stays
+    /// MustRetry, and the caller's retry resolves the leader again.
+    ///
+    /// <para>Only the node that starts a release carries it: a receiver that holds nothing answers MustRetry
+    /// without a fan-out of its own, so two nodes that both believe they lead cannot bounce a release between
+    /// them. Under legacy full replication every roster node hosts the partition, so the voters are the peers.
+    /// An unreachable voter counts as a MustRetry answer. Extra releases are harmless: a release matches the
+    /// transaction id and the bounds, and nothing of a finalized transaction is ever granted again.</para>
+    /// </summary>
+    private async Task<KeyValueResponseType> CarryReleaseToVoters(int partitionId, Func<string, Task<KeyValueResponseType>> send)
+    {
+        if (ForwardedRequestScope.IsActive)
+            return KeyValueResponseType.MustRetry;
+
+        string localEndpoint = raft.GetLocalEndpoint();
+        List<Task<KeyValueResponseType>>? sends = null;
+
+        IReadOnlyList<RaftReplica> replicas = raft.GetPartitionReplicas(partitionId);
+
+        if (replicas.Count > 0)
+        {
+            foreach (RaftReplica replica in replicas)
+            {
+                if (replica.Role != RaftReplicaRole.Voter || string.Equals(replica.Endpoint, localEndpoint, StringComparison.Ordinal))
+                    continue;
+
+                (sends ??= new(replicas.Count)).Add(SendReleaseTo(replica.Endpoint, send));
+            }
+        }
+        else
+        {
+            IList<RaftNode> peers = raft.GetNodes();
+
+            foreach (RaftNode peer in peers)
+            {
+                if (string.Equals(peer.Endpoint, localEndpoint, StringComparison.Ordinal))
+                    continue;
+
+                (sends ??= new(peers.Count)).Add(SendReleaseTo(peer.Endpoint, send));
+            }
+        }
+
+        if (sends is null)
+            return KeyValueResponseType.MustRetry;
+
+        KeyValueResponseType[] answers = await Task.WhenAll(sends);
+
+        foreach (KeyValueResponseType answer in answers)
+        {
+            if (TransactionCoordinator.IsReleaseAcked(answer))
+                return answer;
+        }
+
+        return KeyValueResponseType.MustRetry;
+    }
+
+    private async Task<KeyValueResponseType> SendReleaseTo(string node, Func<string, Task<KeyValueResponseType>> send)
+    {
+        try
+        {
+            return await send(node);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning("Carrying a lock release to {Node} failed: {Type} {Message}", node, ex.GetType().Name, ex.Message);
+
+            return KeyValueResponseType.MustRetry;
+        }
     }
 }

@@ -347,7 +347,7 @@ internal sealed class KeyValuesManagerBuilder
             configuration.TransactionPriorityAgingThreshold,
             configuration.TransactionPriorityMaxQueued);
 
-        txCoordinator = new(manager, configuration, raft, logger, sessionOrderer);
+        txCoordinator = new(manager, configuration, raft, logger, sessionOrderer, runtime.Shutdown.Token);
         scriptExecutor = new(manager, configuration, raft, logger, txCoordinator, scriptOrderer);
 
         // Resident-state gauges for the durable-2PC stores + the admission counter, on an instance-owned meter

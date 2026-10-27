@@ -755,7 +755,7 @@ internal sealed class RangeScanContinuation : ReadContinuation
             if (!KeyValueWriteIntentLease.IsLive(context, key, entry.WriteIntent, currentTime))
                 entry.WriteIntent = null;
             else if (isSnapshotRead
-                     && KeyValueWriteIntentSafeTime.MayCommitAtOrBefore(entry.WriteIntent, snapshotTs))
+                     && KeyValueWriteIntentSafeTime.MayCommitAtOrBefore(entry, entry.WriteIntent, snapshotTs))
                 return KeyValueStaticResponses.WaitingForReplicationResponse;
         }
 

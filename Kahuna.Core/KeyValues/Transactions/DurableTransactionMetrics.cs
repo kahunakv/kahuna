@@ -979,6 +979,62 @@ internal static class DurableTransactionMetrics
     }
 
     /// <summary>
+    /// Retries of a mandatory lock release that no node acknowledged when the commit finalized: one count per
+    /// release per attempt. The first attempt fails in an election window, when no node is confirmed yet, or
+    /// on a coordinator whose leadership belief is stale and whose lock lives on the new leader; a retry
+    /// resolves the leader again. A rising count with few late releases says the releases keep failing, and
+    /// the locks are waited on until their lease ends.
+    /// </summary>
+    internal static readonly Counter<long> LockReleaseRetries =
+        Meter.CreateCounter<long>(
+            "kahuna.transactions.lock_release_retries",
+            description: "Retries of a mandatory lock release that was not acknowledged when the commit finalized.");
+
+    /// <summary>Mandatory lock releases acknowledged on a retry, after the commit finalized without them.</summary>
+    internal static readonly Counter<long> LockReleasesLate =
+        Meter.CreateCounter<long>(
+            "kahuna.transactions.lock_releases_late",
+            description: "Mandatory lock releases acknowledged on a retry after the commit finalized.");
+
+    /// <summary>Mandatory lock releases given up on: their retry stopped at the end of the lock lease or at the
+    /// node shutdown without an acknowledgment, so the lock lapsed with its lease and every writer into it waited.</summary>
+    internal static readonly Counter<long> LockReleasesLeftToLease =
+        Meter.CreateCounter<long>(
+            "kahuna.transactions.lock_releases_left_to_lease",
+            description: "Mandatory lock releases never acknowledged, left to lapse with the lock lease.");
+
+    private static long lockReleaseRetries;
+    private static long lockReleasesLate;
+    private static long lockReleasesLeftToLease;
+
+    /// <summary>Process-wide count behind <see cref="LockReleaseRetries"/>, readable for tests.</summary>
+    internal static long LockReleaseRetriesCount => Interlocked.Read(ref lockReleaseRetries);
+
+    /// <summary>Process-wide count behind <see cref="LockReleasesLate"/>, readable for tests.</summary>
+    internal static long LockReleasesLateCount => Interlocked.Read(ref lockReleasesLate);
+
+    /// <summary>Process-wide count behind <see cref="LockReleasesLeftToLease"/>, readable for tests.</summary>
+    internal static long LockReleasesLeftToLeaseCount => Interlocked.Read(ref lockReleasesLeftToLease);
+
+    internal static void LockReleaseRetried()
+    {
+        Interlocked.Increment(ref lockReleaseRetries);
+        LockReleaseRetries.Add(1);
+    }
+
+    internal static void LockReleasedLate()
+    {
+        Interlocked.Increment(ref lockReleasesLate);
+        LockReleasesLate.Add(1);
+    }
+
+    internal static void CountLockReleasesLeftToLease(int count)
+    {
+        Interlocked.Add(ref lockReleasesLeftToLease, count);
+        LockReleasesLeftToLease.Add(count);
+    }
+
+    /// <summary>
     /// Scans that exhausted the per-page retry budget: one page kept answering
     /// MustRetry/WaitingForReplication for the whole budget, so the scan failed loudly instead of
     /// hanging. The paired error log names the range and the cursor. A firing means some key in the

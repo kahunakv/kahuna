@@ -114,6 +114,29 @@ internal sealed class PartitionWriteState
     /// front of the queue is always the most-aged item.</summary>
     public long OldestPendingTicks => head < pending.Count ? pending[head].EnqueueTicks : NoWake;
 
+    /// <summary>
+    /// Enqueue tick (ms) of the oldest pending item that queue age can release — the oldest
+    /// <see cref="WriteAdmissionClass.Ordinary"/> item — or <see cref="NoWake"/> when none is pending. A
+    /// terminal submission (a decision, a settle, a materialization, a lease renewal) is never released for
+    /// age: its one producer waits for it and does not resend, so releasing it turns a slow commit into an abort
+    /// and buys nothing, where an ordinary producer retries its write. The age deadline that arms the release
+    /// wake therefore follows the oldest ordinary item, so a terminal item at the front of the queue cannot
+    /// arm a wake that releases nothing and fires again at once.
+    /// </summary>
+    public long OldestExpirableTicks
+    {
+        get
+        {
+            for (int i = head; i < pending.Count; i++)
+            {
+                if (pending[i].AdmissionClass != WriteAdmissionClass.Terminal)
+                    return pending[i].EnqueueTicks;
+            }
+
+            return NoWake;
+        }
+    }
+
     public readonly record struct EnqueueResult(bool ShouldFlushNow, bool OpenedBuffer);
 
     /// <summary>
@@ -147,7 +170,7 @@ internal sealed class PartitionWriteState
             return HoldArmed ? holdUntil : NoWake;
 
         long oldest = OldestPendingTicks;
-        long ageDeadline = oldest + maxQueueDelayMs;
+        long ageDeadline = AgeDeadline(maxQueueDelayMs);
         if (!HasDispatchCapacity)
             return ageDeadline;
 
@@ -158,10 +181,14 @@ internal sealed class PartitionWriteState
         return Math.Min(flushDeadline, ageDeadline);
     }
 
-    /// <summary>The oldest pending item's queue-age release deadline, or <see cref="NoWake"/> when nothing is
-    /// pending. A wake deadline equal to it releases expired items; any other wake deadline is a flush (linger or
-    /// post-completion hold).</summary>
-    public long AgeDeadline(int maxQueueDelayMs) => PendingCount == 0 ? NoWake : OldestPendingTicks + maxQueueDelayMs;
+    /// <summary>The queue-age release deadline of the oldest pending item that age can release (see
+    /// <see cref="OldestExpirableTicks"/>), or <see cref="NoWake"/> when there is none. A wake deadline equal to
+    /// it releases expired items; any other wake deadline is a flush (linger or post-completion hold).</summary>
+    public long AgeDeadline(int maxQueueDelayMs)
+    {
+        long oldestExpirable = OldestExpirableTicks;
+        return oldestExpirable == NoWake ? NoWake : oldestExpirable + maxQueueDelayMs;
+    }
 
     /// <summary>Arms a wake for <paramref name="deadline"/> only if it is earlier than the one already armed,
     /// so a steady arrival stream does not start a timer per item. Returns true if the caller should start the
@@ -303,23 +330,49 @@ internal sealed class PartitionWriteState
     public void OnBatchComplete() => inFlightBatches--;
 
     /// <summary>
-    /// Pops and returns the oldest pending items whose age (<paramref name="nowTicks"/> − enqueue tick)
+    /// Pops and returns the oldest pending ordinary items whose age (<paramref name="nowTicks"/> − enqueue tick)
     /// exceeds <paramref name="maxDelayMs"/>, relieving queue-age pressure even while a batch is in flight.
     /// FIFO order means the front items are the most aged, so stopping at the first non-expired item is safe.
+    /// A terminal item inside the aged prefix stays in place (see <see cref="OldestExpirableTicks"/>); the
+    /// ordinary items around it are released and the prefix is closed up behind the kept ones.
     /// </summary>
     public List<IProposalSubmission> PopExpired(long nowTicks, int maxDelayMs)
     {
         List<IProposalSubmission> expired = [];
-        while (head < pending.Count && nowTicks - pending[head].EnqueueTicks > maxDelayMs)
+        List<IProposalSubmission>? kept = null;
+
+        int end = head;
+        while (end < pending.Count && nowTicks - pending[end].EnqueueTicks > maxDelayMs)
         {
-            IProposalSubmission item = pending[head];
-            QueuedBytes -= item.ByteLength;
-            expired.Add(item);
-            head++;
+            IProposalSubmission item = pending[end];
+            if (item.AdmissionClass == WriteAdmissionClass.Terminal)
+                (kept ??= []).Add(item);
+            else
+            {
+                QueuedBytes -= item.ByteLength;
+                expired.Add(item);
+            }
+
+            end++;
         }
 
-        if (expired.Count > 0)
-            Compact();
+        if (expired.Count == 0)
+            return expired;
+
+        if (kept is null)
+            head = end;
+        else
+        {
+            // The kept terminal items move to the front of the aged prefix, in their order, and the gap the
+            // released items left is closed; the queue behind the prefix is untouched.
+            int write = head;
+            foreach (IProposalSubmission item in kept)
+                pending[write++] = item;
+
+            pending.RemoveRange(write, end - write);
+        }
+
+        Compact();
 
         return expired;
     }

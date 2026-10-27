@@ -736,9 +736,30 @@ internal sealed partial class KeyValuesManager : IDisposable
         runtime.WatchBroker.EndAll(KeyValueWatchLagReason.Shutdown);
     }
 
+    /// <summary>
+    /// True once <see cref="SignalShutdown"/> ran. From then on the node takes no new transaction session, no
+    /// commit it does not own, and no lock grant, and it answers no routing question from its own leadership
+    /// belief: its Raft is about to stop or has stopped, so that belief is stale by construction, and a session
+    /// begun or a lock granted here now would be coordinated or held by a node that is going away. Releases,
+    /// rollbacks and the finalize of the sessions it owns are still served, so the node cleans up what it can.
+    /// </summary>
+    internal bool Stopping => runtime.Shutdown.IsCancellationRequested;
+
+    private long refusedWhileStopping;
+
+    /// <summary>Counts a request refused because the node is stopping; reported once at dispose.</summary>
+    internal void CountRefusedWhileStopping() => Interlocked.Increment(ref refusedWhileStopping);
+
+    /// <summary>How many requests this node refused after its shutdown signal. Test access.</summary>
+    internal long RefusedWhileStoppingCount => Interlocked.Read(ref refusedWhileStopping);
+
     public void Dispose()
     {
         SignalShutdown();
+
+        long refused = Interlocked.Read(ref refusedWhileStopping);
+        if (refused > 0)
+            logger.LogNodeShutdownRefusedRequests(refused);
 
         raft.OnRestoreFinished -= OnPartitionRestoreFinished;
 

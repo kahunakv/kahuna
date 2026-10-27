@@ -1,4 +1,5 @@
 using Kahuna.Server.KeyValues;
+using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
 using Kommander;
@@ -136,9 +137,13 @@ public sealed class TestStaleLeaderActorMutationFence : BaseCluster
                 handle.TransactionId, key, 10_000, KeyValueDurability.Persistent, ct);
             Assert.Equal(KeyValueResponseType.MustRetry, staleLock);
 
-            (KeyValueResponseType staleRelease, _) = await stale.LocateAndTryReleaseExclusiveLock(
+            // A release of a lock it does not hold: the cut-off node cannot vouch that the lock is gone, so it
+            // carries the release to the voters it still reaches over the key-value transport, and the quorum
+            // leader's answer is the proof. The cut-off node itself vouches for nothing: with no reachable
+            // voter it answers MustRetry (see TestStaleCoordinatorLockRelease), as it did before it carried.
+            (KeyValueResponseType carriedRelease, _) = await stale.LocateAndTryReleaseExclusiveLock(
                 handle.TransactionId, key, KeyValueDurability.Persistent, ct);
-            Assert.Equal(KeyValueResponseType.MustRetry, staleRelease);
+            Assert.True(TransactionCoordinator.IsReleaseAcked(carriedRelease), $"the live leader must vouch for the carried release; got {carriedRelease}");
 
             KeyValueResponseType staleProbe = await stale.LocateAndTryCheckWriteIntent(
                 handle.TransactionId, key, KeyValueDurability.Persistent, ct);

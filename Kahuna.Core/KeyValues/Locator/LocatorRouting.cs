@@ -2,6 +2,7 @@
 using Kommander;
 using Kommander.Time;
 using Kommander.Diagnostics;
+using Kommander.System;
 
 using System.Collections.Concurrent;
 using System.Diagnostics;
@@ -260,6 +261,12 @@ internal sealed class LocatorRouting
     /// </summary>
     internal async ValueTask<string?> TryWaitForLeader(int partitionId, CancellationToken cancellationToken)
     {
+        // A node that signaled its shutdown answers from no leadership belief of its own (see
+        // KeyValuesManager.Stopping): the target is another node that hosts the partition, which resolves the
+        // leader from a live Raft, or no target at all for a request that already arrived forwarded.
+        if (Stopping)
+            return PickRemotePeerWhileStopping(partitionId);
+
         try
         {
             string? leader = await raft.TryResolveLeader(partitionId, cancellationToken);
@@ -289,6 +296,61 @@ internal sealed class LocatorRouting
             return null;
         }
     }
+
+    /// <summary>
+    /// The forward target of a stopping node for <paramref name="partitionId"/>: the gossiped leader hint when
+    /// it names another node, else the first remote voter of the committed replica set, else the first peer
+    /// (under legacy full replication every roster node hosts the partition). Never this node. Null when the
+    /// request already arrived forwarded, with the same reasoning as the resolver's: a stopping node has no
+    /// better answer than the sender's own map, so the sender retries against a settled view.
+    /// </summary>
+    private string? PickRemotePeerWhileStopping(int partitionId)
+    {
+        if (ForwardedRequestScope.IsActive)
+        {
+            logger.LogKeyValueLeaderNotResolved(partitionId, "No forward target: this node is shutting down, and the request already arrived forwarded");
+            return null;
+        }
+
+        string localEndpoint = raft.GetLocalEndpoint();
+
+        string? hint = raft.GetPartitionLeaderHint(partitionId);
+        if (!string.IsNullOrEmpty(hint) && !string.Equals(hint, localEndpoint, StringComparison.Ordinal))
+            return hint;
+
+        foreach (RaftReplica replica in raft.GetPartitionReplicas(partitionId))
+        {
+            if (replica.Role == RaftReplicaRole.Voter && !string.Equals(replica.Endpoint, localEndpoint, StringComparison.Ordinal))
+                return replica.Endpoint;
+        }
+
+        foreach (RaftNode peer in raft.GetNodes())
+        {
+            if (!string.Equals(peer.Endpoint, localEndpoint, StringComparison.Ordinal))
+                return peer.Endpoint;
+        }
+
+        logger.LogKeyValueLeaderNotResolved(partitionId, "No forward target: this node is shutting down and knows no other node");
+        return null;
+    }
+
+    /// <summary>
+    /// Whether this node refuses new work because it signaled its shutdown (<see cref="KeyValuesManager.Stopping"/>).
+    /// A new session, a commit this node does not own and a lock grant are answered MustRetry when this is true,
+    /// so the sender resolves another target; each refusal is counted and reported once at dispose.
+    /// </summary>
+    internal bool RefusesWhileStopping()
+    {
+        if (!Stopping)
+            return false;
+
+        manager.CountRefusedWhileStopping();
+        return true;
+    }
+
+    /// <summary><see cref="KeyValuesManager.Stopping"/>; false for a locator built without a manager, as the
+    /// routing unit tests build it.</summary>
+    private bool Stopping => manager is not null && manager.Stopping;
 
     /// <summary>
     /// Memoizing variant of <see cref="TryWaitForLeader(int, CancellationToken)"/> for batch
@@ -406,9 +468,13 @@ internal sealed class LocatorRouting
     /// leadership this node believes in, the release still runs, but it acknowledges only what this node
     /// holds of the transaction (<c>KeyValueRequest.ReleaseOnlyIfHeld</c>): a lock found here was granted
     /// here, since a lock lives in the memory of the leader that granted it, so dropping it is right whether
-    /// this node still leads or was deposed in between; a release that finds nothing answers MustRetry, since
-    /// a node whose leadership is unconfirmed cannot vouch that the lock is not held by the leader a quorum
-    /// did confirm.
+    /// this node still leads or was deposed in between; a release that finds nothing cannot be vouched for by
+    /// a node whose leadership is unconfirmed, since the lock may be held by the leader a quorum did confirm,
+    /// so the locator carries it to the other voters of the partition, and it ends as MustRetry only when none
+    /// of them vouches either.
+    ///
+    /// <para>A node that signaled its shutdown answers from no belief at all: its Raft is about to stop or
+    /// has stopped, so its leadership view is stale by construction, and a release takes the forward path.</para>
     ///
     /// <para>The unconfirmed-but-held case is the window a leader is in while its ack round waits on a peer
     /// that just failed. The commit-time lock proof refuses a transaction in that window for exactly that
@@ -418,6 +484,9 @@ internal sealed class LocatorRouting
     /// </summary>
     internal async ValueTask<LockReleaseAdmission> AdmitLockRelease(int partitionId, CancellationToken cancellationToken)
     {
+        if (Stopping)
+            return LockReleaseAdmission.NotHere;
+
         if (await ConfirmLeadershipIfHosted(partitionId, cancellationToken))
             return LockReleaseAdmission.Confirmed;
 
@@ -503,7 +572,8 @@ internal enum LockReleaseAdmission
     Confirmed,
 
     /// <summary>This node believes it leads, but no quorum confirmed it: the release acknowledges only what this
-    /// node holds of the transaction.</summary>
+    /// node holds of the transaction, and the locator carries a release that finds nothing to the other voters
+    /// of the partition.</summary>
     HeldOnly,
 
     /// <summary>This node does not lead the partition by its own belief: the release goes to the leader it resolves.</summary>

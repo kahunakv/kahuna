@@ -1226,6 +1226,7 @@ message GrpcCompleteOperationRequest
   repeated GrpcLockGrantTerm LockGrantTerms = 25;
   // The range locks a batch operation acquired (a batched probe's Shared [k,k] locks).
   repeated GrpcTransactionRangeLock AcquiredRangeLocks = 26;
+  int32 LockExpiresMs = 27;
   GrpcKeyValueDurability Durability = 16;
   GrpcKeyValueResponseType CachedType = 17;
   int64 CachedRevision = 18;

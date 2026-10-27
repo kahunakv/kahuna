@@ -78,7 +78,7 @@ internal sealed class TryReleaseExclusiveRangeLockHandler : BaseHandler
     /// acknowledge what is held (see <see cref="KeyValueRequest.ReleaseOnlyIfHeld"/>).
     /// </summary>
     private static KeyValueResponse NothingHeld(KeyValueRequest message) =>
-        message.ReleaseOnlyIfHeld ? KeyValueStaticResponses.MustRetryResponse : KeyValueStaticResponses.UnlockedResponse;
+        message.ReleaseOnlyIfHeld ? KeyValueStaticResponses.NothingHeldResponse : KeyValueStaticResponses.UnlockedResponse;
 
     private void ReleaseExistingLocksInRange(KeyValueRequest message)
     {

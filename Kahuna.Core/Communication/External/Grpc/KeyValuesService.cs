@@ -2357,6 +2357,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         payload.StagedMutations = request.StagedMutations.Count == 0 ? null : request.StagedMutations.Select(FromGrpcStagedMutation).ToList();
         payload.AcquiredPointLocks = request.AcquiredPointLocks.Count == 0 ? null : request.AcquiredPointLocks.Select(l => (l.Key, (KeyValueDurability)l.Durability)).ToList();
         payload.LockGrantTerms = request.LockGrantTerms.Count == 0 ? null : request.LockGrantTerms.Select(g => new LockGrantTerm(g.PartitionId, g.Term, g.RoutingKey)).ToList();
+        payload.LockExpiresMs = request.LockExpiresMs;
         payload.Durability = (KeyValueDurability)request.Durability;
         payload.CachedType = (KeyValueResponseType)request.CachedType;
         payload.CachedRevision = request.CachedRevision;

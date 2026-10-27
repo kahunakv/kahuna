@@ -180,17 +180,18 @@ internal sealed partial class KeyValuesManager
     /// <summary>
     /// <see cref="TryReleaseExclusiveLock"/> on a node whose leadership no quorum confirmed: releases what this
     /// node holds of the transaction and answers <see cref="KeyValueResponseType.MustRetry"/> when it holds
-    /// nothing on the key (see <see cref="KeyValueRequest.ReleaseOnlyIfHeld"/>).
+    /// nothing on the key, with <see cref="HeldHereRelease.NothingHeld"/> set so the locator carries the release
+    /// to the other replicas (see <see cref="KeyValueRequest.ReleaseOnlyIfHeld"/>).
     /// </summary>
-    internal Task<(KeyValueResponseType, string)> TryReleaseExclusiveLockHeldHere(HLCTimestamp transactionId, string key, KeyValueDurability durability) =>
-        localLocks.TryReleaseExclusiveLock(transactionId, key, durability, onlyIfHeld: true);
+    internal Task<HeldHereRelease> TryReleaseExclusiveLockHeldHere(HLCTimestamp transactionId, string key, KeyValueDurability durability) =>
+        localLocks.TryReleaseExclusiveLockHeldHere(transactionId, key, durability);
 
     public Task<KeyValueResponseType> TryReleaseExclusivePrefixLock(HLCTimestamp transactionId, string prefixKey, KeyValueDurability durability) =>
         localLocks.TryReleaseExclusivePrefixLock(transactionId, prefixKey, durability);
 
     /// <summary><see cref="TryReleaseExclusiveLockHeldHere"/> for a prefix lock.</summary>
-    internal Task<KeyValueResponseType> TryReleaseExclusivePrefixLockHeldHere(HLCTimestamp transactionId, string prefixKey, KeyValueDurability durability) =>
-        localLocks.TryReleaseExclusivePrefixLock(transactionId, prefixKey, durability, onlyIfHeld: true);
+    internal Task<HeldHereRelease> TryReleaseExclusivePrefixLockHeldHere(HLCTimestamp transactionId, string prefixKey, KeyValueDurability durability) =>
+        localLocks.TryReleaseExclusivePrefixLockHeldHere(transactionId, prefixKey, durability);
 
     public Task<(KeyValueResponseType, HLCTimestamp HolderTransactionId)> TryAcquireExclusiveRangeLock(
         HLCTimestamp transactionId,
@@ -222,14 +223,14 @@ internal sealed partial class KeyValuesManager
         localLocks.TryReleaseExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability);
 
     /// <summary><see cref="TryReleaseExclusiveLockHeldHere"/> for a range lock.</summary>
-    internal Task<KeyValueResponseType> TryReleaseExclusiveRangeLockHeldHere(
+    internal Task<HeldHereRelease> TryReleaseExclusiveRangeLockHeldHere(
         HLCTimestamp transactionId,
         string prefix,
         string? startKey, bool startInclusive,
         string? endKey,   bool endInclusive,
         KeyValueDurability durability
     ) =>
-        localLocks.TryReleaseExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability, onlyIfHeld: true);
+        localLocks.TryReleaseExclusiveRangeLockHeldHere(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability);
 
     internal Task RecoverPreparedIntents(CancellationToken cancellationToken) =>
         durableMaintenance.RecoverPreparedIntents(cancellationToken);
@@ -286,11 +287,11 @@ internal sealed partial class KeyValuesManager
         localMutationTickets.TryReleaseManyExclusiveLocks(transactionId, keys);
 
     /// <summary><see cref="TryReleaseExclusiveLockHeldHere"/> for a batch of point locks.</summary>
-    internal Task<List<(KeyValueResponseType, string, KeyValueDurability)>> TryReleaseManyExclusiveLocksHeldHere(
+    internal Task<List<(KeyValueResponseType Type, string Key, KeyValueDurability Durability, bool NothingHeld)>> TryReleaseManyExclusiveLocksHeldHere(
         HLCTimestamp transactionId, 
         List<(string key, KeyValueDurability durability)> keys
     ) =>
-        localMutationTickets.TryReleaseManyExclusiveLocks(transactionId, keys, onlyIfHeld: true);
+        localMutationTickets.TryReleaseManyExclusiveLocksHeldHere(transactionId, keys);
 
     public Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> TryPrepareMutations(
         HLCTimestamp transactionId,

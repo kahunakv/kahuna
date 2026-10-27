@@ -161,6 +161,7 @@ internal sealed class RoutedLockOperations
 
         OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
         payload.AcquiredPointLock = acquired ? key : null;
+        payload.LockExpiresMs = acquired ? expiresMs : 0;
         // The grant's committed base folds into the read set: once this transaction writes the key it becomes
         // the write's validated base, so a commit over a base another transaction moved (possible only when the
         // lock was lost to a leader change) is refused instead of silently replacing that commit.
@@ -267,6 +268,7 @@ internal sealed class RoutedLockOperations
 
         OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
         payload.AcquiredPrefixLock = acquired ? prefixKey : null;
+        payload.LockExpiresMs = acquired ? expiresMs : 0;
         payload.LockGrantTerms = acquired ? grants.Take() : null;
         payload.Durability = durability;
         payload.CachedType = type;
@@ -352,12 +354,19 @@ internal sealed class RoutedLockOperations
         // transient subset as a fresh operation.
         List<(string, KeyValueDurability)> acquired = [];
         List<KeyValueTransactionReadKey>? observations = null;
+        int longestLeaseMs = 0;
         foreach ((KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp _, long baseRevision) in responses)
         {
             if (type != KeyValueResponseType.Locked)
                 continue;
 
             acquired.Add((key, durability));
+
+            foreach ((string requestedKey, int requestedExpiresMs, KeyValueDurability requestedDurability) in keys)
+            {
+                if (requestedExpiresMs > longestLeaseMs && requestedDurability == durability && string.Equals(requestedKey, key, StringComparison.Ordinal))
+                    longestLeaseMs = requestedExpiresMs;
+            }
 
             KeyValueTransactionReadKey? observation = PointLockBase.ToObservation(key, durability, baseRevision);
             if (observation is not null)
@@ -366,6 +375,7 @@ internal sealed class RoutedLockOperations
 
         OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
         payload.AcquiredPointLocks = acquired.Count > 0 ? acquired : null;
+        payload.LockExpiresMs = longestLeaseMs;
         payload.ReadObservations = observations;
         payload.LockGrantTerms = acquired.Count > 0 ? grants.Take() : null;
         // A batch that acquired at least one lock completes terminally so its held locks fold. A
@@ -639,6 +649,7 @@ internal sealed class RoutedLockOperations
 
         OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
         payload.AcquiredRangeLock = acquired ? (range, mode) : null;
+        payload.LockExpiresMs = acquired ? expiresMs : 0;
         payload.LockGrantTerms = acquired ? grants.Take() : null;
         payload.Durability = durability;
         payload.CachedType = type;

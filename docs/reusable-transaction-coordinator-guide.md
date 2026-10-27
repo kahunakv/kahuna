@@ -460,10 +460,13 @@ on the record, moving the deadline to now plus the frozen margin. The state mach
 the lease is still held (the attempt HLC has not passed the current deadline) and only forward; a
 terminal record rejects it. A renewal is sent only when less than half of the lease remains, and each
 attempt may renew at most `DurableDecisionDeadlineMaxExtensions` times. The check runs between the prepare
-loop's rounds and, while a helping pass, a re-prepare or a late validation is in flight, every quarter of
-the lease in wall-clock time, so one long round cannot let the lease lapse. The recovery sweep reads the
-deadline off the record, so a renewed record waits. `kahuna.durable_tx.deadline_extensions{outcome}`
-counts renewals as `extended`, `record_terminal`, `unavailable`, `lapsed` or `budget_spent`.
+loop's rounds and, while the first prepare barrier, a helping pass, a re-prepare or a late validation is in
+flight, every quarter of the lease in wall-clock time, so one long step cannot let the lease lapse. A due
+renewal that could not be replicated is sent again at once while the lease holds (25 ms apart, at most 64
+times), and the write scheduler never releases a terminal-class submission for queue age, so a renewal that
+queued behind a saturated partition is proposed rather than dropped. The recovery sweep reads the deadline
+off the record, so a renewed record waits. `kahuna.durable_tx.deadline_extensions{outcome}` counts renewals
+as `extended`, `record_terminal`, `unavailable`, `lapsed` or `budget_spent`; a resend counts again.
 
 The prepare retry loop uses the same lease. The helping pass reports whether the holders of a refused key
 are decided or still undecided: decided holders are settlement lag, bounded by the (renewed) deadline. A

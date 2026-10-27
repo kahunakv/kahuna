@@ -2152,4 +2152,81 @@ public sealed class TestPartitionWriteAggregator
         // One completion-delay sample per settled batch, never negative.
         Assert.All(capture.Samples("kahuna.kv.write.completion_delay"), d => Assert.True(d >= 0));
     }
+
+    /// <summary>
+    /// A terminal submission is never released for queue age: a decision, a settle or a lease renewal has one
+    /// waiting producer that does not resend it. The ordinary items around it in the aged prefix are released,
+    /// the terminal item keeps its place at the front, and the age deadline follows the oldest ordinary item.
+    /// </summary>
+    [Fact]
+    public void State_PopExpired_KeepsTerminalItems_AndReleasesOrdinaryItemsAroundThem()
+    {
+        PartitionWriteState state = new();
+        state.Enqueue(Item(1, 1, ageMs: 900), maxItems: 512, maxBytes: 4096);
+        state.Enqueue(Item(1, 2, ageMs: 800, admissionClass: WriteAdmissionClass.Terminal), maxItems: 512, maxBytes: 4096);
+        state.Enqueue(Item(1, 3, ageMs: 700), maxItems: 512, maxBytes: 4096);
+        RecordingSubmission fresh = Item(1, 4, ageMs: 100);
+        state.Enqueue(fresh, maxItems: 512, maxBytes: 4096);
+
+        List<IProposalSubmission> expired = state.PopExpired(Environment.TickCount64, maxDelayMs: 500);
+
+        Assert.Equal([1, 3], expired.Select(i => ((RecordingSubmission)i).ProposalId).ToArray());
+        Assert.Equal(2, state.PendingCount);
+        Assert.Equal(fresh.EnqueueTicks + 500, state.AgeDeadline(500));
+
+        List<IProposalSubmission> batch = state.SelectBatch(maxItems: 512, maxBytes: 4096);
+        Assert.Equal([2, 4], batch.Select(i => ((RecordingSubmission)i).ProposalId).ToArray());
+    }
+
+    [Fact]
+    public void State_OnlyTerminalItemsPending_ArmNoAgeWake()
+    {
+        PartitionWriteState state = new();
+        state.Enqueue(Item(1, 1, ageMs: 900, admissionClass: WriteAdmissionClass.Terminal), maxItems: 512, maxBytes: 4096);
+
+        Assert.Equal(PartitionWriteState.NoWake, state.AgeDeadline(500));
+        Assert.Empty(state.PopExpired(Environment.TickCount64, maxDelayMs: 500));
+        Assert.Equal(1, state.PendingCount);
+    }
+
+    /// <summary>
+    /// Through the actor: a terminal item queued behind an in-flight batch outlives the queue-age bound and is
+    /// dispatched once the batch completes, while an ordinary item queued behind it is released at its age
+    /// deadline. The wake that releases the ordinary item does not release the terminal one, and does not spin on
+    /// the terminal item's age.
+    /// </summary>
+    [Fact]
+    public async Task Aggregator_TerminalItem_IsNeverReleasedForQueueAge()
+    {
+        ManualTimeProvider time = new();
+        RecordingExecutor exec = new();
+        RecordingRouter router = new();
+        exec.Gate(14);
+
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
+        {
+            MaxBatchItems = 8,
+            LingerMs = 0,
+            MaxQueueDelayMs = 500,
+            MaxQueuedItemsPerPartition = 1024
+        }, timeProvider: time);
+
+        Assert.True(agg.TryEnqueue(Item(14, 1, sink: router))); // dispatched, gated
+        await WaitUntil(() => exec.Calls.Count == 1);
+        Assert.True(agg.TryEnqueue(Item(14, 2, sink: router, admissionClass: WriteAdmissionClass.Terminal))); // queued behind
+        Assert.True(agg.TryEnqueue(Item(14, 3, sink: router))); // ordinary, queued behind the terminal item
+
+        await AdvanceUntil(time, () => router.Released.ContainsKey(3), stepMs: 600);
+        Assert.True(router.Released[3]);                 // the ordinary item aged out, retryably
+        Assert.False(router.Released.ContainsKey(2));   // the terminal item is still queued
+        Assert.Single(exec.Calls);
+
+        time.Advance(TimeSpan.FromMilliseconds(2_000));  // long past the terminal item's age: still queued
+        Assert.False(router.Released.ContainsKey(2));
+
+        exec.Release(14);
+        await WaitUntil(() => router.Completed.ContainsKey(2));
+        Assert.False(router.Released.ContainsKey(2));
+        Assert.Equal(2, exec.Calls.Count);
+    }
 }

@@ -45,7 +45,7 @@ internal sealed class TryReleaseExclusivePrefixLockHandler : BaseHandler
 
         // The transaction holds no lock on the prefix here: a clean answer, unless the release may only
         // acknowledge what is held (see KeyValueRequest.ReleaseOnlyIfHeld).
-        return message.ReleaseOnlyIfHeld ? KeyValueStaticResponses.MustRetryResponse : KeyValueStaticResponses.UnlockedResponse;
+        return message.ReleaseOnlyIfHeld ? KeyValueStaticResponses.NothingHeldResponse : KeyValueStaticResponses.UnlockedResponse;
     }
     
     /// <summary>

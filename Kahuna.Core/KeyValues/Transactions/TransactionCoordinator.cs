@@ -109,13 +109,23 @@ internal sealed class TransactionCoordinator : IDisposable
     /// </summary>
     private readonly TransactionPriorityOrderer orderer;
 
-    public TransactionCoordinator(KeyValuesManager manager, KahunaConfiguration configuration, IRaft raft, ILogger<IKahuna> logger, TransactionPriorityOrderer orderer)
+    /// <summary>Signaled when the node begins to shut down; ends the detached retry of a commit's lock releases.</summary>
+    private readonly CancellationToken shutdown;
+
+    /// <summary>First delay of the detached retry of a commit's unacknowledged lock releases, doubled up to
+    /// <see cref="LockReleaseRetryMaxDelayMs"/> on each attempt.</summary>
+    internal const int LockReleaseRetryInitialDelayMs = 50;
+
+    internal const int LockReleaseRetryMaxDelayMs = 1_000;
+
+    public TransactionCoordinator(KeyValuesManager manager, KahunaConfiguration configuration, IRaft raft, ILogger<IKahuna> logger, TransactionPriorityOrderer orderer, CancellationToken shutdown = default)
     {
         this.manager = manager;
         this.configuration = configuration;
         this.raft = raft;
         this.logger = logger;
         this.orderer = orderer;
+        this.shutdown = shutdown;
     }
 
     /// <summary>
@@ -520,11 +530,13 @@ internal sealed class TransactionCoordinator : IDisposable
 
     /// <summary>
     /// The commit's cleanup of the working set. No commit outcome depends on it, and the session is finalized
-    /// whatever it answers, so a mandatory release that was not acknowledged is not retried from here: the lock
-    /// it left behind lapses with its lease, and the warning is what explains the writers that wait for it
-    /// meanwhile. A release is served for the locks the node holds even when no quorum confirms its leadership
-    /// (<c>LocatorRouting.AdmitLockRelease</c>), so the confirmation whose absence refused the commit as a lost
-    /// lock does not refuse the cleanup of the locks that refusal leaves behind.
+    /// whatever it answers. A release is served for the locks the node holds even when no quorum confirms its
+    /// leadership (<c>LocatorRouting.AdmitLockRelease</c>), so the confirmation whose absence refused the commit
+    /// as a lost lock does not refuse the cleanup of the locks that refusal leaves behind. A mandatory release
+    /// that still was not acknowledged, because no node could vouch for it in an election window or the lock
+    /// lives on a leader this node could not reach, is retried detached by <see cref="RetryUnacknowledgedReleases"/>
+    /// until it is acknowledged, the lock lease ends, or the node shuts down; the lock a retry does not reach
+    /// lapses with its lease, and the warning at the end of the retry is what explains the writers that waited.
     /// </summary>
     private async Task ReleaseWorkingSetAfterCommit(TransactionContext context)
     {
@@ -540,10 +552,136 @@ internal sealed class TransactionCoordinator : IDisposable
             return;
         }
 
-        if (!acknowledged)
+        if (acknowledged)
+            return;
+
+        List<PendingLockRelease>? pending = context.TakeUnacknowledgedReleases();
+
+        if (pending is null || pending.Count == 0)
+        {
+            // The release did not name what it could not acknowledge (a best-effort item failed): nothing to retry.
             logger.LogWarning(
-                "Transaction {TransactionId}: a mandatory lock release after the commit finalize was not acknowledged; the lock stays until its lease ends",
+                "Transaction {TransactionId}: the working-set release after the commit finalize was not fully acknowledged, and no mandatory lock release is left to retry",
                 context.TransactionId);
+            return;
+        }
+
+        _ = RetryUnacknowledgedReleases(context, pending);
+    }
+
+    /// <summary>
+    /// Retries the mandatory lock releases of a finalized transaction that no node acknowledged, with a backoff
+    /// from <see cref="LockReleaseRetryInitialDelayMs"/> doubled up to <see cref="LockReleaseRetryMaxDelayMs"/>.
+    /// Each attempt resolves the admission and the leader again through the locator, so a leader elected after
+    /// the first attempt is found, and a release this node cannot vouch for is carried to the other voters on
+    /// every attempt. The retry ends when every release is acknowledged, when the latest lock lease of the
+    /// transaction ends (<see cref="TransactionContext.LockLeaseEndTicks"/>; the participant effect window
+    /// when no lock carried a lease), or when the node shuts down. It runs detached: the commit answered
+    /// already, and the session stays finalized.
+    /// </summary>
+    private async Task RetryUnacknowledgedReleases(TransactionContext context, List<PendingLockRelease> pending)
+    {
+        // The releases a retry sends are new fan-out this node starts, as the commit's own cleanup is.
+        using ForwardedRequestScope.SuppressScope _ = ForwardedRequestScope.Suppress();
+
+        long startedTicks = Environment.TickCount64;
+
+        // A lock granted with a lease is gone once the lease ends, so the retry ends there too. A lock that
+        // carried no lease (a write's intent) is bounded by the participant effect window instead.
+        long retryUntil = context.LockLeaseEndTicks > 0 ? context.LockLeaseEndTicks : startedTicks + MaxParticipantEffectTtlMs;
+        int delayMs = LockReleaseRetryInitialDelayMs;
+        int attempts = 0;
+        string ended = "the lock lease ended";
+
+        try
+        {
+            while (pending.Count > 0)
+            {
+                if (shutdown.IsCancellationRequested)
+                {
+                    ended = "the node is shutting down";
+                    break;
+                }
+
+                long remainingMs = retryUntil - Environment.TickCount64;
+                if (remainingMs <= 0)
+                    break;
+
+                try
+                {
+                    await Task.Delay((int)Math.Min(delayMs, remainingMs), shutdown).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    ended = "the node is shutting down";
+                    break;
+                }
+
+                delayMs = Math.Min(delayMs * 2, LockReleaseRetryMaxDelayMs);
+                attempts++;
+
+                for (int i = pending.Count - 1; i >= 0; i--)
+                {
+                    DurableTransactionMetrics.LockReleaseRetried();
+
+                    if (!await TryReleasePending(context.TransactionId, pending[i]).ConfigureAwait(false))
+                        continue;
+
+                    pending.RemoveAt(i);
+                    DurableTransactionMetrics.LockReleasedLate();
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            ended = "the retry failed";
+            logger.LogError("Retrying the lock releases of transaction {TransactionId}: {Type} {Message}", context.TransactionId, ex.GetType().Name, ex.Message);
+        }
+
+        long elapsedMs = Environment.TickCount64 - startedTicks;
+
+        if (pending.Count == 0)
+        {
+            logger.LogLockReleasesAcknowledgedOnRetry(context.TransactionId, attempts, elapsedMs);
+            return;
+        }
+
+        DurableTransactionMetrics.CountLockReleasesLeftToLease(pending.Count);
+
+        logger.LogLockReleasesLeftToLease(context.TransactionId, pending.Count, attempts, elapsedMs, ended);
+    }
+
+    /// <summary>One retry of one unacknowledged release, over the locator; true when the answer is proof.</summary>
+    private async Task<bool> TryReleasePending(HLCTimestamp transactionId, PendingLockRelease release)
+    {
+        try
+        {
+            KeyValueResponseType type;
+
+            switch (release.Shape)
+            {
+                case PendingLockShape.Point:
+                    (type, _) = await manager.LocateAndTryReleaseExclusiveLock(transactionId, release.Key, release.Durability, CancellationToken.None).ConfigureAwait(false);
+                    break;
+
+                case PendingLockShape.Prefix:
+                    type = await manager.LocateAndTryReleaseExclusivePrefixLock(transactionId, release.Key, release.Durability, CancellationToken.None).ConfigureAwait(false);
+                    break;
+
+                default:
+                    type = await manager.LocateAndTryReleaseExclusiveRangeLock(
+                        transactionId, release.Range.Prefix, release.Range.StartKey, release.Range.StartInclusive,
+                        release.Range.EndKey, release.Range.EndInclusive, release.Range.Durability, CancellationToken.None).ConfigureAwait(false);
+                    break;
+            }
+
+            return IsReleaseAcked(type);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning("Retrying a lock release of transaction {TransactionId}: {Type} {Message}", transactionId, ex.GetType().Name, ex.Message);
+            return false;
+        }
     }
 
     /// <summary>
@@ -1262,6 +1400,11 @@ internal sealed class TransactionCoordinator : IDisposable
         // (lifecycle fence) but cleanup has not yet run, which would leave the predicate lock unprotected.
         context.MarkRenewalExcluded();
 
+        // Every mandatory release this pass cannot get acknowledged is named on the context, so the commit's
+        // detached retry resends exactly those (see RetryUnacknowledgedReleases). A pass that runs again, as
+        // a rollback retry does, starts the list over.
+        context.ClearUnacknowledgedReleases();
+
         bool committed = context.State == KeyValueTransactionState.Committed;
         bool allMandatoryAcked = true;
 
@@ -1334,7 +1477,10 @@ internal sealed class TransactionCoordinator : IDisposable
                     (KeyValueResponseType type, string _) = await manager.LocateAndTryReleaseExclusiveLock(context.TransactionId, key, durability, CancellationToken.None);
 
                     if (mandatoryKeys.Contains((key, durability)) && !IsReleaseAcked(type))
+                    {
                         allMandatoryAcked = false;
+                        context.RecordUnacknowledgedRelease(PendingLockRelease.OfPoint(key, durability));
+                    }
                 }
                 else if (perKey.Count > 1)
                 {
@@ -1351,7 +1497,10 @@ internal sealed class TransactionCoordinator : IDisposable
                     foreach ((string, KeyValueDurability) mandatory in mandatoryKeys)
                     {
                         if (!releasedByKey.TryGetValue(mandatory, out KeyValueResponseType type) || !IsReleaseAcked(type))
+                        {
                             allMandatoryAcked = false;
+                            context.RecordUnacknowledgedRelease(PendingLockRelease.OfPoint(mandatory.Item1, mandatory.Item2));
+                        }
                     }
                 }
             }
@@ -1359,6 +1508,9 @@ internal sealed class TransactionCoordinator : IDisposable
             {
                 logger.LogError("ReleaseWorkingSet keys: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
                 allMandatoryAcked = false;
+
+                foreach ((string key, KeyValueDurability durability) in mandatoryKeys)
+                    context.RecordUnacknowledgedRelease(PendingLockRelease.OfPoint(key, durability));
             }
         }
 
@@ -1371,12 +1523,16 @@ internal sealed class TransactionCoordinator : IDisposable
                 {
                     KeyValueResponseType type = await manager.LocateAndTryReleaseExclusivePrefixLock(context.TransactionId, prefixKey, durability, CancellationToken.None);
                     if (!IsReleaseAcked(type))
+                    {
                         allMandatoryAcked = false;
+                        context.RecordUnacknowledgedRelease(PendingLockRelease.OfPrefix(prefixKey, durability));
+                    }
                 }
                 catch (Exception ex)
                 {
                     logger.LogError("ReleaseWorkingSet prefix {Prefix}: {Type} {Message}", prefixKey, ex.GetType().Name, ex.Message);
                     allMandatoryAcked = false;
+                    context.RecordUnacknowledgedRelease(PendingLockRelease.OfPrefix(prefixKey, durability));
                 }
             }
         }
@@ -1392,12 +1548,16 @@ internal sealed class TransactionCoordinator : IDisposable
                         context.TransactionId, range.Prefix, range.StartKey, range.StartInclusive,
                         range.EndKey, range.EndInclusive, range.Durability, CancellationToken.None);
                     if (!IsReleaseAcked(type))
+                    {
                         allMandatoryAcked = false;
+                        context.RecordUnacknowledgedRelease(PendingLockRelease.OfRange(range));
+                    }
                 }
                 catch (Exception ex)
                 {
                     logger.LogError("ReleaseWorkingSet range {Prefix}: {Type} {Message}", range.Prefix, ex.GetType().Name, ex.Message);
                     allMandatoryAcked = false;
+                    context.RecordUnacknowledgedRelease(PendingLockRelease.OfRange(range));
                 }
             }
         }

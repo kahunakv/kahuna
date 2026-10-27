@@ -600,6 +600,12 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         // (helping, backoff, re-proposals) is the difference.
         long firstPrepareStart = Stopwatch.GetTimestamp();
 
+        // The decision-deadline lease of this attempt: the frozen deadline, renewed while the attempt is inside a
+        // productive wait — during the first prepare barrier and a long retry-loop step by AwaitRenewingLeaseAsync,
+        // between rounds by the loop. A first prepare over thousands of intents that queues behind a saturated
+        // partition spends lease like a retry round does, so it is kept alive the same way.
+        DecisionDeadlineLease lease = new(input);
+
         int anchorIndex = -1;
         if (replicateAnchorBundle is not null)
         {
@@ -639,8 +645,8 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
             Task<bool>[] otherPrepareTasks = otherPrepareTaskList.ToArray();
 
-            (bool BatchCommitted, bool PrepareAcknowledged) anchorResult = await anchorBundleTask.ConfigureAwait(false);
-            bool[] otherResults = await Task.WhenAll(otherPrepareTasks).ConfigureAwait(false);
+            ((bool BatchCommitted, bool PrepareAcknowledged) anchorResult, bool[] otherResults) =
+                await AwaitRenewingLeaseAsync(AwaitFirstPrepareAsync(anchorBundleTask, otherPrepareTasks), input, lease, opId, cancellationToken).ConfigureAwait(false);
 
             // The record init and anchor prepare committed atomically. If the batch never committed, nothing is
             // durable — a clean retry, exactly as a standalone init failure was. A decision must NOT be written here:
@@ -676,7 +682,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
                 DurablePartitionPrepare partition = input.Partitions[i];
                 prepareTasks[i] = ReplicatePrepareAsync(partition.PartitionId, prepareDeltas[i], partition.Fences, Writes.WriteSubmissionStage.Prepare, cancellationToken);
             }
-            bool[] prepareResults = await Task.WhenAll(prepareTasks).ConfigureAwait(false);
+            bool[] prepareResults = await AwaitRenewingLeaseAsync(Task.WhenAll(prepareTasks), input, lease, opId, cancellationToken).ConfigureAwait(false);
             for (int i = 0; i < prepareResults.Length; i++)
                 acknowledged[i] = prepareResults[i];
 
@@ -731,10 +737,6 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         bool lastRoundWasLag = false;
         BlockerHelpResult lastHelp = BlockerHelpResult.NotInspected;
         List<int> unacknowledged = new(input.Partitions.Count);
-
-        // The decision-deadline lease of this attempt: the frozen deadline, renewed while the attempt is inside a
-        // productive wait, between rounds by this loop and during a long round by AwaitRenewingLeaseAsync.
-        DecisionDeadlineLease lease = new(input);
 
         while (!allPrepared && !cancellationToken.IsCancellationRequested)
         {
@@ -829,11 +831,9 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             lastRoundWasLag = settlementLag;
             if (settlementLag)
             {
-                HLCTimestamp now = attemptClock!();
-                DeadlineLeaseState renewed = await RenewDeadlineLeaseAsync(input, lease.Deadline, lease.LeaseMs, lease.Extensions, opId, now, cancellationToken).ConfigureAwait(false);
-                lease.Apply(renewed);
+                HLCTimestamp now = await RenewLeaseWithResendsAsync(input, lease, opId, cancellationToken).ConfigureAwait(false);
 
-                if (renewed.RecordTerminal)
+                if (lease.RecordTerminal)
                 {
                     recordDecided = true;
                     break;
@@ -988,7 +988,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             // being presumed aborted for having been slow. A renewal the record refuses changes nothing: the
             // decision below is judged by the record either way.
             if (attemptClock is not null && maxDeadlineExtensions > 0)
-                lease.Apply(await RenewDeadlineLeaseAsync(input, lease.Deadline, lease.LeaseMs, lease.Extensions, opId, attemptClock(), cancellationToken).ConfigureAwait(false));
+                await RenewLeaseWithResendsAsync(input, lease, opId, cancellationToken).ConfigureAwait(false);
 
             outcome = await DecideAsync(input, commit: true, TransactionAbortClass.None, opId, cancellationToken, effectiveDeadline: lease.Deadline).ConfigureAwait(false);
         }
@@ -1076,7 +1076,22 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
     /// <summary>The deadline lease of a finalize attempt after a renewal attempt: the deadline now in force, how
     /// many renewals the attempt has used, and whether the renewal found the record already terminal.</summary>
-    private readonly record struct DeadlineLeaseState(HLCTimestamp Deadline, int Extensions, bool RecordTerminal);
+    /// <summary>
+    /// What one renewal left the attempt with. <see cref="Unavailable"/> is true when the renewal was due and
+    /// could not be replicated — the anchor leader was unreachable, the fence refused it, or the write scheduler
+    /// turned it away — so the lease stands as it was and a resend while it still holds is worth making.
+    /// </summary>
+    private readonly record struct DeadlineLeaseState(HLCTimestamp Deadline, int Extensions, bool RecordTerminal, bool Unavailable = false);
+
+    /// <summary>
+    /// How many times a due renewal that could not be replicated is sent again before the caller gives the
+    /// scheduler a cadence to recover, and the pause between two sends. A renewal is one small record delta; a
+    /// scheduler that is saturated enough to turn it away is also the one holding the predecessors this attempt
+    /// waits for, so the resend keeps the lease alive through exactly the load that makes it matter.
+    /// </summary>
+    private const int MaxRenewalResends = 64;
+
+    private const int RenewalResendDelayMs = 25;
 
     /// <summary>
     /// The decision-deadline lease of one finalize attempt as the attempt knows it: the deadline the record holds,
@@ -1109,9 +1124,45 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         }
     }
 
+    /// <summary>The first prepare barrier as one step: the anchor bundle and every other partition's prepare,
+    /// all awaited, never abandoned.</summary>
+    private static async Task<((bool BatchCommitted, bool PrepareAcknowledged) Anchor, bool[] Others)> AwaitFirstPrepareAsync(
+        Task<(bool BatchCommitted, bool PrepareAcknowledged)> anchorBundleTask, Task<bool>[] otherPrepareTasks)
+    {
+        (bool BatchCommitted, bool PrepareAcknowledged) anchor = await anchorBundleTask.ConfigureAwait(false);
+        bool[] others = await Task.WhenAll(otherPrepareTasks).ConfigureAwait(false);
+        return (anchor, others);
+    }
+
     /// <summary>
-    /// Awaits one step of the prepare retry loop — a helping pass, a re-prepare, or the validation of an attempt
-    /// that already waited — and renews the decision-deadline lease while the step is in flight. The loop renews
+    /// Renews the lease once it is due and, when the renewal could not be replicated, sends it again after a short
+    /// pause while the lease still holds, up to <see cref="MaxRenewalResends"/> times. Returns the attempt clock
+    /// reading of the last send, so the caller judges the lease against the same instant the renewal did. A
+    /// renewal that was not yet due, that landed, that found the record terminal, or that spent the budget ends
+    /// the resends at once. Before the resend, a renewal that the saturated write scheduler released unproposed
+    /// was tried once per cadence: under exactly the load that makes the lease matter, the next look came a whole
+    /// cadence later and found the deadline passed.
+    /// </summary>
+    private async Task<HLCTimestamp> RenewLeaseWithResendsAsync(DurableFinalizeInput input, DecisionDeadlineLease lease, HLCTimestamp opId, CancellationToken cancellationToken)
+    {
+        HLCTimestamp now;
+        for (int resend = 0; ; resend++)
+        {
+            now = attemptClock!();
+            DeadlineLeaseState renewed = await RenewDeadlineLeaseAsync(input, lease.Deadline, lease.LeaseMs, lease.Extensions, opId, now, cancellationToken).ConfigureAwait(false);
+            lease.Apply(renewed);
+
+            if (!renewed.Unavailable || now > lease.Deadline || resend >= MaxRenewalResends)
+                return now;
+
+            await Task.Delay(RenewalResendDelayMs, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Awaits one step of the finalize — the first prepare barrier, a helping pass, a re-prepare, or the
+    /// validation of an attempt that already waited — and renews the decision-deadline lease while the step is
+    /// in flight. The loop renews
     /// between rounds, but a round is not bounded: a helping pass over thousands of intents, or a re-prepare that
     /// queues behind a saturated partition, can outlast the half-lease the between-round renewal is timed for, and
     /// the lease then lapsed in the middle of a wait that was productive. The cadence is a quarter of the lease in
@@ -1136,20 +1187,17 @@ internal sealed class DurableTransactionFinalizer : IDisposable
                 if (await Task.WhenAny(step, tick).ConfigureAwait(false) == step || cancellationToken.IsCancellationRequested)
                     break;
 
-                HLCTimestamp now = attemptClock();
-                DeadlineLeaseState renewed;
+                HLCTimestamp now;
                 try
                 {
-                    renewed = await RenewDeadlineLeaseAsync(input, lease.Deadline, lease.LeaseMs, lease.Extensions, opId, now, cancellationToken).ConfigureAwait(false);
+                    now = await RenewLeaseWithResendsAsync(input, lease, opId, cancellationToken).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException)
                 {
                     break;
                 }
 
-                lease.Apply(renewed);
-
-                if (renewed.RecordTerminal || now > lease.Deadline || lease.Extensions >= maxDeadlineExtensions)
+                if (lease.RecordTerminal || now > lease.Deadline || lease.Extensions >= maxDeadlineExtensions)
                     break;
             }
         }
@@ -1226,7 +1274,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         if (!replicated)
         {
             DurableTransactionMetrics.DeadlineExtensionAttempted(DeadlineExtensionOutcome.Unavailable);
-            return new DeadlineLeaseState(deadline, extensions, RecordTerminal: false);
+            return new DeadlineLeaseState(deadline, extensions, RecordTerminal: false, Unavailable: true);
         }
 
         if (typed is { Known: true, Decision: TransactionDecision.Commit or TransactionDecision.Abort })

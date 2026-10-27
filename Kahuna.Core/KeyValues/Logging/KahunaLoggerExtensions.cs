@@ -400,4 +400,13 @@ public static partial class KahunaLoggerExtensions
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Snapshot read of {Key} at {ReadTimestamp} refused: the timestamp leads this node's clock ({Now}) by {LeadMs} ms, past the {MaxLeadMs} ms clock-fence bound. Served unfenced it could disagree with a later read at the same timestamp; the caller retries once the clocks converge (a wall-clock jump on the node that minted it spreads with its next Raft message)")]
     public static partial void LogSnapshotReadRefusedClockLead(this ILogger<IKahuna> logger, string key, HLCTimestamp readTimestamp, HLCTimestamp now, long leadMs, long maxLeadMs);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Transaction {TransactionId}: every mandatory lock release after the commit finalize was acknowledged on retry, after {Attempts} attempt(s) and {ElapsedMs} ms")]
+    public static partial void LogLockReleasesAcknowledgedOnRetry(this ILogger<IKahuna> logger, HLCTimestamp transactionId, int attempts, long elapsedMs);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Transaction {TransactionId}: {Count} mandatory lock release(s) after the commit finalize were not acknowledged after {Attempts} attempt(s) and {ElapsedMs} ms, and the retry stopped because {Reason}; the locks stay until their lease ends")]
+    public static partial void LogLockReleasesLeftToLease(this ILogger<IKahuna> logger, HLCTimestamp transactionId, int count, int attempts, long elapsedMs, string reason);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Node shutdown refused {Count} request(s) after the shutdown signal (new sessions, forwarded commits and lock grants)")]
+    public static partial void LogNodeShutdownRefusedRequests(this ILogger<IKahuna> logger, long count);
 }

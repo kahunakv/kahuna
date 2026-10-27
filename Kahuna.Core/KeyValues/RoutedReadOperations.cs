@@ -491,6 +491,7 @@ internal sealed class RoutedReadOperations
         OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
         payload.ReadObservations = observations;
         payload.AcquiredRangeLocks = acquired;
+        payload.LockExpiresMs = acquired is null ? 0 : expiresMs;
         payload.LockGrantTerms = acquired is null ? null : grants.Take();
         payload.Durability = durability;
         payload.CachedType = cachedType;

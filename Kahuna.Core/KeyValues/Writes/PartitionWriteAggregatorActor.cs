@@ -300,7 +300,9 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
                 // items that would add state to a range that is quiesced for a data move, individually and
                 // retryably, rather than proposing them or letting them fail their siblings. A moved range is
                 // asked first: it is final for the item's frozen routing, where a quiesce is a window that ends.
-                if (now - item.EnqueueTicks > options.MaxQueueDelayMs)
+                // A terminal item is never released for age (see PartitionWriteState.OldestExpirableTicks): it
+                // dispatches however long it queued.
+                if (item.AdmissionClass != WriteAdmissionClass.Terminal && now - item.EnqueueTicks > options.MaxQueueDelayMs)
                 {
                     PartitionWriteAggregatorMetrics.ReleasedQueueExpired();
                     ReleaseItem(partitionId, item, transient: true);

@@ -2308,4 +2308,107 @@ public sealed class TestDurableTransactionFinalizer
         Assert.NotEmpty(capture.Samples("kahuna.durable_tx.finalize_decision_lookup_ms"));
         Assert.All(capture.Samples("kahuna.durable_tx.finalize_decision_lookup_ms"), d => Assert.True(d >= 0));
     }
+
+    /// <summary>
+    /// The renewal the keeper sends during a long round cannot be replicated once — the write scheduler released it
+    /// unproposed under load — and is sent again at once while the lease still holds, so the lease is renewed
+    /// before it lapses and the commit lands past the frozen deadline. Before the resend, the next renewal came a
+    /// whole cadence later and found the lease lapsed: one refused renewal was an abort.
+    /// </summary>
+    [Fact]
+    public async Task Helping_RenewalRefusedOnce_IsSentAgainAtOnce_AndTheLeaseHolds()
+    {
+        HLCTimestamp blockerTx = Ts(500);
+        Seam seam = new();
+        TransactionRecordStore records = new();
+        PreparedIntentStore intents = new();
+        seam.Records = records;
+        seam.Intents = intents;
+        InstallCommittedBlocker(records, intents, blockerTx, "acct/2");
+
+        // A lease of 2,000 ms, renewed once less than 1,000 ms remain, checked every 500 ms while the 2,600 ms
+        // materialization of the blocker is in flight. The attempt clock reads 100 ms ahead of the stopwatch, so
+        // the tick at 1,000 ms is the first due one beyond doubt. The record init is the first record replicate;
+        // the next one is that renewal, which spends 600 ms in the scheduler and is then refused, as a renewal
+        // released for queue age is. The keeper's next tick would come at 2,100 ms, past the deadline at 2,000 ms;
+        // only a resend at once, at about 1,625 ms, lands inside the lease.
+        const long leaseMs = 2_000;
+        int recordReplicates = 0;
+        bool refuseThisRenewal = false;
+        seam.DelayMs = (_, type) =>
+        {
+            if (type == ReplicationTypes.KeyValues)
+                return 2_600;
+            if (type != ReplicationTypes.TransactionRecord)
+                return 0;
+
+            refuseThisRenewal = Interlocked.Increment(ref recordReplicates) == 2;
+            return refuseThisRenewal ? 600 : 0;
+        };
+        seam.Fail = (_, type) => type == ReplicationTypes.TransactionRecord && refuseThisRenewal;
+
+        Stopwatch clock = Stopwatch.StartNew();
+        DurableTransactionFinalizer finalizer = new(records, intents, seam.Replicate,
+            attemptClock: () => Ts(1200 + clock.ElapsedMilliseconds),
+            resolveDecidedBlockers: HelpingRecovery(records, intents, seam).TryResolveDecidedBlockersAsync,
+            maxDeadlineExtensions: 4);
+
+        using MetricCapture capture = new("outcome", "kahuna.durable_tx.deadline_extensions", "kahuna.durable_tx.prepare_retry_loops");
+
+        HLCTimestamp txId = Ts(1000);
+        DurableFinalizeInput input = Input(txId, 1, revision: 2, baseRevision: 1, (5, "acct/2")) with { DecisionDeadline = Ts(1100 + leaseMs) };
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(input, Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+        Assert.False(outcome.LateCommitRejected);
+        Assert.Equal(1, capture.Total("kahuna.durable_tx.deadline_extensions", "unavailable"));
+        Assert.True(capture.Total("kahuna.durable_tx.deadline_extensions", "extended") >= 1);
+        Assert.Equal(0, capture.Total("kahuna.durable_tx.deadline_extensions", "lapsed"));
+        Assert.Equal(0, capture.Total("kahuna.durable_tx.prepare_retry_loops", "deadline_lapsed"));
+
+        TransactionRecord record = records.Get(txId, 1)!;
+        Assert.Equal(TransactionDecision.Commit, record.Decision);
+        Assert.True(record.DecidedAt > Ts(1100 + leaseMs), "the commit must have landed past the frozen deadline");
+        Assert.Null(intents.Get("acct/2"));
+    }
+
+    /// <summary>
+    /// The first prepare barrier alone outlasts the lease: a prepare over many intents that queues behind a
+    /// saturated partition. The lease is kept alive during that barrier as it is during a retry-loop step, so the
+    /// commit lands past the frozen deadline inside the renewed one. Before this, the first barrier ran outside the
+    /// keeper, and a slow first prepare reached the decision with a lapsed lease.
+    /// </summary>
+    [Fact]
+    public async Task FirstPrepare_OutlastsTheLease_LeaseRenewedDuringThePrepare_Commits()
+    {
+        Seam seam = new();
+        TransactionRecordStore records = new();
+        PreparedIntentStore intents = new();
+        seam.Records = records;
+        seam.Intents = intents;
+
+        const long leaseMs = 2_000;
+        seam.DelayMs = (_, type) => type == ReplicationTypes.PreparedIntent ? 2_600 : 0;
+
+        Stopwatch clock = Stopwatch.StartNew();
+        DurableTransactionFinalizer finalizer = new(records, intents, seam.Replicate,
+            attemptClock: () => Ts(1100 + clock.ElapsedMilliseconds),
+            maxDeadlineExtensions: 4);
+
+        using MetricCapture capture = new("outcome", "kahuna.durable_tx.deadline_extensions");
+
+        HLCTimestamp txId = Ts(1000);
+        DurableFinalizeInput input = Input(txId, 1, (5, "acct/2")) with { DecisionDeadline = Ts(1100 + leaseMs) };
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(input, Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+        Assert.False(outcome.LateCommitRejected);
+        Assert.True(capture.Total("kahuna.durable_tx.deadline_extensions", "extended") >= 1);
+        Assert.Equal(0, capture.Total("kahuna.durable_tx.deadline_extensions", "lapsed"));
+
+        TransactionRecord record = records.Get(txId, 1)!;
+        Assert.Equal(TransactionDecision.Commit, record.Decision);
+        Assert.True(record.DecisionDeadline > Ts(1100 + leaseMs), "the record's deadline must have moved past the frozen one");
+        Assert.True(record.DecidedAt > Ts(1100 + leaseMs), "the commit must have landed past the frozen deadline");
+    }
 }

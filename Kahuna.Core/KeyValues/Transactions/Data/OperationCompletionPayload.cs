@@ -75,6 +75,14 @@ public sealed class OperationCompletionPayload
     /// <summary>A range lock the operation released.</summary>
     public RangeLockKey? ReleasedRangeLock { get; set; }
 
+    /// <summary>
+    /// The lease, in milliseconds, the locks this operation acquired were granted with; 0 when the operation
+    /// acquired no lock or the grant carries no lease of its own (a write's intent). The coordinator keeps the
+    /// latest lease end over every grant of the transaction: a release it could not get acknowledged is
+    /// retried until then, because past that point the lock has lapsed on its own.
+    /// </summary>
+    public int LockExpiresMs { get; set; }
+
     /// <summary>A single key observed by a point read.</summary>
     public KeyValueTransactionReadKey? Read { get; set; }
 
@@ -143,6 +151,7 @@ public sealed class OperationCompletionPayload
         AcquiredRangeLock = null;
         AcquiredRangeLocks = null;
         ReleasedRangeLock = null;
+        LockExpiresMs = 0;
         Read = null;
         ReadObservations = null;
         StagedMutations = null;

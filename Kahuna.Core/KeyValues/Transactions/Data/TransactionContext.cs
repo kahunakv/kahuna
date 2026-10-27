@@ -216,6 +216,32 @@ internal class TransactionContext
     public Dictionary<RangeLockKey, RangeLockMode>? RangeLocksAcquired { get; set; }
 
     /// <summary>
+    /// The latest moment, in <see cref="Environment.TickCount64"/> milliseconds of this node, at which a lock
+    /// this transaction was granted lapses on its own: the greatest grant time plus lease over every grant
+    /// folded into the working set (<see cref="OperationCompletionPayload.LockExpiresMs"/>). Zero when no grant
+    /// carried a lease. A lock release the cleanup could not get acknowledged is retried until then, and not
+    /// beyond: past it the lock is gone whether the release lands or not.
+    /// </summary>
+    internal long LockLeaseEndTicks { get; private set; }
+
+    /// <summary>The mandatory lock releases the last working-set release pass could not get acknowledged; null
+    /// when the pass acknowledged every one. Written by the release pass alone, which runs under the session's
+    /// single finalize slot, and taken by the commit's detached retry.</summary>
+    private List<PendingLockRelease>? unacknowledgedReleases;
+
+    internal void ClearUnacknowledgedReleases() => unacknowledgedReleases = null;
+
+    internal void RecordUnacknowledgedRelease(PendingLockRelease release) => (unacknowledgedReleases ??= []).Add(release);
+
+    /// <summary>Hands the unacknowledged releases to their retry and forgets them here.</summary>
+    internal List<PendingLockRelease>? TakeUnacknowledgedReleases()
+    {
+        List<PendingLockRelease>? taken = unacknowledgedReleases;
+        unacknowledgedReleases = null;
+        return taken;
+    }
+
+    /// <summary>
     /// Keys modified during the transaction along with their durability.
     /// </summary>
     public HashSet<(string, KeyValueDurability)>? ModifiedKeys { get; set; }
@@ -734,6 +760,13 @@ internal class TransactionContext
 
         if (payload.ReleasedRangeLock is { } removedRangeLock)
             RangeLocksAcquired?.Remove(removedRangeLock);
+
+        if (payload.LockExpiresMs > 0)
+        {
+            long leaseEnd = Environment.TickCount64 + payload.LockExpiresMs;
+            if (leaseEnd > LockLeaseEndTicks)
+                LockLeaseEndTicks = leaseEnd;
+        }
 
         // A lock grant folds the committed base it protects as an observation too; only a point read
         // promises to answer the transaction's own staging, so only a read is held to it.

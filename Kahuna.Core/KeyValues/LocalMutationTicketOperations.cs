@@ -66,11 +66,37 @@ internal sealed class LocalMutationTicketOperations
     /// <returns></returns>
     public async Task<List<(KeyValueResponseType, string, KeyValueDurability)>> TryReleaseManyExclusiveLocks(
         HLCTimestamp transactionId, 
-        List<(string key, KeyValueDurability durability)> keys,
-        bool onlyIfHeld = false
+        List<(string key, KeyValueDurability durability)> keys
     )
     {
-        List<(KeyValueResponseType, string, KeyValueDurability)> responses = new(keys.Count);
+        List<(KeyValueResponseType Type, string Key, KeyValueDurability Durability, bool NothingHeld)> released =
+            await ReleaseManyExclusiveLocks(transactionId, keys, onlyIfHeld: false);
+
+        List<(KeyValueResponseType, string, KeyValueDurability)> responses = new(released.Count);
+        foreach ((KeyValueResponseType type, string key, KeyValueDurability durability, bool _) in released)
+            responses.Add((type, key, durability));
+
+        return responses;
+    }
+
+    /// <summary>
+    /// <see cref="TryReleaseManyExclusiveLocks"/> that acknowledges only what this node holds of the transaction
+    /// on each key, for a node whose leadership no quorum confirmed (see <see cref="KeyValueRequest.ReleaseOnlyIfHeld"/>).
+    /// The fourth element says the key answered MustRetry because nothing of the transaction is on it here.
+    /// </summary>
+    internal Task<List<(KeyValueResponseType Type, string Key, KeyValueDurability Durability, bool NothingHeld)>> TryReleaseManyExclusiveLocksHeldHere(
+        HLCTimestamp transactionId,
+        List<(string key, KeyValueDurability durability)> keys
+    ) =>
+        ReleaseManyExclusiveLocks(transactionId, keys, onlyIfHeld: true);
+
+    private async Task<List<(KeyValueResponseType Type, string Key, KeyValueDurability Durability, bool NothingHeld)>> ReleaseManyExclusiveLocks(
+        HLCTimestamp transactionId,
+        List<(string key, KeyValueDurability durability)> keys,
+        bool onlyIfHeld
+    )
+    {
+        List<(KeyValueResponseType, string, KeyValueDurability, bool)> responses = new(keys.Count);
         
         foreach ((string key, KeyValueDurability durability) key in keys)
         {
@@ -104,11 +130,11 @@ internal sealed class LocalMutationTicketOperations
 
                 if (response is null || response.Type == KeyValueResponseType.WaitingForReplication)
                 {
-                    responses.Add((KeyValueResponseType.Errored, key.key, key.durability));
+                    responses.Add((KeyValueResponseType.Errored, key.key, key.durability, false));
                     continue;
                 }
 
-                responses.Add((response.Type, key.key, key.durability));
+                responses.Add((response.Type, key.key, key.durability, response.NothingHeld));
             }
             finally
             {

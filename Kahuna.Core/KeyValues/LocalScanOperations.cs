@@ -271,8 +271,7 @@ internal sealed class LocalScanOperations
                     return new(KeyValueResponseType.MustRetry, []);
 
                 Transactions.DurableTransactionMetrics.AddKvRetryWait("GetByBucket_6080");
-                await Task.Delay(backoffMs);
-                backoffMs = Math.Min(backoffMs * 2, 1000);
+                await Task.Delay(ReadWaitBackoff.Next(ref backoffMs, deadline));
             }
         }
         finally
@@ -552,8 +551,9 @@ internal sealed class LocalScanOperations
                 continue;
 
             Transactions.DurableTransactionMetrics.AddKvRetryWait("TryProbeManyRanges");
-            await Task.Delay(backoffMs);
-            backoffMs = Math.Min(backoffMs * 2, 1000);
+            await Task.Delay(lockWait
+                ? ReadWaitBackoff.Next(ref backoffMs, start + ProbeLockWaitMs)
+                : ReadWaitBackoff.Next(ref backoffMs));
         }
     }
 

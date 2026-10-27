@@ -280,7 +280,7 @@ options and on `EmbeddedKahunaOptions` for the embedded/standalone engine):
 | `KeyValueWriteMaxBatchBytes` | `4 MiB` | Target serialized bytes per Raft call; an oversized single item dispatches alone. |
 | `KeyValueWriteMaxQueuedItemsPerPartition` | `8192` | Maximum admitted items per partition, including those in flight. |
 | `KeyValueWriteMaxQueuedBytesPerPartition` | `32 MiB` | Maximum admitted serialized bytes per partition. |
-| `KeyValueWriteMaxQueueDelayMs` | `1000` | Maximum time an admitted write may wait before dispatch; on expiry it is released as `MustRetry`. |
+| `KeyValueWriteMaxQueueDelayMs` | `1000` | Maximum time an admitted ordinary write may wait before dispatch; on expiry it is released as `MustRetry`. A terminal-class submission (a durable decision, settle, materialization, recovery re-drive or lease renewal) is never released for age: its one producer waits for it and does not resend, so it dispatches however long it queued, and the age wake follows the oldest ordinary item. |
 | `MaxKeyValueWriteAggregatorInboxSize` | `16384` | Ordinary-submission inbox bound per lane; control messages are exempt. |
 | `PersistenceMaxUnflushedItems` | `1000000` | Persistence back-pressure: ordinary writes are refused (`MustRetry`) while this node holds more committed-but-unflushed writes than this (background writer inbox plus dirty queues). Terminal work is exempt. `0` disables. |
 | `PersistenceMaxUnflushedBytes` | `512 MiB` | Byte counterpart, over the value bytes queued for the background flush (dirty queues exactly, inbox estimated from the recent average value size). `0` disables. |

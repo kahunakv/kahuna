@@ -568,7 +568,7 @@ internal sealed class TryGetByRangeHandler : BaseHandler
                 // Gated on the caller's explicit timestamp (snapshotRead), not on readTimestamp,
                 // which is normalised to "now" and never null here — see the persistent merge.
                 else if (snapshotRead
-                         && KeyValueWriteIntentSafeTime.MayCommitAtOrBefore(entry.WriteIntent, readTimestamp))
+                         && KeyValueWriteIntentSafeTime.MayCommitAtOrBefore(entry, entry.WriteIntent, readTimestamp))
                     return KeyValueStaticResponses.WaitingForReplicationResponse;
                 // live write intent from another tx: fall through to committed state
             }

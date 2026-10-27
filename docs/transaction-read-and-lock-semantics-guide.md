@@ -52,7 +52,12 @@ A nonzero `ReadTimestamp` selects the revision committed at or before that HLC t
 history path, rather than creating a latest-read MVCC pin. A snapshot before an intent's commit HLC
 uses the earlier committed state; at or after it, the intent's canonical decision determines visibility.
 A live writer that may commit at or before the snapshot causes a safe-time wait, even when another
-committed intent could otherwise answer the read.
+committed intent could otherwise answer the read. The bound is the writer's known commit timestamp once
+it is prepared. Before that it is the stamp of its staged write on the key, or the plant time of a lock
+that staged nothing yet. A writer whose stamp is above the snapshot cannot commit inside it and never
+makes the read wait, whatever its transaction id. The wait is a poll: the read re-asks the key or page
+with sleeps that double up to 50 ms, so it is served within that of the intent clearing, and a scan page
+that still answers transient at the scan page retry budget fails the scan instead of spinning.
 
 Clock and flush fences prevent answering from incomplete history. Persisted-history fallback can
 answer `MustRetry` while relevant committed revisions are unflushed. Reads more than 5 seconds ahead

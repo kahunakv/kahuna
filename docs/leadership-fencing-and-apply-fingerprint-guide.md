@@ -42,12 +42,38 @@ the cut-off leader's memory.
 
 **A lock release is served for what the node holds, confirmed or not.** A release only drops state from
 the node's own memory, and a lock found there was granted there. A node whose leadership a quorum did
-not confirm still runs the release, but acknowledges only a lock of the transaction it actually holds;
-a release that finds nothing of the transaction answers `MustRetry`, because the lock may live on the
-leader the quorum did confirm. This matters right after a peer fails: the leader's ack round can stall
-for a moment, the commit-time lock proof then refuses the transaction as a lost lock, and the cleanup
-that follows must still drop the locks the refused transaction holds on that leader. Gated on the
-same confirmation, the cleanup was refused too, and the locks stayed until their lease ended.
+not confirm still runs the release, but acknowledges only a lock of the transaction it actually holds.
+This matters right after a peer fails: the leader's ack round can stall for a moment, the commit-time
+lock proof then refuses the transaction as a lost lock, and the cleanup that follows must still drop
+the locks the refused transaction holds on that leader. Gated on the same confirmation, the cleanup
+was refused too, and the locks stayed until their lease ended.
+
+**A release the node cannot vouch for travels to the other voters.** A node whose leadership is not
+confirmed and that finds nothing of the transaction cannot say the lock is gone: the node may have
+been deposed, and the lock may live on the leader the quorum did confirm. The node that starts such a
+release sends it to every other voter of the partition at once. The confirmed leader releases, and its
+answer is proof even when it held nothing. A follower forwards the release once more to the leader it
+believes in, which is where the chain ends: the forward budget is spent, so a stale node that receives
+it there answers `MustRetry` and cannot forward again. Only the node that starts a release fans it out,
+so two nodes that both believe they lead cannot bounce one between them.
+
+**A commit retries the releases it could not get acknowledged.** The commit answers at once; a detached
+retry resends only the releases that no node acknowledged, with a delay that doubles from 50 ms to 1 s,
+and resolves the leader again on each attempt, so a leader elected after the first attempt is found. The
+retry stops when every release is acknowledged, when the latest lock lease of the transaction ends (the
+lock is gone by then anyway), or when the node shuts down. The meters
+`kahuna.transactions.lock_release_retries`, `kahuna.transactions.lock_releases_late` and
+`kahuna.transactions.lock_releases_left_to_lease` count the attempts, the releases acknowledged late, and
+the releases given up on.
+
+**A node that is shutting down takes no new work and trusts no belief of its own.** From its shutdown
+signal until it is gone, a node refuses a new transaction session, a commit of a session it does not own,
+and a lock grant, with `MustRetry`, so the sender resolves another target. A session begun there would be
+coordinated by a node that is going away; a lock granted there would be dropped with it. The node still
+serves releases, rollbacks and the finalize of the sessions it owns, so it cleans up what it can. Its
+routing answers from no leadership belief of its own: a release it is asked to serve goes to another node
+that hosts the partition, which resolves the leader from a live Raft. The node logs one line at dispose
+with the count of refused requests.
 
 ### The check-quorum step-down
 
@@ -217,15 +243,29 @@ Refusing an actor-state mutation on partition 2: node n4:8082 believes it leads 
 One of these lines is the two-leader window itself. Expect a few during a failover. A stream of them
 on one node means that node is cut off from its voters and the step-down has not fired.
 
-A commit's cleanup that could not get a lock release acknowledged logs, at warning level:
+A commit's cleanup that could not get every lock release acknowledged retries them detached, and logs
+at the end of the retry. At information level when the retry succeeded:
 
 ```
-Transaction HLC(1:…): a mandatory lock release after the commit finalize was not acknowledged; the lock stays until its lease ends
+Transaction HLC(1:…): every mandatory lock release after the commit finalize was acknowledged on retry, after 3 attempt(s) and 420 ms
 ```
 
-The lock named by the transaction lapses with its lease (`range_lock_expires_ms` for a range lock, the
-lock's own `expiresMs` otherwise), and writers into its range wait for it meanwhile. A node that was
-deposed in that window drops the lock earlier, when it learns of the loss.
+At warning level when it gave up:
+
+```
+Transaction HLC(1:…): 2 mandatory lock release(s) after the commit finalize were not acknowledged after 11 attempt(s) and 10060 ms, and the retry stopped because the lock lease ended; the locks stay until their lease ends
+```
+
+The locks named by the transaction lapse with their lease (`range_lock_expires_ms` for a range lock, the
+lock's own `expiresMs` otherwise), and writers into their range wait for them meanwhile. A node that was
+deposed in that window drops the lock earlier, when it learns of the loss. A retry that stopped because
+the node is shutting down names that as its reason.
+
+A node that refused requests after its shutdown signal logs once at dispose, at information level:
+
+```
+Node shutdown refused 7 request(s) after the shutdown signal (new sessions, forwarded commits and lock grants)
+```
 
 ---
 

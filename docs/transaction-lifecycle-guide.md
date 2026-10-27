@@ -285,12 +285,17 @@ passed the current deadline) and only forward, so a dead coordinator is presumed
 and a lapsed lease cannot be revived. A renewal is sent only when less than half of the lease remains, so a
 healthy commit never pays the extra record round; each attempt renews at most
 `DurableDecisionDeadlineMaxExtensions` times (0 disables renewal, which a mixed-version rollout needs because
-an older node cannot decode the transition). The check runs between the prepare loop's rounds and, while a
-helping pass, a re-prepare or the validation of an attempt that already waited is in flight, every quarter of
-the lease in wall-clock time — a single round over thousands of intents, or a re-prepare queued behind a
-saturated partition, can outlast the half-lease on its own and used to let the lease lapse in the middle of
-a productive wait. The recovery sweep reads the deadline off the record, so a renewed record is left alone
-until the renewed deadline. `kahuna.durable_tx.deadline_extensions{outcome}` counts the renewals.
+an older node cannot decode the transition). The check runs between the prepare loop's rounds and, while the
+first prepare barrier, a helping pass, a re-prepare or the validation of an attempt that already waited is in
+flight, every quarter of the lease in wall-clock time — a single round over thousands of intents, or a prepare
+queued behind a saturated partition, can outlast the half-lease on its own and used to let the lease lapse in
+the middle of a productive wait. A due renewal that could not be replicated is sent again after 25 ms while the
+lease still holds, up to 64 times: the write scheduler that is saturated enough to turn a renewal away is the
+one holding the predecessors the attempt waits for. The scheduler never releases a terminal-class submission
+for queue age, so a renewal, a decision or a settle that queued behind a burst is proposed however long it
+waited, where an ordinary write is released and resent by its producer. The recovery sweep reads the deadline
+off the record, so a renewed record is left alone until the renewed deadline.
+`kahuna.durable_tx.deadline_extensions{outcome}` counts the renewals.
 
 **Settlement lag aborts only when the lease cannot be held.** The prepare retry loop (§6.3) reads the
 helping pass's report: when every holder of a refused key is a transaction whose record is already

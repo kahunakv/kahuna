@@ -35,10 +35,11 @@ public sealed class TestStatementSnapshotReadHandler : RaftTrackingTest
 
     /// <summary>
     /// A foreign transaction staged a write on the key, so the key holds a live write intent whose commit
-    /// timestamp will be above the writer's transaction id. A statement read at a timestamp above that id waits
-    /// (<c>WaitingForReplication</c>): the commit may still land at or before the snapshot. A statement read at a
-    /// timestamp below the id cannot be overtaken by the commit and reads the committed state. The writer's own
-    /// statement read answers its staged write and waits for nothing.
+    /// timestamp will be at or above the staged write's stamp. A statement read at a timestamp at or above that
+    /// stamp waits (<c>WaitingForReplication</c>): the commit may still land at or before the snapshot. A statement
+    /// read at a timestamp below the stamp cannot be overtaken by the commit and reads the committed state, even
+    /// when its timestamp is above the writer's transaction id. The writer's own statement read answers its
+    /// staged write and waits for nothing.
     /// </summary>
     [Fact]
     public async Task ForeignStagedWrite_WaitsWhenItMayCommitInsideTheSnapshot_FallsThroughOtherwise()
@@ -52,27 +53,38 @@ public sealed class TestStatementSnapshotReadHandler : RaftTrackingTest
         HLCTimestamp beforeWriter = rig.Now();
         HLCTimestamp writer = rig.Now();
         HLCTimestamp reader = rig.Now();
-        HLCTimestamp afterWriter = rig.Now();
+        HLCTimestamp beforeStage = rig.Now();
 
         KeyValueResponse? staged = await rig.SetTransactional(key, "staged", writer);
         Assert.Equal(KeyValueResponseType.Set, staged!.Type);
+
+        HLCTimestamp afterStage = rig.Now();
 
         KeyValueResponse? below = await rig.Get(key, reader, beforeWriter, KeyValueReadMode.StatementSnapshot);
         Assert.Equal(KeyValueResponseType.Get, below!.Type);
         Assert.Equal("v1", Encoding.UTF8.GetString(below.Entry!.Value!));
 
-        KeyValueResponse? above = await rig.Get(key, reader, afterWriter, KeyValueReadMode.StatementSnapshot);
+        // Above the writer's transaction id but below its staged write: the commit lands at or above the stamp,
+        // so it can never overtake this snapshot, and the read falls through to the committed state.
+        KeyValueResponse? belowStage = await rig.Get(key, reader, beforeStage, KeyValueReadMode.StatementSnapshot);
+        Assert.Equal(KeyValueResponseType.Get, belowStage!.Type);
+        Assert.Equal("v1", Encoding.UTF8.GetString(belowStage.Entry!.Value!));
+
+        KeyValueResponse? above = await rig.Get(key, reader, afterStage, KeyValueReadMode.StatementSnapshot);
         Assert.Equal(KeyValueResponseType.WaitingForReplication, above!.Type);
 
-        KeyValueResponse? own = await rig.Get(key, writer, afterWriter, KeyValueReadMode.StatementSnapshot);
+        KeyValueResponse? own = await rig.Get(key, writer, afterStage, KeyValueReadMode.StatementSnapshot);
         Assert.Equal(KeyValueResponseType.Get, own!.Type);
         Assert.Equal("staged", Encoding.UTF8.GetString(own.Entry!.Value!));
 
         // The batched probe applies the same rules per key.
-        KeyValueResponse probe = await rig.Probe([key], reader, afterWriter, KeyValueReadMode.StatementSnapshot);
+        KeyValueResponse probe = await rig.Probe([key], reader, afterStage, KeyValueReadMode.StatementSnapshot);
         Assert.Equal(KeyValueResponseType.WaitingForReplication, probe.ProbeResults![0].Type);
 
-        KeyValueResponse ownProbe = await rig.Probe([key], writer, afterWriter, KeyValueReadMode.StatementSnapshot);
+        KeyValueResponse belowStageProbe = await rig.Probe([key], reader, beforeStage, KeyValueReadMode.StatementSnapshot);
+        Assert.Equal(KeyValueResponseType.Get, belowStageProbe.ProbeResults![0].Type);
+
+        KeyValueResponse ownProbe = await rig.Probe([key], writer, afterStage, KeyValueReadMode.StatementSnapshot);
         Assert.Equal(KeyValueResponseType.Get, ownProbe.ProbeResults![0].Type);
         Assert.Equal("staged", Encoding.UTF8.GetString(ownProbe.ProbeResults[0].Entry!.Value!));
     }

@@ -301,7 +301,21 @@ internal sealed class LocalLockOperations
     /// <param name="key"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, string)> TryReleaseExclusiveLock(HLCTimestamp transactionId, string key, KeyValueDurability durability, bool onlyIfHeld = false)
+    public async Task<(KeyValueResponseType, string)> TryReleaseExclusiveLock(HLCTimestamp transactionId, string key, KeyValueDurability durability)
+    {
+        HeldHereRelease released = await ReleaseExclusiveLock(transactionId, key, durability, onlyIfHeld: false);
+
+        return (released.Type, key);
+    }
+
+    /// <summary>
+    /// <see cref="TryReleaseExclusiveLock"/> that acknowledges only what this node holds of the transaction on
+    /// the key, for a node whose leadership no quorum confirmed (see <see cref="KeyValueRequest.ReleaseOnlyIfHeld"/>).
+    /// </summary>
+    internal Task<HeldHereRelease> TryReleaseExclusiveLockHeldHere(HLCTimestamp transactionId, string key, KeyValueDurability durability) =>
+        ReleaseExclusiveLock(transactionId, key, durability, onlyIfHeld: true);
+
+    private async Task<HeldHereRelease> ReleaseExclusiveLock(HLCTimestamp transactionId, string key, KeyValueDurability durability, bool onlyIfHeld)
     {
         KeyValueRequest request = KeyValueRequestPool.Rent(
             KeyValueRequestType.TryReleaseExclusiveLock, 
@@ -335,7 +349,7 @@ internal sealed class LocalLockOperations
                     response = await AskKeyValueActor(persistentKeyValuesRouter, request);
 
                 if (response is null)
-                    return (KeyValueResponseType.Errored, key);
+                    return new(KeyValueResponseType.Errored, false);
 
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
@@ -344,10 +358,10 @@ internal sealed class LocalLockOperations
                     continue;
                 }
 
-                return (response.Type, key);
+                return new(response.Type, response.NothingHeld);
             }
 
-            return (KeyValueResponseType.MustRetry, key);
+            return new(KeyValueResponseType.MustRetry, false);
         }
         finally
         {
@@ -362,7 +376,18 @@ internal sealed class LocalLockOperations
     /// <param name="key"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<KeyValueResponseType> TryReleaseExclusivePrefixLock(HLCTimestamp transactionId, string prefixKey, KeyValueDurability durability, bool onlyIfHeld = false)
+    public async Task<KeyValueResponseType> TryReleaseExclusivePrefixLock(HLCTimestamp transactionId, string prefixKey, KeyValueDurability durability)
+    {
+        HeldHereRelease released = await ReleaseExclusivePrefixLock(transactionId, prefixKey, durability, onlyIfHeld: false);
+
+        return released.Type;
+    }
+
+    /// <summary><see cref="TryReleaseExclusiveLockHeldHere"/> for a prefix lock.</summary>
+    internal Task<HeldHereRelease> TryReleaseExclusivePrefixLockHeldHere(HLCTimestamp transactionId, string prefixKey, KeyValueDurability durability) =>
+        ReleaseExclusivePrefixLock(transactionId, prefixKey, durability, onlyIfHeld: true);
+
+    private async Task<HeldHereRelease> ReleaseExclusivePrefixLock(HLCTimestamp transactionId, string prefixKey, KeyValueDurability durability, bool onlyIfHeld)
     {
         KeyValueRequest request = KeyValueRequestPool.Rent(
             KeyValueRequestType.TryReleaseExclusivePrefixLock, 
@@ -396,7 +421,7 @@ internal sealed class LocalLockOperations
                     response = await AskKeyValueActor(persistentKeyValuesRouter, request);
 
                 if (response is null)
-                    return KeyValueResponseType.Errored;
+                    return new(KeyValueResponseType.Errored, false);
 
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
@@ -405,10 +430,10 @@ internal sealed class LocalLockOperations
                     continue;
                 }
 
-                return response.Type;
+                return new(response.Type, response.NothingHeld);
             }
 
-            return KeyValueResponseType.MustRetry;
+            return new(KeyValueResponseType.MustRetry, false);
         }
         finally
         {
@@ -562,8 +587,31 @@ internal sealed class LocalLockOperations
         string prefix,
         string? startKey, bool startInclusive,
         string? endKey,   bool endInclusive,
+        KeyValueDurability durability
+    )
+    {
+        HeldHereRelease released = await ReleaseExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability, onlyIfHeld: false);
+
+        return released.Type;
+    }
+
+    /// <summary><see cref="TryReleaseExclusiveLockHeldHere"/> for a range lock.</summary>
+    internal Task<HeldHereRelease> TryReleaseExclusiveRangeLockHeldHere(
+        HLCTimestamp transactionId,
+        string prefix,
+        string? startKey, bool startInclusive,
+        string? endKey,   bool endInclusive,
+        KeyValueDurability durability
+    ) =>
+        ReleaseExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability, onlyIfHeld: true);
+
+    private async Task<HeldHereRelease> ReleaseExclusiveRangeLock(
+        HLCTimestamp transactionId,
+        string prefix,
+        string? startKey, bool startInclusive,
+        string? endKey,   bool endInclusive,
         KeyValueDurability durability,
-        bool onlyIfHeld = false
+        bool onlyIfHeld
     )
     {
         KeyValueRequest request = KeyValueRequestPool.Rent(
@@ -602,7 +650,7 @@ internal sealed class LocalLockOperations
                     response = await AskKeyValueActor(persistentKeyValuesRouter, request);
 
                 if (response is null)
-                    return KeyValueResponseType.Errored;
+                    return new(KeyValueResponseType.Errored, false);
 
                 if (response.Type == KeyValueResponseType.WaitingForReplication)
                 {
@@ -611,10 +659,10 @@ internal sealed class LocalLockOperations
                     continue;
                 }
 
-                return response.Type;
+                return new(response.Type, response.NothingHeld);
             }
 
-            return KeyValueResponseType.MustRetry;
+            return new(KeyValueResponseType.MustRetry, false);
         }
         finally
         {

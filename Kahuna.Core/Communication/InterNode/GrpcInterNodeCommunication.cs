@@ -1901,6 +1901,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             OperationIdHigh = operationId.High,
             OperationIdLow = operationId.Low,
             Durability = (GrpcKeyValueDurability)payload.Durability,
+            LockExpiresMs = payload.LockExpiresMs,
             CachedType = (GrpcKeyValueResponseType)payload.CachedType,
             CachedRevision = payload.CachedRevision,
             CachedTimestampNode = payload.CachedTimestamp.N,

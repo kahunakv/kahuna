@@ -177,7 +177,7 @@ internal sealed class TryGetHandler : BaseHandler
                 if (!KeyValueWriteIntentLease.IsLive(context, message.Key, entry.WriteIntent, currentTime))
                     entry.WriteIntent = null;
                 else if (!message.ReadTimestamp.IsNull()
-                         && KeyValueWriteIntentSafeTime.MayCommitAtOrBefore(entry.WriteIntent, message.ReadTimestamp))
+                         && KeyValueWriteIntentSafeTime.MayCommitAtOrBefore(entry, entry.WriteIntent, message.ReadTimestamp))
                     return KeyValueStaticResponses.WaitingForReplicationResponse;
                 // live write intent from another tx and outside our snapshot window: fall through
             }

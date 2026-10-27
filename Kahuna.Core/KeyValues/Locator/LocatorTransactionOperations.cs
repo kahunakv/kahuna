@@ -67,6 +67,10 @@ internal sealed class LocatorTransactionOperations
         if (!TryPinCoordinator(options, out int partitionId))
             return new(KeyValueResponseType.InvalidInput, TransactionHandle.None);
 
+        // A session begun on a stopping node would be coordinated by a node that is going away.
+        if (routing.RefusesWhileStopping())
+            return new(KeyValueResponseType.MustRetry, TransactionHandle.None);
+
         if (!raft.Joined || await routing.AmILeaderIfHosted(partitionId, cancellationToken))
             return await manager.StartTransaction(options);
 
@@ -228,6 +232,11 @@ internal sealed class LocatorTransactionOperations
         // The session's owner serves it, whoever leads the coordinator partition now.
         if (OwnsSession(handle.TransactionId))
             return await manager.CommitTransaction(handle);
+
+        // A commit of a session this node does not own is not taken on while the node stops: the sender
+        // resolves the owner, or the record, through a node whose leadership view is live.
+        if (routing.RefusesWhileStopping())
+            return new TransactionCommitAnswer(KeyValueResponseType.MustRetry, null, CommitRefusalClass.Unresolved, "The node is shutting down");
 
         int partitionId = LocateCoordinator(handle.CoordinatorKey);
 
