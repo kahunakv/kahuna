@@ -1,3 +1,4 @@
+using System.Text;
 using System.Collections.Concurrent;
 using Google.Protobuf;
 using Kahuna.Server.KeyValues.Transactions.Data;
@@ -121,7 +122,7 @@ internal sealed partial class PreparedIntentStore
     private static string ReadLengthDelimitedString(ReadOnlySpan<byte> data, ref int pos)
     {
         int length = ReadLengthPrefix(data, ref pos);
-        string result = System.Text.Encoding.UTF8.GetString(data.Slice(pos, length));
+        string result = Encoding.UTF8.GetString(data.Slice(pos, length));
         pos += length;
         return result;
     }

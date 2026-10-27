@@ -1,4 +1,5 @@
 
+using System.Globalization;
 using System.Runtime.InteropServices;
 
 namespace Kahuna.Extensibility;
@@ -210,8 +211,8 @@ public readonly struct KahunaValue
         {
             KahunaValueKind.Null   => "(null)",
             KahunaValueKind.Bool   => AsBool() ? "true" : "false",
-            KahunaValueKind.Long   => AsLong().ToString(System.Globalization.CultureInfo.InvariantCulture),
-            KahunaValueKind.Double => AsDouble().ToString(System.Globalization.CultureInfo.InvariantCulture),
+            KahunaValueKind.Long   => AsLong().ToString(CultureInfo.InvariantCulture),
+            KahunaValueKind.Double => AsDouble().ToString(CultureInfo.InvariantCulture),
             KahunaValueKind.String => AsString(),
             KahunaValueKind.Bytes  => "(bytes:" + Length + ")",
             KahunaValueKind.Array  => "(array)",

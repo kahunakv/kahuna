@@ -1,4 +1,5 @@
 
+using System.Diagnostics.CodeAnalysis;
 using Kommander.Time;
 
 namespace Kahuna.Server.Locks.Data;
@@ -48,7 +49,7 @@ internal sealed class LockEntry
     /// A new entry holding a persisted row, for a lock actor to own: the persistence backend returns
     /// immutable rows. Returns null for a null row.
     /// </summary>
-    [return: System.Diagnostics.CodeAnalysis.NotNullIfNotNull(nameof(row))]
+    [return: NotNullIfNotNull(nameof(row))]
     public static LockEntry? FromRow(LockRow? row)
     {
         if (row is null)

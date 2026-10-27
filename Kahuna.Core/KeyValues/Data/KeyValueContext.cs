@@ -1,4 +1,5 @@
 
+using System.Diagnostics;
 using Nixie;
 using Kommander;
 using Kommander.Time;
@@ -340,7 +341,7 @@ internal sealed class KeyValueContext
         if (Store.TryGetValue(key, out KeyValueEntry? existing))
         {
 #if DEBUG
-            System.Diagnostics.Debug.Assert(
+            Debug.Assert(
                 existing.CachedBytes == KeyValueStoreAccounting.EstimateEntryBytes(key, existing) - (key.Length * sizeof(char)),
                 $"CachedBytes drift on replace: key={key}, cached={existing.CachedBytes}, computed={KeyValueStoreAccounting.EstimateEntryBytes(key, existing) - (key.Length * sizeof(char))}");
 #endif

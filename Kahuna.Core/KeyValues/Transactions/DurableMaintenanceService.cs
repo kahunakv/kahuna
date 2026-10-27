@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 
 using Nixie;
@@ -1173,7 +1174,7 @@ internal sealed class DurableMaintenanceService
     // delta up to its retry budget) costs one veto instead of one per retry. Bounded by a wholesale clear at the
     // cap — vetoes are rare by construction, so the map staying tiny is the norm and a clear only risks one
     // duplicate veto per entry, which the record state machine absorbs idempotently.
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<(HLCTimestamp TransactionId, long Epoch), byte> vetoedTransactions = new();
+    private readonly ConcurrentDictionary<(HLCTimestamp TransactionId, long Epoch), byte> vetoedTransactions = new();
 
     private const int VetoedTransactionsMaxTracked = 4_096;
 

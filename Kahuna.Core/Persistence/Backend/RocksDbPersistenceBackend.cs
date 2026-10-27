@@ -1058,7 +1058,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             ReadOnlySpan<byte> serialized = rentedSer.AsSpan(0, serializedSize);
 
             // ~CURRENT key: encode key + CurrentMarker suffix without an intermediate string.
-            System.Diagnostics.Debug.Assert(CurrentMarker.Length == CurrentMarkerUtf8.Length,
+            Debug.Assert(CurrentMarker.Length == CurrentMarkerUtf8.Length,
                 "CurrentMarker string and CurrentMarkerUtf8 span have drifted — update the u8 literal");
             
             Encoding.UTF8.GetBytes(item.Key, buffer);
@@ -1068,7 +1068,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             // ~<revision> key: reuse the key bytes already at buffer[0..keyLen), overwrite the suffix.
             buffer[keyLen] = (byte)'~';
             bool formatted = Utf8Formatter.TryFormat(item.Revision, buffer[(keyLen + 1)..], out int revLen);
-            System.Diagnostics.Debug.Assert(formatted, "Utf8Formatter.TryFormat failed for revision key");
+            Debug.Assert(formatted, "Utf8Formatter.TryFormat failed for revision key");
             batch.Put(buffer[..(keyLen + 1 + revLen)], serialized, cf: columnFamily);
         }
         finally
@@ -1205,7 +1205,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 Encoding.UTF8.GetBytes(candidate.Key.Key, rowKey);
                 rowKey[keyLen] = (byte)'~';
                 bool formatted = Utf8Formatter.TryFormat(candidate.Key.Revision, rowKey[(keyLen + 1)..], out int revLen);
-                System.Diagnostics.Debug.Assert(formatted, "Utf8Formatter.TryFormat failed for guarded history row key");
+                Debug.Assert(formatted, "Utf8Formatter.TryFormat failed for guarded history row key");
 
                 StoredKeyValueOrderingLookup stored = db.Get(
                     rowKey[..(keyLen + 1 + revLen)], StoredKeyValueOrderingDeserializer.Instance, cf: columnFamilyKeys);
@@ -1883,7 +1883,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             // ~CURRENT key: encode key + CurrentMarker suffix without an intermediate string.
             if (putCurrent)
             {
-                System.Diagnostics.Debug.Assert(CurrentMarker.Length == CurrentMarkerUtf8.Length,
+                Debug.Assert(CurrentMarker.Length == CurrentMarkerUtf8.Length,
                     "CurrentMarker string and CurrentMarkerUtf8 span have drifted — update the u8 literal");
                 CurrentMarkerUtf8.CopyTo(buffer[keyLen..]);
                 batch.Put(buffer[..(keyLen + CurrentMarkerUtf8.Length)], serialized, cf: columnFamily);
@@ -1892,10 +1892,10 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             // ~<revision> key: never written for no-revision writes — only the current value is kept.
             if (putHistory)
             {
-                System.Diagnostics.Debug.Assert(!item.NoRevision, "a no-revision write must not own a history row");
+                Debug.Assert(!item.NoRevision, "a no-revision write must not own a history row");
                 buffer[keyLen] = (byte)'~';
                 bool formatted = Utf8Formatter.TryFormat(item.Revision, buffer[(keyLen + 1)..], out int revLen);
-                System.Diagnostics.Debug.Assert(formatted, "Utf8Formatter.TryFormat failed for revision key");
+                Debug.Assert(formatted, "Utf8Formatter.TryFormat failed for revision key");
                 batch.Put(buffer[..(keyLen + 1 + revLen)], serialized, cf: columnFamily);
             }
         }
@@ -2140,7 +2140,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             Encoding.UTF8.GetBytes(keyName, buffer);
             buffer[keyLen] = (byte)'~';
             bool formatted = Utf8Formatter.TryFormat(revision, buffer[(keyLen + 1)..], out int revLen);
-            System.Diagnostics.Debug.Assert(formatted, "Utf8Formatter.TryFormat failed for revision lookup key");
+            Debug.Assert(formatted, "Utf8Formatter.TryFormat failed for revision lookup key");
 
             byte[]? value = db.Get(buffer[..(keyLen + 1 + revLen)], cf: columnFamilyKeys);
             if (value is null)
@@ -2186,7 +2186,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         for (int i = 0; i < revisions.Length; i++)
         {
             bool formatted = Utf8Formatter.TryFormat(revisions[i], digits, out int revLen);
-            System.Diagnostics.Debug.Assert(formatted, "Utf8Formatter.TryFormat failed for revision lookup key");
+            Debug.Assert(formatted, "Utf8Formatter.TryFormat failed for revision lookup key");
 
             byte[] key = new byte[keyLen + 1 + revLen];
             Encoding.UTF8.GetBytes(keyName.AsSpan(), key);

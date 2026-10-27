@@ -1,4 +1,5 @@
 
+using System.Diagnostics.CodeAnalysis;
 using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues;
@@ -379,7 +380,7 @@ internal sealed class KeyValueEntry
     /// A new entry holding a persisted row, for an actor to own: the persistence backend returns
     /// immutable rows, and the actor keeps its own mutable entry. Returns null for a null row.
     /// </summary>
-    [return: System.Diagnostics.CodeAnalysis.NotNullIfNotNull(nameof(row))]
+    [return: NotNullIfNotNull(nameof(row))]
     public static KeyValueEntry? FromRow(ReadOnlyKeyValueEntry? row)
     {
         if (row is null)

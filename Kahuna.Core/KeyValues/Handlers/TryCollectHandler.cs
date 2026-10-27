@@ -255,7 +255,7 @@ internal sealed class TryCollectHandler : BaseHandler
 
 #if DEBUG
         // The LRU walk is bounded to the inspection budget per cycle, never O(Store.Count).
-        System.Diagnostics.Debug.Assert(
+        Debug.Assert(
             lruVisited <= inspectionMax,
             $"LRU walk visited {lruVisited} entries but the per-cycle inspection budget is {inspectionMax}");
 #endif

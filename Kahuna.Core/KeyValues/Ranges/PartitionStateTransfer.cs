@@ -1,4 +1,6 @@
 
+using System.Buffers;
+using System.Collections.Concurrent;
 using Google.Protobuf;
 using Kommander;
 using Kommander.Time;
@@ -83,7 +85,7 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
     /// gate a loss-triggered purge still walking the backend could delete rows a re-gain's
     /// snapshot install just wrote.
     /// </summary>
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, SemaphoreSlim> installGates = new();
+    private readonly ConcurrentDictionary<int, SemaphoreSlim> installGates = new();
 
     private SemaphoreSlim InstallGateOf(int partitionId) =>
         installGates.GetOrAdd(partitionId, static _ => new SemaphoreSlim(1, 1));
@@ -402,7 +404,7 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
     /// queued attempt pins its whole staged snapshot for as long as it waits. Kommander already serializes
     /// installs on the partition executor, so this only ever fires if that changes; the sender retries.
     /// </summary>
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, byte> installsInProgress = new();
+    private readonly ConcurrentDictionary<int, byte> installsInProgress = new();
 
     public async Task ImportPartitionState(int partitionId, Stream snapshot, CancellationToken ct)
     {
@@ -784,7 +786,7 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
 
         // FNV-1a 64 over the three payloads in field order (checksum field excluded), as the exporter wrote it.
         KvStateMachineTransfer.FnvHashStream hasher = new();
-        byte[] buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(SegmentedBufferStream.SegmentSize);
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(SegmentedBufferStream.SegmentSize);
         try
         {
             HashRange(input, receipts, hasher, buffer);
@@ -793,7 +795,7 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
         }
         finally
         {
-            System.Buffers.ArrayPool<byte>.Shared.Return(buffer);
+            ArrayPool<byte>.Shared.Return(buffer);
         }
 
         input.Position = end;

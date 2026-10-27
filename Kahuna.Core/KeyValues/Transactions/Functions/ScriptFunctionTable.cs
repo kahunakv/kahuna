@@ -1,4 +1,5 @@
 
+using System.Diagnostics;
 using System.Collections.Frozen;
 
 using Microsoft.Extensions.Logging;
@@ -34,7 +35,7 @@ internal sealed class ScriptFunctionStats(string name)
     public long ElapsedTicks => Interlocked.Read(ref elapsedTicks);
 
     /// <summary>Total time spent inside the function, in milliseconds.</summary>
-    public double ElapsedMilliseconds => ElapsedTicks * 1000d / System.Diagnostics.Stopwatch.Frequency;
+    public double ElapsedMilliseconds => ElapsedTicks * 1000d / Stopwatch.Frequency;
 
     public void Record(long ticks)
     {
@@ -163,7 +164,7 @@ internal sealed class ScriptFunctionTable
         NodeName = nodeName;
         Logger = logger;
         SlowWarnMs = slowWarnMs < 0 ? 0 : slowWarnMs;
-        SlowWarnTicks = SlowWarnMs == 0 ? 0 : (long)(System.Diagnostics.Stopwatch.Frequency * (SlowWarnMs / 1000d));
+        SlowWarnTicks = SlowWarnMs == 0 ? 0 : (long)(Stopwatch.Frequency * (SlowWarnMs / 1000d));
 
         registry ??= new();
 

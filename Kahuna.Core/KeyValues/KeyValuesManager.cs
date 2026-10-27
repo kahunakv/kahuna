@@ -1,4 +1,5 @@
 
+using System.Diagnostics.Metrics;
 using System.Collections.Concurrent;
 using Kahuna.Server.KeyValues.Data;
 
@@ -332,14 +333,14 @@ internal sealed partial class KeyValuesManager : IDisposable
 
     // Instance-owned meter for the durable-2PC resident-state gauges; disposed on teardown so a disposed node's
     // stores are not kept reachable by the gauge callbacks.
-    private readonly System.Diagnostics.Metrics.Meter durableGaugeMeter;
+    private readonly Meter durableGaugeMeter;
 
-    private readonly System.Diagnostics.Metrics.Meter admissionGaugeMeter;
+    private readonly Meter admissionGaugeMeter;
 
     // Instance-owned meter for the per-partition applied-log-id gauge; same ownership rule.
-    private readonly System.Diagnostics.Metrics.Meter applyGaugeMeter;
+    private readonly Meter applyGaugeMeter;
 
-    private readonly System.Diagnostics.Metrics.Meter functionGaugeMeter;
+    private readonly Meter functionGaugeMeter;
 
     /// <summary>The durable-intent 2PC stores and key→partition routing, exposed to the transaction coordinator's
     /// durable finalize path (the sole durable-persistent finalize path).</summary>

@@ -1,3 +1,5 @@
+using System.Globalization;
+using System.Text;
 namespace Kahuna.Server.ScriptParser;
 
 /// <summary>
@@ -59,7 +61,7 @@ internal partial class scriptScanner
         if (firstEscape < 0)
             return new string(body);
 
-        System.Text.StringBuilder builder = new(body.Length);
+        StringBuilder builder = new(body.Length);
 
         builder.Append(body[..firstEscape]);
 
@@ -129,7 +131,7 @@ internal partial class scriptScanner
     /// Reads the one to three octal digits of an escape that begins at <paramref name="index"/> and appends
     /// the character they name. Advances <paramref name="index"/> past the digits it consumed.
     /// </summary>
-    private static void AppendOctal(System.Text.StringBuilder builder, ReadOnlySpan<char> body, ref int index)
+    private static void AppendOctal(StringBuilder builder, ReadOnlySpan<char> body, ref int index)
     {
         int value = 0;
         int digits = 0;
@@ -152,7 +154,7 @@ internal partial class scriptScanner
     /// and appends the character it names. Advances <paramref name="index"/> past the digits it consumed.
     /// Returns false when the sequence is malformed, after reporting the error.
     /// </summary>
-    private bool TryAppendCodePoint(System.Text.StringBuilder builder, ReadOnlySpan<char> body, ref int index, int digits)
+    private bool TryAppendCodePoint(StringBuilder builder, ReadOnlySpan<char> body, ref int index, int digits)
     {
         if (index + digits >= body.Length)
         {
@@ -162,7 +164,7 @@ internal partial class scriptScanner
 
         ReadOnlySpan<char> hex = body.Slice(index + 1, digits);
 
-        if (!uint.TryParse(hex, System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out uint value))
+        if (!uint.TryParse(hex, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out uint value))
         {
             yyerror("Invalid escape sequence '{0}' in string literal", new string(hex));
             return false;

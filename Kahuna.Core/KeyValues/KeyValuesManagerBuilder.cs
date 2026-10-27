@@ -1,3 +1,4 @@
+using System.Diagnostics.Metrics;
 using System.Diagnostics.CodeAnalysis;
 
 using Nixie;
@@ -74,11 +75,11 @@ internal sealed class KeyValuesManagerBuilder
     internal TransactionPriorityOrderer scriptOrderer = null!;
     internal TransactionCoordinator txCoordinator = null!;
     internal ScriptTransactionExecutor scriptExecutor = null!;
-    internal System.Diagnostics.Metrics.Meter durableGaugeMeter = null!;
-    internal System.Diagnostics.Metrics.Meter admissionGaugeMeter = null!;
-    internal System.Diagnostics.Metrics.Meter applyGaugeMeter = null!;
+    internal Meter durableGaugeMeter = null!;
+    internal Meter admissionGaugeMeter = null!;
+    internal Meter applyGaugeMeter = null!;
 
-    internal System.Diagnostics.Metrics.Meter functionGaugeMeter = null!;
+    internal Meter functionGaugeMeter = null!;
     internal KeyValueLocator locator = null!;
     internal IActorRef<PreparedIntentRecoveryActor, PreparedIntentRecoveryRequest> preparedIntentRecovery = null!;
     internal KeyValueRestorer restorer = null!;

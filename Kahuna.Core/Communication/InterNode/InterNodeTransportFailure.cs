@@ -1,4 +1,5 @@
 
+using System.Net.Sockets;
 using Grpc.Core;
 
 namespace Kahuna.Server.Communication.Internode;
@@ -30,5 +31,5 @@ public static class InterNodeTransportFailure
         IsTransportException(ex.Status.DebugException) || IsTransportException(ex.InnerException);
 
     private static bool IsTransportException(Exception? ex) =>
-        ex is HttpRequestException or IOException or System.Net.Sockets.SocketException;
+        ex is HttpRequestException or IOException or SocketException;
 }

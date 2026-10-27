@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Collections.Concurrent;
 
 using Kommander;
@@ -778,12 +779,12 @@ internal sealed class DurableReplicationGateway
         // that enqueued it and carried back on the reply so the ORIGIN — local or remote — records both halves
         // of the decomposition itself. A batch that never committed still reports its measured round: the time
         // was spent, and hiding it would fold a failed round into the pre-submission share.
-        long bundleStart = System.Diagnostics.Stopwatch.GetTimestamp();
+        long bundleStart = Stopwatch.GetTimestamp();
 
         using CancellationTokenRegistration _ = cancellationToken.Register(static state => ((TaskCompletionSource<bool>)state!).TrySetResult(false), completion);
         bool prepareAcknowledged = await submission.Committed.ConfigureAwait(false);
 
-        double bundleMs = System.Diagnostics.Stopwatch.GetElapsedTime(bundleStart).TotalMilliseconds;
+        double bundleMs = Stopwatch.GetElapsedTime(bundleStart).TotalMilliseconds;
 
         // Not committed, or committed but this node never observed the ordered apply (it stopped leading, or the
         // wait bound elapsed): both are the clean retry. The re-driven bundle is idempotent in the log, and the
