@@ -636,6 +636,9 @@ public sealed class KahunaCommandLineOptions
     [Option("extension-assembly", Required = false, HelpText = "Path to an assembly publishing user-defined script functions through IKahunaFunctionProvider, or storage engines for --storage and --wal-storage through IPersistenceBackendProvider and IWalProvider. Repeatable. Every node of a cluster must load the same set, because the functions are not replicated. Dependencies are loaded from the assembly's directory. An extension assembly is fully trusted code: it runs in the server process with the server's privileges")]
     public IEnumerable<string>? ExtensionAssemblies { get; set; }
 
+    [Option("extension-option", Required = false, HelpText = "Settings for the extensions loaded with --extension-assembly, as key=value, several after one flag: --extension-option a.x=1 b.y=2. The value is everything after the first '='; a key may appear once. Kahuna passes them to the storage engines' provider contexts without reading them; by convention a key starts with the extension's name, as solarium.environment=io_uring")]
+    public IEnumerable<string>? ExtensionOptions { get; set; }
+
     [Option("function-slow-warn-ms", Required = false, HelpText = "Log a warning when a user-defined script function takes longer than this many milliseconds. The call is synchronous and blocks a request path while the transaction holds its locks. 0 disables the warning", Default = 50)]
     public int FunctionSlowWarnMs { get; set; } = 50;
 
@@ -923,4 +926,25 @@ public sealed class KahunaCommandLineOptions
     /// </summary>
     public int GetStorageSharedCacheMb() =>
         StorageSharedCacheMb != 0 ? StorageSharedCacheMb : RocksDbSharedMemoryBudgetMb ?? 0;
+
+    /// <summary>
+    /// The settings of <c>--extension-option</c>, by key: each value is everything after the first '='.
+    /// Throws <see cref="KahunaServerException"/> for a setting without '=', an empty key, or a key given twice.
+    /// </summary>
+    public IReadOnlyDictionary<string, string> GetExtensionOptions()
+    {
+        Dictionary<string, string> options = new(StringComparer.Ordinal);
+        foreach (string option in ExtensionOptions ?? [])
+        {
+            int separator = option.IndexOf('=');
+            if (separator <= 0)
+                throw new KahunaServerException($"--extension-option '{option}' must be key=value with a non-empty key");
+
+            string key = option[..separator];
+            if (!options.TryAdd(key, option[(separator + 1)..]))
+                throw new KahunaServerException($"--extension-option '{key}' is given more than once");
+        }
+
+        return options;
+    }
 }

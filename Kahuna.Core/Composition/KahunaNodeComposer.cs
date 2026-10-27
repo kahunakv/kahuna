@@ -50,6 +50,7 @@ internal static class KahunaNodeComposer
             Configuration = configuration,
             Logger = NullLogger.Instance,
             SharedMemory = configuration.SharedMemory,
+            ExtensionOptions = configuration.ExtensionOptions,
         });
     }
 #else
@@ -63,6 +64,7 @@ internal static class KahunaNodeComposer
             Logger = logger,
             SharedResources = sharedResources,
             SharedMemory = configuration.SharedMemory,
+            ExtensionOptions = configuration.ExtensionOptions,
         });
     }
 #endif

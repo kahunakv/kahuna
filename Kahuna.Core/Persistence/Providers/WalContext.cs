@@ -29,6 +29,13 @@ public sealed class WalContext
     /// </summary>
     public SharedStorageMemory? SharedMemory { get; init; }
 
+    /// <summary>
+    /// The node's settings for its extensions, from <c>--extension-option key=value</c>
+    /// (<see cref="Configuration.KahunaConfiguration.ExtensionOptions"/>); empty when none are given. An engine reads
+    /// its own keys and refuses a value it cannot use.
+    /// </summary>
+    public IReadOnlyDictionary<string, string> ExtensionOptions { get; init; } = new Dictionary<string, string>(StringComparer.Ordinal);
+
 #if !KAHUNA_THREAD_FREE
     /// <summary>
     /// The block cache and write-buffer budget that a RocksDB WAL shares with the RocksDB backend, when the

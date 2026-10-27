@@ -152,6 +152,15 @@ public sealed class KahunaConfiguration
     public StorageProviders StorageProviders { get; set; } = StorageProviders.CreateDefault();
 
     /// <summary>
+    /// Settings for the extensions loaded with <c>--extension-assembly</c>, by key, from <c>--extension-option
+    /// key=value</c>; empty by default. Kahuna does not read them: they reach the <c>ExtensionOptions</c> of
+    /// every <see cref="PersistenceBackendContext"/> and <see cref="WalContext"/>, where a storage engine reads its
+    /// own and refuses a value it cannot use. By convention, an extension's keys start with its name, as
+    /// <c>solarium.environment</c>.
+    /// </summary>
+    public IReadOnlyDictionary<string, string> ExtensionOptions { get; set; } = new Dictionary<string, string>(StringComparer.Ordinal);
+
+    /// <summary>
     /// When true (default), the RocksDB KV/locks backend reads SSTs with direct I/O, bypassing the OS
     /// page cache so the block cache is the sole in-RAM read cache. Disable to use buffered reads
     /// backed by the page cache. Only affects the "rocksdb" storage backend.

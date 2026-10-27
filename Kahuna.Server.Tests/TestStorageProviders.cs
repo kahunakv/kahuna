@@ -201,6 +201,35 @@ public sealed class TestStorageProviders : IDisposable
         Assert.Equal([24L * 1024 * 1024, 40L * 1024 * 1024], (List<long>)engineResources);
     }
 
+    /// <summary>The node's extension options reach the contexts of the providers that open its WAL and its store.</summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task TheNodesWalAndStore_ReceiveTheExtensionOptions(bool standalone)
+    {
+        RecordingBackendProvider backendProvider = new("recorded");
+        RecordingWalProvider walProvider = new("recorded-wal");
+
+        EmbeddedKahunaOptions options = Options(storage: "recorded", walStorage: "recorded-wal");
+        options.StoragePath = Path.Combine(tempRoot, "store");
+        options.WalPath = Path.Combine(tempRoot, "wal");
+        options.ExtensionOptions = new Dictionary<string, string> { ["recorded.mode"] = "fast" };
+        options.StorageProviders.Register(backendProvider);
+        options.StorageProviders.Register(walProvider);
+
+        await using (EmbeddedKahunaNode node = standalone
+            ? new(options, NullLoggerFactory.Instance)
+            : new(options, new Kahuna.Server.Communication.Internode.MemoryInterNodeCommmunication(), new Kommander.Communication.Memory.InMemoryCommunication(),
+                new Kommander.Discovery.StaticDiscovery([]), NullLoggerFactory.Instance))
+        {
+        }
+
+        Assert.Equal("fast", Assert.Single(walProvider.Opened).ExtensionOptions["recorded.mode"]);
+        PersistenceBackendContext store = Assert.Single(backendProvider.Opened);
+        Assert.Equal("fast", store.ExtensionOptions["recorded.mode"]);
+        Assert.Same(store.ExtensionOptions, store.Configuration.ExtensionOptions);
+    }
+
     private static EmbeddedKahunaOptions Options(string storage, string walStorage) => new()
     {
         Storage = storage,

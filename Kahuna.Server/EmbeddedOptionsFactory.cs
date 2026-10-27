@@ -35,6 +35,7 @@ public static class EmbeddedOptionsFactory
     {
         TransportSecurity = transportSecurity,
         StorageProviders = storageProviders ?? StorageProviders.CreateDefault(),
+        ExtensionOptions = opts.GetExtensionOptions(),
         Functions = functions ?? new(),
         FunctionSlowWarnMs = opts.FunctionSlowWarnMs,
         NodeName = opts.RaftNodeName,

@@ -453,6 +453,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             SyncWrites = options.WalSyncWrites,
             Logger = logger,
             SharedMemory = sharedMemory,
+            ExtensionOptions = options.ExtensionOptions,
         });
     }
 #else
@@ -467,6 +468,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             Logger = logger,
             SharedResources = sharedResources,
             SharedMemory = sharedMemory,
+            ExtensionOptions = options.ExtensionOptions,
             RocksDbTuning = RaftWalTuningFactory.Build(options),
         });
     }
@@ -561,6 +563,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             BackendReadQueueDepth = options.BackendReadQueueDepth,
             Storage = options.Storage,
             StorageProviders = options.StorageProviders,
+            ExtensionOptions = options.ExtensionOptions,
             StoragePath = options.StoragePath,
             StorageRevision = string.IsNullOrWhiteSpace(options.StorageRevision) ? Guid.NewGuid().ToString() : options.StorageRevision,
             RocksDbDirectReads = options.RocksDbDirectReads,

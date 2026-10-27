@@ -68,6 +68,24 @@ kahuna-server --extension-assembly /opt/kahuna/engines/MyEngine/MyEngine.dll \
 - **Trust.** An extension assembly is fully trusted code that runs in the server process with the
   server's privileges.
 
+### Settings for an engine
+
+A provider has no constructor arguments, so an engine takes its settings from `--extension-option`, as
+`key=value` pairs after one flag. The value is everything after the first `=`, and a key may appear once:
+
+```sh
+kahuna-server --extension-assembly /opt/kahuna/solarium/Solarium.Kahuna.dll \
+              --storage solarium --wal-storage solarium \
+              --extension-option solarium.environment=io_uring
+```
+
+An embedding host sets `EmbeddedKahunaOptions.ExtensionOptions`. The node passes the map, unread, to
+`KahunaConfiguration.ExtensionOptions` and to the `ExtensionOptions` of every `PersistenceBackendContext` and
+`WalContext` it opens, so an engine reads its own keys in `Open`. An engine should refuse, with an
+exception that names the key, a value it cannot use, and ignore keys that are not its own. By convention,
+an engine's keys start with its name, so the engines of several extensions do not collide. Every node of a
+cluster should be given the same settings.
+
 The backend itself implements `IPersistenceBackend` (`Kahuna.Server.Persistence.Backend`), the same
 contract as the RocksDB, SQLite and memory backends. It returns immutable rows: `ReadOnlyKeyValueEntry`
 for key-value rows and `LockRow` for locks. The node copies a row into its own state when it loads it, so

@@ -54,6 +54,13 @@ public sealed class EmbeddedKahunaOptions
     /// </summary>
     public StorageProviders StorageProviders { get; set; } = StorageProviders.CreateDefault();
 
+    /// <summary>
+    /// Settings for the storage engines of <see cref="StorageProviders"/>, by key; empty by default. They reach
+    /// <see cref="KahunaConfiguration.ExtensionOptions"/>, which a provider reads from its context. By convention,
+    /// an engine's keys start with its name, as <c>solarium.environment</c>.
+    /// </summary>
+    public IReadOnlyDictionary<string, string> ExtensionOptions { get; set; } = new Dictionary<string, string>(StringComparer.Ordinal);
+
     public string WalPath { get; set; } = "";
 
     public string WalRevision { get; set; } = "";

@@ -32,6 +32,7 @@ public sealed class TestServerConfigurationSurface
     private static KahunaCommandLineOptions NonDefaultOptions() => new()
     {
         StorageRevision = "v1",
+        ExtensionOptions = ["acme.mode=fast"],
         DurableRecordRetentionMax = 1_234,
         DurableRecordRetentionMaxBytes = 5_678_901,
         DurableRecordRetentionHeapPressure = 0.5,
@@ -151,6 +152,56 @@ public sealed class TestServerConfigurationSurface
         Assert.Equal(64L * 1024 * 1024, new KahunaConfiguration { StorageSharedCacheBytes = 64L * 1024 * 1024 }.SharedMemory!.CacheBytes);
         Assert.Equal(0, new KahunaConfiguration { StorageSharedCacheBytes = 64L * 1024 * 1024 }.SharedMemory!.MemtableBudgetBytes);
         Assert.Null(EmbeddedKahunaNode.CreateKahunaConfiguration(new EmbeddedKahunaOptions(), singleProcessRaftGroup: true).SharedMemory);
+    }
+
+    [Fact]
+    public void ExtensionOptions_ReachBothNodeShapes_AndDefaultToNone()
+    {
+        KahunaCommandLineOptions parsed = CommandLine.Parser.Default.ParseArguments<KahunaCommandLineOptions>(
+            ["--storage-revision", "v1", "--extension-option", "solarium.environment=io_uring", "acme.url=https://h/?a=b"]).Value;
+        KahunaConfiguration server = ServerConfigurationFactory.Create(parsed);
+        KahunaConfiguration embedded = EmbeddedKahunaNode.CreateKahunaConfiguration(
+            EmbeddedOptionsFactory.CreateEmbeddedOptions(parsed), singleProcessRaftGroup: false);
+
+        foreach (KahunaConfiguration configuration in new[] { server, embedded })
+        {
+            Assert.Equal(2, configuration.ExtensionOptions.Count);
+            Assert.Equal("io_uring", configuration.ExtensionOptions["solarium.environment"]);
+
+            // The value is everything after the first '='.
+            Assert.Equal("https://h/?a=b", configuration.ExtensionOptions["acme.url"]);
+        }
+
+        KahunaCommandLineOptions none = CommandLine.Parser.Default
+            .ParseArguments<KahunaCommandLineOptions>(["--storage-revision", "v1"]).Value;
+        Assert.Empty(ServerConfigurationFactory.Create(none).ExtensionOptions);
+        Assert.Empty(EmbeddedKahunaNode.CreateKahunaConfiguration(new EmbeddedKahunaOptions(), singleProcessRaftGroup: true).ExtensionOptions);
+    }
+
+    [Theory]
+    [InlineData(new[] { "solarium.environment" }, "must be key=value")]
+    [InlineData(new[] { "=io_uring" }, "must be key=value")]
+    [InlineData(new[] { "solarium.environment=io_uring", "solarium.environment=default" }, "more than once")]
+    public void AnExtensionOptionWithoutKeyAndValue_OrAKeyGivenTwice_IsRefused(string[] values, string expected)
+    {
+        KahunaCommandLineOptions opts = NonDefaultOptions();
+        opts.ExtensionOptions = values;
+
+        KahunaServerException ex = Assert.Throws<KahunaServerException>(() => ServerConfigurationFactory.Create(opts));
+        Assert.Contains("--extension-option", ex.Message);
+        Assert.Contains(expected, ex.Message);
+    }
+
+    [Fact]
+    public void TheExtensionOptionFlag_ParsesSeveralValuesAfterOneFlag_AndRefusesASecondFlag()
+    {
+        CommandLine.ParserResult<KahunaCommandLineOptions> several = CommandLine.Parser.Default.ParseArguments<KahunaCommandLineOptions>(
+            ["--extension-option", "a.x=1", "b.y=2"]);
+        Assert.Equal(["a.x=1", "b.y=2"], several.Value.ExtensionOptions!);
+
+        CommandLine.ParserResult<KahunaCommandLineOptions> repeated = CommandLine.Parser.Default.ParseArguments<KahunaCommandLineOptions>(
+            ["--extension-option", "a.x=1", "--extension-option", "b.y=2"]);
+        Assert.Equal(CommandLine.ParserResultType.NotParsed, repeated.Tag);
     }
 
     [Theory]
@@ -320,6 +371,18 @@ public sealed class TestServerConfigurationSurface
                 if (server.SharedMemory?.MemtableBudgetBytes != embedded.SharedMemory?.MemtableBudgetBytes
                     || server.SharedMemory?.CacheBytes != embedded.SharedMemory?.CacheBytes)
                     differences.Add($"{property.Name}: the shared memory sizes differ");
+
+                continue;
+            }
+
+            // Each build gets its own map of extension options; compare the entries.
+            if (property.PropertyType == typeof(IReadOnlyDictionary<string, string>))
+            {
+                IReadOnlyDictionary<string, string> serverOptions = (IReadOnlyDictionary<string, string>)property.GetValue(server)!;
+                IReadOnlyDictionary<string, string> embeddedOptions = (IReadOnlyDictionary<string, string>)property.GetValue(embedded)!;
+                if (serverOptions.Count != embeddedOptions.Count
+                    || serverOptions.Any(option => !embeddedOptions.TryGetValue(option.Key, out string? value) || value != option.Value))
+                    differences.Add($"{property.Name}: the entries differ");
 
                 continue;
             }

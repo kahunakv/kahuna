@@ -146,6 +146,7 @@ else
             SharedResources = sharedResources,
             // The node's configuration, the one its store opens from, so the two share one budget object.
             SharedMemory = services.GetRequiredService<KahunaConfiguration>().SharedMemory,
+            ExtensionOptions = services.GetRequiredService<KahunaConfiguration>().ExtensionOptions,
             RocksDbTuning = walTuning,
         });
 
