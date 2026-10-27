@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Kommander;
 using Kahuna.Server.KeyValues.Logging;
 using Kahuna.Server.KeyValues.Data;
@@ -43,7 +44,7 @@ internal sealed class KeyValueReplicationDispatcher
     // the node logs alone. The version lets the fingerprint read the applied id and the store counts as one
     // consistent snapshot without a lock on the apply path: applies are serialized per partition by Kommander,
     // so a reader that sees the same even version before and after its reads saw no apply in between.
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, ApplyProgress> applyProgressByPartition = new();
+    private readonly ConcurrentDictionary<int, ApplyProgress> applyProgressByPartition = new();
 
     private sealed class ApplyProgress
     {
@@ -92,9 +93,14 @@ internal sealed class KeyValueReplicationDispatcher
     // Partitions whose leader-change fingerprint comparison is in flight, so a burst of leadership changes
     // on one partition runs one comparison at a time instead of a pile of them. A change that lands while
     // one runs bumps the partition's generation, and the running comparison re-runs once for it.
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, byte> leaderChangeComparisonsInFlight = new();
+    private readonly ConcurrentDictionary<int, byte> leaderChangeComparisonsInFlight = new();
 
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, long> leaderChangeGeneration = new();
+    private readonly ConcurrentDictionary<int, long> leaderChangeGeneration = new();
+
+    // The leader endpoint named by the most recent leader-change notification per partition, recorded only
+    // once that notification has claimed or queued its comparison run: an observer that sees a leader here
+    // with no run in flight knows the comparison for that notification has completed.
+    private readonly ConcurrentDictionary<int, string> lastNotifiedLeader = new();
 
     /// <summary>Bound on one comparison attempt, peers included.</summary>
     private const int ComparisonAttemptTimeoutMs = 5_000;
@@ -561,8 +567,24 @@ internal sealed class KeyValueReplicationDispatcher
         if (leaderChangeComparisonsInFlight.TryAdd(partitionId, 0))
             _ = RunLeaderChangeComparisonsAsync(partitionId);
 
+        // After the run is claimed or queued, so that this leader with no run in flight means its comparison
+        // has completed.
+        lastNotifiedLeader[partitionId] = node;
+
         return Task.FromResult(true);
     }
+
+    /// <summary>
+    /// The leader endpoint named by the most recent leader-change notification for the partition (empty while
+    /// the partition has no leader), or null before any notification reached this node. Together with
+    /// <see cref="IsLeaderChangeComparisonInFlight"/>: the named leader with no comparison in flight means the
+    /// comparison that notification started has completed.
+    /// </summary>
+    internal string? LastNotifiedLeader(int partitionId) =>
+        lastNotifiedLeader.TryGetValue(partitionId, out string? leader) ? leader : null;
+
+    /// <summary>True while a leader-change fingerprint comparison for the partition is running or queued to re-run.</summary>
+    internal bool IsLeaderChangeComparisonInFlight(int partitionId) => leaderChangeComparisonsInFlight.ContainsKey(partitionId);
 
     /// <summary>
     /// Runs the leader-change comparison for the partition, and again for every leader change that landed

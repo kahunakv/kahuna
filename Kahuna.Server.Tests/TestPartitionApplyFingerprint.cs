@@ -291,13 +291,23 @@ public sealed class TestPartitionApplyFingerprint : BaseCluster
             await WaitUntilAsync(() => leader.KeyValues.DivergenceContainment.IsGated(partition), timeoutMs: 15_000);
             await WaitUntilAsync(async () => !await leaderRaft.AmILeaderIfHosted(partition, ct), timeoutMs: 30_000);
 
-            (IRaft _, KahunaManager successor) = await LeaderOf(partition, nodes);
+            (IRaft successorRaft, KahunaManager successor) = await LeaderOf(partition, nodes);
             Assert.NotSame(leader, successor);
 
             // Back to a truthful report and an open gate: the mask moves to the successor so the split's source
             // completeness gate is exercised on the leader it copies from.
             leader.KeyValues.ApplyFingerprintOverrideForTesting = null;
             await leader.KeyValues.DivergenceContainment.ClearAsync(partition);
+
+            // Kommander publishes leadership before it delivers the promotion notification, and the successor
+            // runs its own comparison off that notification. Masked before that comparison has run, the
+            // successor would convict itself at its own promotion and hand leadership straight back, and the
+            // split below would copy from an unmasked leader. Wait for the promotion comparison to complete.
+            string successorEndpoint = successorRaft.GetLocalEndpoint();
+            KeyValueReplicationDispatcher successorDispatcher = successor.KeyValues.ReplicationDispatcher;
+            await WaitUntilAsync(() =>
+                successorDispatcher.LastNotifiedLeader(partition) == successorEndpoint
+                && !successorDispatcher.IsLeaderChangeComparisonInFlight(partition), timeoutMs: 30_000);
 
             masked = successor;
             successor.KeyValues.ApplyFingerprintOverrideForTesting = (id, real) =>

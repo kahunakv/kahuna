@@ -386,10 +386,33 @@ public class TestLocateAndScanRange : BaseCluster
     private static async Task WaitForPartitionLeaderAsync(
         int partitionId, (IRaft Raft, KahunaManager Kahuna)[] nodes, CancellationToken ct)
     {
-        // Generous budget: electing the new group competes with every other cluster the suite runs
-        // in parallel.
         foreach ((IRaft raft, KahunaManager _) in nodes)
-            await raft.WaitForLeader(partitionId, ct).AsTask().WaitAsync(TimeSpan.FromSeconds(30), ct);
+        {
+            IRaft node = raft;
+
+            // Generous budget: electing the new group competes with every other cluster the suite runs
+            // in parallel.
+            await WaitUntilAsync(async () =>
+            {
+                // CreatePartitionAsync answers once the map change is committed on the system partition;
+                // every other node materializes the new Raft group only when it applies that entry, and
+                // asked for the leader before then it throws "Invalid partition".
+                if (!node.HostsPartition(partitionId))
+                    return false;
+
+                try
+                {
+                    await node.WaitForLeader(partitionId, ct);
+                    return true;
+                }
+                catch (RaftException)
+                {
+                    // The group exists here but its first election did not conclude inside Kommander's own
+                    // wait; keep waiting within this budget.
+                    return false;
+                }
+            }, timeoutMs: 30_000);
+        }
     }
 
 
