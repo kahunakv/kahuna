@@ -1,4 +1,5 @@
 using Kommander;
+using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues.Data;
 using Kommander.Time;
 
@@ -84,12 +85,13 @@ internal sealed class RangeSplitter
     public const int MinRangeKeys = 2;
 
     /// <summary>
-    /// How long the quiesce window may stay open (ms). Long enough to cover the catch-up export, and
-    /// short enough that a split executor which dies mid-window costs the range a bounded stretch of
-    /// refused writes. Applied to both guards — the range lock's TTL and the replicated descriptor
-    /// deadline — so neither outlives the other and reopens the window while the split still runs.
+    /// How long the quiesce window may stay open (ms), from <see cref="KahunaConfiguration.RangeMoveQuiesceTtl"/>.
+    /// Long enough to cover the catch-up export, and short enough that a split executor which dies
+    /// mid-window costs the range a bounded stretch of refused writes. Applied to both guards — the range
+    /// lock's TTL and the replicated descriptor deadline — so neither outlives the other and reopens the
+    /// window while the split still runs.
     /// </summary>
-    private const int QuiesceTtlMs = 30_000;
+    private readonly int quiesceTtlMs;
 
     private readonly IRaft raft;
     private readonly RangeMapStore rangeMapStore;
@@ -100,12 +102,14 @@ internal sealed class RangeSplitter
         IRaft raft,
         RangeMapStore rangeMapStore,
         KeyValuesManager manager,
+        KahunaConfiguration configuration,
         ILogger<IKahuna> logger)
     {
         this.raft = raft;
         this.rangeMapStore = rangeMapStore;
         this.manager = manager;
         this.logger = logger;
+        quiesceTtlMs = RangeMoveQuiesce.TtlMsOf(configuration);
     }
 
     /// <summary>
@@ -307,7 +311,7 @@ internal sealed class RangeSplitter
             keySpace,
             splitKey, true,
             descriptor.EndKey, false,
-            QuiesceTtlMs,
+            quiesceTtlMs,
             KeyValueDurability.Persistent,
             RangeLockMode.WriteFence,
             ct);
@@ -330,7 +334,7 @@ internal sealed class RangeSplitter
         // wherever P's leadership ends up, not only in this node's router. Fail the split if it does
         // not commit: proceeding would copy the range while it is still accepting writes.
         HLCTimestamp quiescedUntil =
-            raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId()) + QuiesceTtlMs;
+            raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId()) + quiesceTtlMs;
 
         bool quiescePublished = await rangeMapStore.QuiesceRangeAsync(
             keySpace, splitKey, descriptor.EndKey, splitTxId, quiescedUntil, ct);
@@ -349,6 +353,15 @@ internal sealed class RangeSplitter
             return SplitOutcome.QuiesceFailed;
         }
 
+        // The quiesce's own clock bounds everything that follows. The in-window steps run against the time
+        // the quiesce has left, and the cutover is proposed only while the quiesce still holds, with a margin
+        // (see RangeMoveQuiesce): past the deadline the write fence and the descriptor deadline reopen the
+        // range on their own, and a write admitted on P after the catch-up copy would be unreachable the moment
+        // [K,E) routes to P'. A split that outlives its quiesce refuses its attempt; the trigger retries.
+        using CancellationTokenSource window = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        window.CancelAfter(RangeMoveQuiesce.WindowBudgetMs(quiescedUntil, raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId()), quiesceTtlMs));
+        CancellationToken windowCt = window.Token;
+
         try
         {
             // ── 6b. Settle the moving range's durable intents before the catch-up copy ──────────
@@ -360,7 +373,7 @@ internal sealed class RangeSplitter
             // here is stable: decided intents materialize into the source range and the catch-up copy
             // carries the rows. An intent still undecided inside its window refuses this attempt —
             // the trigger retries once its coordinator has decided.
-            if (!await manager.SettleMovingRangeIntentsAsync(descriptor.PartitionId, splitKey, movingEndKey, ct))
+            if (!await manager.SettleMovingRangeIntentsAsync(descriptor.PartitionId, splitKey, movingEndKey, windowCt))
             {
                 logger.LogWarning(
                     "RangeSplitter: moving range [{Key},{End}) holds unsettled durable intents; refusing this split attempt",
@@ -380,7 +393,7 @@ internal sealed class RangeSplitter
                 // destination's leader is established by now (it accepted the bulk copy).
                 if (!await manager.CopyRangeToPartitionAsync(
                         keySpace, splitKey, descriptor.EndKey, catchupTs, descriptor.PartitionId, newPartitionId,
-                        splitTxId, ct, RangeStateTransferService.RangeCopyQuiescedDeadlineMs))
+                        splitTxId, windowCt, RangeStateTransferService.RangeCopyQuiescedDeadlineMs))
                 {
                     logger.LogError("RangeSplitter: catch-up copy failed for {Space} [{Key},{End})",
                         keySpace, splitKey, descriptor.EndKey ?? "+inf");
@@ -404,13 +417,13 @@ internal sealed class RangeSplitter
             HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
             List<KeyValueRangeLock> sourceLocks = await manager.GetRangeLocksFromPartitionLeaderAsync(
-                keySpace, descriptor.PartitionId, ct);
+                keySpace, descriptor.PartitionId, windowCt);
 
             List<KeyValueRangeLock> clampedLocks = KvStateMachineTransfer.FilterAndClamp(
                 sourceLocks, splitKey, descriptor.EndKey, now, splitTxId);
 
             if (clampedLocks.Count > 0)
-                await manager.ImportRangeLocksToPartitionLeaderAsync(keySpace, newPartitionId, clampedLocks, ct);
+                await manager.ImportRangeLocksToPartitionLeaderAsync(keySpace, newPartitionId, clampedLocks, windowCt);
 
             // ── 7c/7d. Gather the moving range's transaction state, then hand it to P' ───
             // Completion receipts, canonical transaction records and prepared intents whose
@@ -425,7 +438,7 @@ internal sealed class RangeSplitter
             // The gather is pipelined with the handoff, one page at a time, so the split never holds the moving
             // range's whole transaction state.
             RangeStateTransferService.RangeTransactionStateTransferOutcome transferred =
-                await manager.TransferRangeTransactionStateAsync(descriptor.PartitionId, placedSource, splitKey, movingEndKey, newPartitionId, ct);
+                await manager.TransferRangeTransactionStateAsync(descriptor.PartitionId, placedSource, splitKey, movingEndKey, newPartitionId, windowCt);
 
             switch (transferred)
             {
@@ -449,6 +462,20 @@ internal sealed class RangeSplitter
             // Test seam: let the caller race an operation into the quiesce window.
             if (duringQuiesce is not null)
                 await duringQuiesce();
+
+            // ── 7e. The quiesce must still hold when the cutover is proposed ─────────────
+            // Everything above ran against the quiesce's remaining time, but a step may have overrun it, and
+            // the test seam can hold the window open. Once the deadline passed, writes into [K,E) were
+            // admitted on P again, after the catch-up copy; cutting over now would route them away for good.
+            HLCTimestamp beforeCutover = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+            if (!RangeMoveQuiesce.AllowsCutover(quiescedUntil, beforeCutover, quiesceTtlMs))
+            {
+                logger.LogError(
+                    "RangeSplitter: the quiesce of {Space} [{Key},{End}) has {RemainingMs} ms left of its {TtlMs} ms when the cutover needs more than {MarginMs} ms; refusing the cutover, because a write admitted on P{Source} after the catch-up copy would be unreachable once the range routes to P{New}",
+                    keySpace, splitKey, descriptor.EndKey ?? "+inf", RangeMoveQuiesce.RemainingMs(quiescedUntil, beforeCutover), quiesceTtlMs,
+                    RangeMoveQuiesce.MarginMsOf(quiesceTtlMs), descriptor.PartitionId, newPartitionId);
+                return SplitOutcome.QuiesceExpired;
+            }
 
             // ── 8. Atomic cutover ────────────────────────────────────────────────
             // Replace R with [S,K)@P and [K,E)@P' — both get generation+1 to invalidate any
@@ -540,7 +567,23 @@ internal sealed class RangeSplitter
 
             logger.LogRangeSplitterSplit(keySpace, splitKey, descriptor.StartKey ?? "-inf", descriptor.EndKey ?? "+inf", descriptor.PartitionId, newPartitionId, newGeneration);
 
+            // One line per move at the level an operator's node log keeps: the span, both partitions, the
+            // generation and how much of the quiesce the move used, so a run's timeline can be read back.
+            logger.LogWarning(
+                "RangeSplitter: cut over {Space} [{Key},{End}) from P{Source} to P{New} at generation {Generation} with {RemainingMs} ms of its {TtlMs} ms quiesce left",
+                keySpace, splitKey, descriptor.EndKey ?? "+inf", descriptor.PartitionId, newPartitionId, newGeneration,
+                RangeMoveQuiesce.RemainingMs(quiescedUntil, beforeCutover), quiesceTtlMs);
+
             return new SplitOutcome(SplitStatus.Succeeded, newPartitionId, newGeneration);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            // The window token fired: an in-window step outlived the quiesce. Same refusal as the check
+            // before the cutover; the range reopens in the finally below and the trigger retries.
+            logger.LogError(
+                "RangeSplitter: the quiesce of {Space} [{Key},{End}) lapsed ({TtlMs} ms) while the move was still settling, copying or handing off; refusing this split attempt before the cutover",
+                keySpace, splitKey, descriptor.EndKey ?? "+inf", quiesceTtlMs);
+            return SplitOutcome.QuiesceExpired;
         }
         finally
         {
@@ -677,6 +720,10 @@ internal enum SplitStatus
     /// <summary>The source partition's leader holds fewer committed heads than a replica at the same applied
     /// log id; copying from it would carry an incomplete state into the new partition. Retryable.</summary>
     SourceStateIncomplete,
+    /// <summary>The quiesce lapsed before the cutover could be proposed: the write fence and the descriptor
+    /// deadline reopened the moving range while the move was still running, so a write may have been admitted
+    /// on the source after the catch-up copy. Cutting over would route the range away from it. Retryable.</summary>
+    QuiesceExpired,
 }
 
 /// <summary>Result of <see cref="RangeSplitter.SplitAsync"/>.</summary>
@@ -713,6 +760,7 @@ internal readonly struct SplitOutcome
     public static SplitOutcome ConcurrentSplit => new(SplitStatus.ConcurrentSplit);
     public static SplitOutcome UnsettledMovingIntents => new(SplitStatus.UnsettledMovingIntents);
     public static SplitOutcome SourceStateIncomplete => new(SplitStatus.SourceStateIncomplete);
+    public static SplitOutcome QuiesceExpired => new(SplitStatus.QuiesceExpired);
 
     /// <summary>A <see cref="SplitStatus.TransferFailed"/> outcome naming the step that failed.</summary>
     public static SplitOutcome TransferFailedAt(string detail) => new(SplitStatus.TransferFailed, detail: detail);

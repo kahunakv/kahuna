@@ -660,6 +660,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             RangeSplitIndivisibleCooldown = options.RangeSplitIndivisibleCooldown,
             RangeSplitSettleWindow = options.RangeSplitSettleWindow,
             RangeMoveSettleTimeout = options.RangeMoveSettleTimeout,
+            RangeMoveQuiesceTtl = options.RangeMoveQuiesceTtl,
             RangeMergeMinSize = options.RangeMergeMinSize,
             StagedWriteIntentLeaseMs = options.StagedWriteIntentLeaseMs,
             ScanPageRetryBudgetMs = options.ScanPageRetryBudgetMs,

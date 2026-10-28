@@ -422,10 +422,11 @@ internal sealed class RangeSplitTrigger : IDisposable
 
         if (!outcome.IsSuccess)
         {
-            // A refused drain is the one failure that is expected to repeat: the range is being
-            // written and its coordinators have not all decided. Back off before re-attempting, so
-            // the next pass does not re-quiesce it and refuse its writes again for nothing.
-            if (outcome.Status == SplitStatus.UnsettledMovingIntents)
+            // A refused drain and a lapsed quiesce are the failures that are expected to repeat: the range
+            // is being written, and its coordinators have not all decided or its move outlives the window
+            // under that load. Back off before re-attempting, so the next pass does not re-quiesce it and
+            // refuse its writes again for nothing.
+            if (outcome.Status is SplitStatus.UnsettledMovingIntents or SplitStatus.QuiesceExpired)
                 RecordDrainRefusal(descriptor);
 
             return false;

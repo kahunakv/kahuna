@@ -902,6 +902,18 @@ public sealed class KahunaConfiguration
     public TimeSpan RangeMoveSettleTimeout { get; set; } = TimeSpan.FromSeconds(10);
 
     /// <summary>
+    /// How long a range split or merge may hold its quiesce: the TTL of the write-fence range lock on the
+    /// moving range and the deadline of the quiesce the replicated descriptor carries. Both guards refuse
+    /// every write into the moving range while the move settles its intents, takes its catch-up copy and hands
+    /// its transaction state to the destination. Once the deadline passes the guards reopen the range on
+    /// their own, so a move executor that died mid-window costs the range only a bounded stretch of refused
+    /// writes; a live move that outlives the deadline cannot cut over, because a write admitted on the source
+    /// after the catch-up copy would be unreachable once the range routes to the destination. Such a move
+    /// refuses its attempt instead and the trigger retries. Values below one second are raised to it.
+    /// </summary>
+    public TimeSpan RangeMoveQuiesceTtl { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
     /// Maximum number of keys a KeyRange descriptor may contain before it is no longer
     /// considered an under-min merge candidate. When two adjacent descriptors both have fewer
     /// than this value the auto-merge trigger coalesces them. 0 disables auto-merge.

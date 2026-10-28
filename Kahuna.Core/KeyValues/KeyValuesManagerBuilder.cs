@@ -684,9 +684,9 @@ internal sealed class KeyValuesManagerBuilder
 
         // RangeSplitter and RangeSplitTrigger both depend on this (KeyValuesManager) being fully
         // constructed, so we assign after all other fields are set.
-        rangeSplitter     = new(raft, rangeMapStore, manager, logger);
+        rangeSplitter     = new(raft, rangeMapStore, manager, configuration, logger);
         rangeSplitTrigger = new(raft, rangeMapStore, rangeSplitter, manager, writeFrequencyRegistry, configuration, logger);
-        rangeMerger       = new(raft, rangeMapStore, manager, logger);
+        rangeMerger       = new(raft, rangeMapStore, manager, configuration, logger);
         rangeMergeTrigger = new(raft, rangeMapStore, rangeMerger, writeFrequencyRegistry, configuration, logger);
 
         keySpaceAdmin = new(runtime, manager, rangeSplitter, rangeSplitTrigger, rangeMerger, rangeMergeTrigger);

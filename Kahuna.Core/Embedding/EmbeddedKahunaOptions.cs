@@ -970,6 +970,14 @@ public sealed class EmbeddedKahunaOptions
     public TimeSpan RangeMoveSettleTimeout { get; set; } = TimeSpan.FromSeconds(10);
 
     /// <summary>
+    /// How long a range split or merge may hold its quiesce: the TTL of the write fence on the moving range
+    /// and the deadline on its replicated descriptor. A move still running when the quiesce lapses refuses
+    /// its attempt instead of cutting over, because a write admitted on the source after the catch-up copy
+    /// would be unreachable once the range moves. Values below one second are raised to one second.
+    /// </summary>
+    public TimeSpan RangeMoveQuiesceTtl { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
     /// Key count below which two adjacent ranges become eligible to be merged back into one.
     /// 0 disables auto-merge: the periodic merge checker is not started at all, so cold ranges
     /// accumulate until something merges them by hand.

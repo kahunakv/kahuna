@@ -831,6 +831,9 @@ public sealed class KahunaCommandLineOptions
     [Option("range-move-settle-timeout", Required = false, HelpText = "Maximum seconds a range split or merge holds its quiesce while it waits for the moving range's in-flight transactions to decide and settle before the cutover. Writes into the moving range are refused (retryably) for at most this long per attempt. 0 disables the wait, so a range under sustained writes may never split. Clamped to 15. Default 10.", Default = 10)]
     public int RangeMoveSettleTimeoutSeconds { get; set; } = 10;
 
+    [Option("range-move-quiesce-ttl", Required = false, HelpText = "Seconds a range split or merge may hold its quiesce (the write fence on the moving range and the deadline on its descriptor). A move still running when the quiesce lapses refuses its attempt instead of cutting over, because a write admitted after the catch-up copy would be unreachable once the range moves. Values below 1 are raised to 1. Default 30.", Default = 30)]
+    public int RangeMoveQuiesceTtlSeconds { get; set; } = 30;
+
     [Option("commit-admission-lag-ms", Required = false, HelpText = "Milliseconds a new commit's timestamp may trail the time of the log entry that carries it. Positive turns on the commit admission window: a prepare or a write outside a transaction whose timestamp falls outside (entry time - lag, entry time + 5 s) is refused retryably, and watches send progress watermarks. Enable only when every node runs a version that reads it, with the same value on every node. 0 disables it. Default 0.", Default = 0)]
     public int CommitAdmissionLagMs { get; set; }
 

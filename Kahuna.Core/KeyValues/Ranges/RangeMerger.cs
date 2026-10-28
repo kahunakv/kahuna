@@ -1,5 +1,6 @@
 
 using Kommander;
+using Kahuna.Server.Configuration;
 using Kommander.Time;
 
 using Kahuna.Server.KeyValues.Logging;
@@ -77,13 +78,13 @@ internal sealed class RangeMerger
     private const int CountPageSize = 512;
 
     /// <summary>
-    /// How long the quiesce window may stay open (ms). Long enough to cover the settle and the copy
-    /// of an under-min range, and short enough that a merge executor which dies mid-window costs the
-    /// range a bounded stretch of refused writes. Applied to both guards — the range lock's TTL and
-    /// the replicated descriptor deadline — so neither outlives the other and reopens the window
-    /// while the merge still runs.
+    /// How long the quiesce window may stay open (ms), from <see cref="KahunaConfiguration.RangeMoveQuiesceTtl"/>.
+    /// Long enough to cover the settle and the copy of an under-min range, and short enough that a
+    /// merge executor which dies mid-window costs the range a bounded stretch of refused writes.
+    /// Applied to both guards — the range lock's TTL and the replicated descriptor deadline — so
+    /// neither outlives the other and reopens the window while the merge still runs.
     /// </summary>
-    private const int QuiesceTtlMs = 30_000;
+    private readonly int quiesceTtlMs;
 
     private readonly IRaft raft;
     private readonly RangeMapStore rangeMapStore;
@@ -94,12 +95,14 @@ internal sealed class RangeMerger
         IRaft raft,
         RangeMapStore rangeMapStore,
         KeyValuesManager manager,
+        KahunaConfiguration configuration,
         ILogger<IKahuna> logger)
     {
         this.raft          = raft;
         this.rangeMapStore = rangeMapStore;
         this.manager       = manager;
         this.logger        = logger;
+        quiesceTtlMs       = RangeMoveQuiesce.TtlMsOf(configuration);
     }
 
     /// <summary>
@@ -176,7 +179,7 @@ internal sealed class RangeMerger
             keySpace,
             right.StartKey, true,
             right.EndKey, false,
-            QuiesceTtlMs,
+            quiesceTtlMs,
             KeyValueDurability.Persistent,
             RangeLockMode.WriteFence,
             ct);
@@ -196,7 +199,7 @@ internal sealed class RangeMerger
         // wherever P2's leadership ends up, not only in this node's router. Fail the merge if it does
         // not commit: proceeding would copy the range while it is still accepting writes.
         HLCTimestamp quiescedUntil =
-            raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId()) + QuiesceTtlMs;
+            raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId()) + quiesceTtlMs;
 
         bool quiescePublished = await rangeMapStore.QuiesceRangeAsync(
             keySpace, right.StartKey, right.EndKey, mergeTxId, quiescedUntil, ct);
@@ -217,7 +220,16 @@ internal sealed class RangeMerger
 
         try
         {
-            return await MergeUnderQuiesceAsync(keySpace, left, right, mergeTxId, duringQuiesce, ct);
+            return await MergeUnderQuiesceAsync(keySpace, left, right, mergeTxId, quiescedUntil, duringQuiesce, ct);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            // The window token fired: an in-window step outlived the quiesce. Same refusal as the check
+            // before the cutover; the range reopens in the finally below and the trigger retries.
+            logger.LogError(
+                "RangeMerger: the quiesce of {Space} [{Start},{End}) lapsed ({TtlMs} ms) while the move was still settling, copying or handing off; refusing this merge attempt before the cutover",
+                keySpace, right.StartKey, right.EndKey ?? "+inf", quiesceTtlMs);
+            return MergeOutcome.QuiesceExpired;
         }
         finally
         {
@@ -250,9 +262,18 @@ internal sealed class RangeMerger
         RangeDescriptor left,
         RangeDescriptor right,
         HLCTimestamp mergeTxId,
+        HLCTimestamp quiescedUntil,
         Func<Task>? duringQuiesce,
         CancellationToken ct)
     {
+        // The quiesce's own clock bounds everything that follows: the in-window steps run against the time
+        // the quiesce has left, and the cutover is proposed only while the quiesce still holds, with a margin
+        // (see RangeMoveQuiesce). Past the deadline the write fence and the descriptor deadline reopen [B,C)
+        // on their own, and a write admitted on P2 after the copy would be lost with the retired partition.
+        using CancellationTokenSource window = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        window.CancelAfter(RangeMoveQuiesce.WindowBudgetMs(quiescedUntil, raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId()), quiesceTtlMs));
+        CancellationToken windowCt = window.Token;
+
         // The transaction-state reads below (settle barrier, receipts/records/intents handoff) run
         // over node-global stores ordered by raw key, where a null end bound means "+infinity"
         // rather than this range's "end of the key space". Bound them to the key space: an
@@ -269,7 +290,7 @@ internal sealed class RangeMerger
         // prepares, so settling here is stable — decided intents materialize into the moving range
         // and the copy carries the rows. An intent still undecided inside its window refuses this
         // attempt; the trigger retries once its coordinator has decided.
-        if (!await manager.SettleMovingRangeIntentsAsync(right.PartitionId, right.StartKey, movingEndKey, ct))
+        if (!await manager.SettleMovingRangeIntentsAsync(right.PartitionId, right.StartKey, movingEndKey, windowCt))
         {
             logger.LogWarning(
                 "RangeMerger: moving range [{Start},{End}) holds unsettled durable intents; refusing this merge attempt",
@@ -293,7 +314,7 @@ internal sealed class RangeMerger
             // survivor partition is long-lived, so no first election needs to be waited out.
             if (!await manager.CopyRangeToPartitionAsync(
                     keySpace, right.StartKey, right.EndKey, snapshotTs, right.PartitionId, left.PartitionId,
-                    mergeTxId, ct, RangeStateTransferService.RangeCopyQuiescedDeadlineMs))
+                    mergeTxId, windowCt, RangeStateTransferService.RangeCopyQuiescedDeadlineMs))
             {
                 logger.LogError(
                     "RangeMerger: bulk copy failed for {Space} [{Start},{End})",
@@ -330,7 +351,7 @@ internal sealed class RangeMerger
             HLCTimestamp lockNow = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
             List<KeyValueRangeLock> rightLocks = await manager.GetRangeLocksFromPartitionLeaderAsync(
-                keySpace, right.PartitionId, ct);
+                keySpace, right.PartitionId, windowCt);
 
             // mergeTxId (the quiesce lock) is excluded — it is released independently in the caller's
             // finally. Transferring it would move this merge's own lock onto the survivor, where it
@@ -339,7 +360,12 @@ internal sealed class RangeMerger
                 rightLocks, right.StartKey, right.EndKey, lockNow, mergeTxId);
 
             if (clampedLocks.Count > 0)
-                await manager.ImportRangeLocksToPartitionLeaderAsync(keySpace, left.PartitionId, clampedLocks, ct);
+                await manager.ImportRangeLocksToPartitionLeaderAsync(keySpace, left.PartitionId, clampedLocks, windowCt);
+        }
+        catch (OperationCanceledException) when (windowCt.IsCancellationRequested && !ct.IsCancellationRequested)
+        {
+            // The quiesce lapsed mid-transfer: surface it as the window refusal, not as a best-effort miss.
+            throw;
         }
         catch (Exception ex)
         {
@@ -363,7 +389,7 @@ internal sealed class RangeMerger
             // pipelined with the handoff, one page at a time, so the merge never holds the moving
             // range's whole transaction state.
             RangeStateTransferService.RangeTransactionStateTransferOutcome transferred =
-                await manager.TransferRangeTransactionStateAsync(right.PartitionId, placedRight, right.StartKey, movingEndKey, left.PartitionId, ct);
+                await manager.TransferRangeTransactionStateAsync(right.PartitionId, placedRight, right.StartKey, movingEndKey, left.PartitionId, windowCt);
 
             switch (transferred)
             {
@@ -395,6 +421,20 @@ internal sealed class RangeMerger
         // Test seam: let the caller race an operation into the quiesce window.
         if (duringQuiesce is not null)
             await duringQuiesce();
+
+        // -- 3c. The quiesce must still hold when the cutover is proposed ----------
+        // A step may have overrun the window, and the test seam can hold it open. Once the deadline passed,
+        // writes into [B,C) were admitted on P2 again, after the copy; cutting over now would retire the
+        // partition that holds them.
+        HLCTimestamp beforeCutover = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+        if (!RangeMoveQuiesce.AllowsCutover(quiescedUntil, beforeCutover, quiesceTtlMs))
+        {
+            logger.LogError(
+                "RangeMerger: the quiesce of {Space} [{Start},{End}) has {RemainingMs} ms left of its {TtlMs} ms when the cutover needs more than {MarginMs} ms; refusing the cutover, because a write admitted on P{Right} after the copy would be lost with the retired partition",
+                keySpace, right.StartKey, right.EndKey ?? "+inf", RangeMoveQuiesce.RemainingMs(quiescedUntil, beforeCutover), quiesceTtlMs,
+                RangeMoveQuiesce.MarginMsOf(quiesceTtlMs), right.PartitionId);
+            return MergeOutcome.QuiesceExpired;
+        }
 
         // -- 4. Atomic cutover ----------------------------------------------------
         // Replace {left, right} with [A,C)@P1 gen+1. The merged descriptor carries no quiesce, so the
@@ -474,6 +514,13 @@ internal sealed class RangeMerger
                 manager, keySpace, left.PartitionId, clampedLocks, logger, "RangeMerger", ct);
 
         logger.LogRangeMergerMerged(keySpace, left.StartKey ?? "-inf", right.EndKey ?? "+inf", left.PartitionId, newGeneration, right.PartitionId);
+
+        // One line per move at the level an operator's node log keeps: the span, both partitions, the
+        // generation and how much of the quiesce the move used, so a run's timeline can be read back.
+        logger.LogWarning(
+            "RangeMerger: merged {Space} [{Start},{End}) from P{Right} into P{Left} at generation {Generation} with {RemainingMs} ms of its {TtlMs} ms quiesce left",
+            keySpace, right.StartKey, right.EndKey ?? "+inf", right.PartitionId, left.PartitionId, newGeneration,
+            RangeMoveQuiesce.RemainingMs(quiescedUntil, beforeCutover), quiesceTtlMs);
 
         return new MergeOutcome(MergeStatus.Succeeded, right.PartitionId, newGeneration);
     }
@@ -627,6 +674,8 @@ internal enum MergeStatus
     ConcurrentChange,
     ConcurrentMove,
     UnsettledMovingIntents,
+    /// <summary>The quiesce lapsed before the cutover could be proposed; see the split counterpart. Retryable.</summary>
+    QuiesceExpired,
 }
 
 /// <summary>Result of <see cref="RangeMerger.MergeAsync"/>.</summary>
@@ -652,4 +701,5 @@ internal readonly struct MergeOutcome
     public static MergeOutcome ConcurrentChange => new(MergeStatus.ConcurrentChange);
     public static MergeOutcome ConcurrentMove => new(MergeStatus.ConcurrentMove);
     public static MergeOutcome UnsettledMovingIntents => new(MergeStatus.UnsettledMovingIntents);
+    public static MergeOutcome QuiesceExpired => new(MergeStatus.QuiesceExpired);
 }

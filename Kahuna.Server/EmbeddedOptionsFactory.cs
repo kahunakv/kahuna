@@ -152,6 +152,7 @@ public static class EmbeddedOptionsFactory
         RangeSplitMinRangeSize = opts.RangeSplitMinRangeSize,
         RangeSplitSettleWindow = TimeSpan.FromSeconds(opts.RangeSplitSettleWindowSeconds),
         RangeMoveSettleTimeout = TimeSpan.FromSeconds(opts.RangeMoveSettleTimeoutSeconds),
+        RangeMoveQuiesceTtl = TimeSpan.FromSeconds(opts.RangeMoveQuiesceTtlSeconds),
         RangeMergeMinSize = opts.RangeMergeMinSize,
         CommitAdmissionLagMs = opts.CommitAdmissionLagMs,
         HistoryHoldMaxLeaseMs = opts.HistoryHoldMaxLeaseMs,

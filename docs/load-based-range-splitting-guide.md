@@ -123,6 +123,7 @@ bursty report could trip a split. Keep `RangeSplitLoadWindow` ≥ ~10s.
 | `RangeSplitSettleWindow` | `--range-split-settle-window` | `10s` | Post-split cooldown; neither child is re-evaluated until it elapses. **Must be ≥ `MinLeaderStability`** (validated at startup). |
 | `RangeSplitIndivisibleCooldown` | *(embedded only)* | `5min` | How long an indivisible range is skipped before the count branch re-samples it. |
 | `RangeMoveSettleTimeout` | `--range-move-settle-timeout` | `10s` | Maximum time a split or merge holds its quiesce while it waits for the moving range's in-flight transactions to decide and settle before the cutover. Writes into the moving range are refused (retryably) for at most this long per attempt. `0` disables the wait, so a range under sustained writes may never split. Clamped to `15s`. |
+| `RangeMoveQuiesceTtl` | `--range-move-quiesce-ttl` | `30s` | How long a split or merge may hold its quiesce: the TTL of the write fence on the moving range and the deadline on its descriptor. A move still running when the quiesce lapses refuses its attempt (`QuiesceExpired`, retryable) instead of cutting over, so a write admitted on the source after the catch-up copy is never routed away. Values below `1s` are raised to `1s`. |
 
 ### Count-split knobs (pre-existing)
 

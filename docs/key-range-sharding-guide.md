@@ -439,6 +439,19 @@ Step by step:
    to the split's own transaction id, so a straggling release cannot reopen a *later* split's
    window, and a successful cutover clears the quiesce atomically by replacing the descriptor.
 
+   The deadline cuts both ways: once it passes, the range lock and the descriptor quiesce admit
+   writes into `[K,E)` again, on P, after the catch-up copy. A split that is still running at that
+   point must not cut over, because every such write would become unreachable the moment the range
+   routes to P'. So the in-window steps (the settle barrier, the catch-up copy, the lock transfer
+   and the transaction-state hand-off) run against the quiesce's remaining time, and immediately
+   before the cutover the split checks that the quiesce still holds with a margin for the cutover's
+   own meta commit and for clock skew between the driver and the source leader (a fifteenth of the
+   TTL, between 200 ms and 2 s). A split that outlived its quiesce answers `QuiesceExpired`
+   (retryable; the trigger backs off as for a refused drain) and the range reopens as before. The
+   TTL is `--range-move-quiesce-ttl` (default 30 s); a successful cutover logs one Warning line with
+   the span, both partitions, the generation and the quiesce time left, so a run's timeline can be
+   read back from a node log kept at that level. Merge has the same guard.
+
 5. **Atomic cutover.** One `MutateAsync` meta-transaction on P0: bump generations,
    write the two new descriptors (`[S,K)@P` and `[K,E)@P'`), remove the old one. Because
    `MutateAsync` is the single serialized writer, overlap is impossible. After commit, routing
@@ -715,6 +728,7 @@ The count-based knobs (the load-based ones live in the
 | `--range-merge-min-size` | 10 | Below this, adjacent ranges become merge candidates. **`0` disables auto-merge entirely.** |
 | `--range-split-settle-window` | 10s | Post-split cooldown. Must be ≥ `--raft-min-leader-stability-ms`; startup fails otherwise. |
 | `--range-move-settle-timeout` | 10s | Maximum time a split or merge waits, inside its quiesce, for the moving range's in-flight transactions to decide and settle before the cutover. `0` disables the wait — a range under sustained writes may then never split. Clamped to 15s. |
+| `--range-move-quiesce-ttl` | 30s | How long a split or merge may hold its quiesce (the write fence on the moving range and the deadline on its descriptor). A move still running when the quiesce lapses refuses its attempt with `QuiesceExpired` instead of cutting over, because a write admitted after the catch-up copy would be unreachable once the range moves. Values below 1s are raised to 1s. |
 | `--range-collection-interval` | 60s | Sampling cadence. See the warning below. |
 
 A `0` on a threshold is not "no limit" — the corresponding background actor is never spawned, so the
