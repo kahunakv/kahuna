@@ -159,6 +159,15 @@ internal sealed class TryPrepareMutationsHandler : BaseHandler
         HLCTimestamp prepareTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
         HLCTimestamp intentExpires = prepareTime + DefaultTxCompleteTimeout;
 
+        // A snapshot read served the committed head over this intent at its commit floor, so the committed
+        // revision must carry a stamp above the floor: the staged stamp becomes the commit timestamp below, and
+        // one at or below the floor would land the write inside a snapshot already answered without it. The
+        // read folded its timestamp into this actor's clock, so a fresh reading of the clock is above the floor.
+        if (entry.WriteIntent is { } held
+            && !held.CommitFloor.IsNull()
+            && mvccEntry.LastModified.CompareTo(held.CommitFloor) <= 0)
+            mvccEntry.LastModified = StampAfter(prepareTime, held.CommitFloor);
+
         if (entry.WriteIntent is null)
         {
             entry.WriteIntent = new()

@@ -62,12 +62,26 @@ internal sealed class TryCheckWriteIntentHandler : BaseHandler
             && RangeLockChecks.KeyCoveredByForeignRangeLock(context, message.Key, GetBucket(message.Key), message.TransactionId, currentTime))
             return KeyValueStaticResponses.AbortedResponse;
 
-        if ((message.ConflictChecks & KeyValueConflictChecks.OwnStagedIntent) != 0
-            && !OwnStagedIntentHeld(message, currentTime))
-            return KeyValueStaticResponses.UnlockedResponse;
+        HLCTimestamp commitFloor = HLCTimestamp.Zero;
+
+        if ((message.ConflictChecks & KeyValueConflictChecks.OwnStagedIntent) != 0)
+        {
+            if (!OwnStagedIntentHeld(message, currentTime, out commitFloor))
+                return KeyValueStaticResponses.UnlockedResponse;
+
+            // A snapshot read was served the committed head over this intent at the floor, so the commit must
+            // land above it. A caller that does not ask for the floor cannot mint above it: an older coordinator
+            // would commit at the timestamp it froze and land the write inside that read's snapshot. For a
+            // persistent key the only safe answer is that the intent is not held; an ephemeral key is re-stamped
+            // above the floor by the manual prepare itself, whichever coordinator drives it.
+            if (!commitFloor.IsNull()
+                && (message.ConflictChecks & KeyValueConflictChecks.CommitFloor) == 0
+                && message.Durability == KeyValueDurability.Persistent)
+                return KeyValueStaticResponses.UnlockedResponse;
+        }
 
         if ((message.ConflictChecks & (KeyValueConflictChecks.WriteIntent | KeyValueConflictChecks.StagedBase)) == 0)
-            return KeyValueStaticResponses.DoesNotExistContextResponse;
+            return Held(commitFloor);
 
         bool resident = context.Store.TryGetValue(message.Key, out KeyValueEntry? entry);
 
@@ -115,7 +129,7 @@ internal sealed class TryCheckWriteIntentHandler : BaseHandler
         }
 
         if ((message.ConflictChecks & KeyValueConflictChecks.WriteIntent) == 0)
-            return KeyValueStaticResponses.DoesNotExistContextResponse;
+            return Held(commitFloor);
 
         // Live in-memory write intent from a different transaction — signal conflict to the caller.
         if (entry?.WriteIntent is not null && entry.WriteIntent.TransactionId != message.TransactionId)
@@ -135,8 +149,16 @@ internal sealed class TryCheckWriteIntentHandler : BaseHandler
             && DurableReadVisibility.IsUndecidedWriter(context, foreignIntent, message.ForeignDecisionHint))
             return KeyValueStaticResponses.AbortedResponse;
 
-        return KeyValueStaticResponses.DoesNotExistContextResponse;
+        return Held(commitFloor);
     }
+
+    /// <summary>
+    /// The clean answer: no conflict the probe asked about exists on the key. It carries the commit floor of the
+    /// caller's own staged intent when a snapshot read left one, so the caller mints its commit above it; the
+    /// shared static answer serves the common case of no floor.
+    /// </summary>
+    private static KeyValueResponse Held(HLCTimestamp commitFloor) =>
+        commitFloor.IsNull() ? KeyValueStaticResponses.DoesNotExistContextResponse : KeyValueResponse.HeldWithCommitFloor(commitFloor);
 
     /// <summary>
     /// Whether the write intent this transaction staged its write on the key under still holds the key and never
@@ -157,9 +179,17 @@ internal sealed class TryCheckWriteIntentHandler : BaseHandler
     /// lapse during a slow bundle round could not be refused afterwards; a renewed lease would only move the
     /// window, a hold closes it. The commit or the rollback clears the intent, and the session liveness ceiling
     /// bounds one whose coordinator died in between.
+    ///
+    /// <para>The hold is also the claim that ends the push window: up to here a snapshot read that met the intent
+    /// was served the committed head and raised the intent's commit floor; from here on such a read waits. The
+    /// floor is answered in <paramref name="commitFloor"/>, and the caller mints the commit timestamp above it.
+    /// Because the claim precedes every proposal that carries the frozen commit timestamp, no floor can rise
+    /// above that timestamp after the caller checked it.</para>
     /// </summary>
-    private bool OwnStagedIntentHeld(KeyValueRequest message, HLCTimestamp currentTime)
+    private bool OwnStagedIntentHeld(KeyValueRequest message, HLCTimestamp currentTime, out HLCTimestamp commitFloor)
     {
+        commitFloor = HLCTimestamp.Zero;
+
         if (!context.Store.TryGetValue(message.Key, out KeyValueEntry? entry)
             || entry.MvccEntries is null
             || !entry.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? mvccEntry)
@@ -172,6 +202,7 @@ internal sealed class TryCheckWriteIntentHandler : BaseHandler
             return false;
 
         stagedUnder.HeldForCommit = true;
+        commitFloor = stagedUnder.CommitFloor;
 
         return true;
     }

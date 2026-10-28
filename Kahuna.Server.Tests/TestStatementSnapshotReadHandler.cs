@@ -42,7 +42,7 @@ public sealed class TestStatementSnapshotReadHandler : RaftTrackingTest
     /// staged write and waits for nothing.
     /// </summary>
     [Fact]
-    public async Task ForeignStagedWrite_WaitsWhenItMayCommitInsideTheSnapshot_FallsThroughOtherwise()
+    public async Task ForeignStagedWrite_IsSteppedOver_AndItsCommitLandsAboveTheSnapshot()
     {
         await using ActorRig rig = ActorRig.Create(this, "stmt-safe-time");
         string key = Key("k");
@@ -70,8 +70,11 @@ public sealed class TestStatementSnapshotReadHandler : RaftTrackingTest
         Assert.Equal(KeyValueResponseType.Get, belowStage!.Type);
         Assert.Equal("v1", Encoding.UTF8.GetString(belowStage.Entry!.Value!));
 
+        // Above the staged write, by a writer that has not claimed the intent for its commit: the read raises the
+        // intent's commit floor to its timestamp and falls through to the committed state instead of waiting.
         KeyValueResponse? above = await rig.Get(key, reader, afterStage, KeyValueReadMode.StatementSnapshot);
-        Assert.Equal(KeyValueResponseType.WaitingForReplication, above!.Type);
+        Assert.Equal(KeyValueResponseType.Get, above!.Type);
+        Assert.Equal("v1", Encoding.UTF8.GetString(above.Entry!.Value!));
 
         KeyValueResponse? own = await rig.Get(key, writer, afterStage, KeyValueReadMode.StatementSnapshot);
         Assert.Equal(KeyValueResponseType.Get, own!.Type);
@@ -79,7 +82,8 @@ public sealed class TestStatementSnapshotReadHandler : RaftTrackingTest
 
         // The batched probe applies the same rules per key.
         KeyValueResponse probe = await rig.Probe([key], reader, afterStage, KeyValueReadMode.StatementSnapshot);
-        Assert.Equal(KeyValueResponseType.WaitingForReplication, probe.ProbeResults![0].Type);
+        Assert.Equal(KeyValueResponseType.Get, probe.ProbeResults![0].Type);
+        Assert.Equal("v1", Encoding.UTF8.GetString(probe.ProbeResults[0].Entry!.Value!));
 
         KeyValueResponse belowStageProbe = await rig.Probe([key], reader, beforeStage, KeyValueReadMode.StatementSnapshot);
         Assert.Equal(KeyValueResponseType.Get, belowStageProbe.ProbeResults![0].Type);
@@ -87,6 +91,26 @@ public sealed class TestStatementSnapshotReadHandler : RaftTrackingTest
         KeyValueResponse ownProbe = await rig.Probe([key], writer, afterStage, KeyValueReadMode.StatementSnapshot);
         Assert.Equal(KeyValueResponseType.Get, ownProbe.ProbeResults![0].Type);
         Assert.Equal("staged", Encoding.UTF8.GetString(ownProbe.ProbeResults[0].Entry!.Value!));
+
+        // The writer's manual prepare copies the staged stamp into the commit timestamp, which is at or below
+        // the floor the read left: it re-stamps the staged write above the floor first, so the commit lands
+        // above every snapshot already served without it. The read asked again still answers the committed
+        // state; a snapshot minted after the commit sees the write.
+        KeyValueResponse? prepared = await rig.Prepare(key, writer);
+        Assert.Equal(KeyValueResponseType.Prepared, prepared!.Type);
+
+        KeyValueResponse? committed = await rig.Commit(key, writer);
+        Assert.Equal(KeyValueResponseType.Committed, committed!.Type);
+
+        KeyValueResponse? aboveAgain = await rig.Get(key, reader, afterStage, KeyValueReadMode.StatementSnapshot);
+        Assert.Equal(KeyValueResponseType.Get, aboveAgain!.Type);
+        Assert.Equal("v1", Encoding.UTF8.GetString(aboveAgain.Entry!.Value!));
+
+        KeyValueResponse? afterCommit = await rig.Get(key, reader, rig.Now(), KeyValueReadMode.StatementSnapshot);
+        Assert.Equal(KeyValueResponseType.Get, afterCommit!.Type);
+        Assert.Equal("staged", Encoding.UTF8.GetString(afterCommit.Entry!.Value!));
+        Assert.True(afterCommit.Entry.LastModified > afterStage,
+            $"the commit was stamped at {afterCommit.Entry.LastModified}, at or below the snapshot {afterStage} a read was served at");
     }
 
     /// <summary>
@@ -310,6 +334,18 @@ public sealed class TestStatementSnapshotReadHandler : RaftTrackingTest
             Ask(new KeyValueRequest(
                 KeyValueRequestType.TrySet, transactionId, HLCTimestamp.Zero, key, Encoding.UTF8.GetBytes(value), null, -1,
                 KeyValueFlags.Set, 0, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, 0, 0, default));
+
+        /// <summary>The manual prepare of <paramref name="transactionId"/>'s staged write on the key, under a fresh commit id.</summary>
+        public Task<KeyValueResponse?> Prepare(string key, HLCTimestamp transactionId) =>
+            Ask(new KeyValueRequest(
+                KeyValueRequestType.TryPrepareMutations, transactionId, Now(), key, null, null, -1,
+                KeyValueFlags.None, 0, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, 0, 0, default));
+
+        /// <summary>The manual commit of <paramref name="transactionId"/>'s prepared write on the key: an ephemeral commit applies at once.</summary>
+        public Task<KeyValueResponse?> Commit(string key, HLCTimestamp transactionId) =>
+            Ask(new KeyValueRequest(
+                KeyValueRequestType.TryCommitMutations, transactionId, HLCTimestamp.Zero, key, null, null, -1,
+                KeyValueFlags.None, 0, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, 0, 0, default));
 
         public ValueTask DisposeAsync()
         {

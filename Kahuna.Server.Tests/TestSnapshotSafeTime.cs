@@ -196,20 +196,20 @@ public sealed class TestSnapshotSafeTime : BaseCluster
         }
     }
 
-    // ── ExpiredIntent_ClearedByReader_ServesCommittedState ───────────────────
+    // ── UnpreparedLock_BelowSnapshot_IsSteppedOver_ServesCommittedState ──────
 
     /// <summary>
-    /// An unprepared (CommitTimestamp == Zero) exclusive lock with a short TTL causes the
-    /// retry loop to back off. Once the TTL lapses the actor clears the intent as housekeeping
-    /// and returns Get — the wait resolves transparently; the caller never sees WaitingForReplication.
+    /// An unprepared (CommitTimestamp == Zero) exclusive lock planted below the snapshot, by an
+    /// owner that has not claimed it for a commit. The read does not wait for the lock's TTL: it
+    /// raises the intent's commit floor to its own timestamp and is served the committed state at
+    /// once, and any write the owner stages later is stamped above the snapshot by the fenced actor
+    /// clock. The caller never sees WaitingForReplication.
     ///
-    /// T is captured after the lock transaction began, so the lock's owner is a transaction the
-    /// snapshot cannot rule out — that ordering is what makes the read wait at all. A snapshot
-    /// below the owner's transaction id skips the intent outright and never reaches the
-    /// housekeeping path this test exists for.
+    /// T is captured after the lock was planted, so the snapshot cannot rule the owner out by its
+    /// stamp; that ordering is what used to make the read wait, and is what the push exists for.
     /// </summary>
     [Fact]
-    public async Task ExpiredIntent_ClearedByReader_ServesCommittedState()
+    public async Task UnpreparedLock_BelowSnapshot_IsSteppedOver_ServesCommittedState()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
@@ -240,20 +240,23 @@ public sealed class TestSnapshotSafeTime : BaseCluster
                     lockTxId, key, 200, KeyValueDurability.Ephemeral, ct);
                 Assert.Equal(KeyValueResponseType.Locked, lockResult);
 
-                // Capture T strictly above the lock owner's transaction id, so the snapshot cannot
-                // prove the owner's writes land outside it and the safe-time wait engages.
+                // Capture T strictly above the lock's plant, so the snapshot cannot prove by the stamp
+                // that the owner's writes land outside it.
                 await Task.Delay(10, ct);
                 HLCTimestamp T = node1.HybridLogicalClock.TrySendOrLocalEvent(node1.GetLocalNodeId());
 
-                // Read at T: handler loops (WaitingForReplication) until the 200 ms lock
-                // expires, at which point the actor clears it and returns Get + valA.
-                // The TTL (200 ms) is shorter than the first back-off plateau so the loop
-                // resolves within ~300 ms total.
+                // Read at T: the unclaimed lock is stepped over (its commit floor is raised to T) and the
+                // committed valA is served at once, well inside the 200 ms the lock still has to live.
+                System.Diagnostics.Stopwatch elapsed = System.Diagnostics.Stopwatch.StartNew();
                 (KeyValueResponseType r1, ReadOnlyKeyValueEntry? snap) = await kahuna3.LocateAndTryGetValue(
                     HLCTimestamp.Zero, key, -1, T, KeyValueDurability.Ephemeral, ct);
+                elapsed.Stop();
+
                 Assert.Equal(KeyValueResponseType.Get, r1);
                 Assert.NotNull(snap);
                 Assert.Equal("committed", Encoding.UTF8.GetString(snap.Value!));
+                Assert.True(elapsed.ElapsedMilliseconds < 150,
+                    $"the read waited {elapsed.ElapsedMilliseconds} ms on an unclaimed lock it could step over");
             });
         }
         finally

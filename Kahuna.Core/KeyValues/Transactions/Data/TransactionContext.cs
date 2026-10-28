@@ -179,6 +179,23 @@ internal class TransactionContext
     internal HLCTimestamp DurableCommitTimestamp { get; set; }
 
     /// <summary>
+    /// The highest commit floor the commit-time probe reported over this transaction's staged intents: the
+    /// highest snapshot timestamp a read was served the committed head at over one of them while the commit could
+    /// still be moved (<see cref="KeyValueWriteIntent.CommitFloor"/>). The durable commit timestamp must be
+    /// strictly above it. Written by the probe, read by the finalizer after the one-phase validation and by the
+    /// freeze of a re-driven attempt. Only ever rises: the probe claims the intents it confirms, so no later read
+    /// pushes them further. Accessed while holding the session's single finalize slot.
+    /// </summary>
+    internal HLCTimestamp ClaimedCommitFloor { get; set; }
+
+    /// <summary>Raises <see cref="ClaimedCommitFloor"/> to <paramref name="floor"/> when that is higher.</summary>
+    internal void RaiseClaimedCommitFloor(HLCTimestamp floor)
+    {
+        if (floor.CompareTo(ClaimedCommitFloor) > 0)
+            ClaimedCommitFloor = floor;
+    }
+
+    /// <summary>
     /// True once any finalize attempt of this transaction had its commit rejected by the record's deadline
     /// gate. Lets the coordinator count late-commit rejections once per transaction, so a client that retries
     /// the same commit several times is not counted as several lost transactions.

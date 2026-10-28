@@ -1695,7 +1695,7 @@ internal sealed class TransactionCoordinator : IDisposable
         {
             if (ephemeralKeys.Count == 0)
             {
-                await DurableFinalize(context, durableInput!, durableOpId, cancellationToken).ConfigureAwait(false);
+                await DurableFinalize(context, persistentKeys, durableInput!, durableOpId, cancellationToken).ConfigureAwait(false);
                 return;
             }
 
@@ -1717,7 +1717,7 @@ internal sealed class TransactionCoordinator : IDisposable
                 return; // context.Result already set to Aborted by PrepareMutations
             }
 
-            DurableFinalizeResult durableResult = await DurableFinalize(context, durableInput!, durableOpId, cancellationToken).ConfigureAwait(false);
+            DurableFinalizeResult durableResult = await DurableFinalize(context, persistentKeys, durableInput!, durableOpId, cancellationToken).ConfigureAwait(false);
 
             // The durable decision is the transaction's outcome. On a durable commit, apply the ephemeral writes in
             // memory (near-always succeeds; the persistent commit is already durable and truthful regardless); on a
@@ -1859,6 +1859,9 @@ internal sealed class TransactionCoordinator : IDisposable
         // Write-side compare-and-set before anything durable: a staged base that moved while the in-memory
         // write-intent lease lapsed aborts truthfully instead of silently discarding the other writer's commit.
         validateStagedBases: ValidateStagedBasesAsync,
+        // Claim the staged intents before the two-phase prepares: ends the window in which a snapshot read pushes
+        // the commit above itself instead of waiting, and reports the floor the commit must be minted above.
+        claimStagedIntents: ClaimStagedIntentsAsync,
         // Re-resolve each intent's current data partition at resolution time: a range split/merge between the
         // decision and a (deferred or retried) materialization moves the key's ownership, and materializing
         // into the frozen partition would hide the committed value from every reader of the new range.
@@ -2039,7 +2042,10 @@ internal sealed class TransactionCoordinator : IDisposable
         // participant's own stamp on the staged write, not only above the transaction id: a participant that
         // served a snapshot read at T before this write was staged fenced its clock past T, and minting from
         // the transaction id alone on a coordinator whose clock lags could still land the commit at or below T.
-        HLCTimestamp commitTimestamp = MintDurableCommitTimestamp(raft.HybridLogicalClock, raft.GetLocalNodeId(), txId, staged);
+        // It must also sit above every commit floor the commit probe reported: a snapshot read served over a
+        // staged write after it was staged answered the committed head at the floor, and the commit must not
+        // land inside that snapshot.
+        HLCTimestamp commitTimestamp = MintDurableCommitTimestamp(raft.HybridLogicalClock, raft.GetLocalNodeId(), txId, staged, context.ClaimedCommitFloor);
         HLCTimestamp decisionDeadline = new(commitTimestamp.N, commitTimestamp.L + DeriveDecisionDeadlineMarginMs(persistentKeys.Count), commitTimestamp.C);
 
         // The builder reads the session's staged values and written-base observations in place: this freeze runs
@@ -2057,10 +2063,28 @@ internal sealed class TransactionCoordinator : IDisposable
         return true;
     }
 
+    /// <summary>
+    /// How many times one finalize may freeze its commit timestamp again above a snapshot read's commit floor.
+    /// The claim that reports the floor also ends the push window, so one re-freeze is all a commit needs; the
+    /// bound only guards the loop.
+    /// </summary>
+    private const int MaxCommitFloorRefreezes = 2;
+
     // Finalizes the persistent (durable) subset of a transaction and returns its terminal decision, so a mixed
     // transaction's caller can commit or roll back the ephemeral subset accordingly. Sets context.Result too.
-    private async Task<DurableFinalizeResult> DurableFinalize(TransactionContext context, DurableFinalizeInput input, HLCTimestamp opId, CancellationToken cancellationToken)
+    // persistentKeys is the subset the input was frozen from, so the input can be frozen again above a commit
+    // floor the finalizer reports.
+    private async Task<DurableFinalizeResult> DurableFinalize(
+        TransactionContext context,
+        IReadOnlyCollection<(string Key, KeyValueDurability Durability)> persistentKeys,
+        DurableFinalizeInput input,
+        HLCTimestamp opId,
+        CancellationToken cancellationToken)
     {
+        // Whether this attempt froze the input itself. A re-driven input keeps the identity an earlier attempt
+        // proposed under; only a freshly frozen one may be frozen again (see the commit-floor re-freeze below).
+        bool frozenHere = context.UnresolvedDurableFinalize is null;
+
         context.DurableCommitTimestamp = input.CommitTimestamp;
 
         // A retry of a frozen finalize whose decision deadline is already behind this attempt's clock cannot
@@ -2161,45 +2185,84 @@ internal sealed class TransactionCoordinator : IDisposable
         // before reporting a definite abort. Cleared below only on a record-backed terminal outcome.
         context.UnresolvedDurableFinalize = input;
 
-        OnePhaseEligibility eligibility = ComputeOnePhaseEligibility(context, input);
-
         DurableFinalizeOutcome outcome;
         try
         {
-            outcome = await DurableFinalizer.FinalizeAsync(
-                input,
-                validateReadSet: async ct =>
+            for (int refreeze = 0; ; refreeze++)
+            {
+                OnePhaseEligibility eligibility = ComputeOnePhaseEligibility(context, input);
+
+                try
                 {
-                    DurableTransactionMetrics.FinalizeReadSetKeys.Record(context.ReadKeys?.Count ?? 0);
+                    outcome = await DurableFinalizer.FinalizeAsync(
+                        input,
+                        validateReadSet: async ct =>
+                        {
+                            DurableTransactionMetrics.FinalizeReadSetKeys.Record(context.ReadKeys?.Count ?? 0);
 
-                    if (await CheckCommitConflicts(context, ct).ConfigureAwait(false)
-                        && await ValidateReadSet(context, ct).ConfigureAwait(false))
-                        return TransactionAbortClass.None;
+                            if (await CheckCommitConflicts(context, ct).ConfigureAwait(false)
+                                && await ValidateReadSet(context, ct).ConfigureAwait(false))
+                                return TransactionAbortClass.None;
 
-                    // The refusal that failed the check named its cause on the result: a lost lock is recorded
-                    // as such, so the decision does not call a leader change a conflict; and a probe that proved
-                    // nothing is no abort at all — the finalizer decides nothing and the attempt is retried.
-                    return context.Result switch
-                    {
-                        { Type: KeyValueResponseType.MustRetry } => TransactionAbortClass.RetryableFailure,
-                        { Type: KeyValueResponseType.Aborted, ExclusionLost: true } => TransactionAbortClass.LostExclusion,
-                        _ => TransactionAbortClass.Conflict
-                    };
-                },
-                opId,
-                cancellationToken,
-                readSetExclusion: eligibility.ReadSetExclusion,
-                applyTimeValidation: eligibility.ApplyTimeValidation,
-                bundledReadDependencies: eligibility.OnPartitionReadDependencies,
-                bundledExclusionTerm: () => AnchorExclusionTerm(context, input.AnchorPartitionId)).ConfigureAwait(false);
-        }
-        catch (Exception)
-        {
-            // An exception during finalize does not itself decide anything. Classify from the canonical record:
-            // if the decision is already durable it is the truth (Committed or Abort); otherwise the outcome is
-            // unknown and retryable. This is what stops a post-decision infrastructure failure from telling the
-            // caller it is safe to replay a transaction that actually committed.
-            outcome = ClassifyFromCanonicalRecord(input);
+                            // The refusal that failed the check named its cause on the result: a lost lock is recorded
+                            // as such, so the decision does not call a leader change a conflict; and a probe that proved
+                            // nothing is no abort at all — the finalizer decides nothing and the attempt is retried.
+                            return context.Result switch
+                            {
+                                { Type: KeyValueResponseType.MustRetry } => TransactionAbortClass.RetryableFailure,
+                                { Type: KeyValueResponseType.Aborted, ExclusionLost: true } => TransactionAbortClass.LostExclusion,
+                                _ => TransactionAbortClass.Conflict
+                            };
+                        },
+                        opId,
+                        cancellationToken,
+                        readSetExclusion: eligibility.ReadSetExclusion,
+                        applyTimeValidation: eligibility.ApplyTimeValidation,
+                        bundledReadDependencies: eligibility.OnPartitionReadDependencies,
+                        bundledExclusionTerm: () => AnchorExclusionTerm(context, input.AnchorPartitionId),
+                        claimedCommitFloor: () => context.ClaimedCommitFloor).ConfigureAwait(false);
+                }
+                catch (Exception)
+                {
+                    // An exception during finalize does not itself decide anything. Classify from the canonical record:
+                    // if the decision is already durable it is the truth (Committed or Abort); otherwise the outcome is
+                    // unknown and retryable. This is what stops a post-decision infrastructure failure from telling the
+                    // caller it is safe to replay a transaction that actually committed.
+                    outcome = ClassifyFromCanonicalRecord(input);
+                }
+
+                if (outcome.CommitFloor.IsNull())
+                    break;
+
+                // A snapshot read was served the committed head over one of this transaction's staged writes at a
+                // timestamp at or above the frozen commit timestamp: minted after the freeze, served before the
+                // commit probe claimed the intent. The finalizer refused before its first proposal, so nothing
+                // durable carries the frozen identity, and the commit is frozen again strictly above the floor.
+                // The claim ended the push window, so the next attempt cannot be refused with a higher floor; the
+                // bound only guards the loop. A re-driven input keeps its identity: an earlier attempt proposed
+                // under it, and its claim preceded that proposal, so this refusal does not arise for it; were it
+                // to, the attempt answers MustRetry as it stands instead of minting an identity the record rejects.
+                if (!frozenHere || refreeze >= MaxCommitFloorRefreezes)
+                {
+                    logger.LogWarning(
+                        "Durable commit of transaction {TransactionId} met a snapshot read floor {CommitFloor} at or above its frozen commit timestamp {CommitTimestamp} and was not frozen again (re-driven {ReDriven}, re-freezes {Refreezes}); answering MustRetry",
+                        input.TransactionId, outcome.CommitFloor, input.CommitTimestamp, !frozenHere, refreeze);
+                    break;
+                }
+
+                context.RaiseClaimedCommitFloor(outcome.CommitFloor);
+                context.UnresolvedDurableFinalize = null;
+
+                if (!TryBuildDurableFinalizeInput(context, persistentKeys, out DurableFinalizeInput? refrozen, out HLCTimestamp refrozenOpId))
+                    break;
+
+                DurableTransactionMetrics.CommitFloorRefrozen();
+
+                input = refrozen!;
+                opId = refrozenOpId;
+                context.DurableCommitTimestamp = input.CommitTimestamp;
+                context.UnresolvedDurableFinalize = input;
+            }
         }
         finally
         {
@@ -2958,6 +3021,85 @@ internal sealed class TransactionCoordinator : IDisposable
     }
 
     /// <summary>
+    /// Claims every staged intent of a two-phase finalize before its first proposal, and answers the highest
+    /// commit floor a snapshot read left on them (<see cref="DurableTransactionFinalizer.ClaimStagedIntentsDelegate"/>).
+    /// One confirmed probe per node owning part of the written set, asking each key's leader whether this
+    /// transaction's staged write is still covered by the intent it was staged under
+    /// (<see cref="KeyValueConflictChecks.OwnStagedIntent"/>) and what floor that intent carries
+    /// (<see cref="KeyValueConflictChecks.CommitFloor"/>). A held answer claims the intent, so no snapshot read
+    /// pushes it afterwards; a lost one names the key and is left to the post-prepare validation, which refuses
+    /// the commit and attributes the loss (a lost lock over a lost staging) with its usual counters; an answer
+    /// that proved nothing (a leader that could not confirm its leadership, a gated key, no answer at all) is
+    /// unknown. The post-prepare probe asks the same question again and finds the intents already claimed.
+    /// </summary>
+    private async Task<StagedIntentClaim> ClaimStagedIntentsAsync(DurableFinalizeInput input, CancellationToken cancellationToken)
+    {
+        List<KeyValueConflictProbe> probes = new(input.Manifest.Count);
+
+        foreach (DurablePartitionPrepare partition in input.Partitions)
+        {
+            foreach (PreparedIntent intent in partition.Intents)
+                probes.Add(new(intent.Key, KeyValueDurability.Persistent, KeyValueConflictChecks.OwnStagedIntent | KeyValueConflictChecks.CommitFloor));
+        }
+
+        if (probes.Count == 0)
+            return new StagedIntentClaim(StagedIntentClaimOutcome.Held, HLCTimestamp.Zero, null);
+
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability)> results;
+        HLCTimestamp commitFloor;
+
+        using (LockGrantScope.Begin(out LockGrantCapture capture))
+        {
+            results = await manager.LocateAndTryCheckManyWriteIntents(input.TransactionId, probes, cancellationToken).ConfigureAwait(false);
+            commitFloor = capture.CommitFloor;
+        }
+
+        // Two answers for one key can only differ if one of them did not answer clean, and that is the one that
+        // counts; see ProbeCommitConflicts.
+        Dictionary<string, KeyValueResponseType> byKey = new(results.Count, StringComparer.Ordinal);
+
+        foreach ((KeyValueResponseType type, string key, KeyValueDurability _) in results)
+        {
+            if (byKey.TryGetValue(key, out KeyValueResponseType existing) && ProbeAnswerRank(existing) >= ProbeAnswerRank(type))
+                continue;
+
+            byKey[key] = type;
+        }
+
+        bool unknown = false;
+
+        foreach (KeyValueConflictProbe probe in probes)
+        {
+            if (!byKey.TryGetValue(probe.Key, out KeyValueResponseType type))
+            {
+                unknown = true;
+                continue;
+            }
+
+            switch (type)
+            {
+                case KeyValueResponseType.DoesNotExist:
+                    continue;
+
+                case KeyValueResponseType.Unlocked:
+                    return new StagedIntentClaim(StagedIntentClaimOutcome.Lost, commitFloor, probe.Key);
+
+                default:
+                    unknown = true;
+                    break;
+            }
+        }
+
+        if (unknown)
+        {
+            DurableTransactionMetrics.CommitProbeUnproven();
+            return new StagedIntentClaim(StagedIntentClaimOutcome.Unknown, commitFloor, null);
+        }
+
+        return new StagedIntentClaim(StagedIntentClaimOutcome.Held, commitFloor, null);
+    }
+
+    /// <summary>
     /// The commit barrier's two questions, asked side by side: whether every lock the transaction was granted
     /// is still in force (<see cref="FindLostLock"/>), and whether a conflict that must not exist at commit does
     /// (<see cref="ProbeCommitConflicts"/>). False sets the Aborted result, or the MustRetry result when the
@@ -3177,13 +3319,15 @@ internal sealed class TransactionCoordinator : IDisposable
 
         // Write keys ask about foreign range locks and about their own staged write intent. The commit timestamp
         // is frozen before any prepare lands, and until it does, the in-memory intent a write was staged under is
-        // the only thing that makes a snapshot read wait for that write. An intent that lapsed, was taken, or was
-        // dropped by a leader change may have let a read answer the old value at a snapshot this commit would land
-        // inside, so the commit is refused. On the two-phase flows this probe runs after the prepares are durable,
-        // and from there on the prepared intents make reads wait. The one-phase bundle validates before it
-        // proposes and cannot be refused once appended, so the probe closes the gap to its apply in two ways: a
-        // held intent is claimed for the commit and no longer lapses by its lease, and the leader that confirmed
-        // it reports the term it leads under, to which the bundle is fenced at the anchor leader.
+        // the only thing a snapshot read that meets the write consults: it leaves its commit floor on the intent
+        // while the commit can be moved, and waits behind it once claimed. An intent that lapsed, was taken, or
+        // was dropped by a leader change may have let a read answer the old value at a snapshot this commit would
+        // land inside, with no floor to show for it, so the commit is refused. On the two-phase flows this probe
+        // runs after the prepares are durable (the claim before them is ClaimStagedIntentsAsync), and from there
+        // on the prepared intents make reads wait. The one-phase bundle validates before it proposes and cannot
+        // be refused once appended, so the probe closes the gap to its apply in two ways: a held intent is claimed
+        // for the commit and no longer lapses by its lease, and the leader that confirmed it reports the term it
+        // leads under, to which the bundle is fenced at the anchor leader.
         //
         // Write keys deliberately do not ask about foreign write intents: a foreign
         // in-memory intent on a key this transaction writes is the durable prepare's conflict to resolve —
@@ -3200,7 +3344,9 @@ internal sealed class TransactionCoordinator : IDisposable
                 if (string.IsNullOrEmpty(key))
                     continue;
 
-                probeKeys.Add(new(key, durability, KeyValueConflictChecks.ForeignRangeLock | KeyValueConflictChecks.OwnStagedIntent));
+                // The floor is asked for with the claim: a snapshot read served over the staged write before the
+                // claim left the highest timestamp it answered at, and the commit is minted above it.
+                probeKeys.Add(new(key, durability, KeyValueConflictChecks.ForeignRangeLock | KeyValueConflictChecks.OwnStagedIntent | KeyValueConflictChecks.CommitFloor));
             }
         }
 
@@ -3210,13 +3356,15 @@ internal sealed class TransactionCoordinator : IDisposable
         // One probe per node owning part of the set, rather than one per key: a working set spread over remote
         // partitions otherwise costs a network round trip per key. The capture collects, per partition, the
         // leadership term under which a leader confirmed this transaction's staged intents held; the one-phase
-        // bundle is fenced to it (see AnchorExclusionTerm).
+        // bundle is fenced to it (see AnchorExclusionTerm). It also collects the highest commit floor over those
+        // intents, which the finalizer compares with the frozen commit timestamp before it proposes.
         List<(KeyValueResponseType type, string key, KeyValueDurability durability)> results;
 
         using (LockGrantScope.Begin(out LockGrantCapture stagedIntentTerms))
         {
             results = await manager.LocateAndTryCheckManyWriteIntents(context.TransactionId, probeKeys, cancellationToken);
             context.RecordStagedIntentTerms(stagedIntentTerms.Take());
+            context.RaiseClaimedCommitFloor(stagedIntentTerms.CommitFloor);
         }
 
         Dictionary<(string, KeyValueDurability), KeyValueResponseType> byKey = new(results.Count);
@@ -3434,11 +3582,12 @@ internal sealed class TransactionCoordinator : IDisposable
     }
 
     /// <summary>
-    /// Mints a durable commit timestamp on the coordinator's clock that is strictly above the transaction id and
-    /// every staged write's participant stamp.
+    /// Mints a durable commit timestamp on the coordinator's clock that is strictly above the transaction id,
+    /// every staged write's participant stamp, and <paramref name="commitFloor"/>: the highest snapshot
+    /// timestamp a read was served the committed head at over one of the staged writes (Zero when none was).
     /// </summary>
     internal static HLCTimestamp MintDurableCommitTimestamp(
-        HybridLogicalClock clock, int nodeId, HLCTimestamp transactionId, Dictionary<string, StagedValue> staged)
+        HybridLogicalClock clock, int nodeId, HLCTimestamp transactionId, Dictionary<string, StagedValue> staged, HLCTimestamp commitFloor = default)
     {
         HLCTimestamp highest = transactionId;
 
@@ -3447,6 +3596,9 @@ internal sealed class TransactionCoordinator : IDisposable
             if (value.StagedAt > highest)
                 highest = value.StagedAt;
         }
+
+        if (commitFloor > highest)
+            highest = commitFloor;
 
         return clock.ReceiveEvent(nodeId, highest);
     }

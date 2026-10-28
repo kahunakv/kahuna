@@ -51,13 +51,24 @@ snapshot between commits. See [durable settlement](durable-settlement-guide.md) 
 A nonzero `ReadTimestamp` selects the revision committed at or before that HLC through the as-of
 history path, rather than creating a latest-read MVCC pin. A snapshot before an intent's commit HLC
 uses the earlier committed state; at or after it, the intent's canonical decision determines visibility.
-A live writer that may commit at or before the snapshot causes a safe-time wait, even when another
-committed intent could otherwise answer the read. The bound is the writer's known commit timestamp once
-it is prepared. Before that it is the stamp of its staged write on the key, or the plant time of a lock
-that staged nothing yet. A writer whose stamp is above the snapshot cannot commit inside it and never
-makes the read wait, whatever its transaction id. The wait is a poll: the read re-asks the key or page
-with sleeps that double up to 50 ms, so it is served within that of the intent clearing, and a scan page
-that still answers transient at the scan page retry budget fails the scan instead of spinning.
+A live writer whose commit timestamp is fixed at or before the snapshot causes a safe-time wait, even
+when another committed intent could otherwise answer the read. The timestamp is fixed once the writer is
+prepared (the intent carries it), and once the writer's commit probe claimed the intent (the coordinator
+froze it; the actor does not know it yet). Both waits last the commit's own latency.
+
+A writer that is still open does not make the read wait. A write staged above the snapshot, or a lock
+planted above it, commits above it, whatever the writer's transaction id. A write staged at or below the
+snapshot, or a lock planted at or below it, is stepped over: the read records its timestamp as the
+intent's *commit floor* and serves the committed head, and the writer's commit is minted strictly above
+the floor. The durable commit probe claims the intent (no later read pushes it) and reports the floor; a
+floor at or above the commit timestamp the coordinator already froze sends the commit back for a fresh
+freeze above it, before anything durable is proposed. The manual (ephemeral) prepare re-stamps the staged
+write above the floor. So a read asked again at the same snapshot answers the same head, and a writer
+that holds a staged row open for seconds no longer holds every snapshot scan of its table for as long.
+
+The remaining wait is a poll: the read re-asks the key or page with sleeps that double up to 50 ms, so it
+is served within that of the intent clearing, and a scan page that still answers transient at the scan
+page retry budget fails the scan instead of spinning.
 
 Clock and flush fences prevent answering from incomplete history. Persisted-history fallback can
 answer `MustRetry` while relevant committed revisions are unflushed. Reads more than 5 seconds ahead

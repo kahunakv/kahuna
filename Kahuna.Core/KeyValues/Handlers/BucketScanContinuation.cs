@@ -345,7 +345,7 @@ internal sealed class BucketScanContinuation : ReadContinuation
             if (!KeyValueWriteIntentLease.IsLive(context, key, entry.WriteIntent, currentTime))
                 entry.WriteIntent = null;
             else if (!readTimestamp.IsNull()
-                     && KeyValueWriteIntentSafeTime.MayCommitAtOrBefore(entry, entry.WriteIntent, readTimestamp))
+                     && KeyValueWriteIntentSafeTime.MustWait(entry, entry.WriteIntent, readTimestamp))
                 return KeyValueStaticResponses.WaitingForReplicationResponse;
         }
 

@@ -81,6 +81,18 @@ internal sealed class KeyValueWriteIntent
     /// the probe; never cleared.
     /// </summary>
     public bool HeldForCommit { get; set; }
+
+    /// <summary>
+    /// The highest snapshot timestamp at which a read was served the committed head over this intent while the
+    /// owner's commit could still be moved: before the intent was prepared (<see cref="CommitTimestamp"/> Zero)
+    /// and before the commit probe claimed it (<see cref="HeldForCommit"/>). Such a read did not wait for the
+    /// staged write, so the owner's commit must land strictly above the floor, or the same read asked again
+    /// would see the write. The durable coordinator learns the floor from the commit probe and mints the commit
+    /// timestamp above it; the manual prepare re-stamps the staged write above it. Raised only by snapshot reads
+    /// in the key's actor turn, which fold their timestamp into the actor clock first, so every stamp the actor
+    /// mints afterwards is above it. Zero when no snapshot read passed over the intent.
+    /// </summary>
+    public HLCTimestamp CommitFloor { get; set; }
 }
 
 /// <summary>
@@ -108,9 +120,51 @@ internal sealed class KeyValueWriteIntent
 /// made every snapshot scan of its table wait that way. The rule is also what keeps a snapshot scan live
 /// under a saturating writer: every retry of the scan meets the writer's newest in-flight intent, and
 /// without the bound it would wait, retry into the next one, and starve.</para>
+///
+/// <para>A write staged at or below the snapshot does not make the read wait either, as long as the owner's
+/// commit can still be moved. The read records its timestamp as the intent's commit floor
+/// (<see cref="KeyValueWriteIntent.CommitFloor"/>) and is served the committed head; the commit is then minted
+/// above the floor (<see cref="MustWait"/>). What the read waits for is a commit whose timestamp is fixed: a
+/// prepared intent at or below the snapshot, or an intent the commit probe already claimed
+/// (<see cref="KeyValueWriteIntent.HeldForCommit"/>), whose frozen commit timestamp the actor does not know.
+/// Both waits last the commit's own latency, not the writer's open time.</para>
 /// </summary>
 internal static class KeyValueWriteIntentSafeTime
 {
+    /// <summary>
+    /// Whether a snapshot read at <paramref name="readTimestamp"/> must wait for the live foreign
+    /// <paramref name="intent"/>. A read that need not wait falls through to the committed state. When the
+    /// intent's commit could land inside the snapshot (<see cref="MayCommitAtOrBefore(KeyValueEntry, KeyValueWriteIntent, HLCTimestamp)"/>)
+    /// but can still be moved (<see cref="CanPushCommit"/>), the read raises the intent's commit floor to its
+    /// timestamp and is served the committed head instead of waiting: the owner's commit is minted above the
+    /// floor, so the read asked again at the same timestamp still answers the head. Callers apply this only to
+    /// a live intent owned by a foreign transaction, on a read that carries a snapshot timestamp, inside the
+    /// key's actor turn, after the actor's clock was fenced at the read's timestamp.
+    /// </summary>
+    internal static bool MustWait(KeyValueEntry entry, KeyValueWriteIntent intent, HLCTimestamp readTimestamp)
+    {
+        if (!MayCommitAtOrBefore(entry, intent, readTimestamp))
+            return false;
+
+        if (!CanPushCommit(intent))
+            return true;
+
+        if (intent.CommitFloor.CompareTo(readTimestamp) < 0)
+            intent.CommitFloor = readTimestamp;
+
+        KeyValueSnapshotReadMetrics.CommitsPushedAboveSnapshot.Add(1);
+        return false;
+    }
+
+    /// <summary>
+    /// Whether the owner's commit timestamp is not fixed yet, so a snapshot read may push it above itself
+    /// instead of waiting: the intent is not prepared (no known commit timestamp) and the commit probe has not
+    /// claimed it. After the claim the coordinator's frozen commit timestamp is final and the one-phase bundle
+    /// may already be in flight, so a read that could be inside it waits for the apply.
+    /// </summary>
+    internal static bool CanPushCommit(KeyValueWriteIntent intent) =>
+        intent.CommitTimestamp.IsNull() && !intent.HeldForCommit;
+
     /// <summary>
     /// Returns whether the intent's pending commit could land at or before <paramref name="readTimestamp"/>:
     /// whether a snapshot read at that timestamp must wait for the intent to resolve. Callers apply this only

@@ -69,13 +69,26 @@ public enum KeyValueConflictChecks
     /// <summary>
     /// The caller's own staged write on the key is still covered by the write intent it was staged under. The
     /// commit timestamp is frozen before any prepare lands, and until the prepare does, that in-memory intent is
-    /// the only thing that makes a snapshot read wait for the staged write. If it lapsed, was replaced, or was
-    /// dropped by a leader change, a read may already have answered the old value at a snapshot the commit would
-    /// land inside. Asked of the transaction's written keys at commit. Answers
+    /// the only thing a snapshot read that meets the staged write consults: it records the read's timestamp as
+    /// the intent's commit floor (<see cref="CommitFloor"/>) while the commit can still be moved, and waits once
+    /// the intent is claimed. If the intent lapsed, was replaced, or was dropped by a leader change, a read may
+    /// already have answered the old value at a snapshot the commit would land inside, with no floor to show for
+    /// it. Asked of the transaction's written keys at commit. Answers
     /// <see cref="KeyValueResponseType.Unlocked"/> when the intent was lost, and claims it for the commit
-    /// otherwise, so it cannot lapse before the prepare or the one-phase bundle that follows this probe applies.
-    /// The node that answers "held" also reports the leadership term it confirmed the intent under, so the
-    /// one-phase bundle can be fenced to that term.
+    /// otherwise, so it cannot lapse before the prepare or the one-phase bundle that follows this probe applies,
+    /// and no later read pushes its floor. The node that answers "held" also reports the leadership term it
+    /// confirmed the intent under, so the one-phase bundle can be fenced to that term.
     /// </summary>
-    OwnStagedIntent = 1 << 5
+    OwnStagedIntent = 1 << 5,
+
+    /// <summary>
+    /// Report the commit floor of the caller's own staged intent on the key: the highest snapshot timestamp a
+    /// read was served the committed head at over that intent while the commit could still be moved. The caller
+    /// must mint its commit timestamp strictly above the floor, or a snapshot already answered without the
+    /// write would see it on its next ask. Asked together with <see cref="OwnStagedIntent"/>; the floor rides
+    /// back beside the leadership terms. A participant that holds a floor on a persistent key and is asked
+    /// <see cref="OwnStagedIntent"/> without this check answers <see cref="KeyValueResponseType.Unlocked"/>:
+    /// the caller cannot honour a floor it does not ask for.
+    /// </summary>
+    CommitFloor = 1 << 6
 }

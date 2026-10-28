@@ -64,6 +64,32 @@ internal enum StagedBaseValidation
     Unknown
 }
 
+/// <summary>What the claim of a transaction's staged intents found, before the first proposal of a two-phase
+/// finalize (see <see cref="DurableTransactionFinalizer.ClaimStagedIntentsDelegate"/>).</summary>
+internal enum StagedIntentClaimOutcome
+{
+    /// <summary>Every staged write is still covered by the intent it was staged under, and each intent is now
+    /// claimed for the commit: no snapshot read pushes its commit floor from here on.</summary>
+    Held,
+
+    /// <summary>A staged write's intent was lost (its lease lapsed, another transaction took the key, or a
+    /// leader change dropped it). A snapshot read may already have answered without the write at a timestamp
+    /// the commit would land inside, so the transaction will not commit; the post-prepare validation refuses
+    /// it and names the cause, so the claim itself decides nothing.</summary>
+    Lost,
+
+    /// <summary>A key's leader could not confirm its leadership, or did not answer: nothing was proven and
+    /// nothing may be decided from it.</summary>
+    Unknown
+}
+
+/// <summary>
+/// The answer of the staged-intent claim: its outcome, the highest commit floor a snapshot read left on the
+/// claimed intents (Zero when none did; the commit timestamp must be strictly above it), and, for a lost claim,
+/// the key whose intent was lost (diagnostic only).
+/// </summary>
+internal readonly record struct StagedIntentClaim(StagedIntentClaimOutcome Outcome, HLCTimestamp CommitFloor, string? LostKey);
+
 /// <summary>The outcome of a finalize attempt, mapped to the result contract: a durable abort is
 /// <see cref="DurableFinalizeResult.Aborted"/> whatever its class (the record decides once and a later commit
 /// against it is rejected), and every attempt that reached no record-backed outcome is
@@ -87,7 +113,12 @@ internal readonly record struct DurableFinalizeOutcome(
     bool CanonicalDecisionRead = false,
     CommitRefusalClass Refusal = CommitRefusalClass.None,
     string? Reason = null,
-    HLCTimestamp DecisionDeadline = default);
+    HLCTimestamp DecisionDeadline = default,
+    // Set on a MustRetry answered before anything durable was proposed, when a snapshot read was served the
+    // committed head over one of the transaction's staged writes at a timestamp at or above the frozen commit
+    // timestamp. The coordinator freezes the commit again strictly above this floor and drives the attempt
+    // again; nothing carries the refused identity.
+    HLCTimestamp CommitFloor = default);
 
 /// <summary>
 /// Drives one transaction's finalize under the durable-intent 2PC model: initialize the canonical
@@ -203,6 +234,17 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     /// would silently discard that write. Null disables the check (protocol tests that fabricate intents).</summary>
     public delegate Task<StagedBaseValidation> ValidateStagedBasesDelegate(DurableFinalizeInput input, CancellationToken cancellationToken);
 
+    /// <summary>Claims every staged intent of the transaction for its commit before the two-phase flow's first
+    /// proposal, and reports the highest commit floor a snapshot read left on them. Until the claim, a snapshot
+    /// read that meets one of the staged writes is served the committed head and raises the intent's floor
+    /// instead of waiting; the commit timestamp must land above every floor, and it is frozen into the record
+    /// identity that the prepares carry, so the claim has to precede them: a read pushing after a prepare landed
+    /// would be served at a timestamp the frozen commit lands inside. The one-phase bundle's validation probe
+    /// is its claim (it runs before the propose), so the delegate is asked on the two-phase path only. The
+    /// claim decides nothing about a lost intent; the post-prepare validation refuses that and names the cause.
+    /// Null disables the claim (protocol tests that fabricate intents).</summary>
+    public delegate Task<StagedIntentClaim> ClaimStagedIntentsDelegate(DurableFinalizeInput input, CancellationToken cancellationToken);
+
     /// <summary>Collects the staged-base fence verdicts of every replica of the participant partitions before
     /// the commit decision is proposed — the pre-decision replica fence confirmation. The prepare
     /// acknowledgement folds only the LEADER's fence verdict, and a leader whose committed-head memory is
@@ -264,6 +306,9 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
     // Null disables the up-front staged-base check (protocol tests that fabricate intents).
     private readonly ValidateStagedBasesDelegate? validateStagedBases;
+
+    // Null disables the staged-intent claim before the two-phase prepares (protocol tests that fabricate intents).
+    private readonly ClaimStagedIntentsDelegate? claimStagedIntents;
 
     // Null disables the pre-decision replica fence confirmation (single-process groups, protocol tests).
     private readonly ConfirmReplicaFenceDelegate? confirmReplicaFence;
@@ -355,9 +400,11 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         bool materializeOnResolve = false,
         int maxDeadlineExtensions = 0,
         ILogger? logger = null,
-        long commitAdmissionLagMs = 0)
+        long commitAdmissionLagMs = 0,
+        ClaimStagedIntentsDelegate? claimStagedIntents = null)
     {
         this.decide = decide;
+        this.claimStagedIntents = claimStagedIntents;
         this.commitAdmissionLagMs = Math.Max(0, commitAdmissionLagMs);
         this.materializeOnResolve = materializeOnResolve;
         this.maxDeadlineExtensions = Math.Max(0, maxDeadlineExtensions);
@@ -444,6 +491,12 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     /// ran, because that validation's probe is what reports the staged intents' term. The one-phase bundle is
     /// fenced to it at the anchor leader (refused before anything is appended under another term) and, with
     /// <paramref name="applyTimeValidation"/>, carries it into the bundled commit so the apply refuses it too.</param>
+    /// <param name="claimedCommitFloor">Reports the highest commit floor the validation's probe found on the
+    /// transaction's staged intents: the highest snapshot timestamp a read was served the committed head at over
+    /// one of them before the probe claimed it; Zero when none. Read after <paramref name="validateReadSet"/>
+    /// ran on the one-phase path. A floor at or above the frozen commit timestamp refuses the attempt before the
+    /// bundle is proposed, with <see cref="DurableFinalizeOutcome.CommitFloor"/> set, so the coordinator freezes
+    /// the commit again above it.</param>
     public async Task<DurableFinalizeOutcome> FinalizeAsync(
         DurableFinalizeInput input,
         Func<CancellationToken, Task<TransactionAbortClass>> validateReadSet,
@@ -452,7 +505,8 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         OnePhaseGateOutcome? readSetExclusion = null,
         bool applyTimeValidation = false,
         IReadOnlyList<BundledReadDependency>? bundledReadDependencies = null,
-        Func<long>? bundledExclusionTerm = null)
+        Func<long>? bundledExclusionTerm = null,
+        Func<HLCTimestamp>? claimedCommitFloor = null)
     {
         long startTicks = Stopwatch.GetTimestamp();
 
@@ -583,7 +637,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         if (gate == OnePhaseGateOutcome.Entered)
         {
             (DurableFinalizeOutcome? onePhase, OnePhaseFallbackReason fallback) = await TryOnePhaseFinalizeAsync(
-                input, initDelta, prepareDeltas[0], validateReadSet, opId, applyTimeValidation, bundledReadDependencies, bundledExclusionTerm, cancellationToken).ConfigureAwait(false);
+                input, initDelta, prepareDeltas[0], validateReadSet, opId, applyTimeValidation, bundledReadDependencies, bundledExclusionTerm, claimedCommitFloor, cancellationToken).ConfigureAwait(false);
 
             if (onePhase is { } fastOutcome)
             {
@@ -594,6 +648,28 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
             DurableTransactionMetrics.OnePhaseFellBack(fallback);
             prepareStageStart = Stopwatch.GetTimestamp();
+        }
+
+        // ── Claim the staged intents, before the first proposal ──
+        // The prepares below carry the frozen commit timestamp. Until an intent is claimed, a snapshot read that
+        // meets its staged write is served the committed head and raises the intent's commit floor; a read that
+        // did so at or above the frozen timestamp, after the freeze, would be contradicted by a prepare landing
+        // under it. The claim ends the push window on every written key and reports the highest floor, and a
+        // floor at or above the frozen timestamp sends the attempt back to the coordinator for a fresh freeze
+        // while nothing durable carries the old one. A lost intent decides nothing here: the post-prepare
+        // validation refuses it, and names its cause — a lock lost to a leader change is reported over the
+        // staging it took with it, and a replica's staged-base verdict over both — exactly as before the claim
+        // existed. The prepares that validation needs are spent on a transaction that will not commit, as they
+        // were before; a lost intent that pushed no floor commits nothing either way.
+        if (claimStagedIntents is not null)
+        {
+            StagedIntentClaim claim = await claimStagedIntents(input, cancellationToken).ConfigureAwait(false);
+
+            if (claim.Outcome == StagedIntentClaimOutcome.Unknown)
+                return Retry();
+
+            if (CommitFloorRefusal(input, claim.CommitFloor) is { } floorRefusal)
+                return floorRefusal;
         }
 
         // The first barrier alone is timed separately from the whole prepare stage, so the retry loop's share
@@ -1353,6 +1429,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         bool applyTimeValidation,
         IReadOnlyList<BundledReadDependency>? bundledReadDependencies,
         Func<long>? bundledExclusionTerm,
+        Func<HLCTimestamp>? claimedCommitFloor,
         CancellationToken cancellationToken)
     {
         // Every admitted attempt records its pre-submission wall time exactly once: at a pre-propose exit
@@ -1406,6 +1483,18 @@ internal sealed class DurableTransactionFinalizer : IDisposable
                 return (Retry(), OnePhaseFallbackReason.None);
 
             return (null, OnePhaseFallbackReason.ValidationFailed);
+        }
+
+        // The validation's probe claimed the staged intents; until it did, a snapshot read that met one of the
+        // staged writes was served the committed head and raised the intent's commit floor. A floor at or above
+        // the frozen commit timestamp (a read minted after the freeze, served before the claim) means the bundle
+        // must not be proposed under this identity: nothing durable exists yet, and the coordinator freezes the
+        // commit again above the floor. From the claim on no read pushes, so the next attempt's floor is below
+        // its timestamp.
+        if (CommitFloorRefusal(input, claimedCommitFloor?.Invoke() ?? HLCTimestamp.Zero) is { } floorRefusal)
+        {
+            DurableTransactionMetrics.OnePhasePreBundle(Stopwatch.GetElapsedTime(attemptStart).TotalMilliseconds, forwarded: false);
+            return (floorRefusal, OnePhaseFallbackReason.None);
         }
 
         // Test-only: runs a competing action after the commit-time probe passed and before the bundle is
@@ -2191,6 +2280,20 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
     private static DurableFinalizeOutcome Retry(CommitRefusalClass refusal, string reason) =>
         new(DurableFinalizeResult.MustRetry, TransactionAbortClass.RetryableFailure, Refusal: refusal, Reason: reason);
+
+    /// <summary>
+    /// The clean retry that sends the attempt back for a fresh freeze when <paramref name="commitFloor"/> is at
+    /// or above the frozen commit timestamp (<see cref="DurableFinalizeOutcome.CommitFloor"/>); null when the
+    /// floor is Zero or below it. Only asked before anything durable was proposed under the identity.
+    /// </summary>
+    private static DurableFinalizeOutcome? CommitFloorRefusal(DurableFinalizeInput input, HLCTimestamp commitFloor)
+    {
+        if (commitFloor.IsNull() || commitFloor.CompareTo(input.CommitTimestamp) < 0)
+            return null;
+
+        return Retry(CommitRefusalClass.Unresolved, "A snapshot read was served at or above the frozen commit timestamp; the commit must be frozen again above it")
+            with { CommitFloor = commitFloor };
+    }
 
     /// <summary>
     /// Concludes a commit the record's deadline gate withheld. The gate compares the attempt HLC with the frozen

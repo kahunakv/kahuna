@@ -128,7 +128,8 @@ internal sealed class TryExistsHandler : BaseHandler
         }
 
         // When a snapshot readTimestamp is in play, a live foreign write intent whose pending
-        // commit could land at-or-before T must be awaited.
+        // commit is fixed at-or-before T must be awaited; one whose commit can still be moved is
+        // pushed above T instead (see KeyValueWriteIntentSafeTime.MustWait).
         if (entry?.WriteIntent != null)
         {
             if (entry.WriteIntent.TransactionId != message.TransactionId)
@@ -136,7 +137,7 @@ internal sealed class TryExistsHandler : BaseHandler
                 if (!KeyValueWriteIntentLease.IsLive(context, message.Key, entry.WriteIntent, currentTime))
                     entry.WriteIntent = null;
                 else if (!message.ReadTimestamp.IsNull()
-                         && KeyValueWriteIntentSafeTime.MayCommitAtOrBefore(entry, entry.WriteIntent, message.ReadTimestamp))
+                         && KeyValueWriteIntentSafeTime.MustWait(entry, entry.WriteIntent, message.ReadTimestamp))
                     return KeyValueStaticResponses.WaitingForReplicationResponse;
             }
         }

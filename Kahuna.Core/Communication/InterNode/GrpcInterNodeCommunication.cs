@@ -927,8 +927,9 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         GrpcTryCheckManyWriteIntentsResponse remoteResponse = response.TryCheckManyWriteIntents!;
 
         // The terms the remote leader confirmed the caller's staged intents under, replayed into the caller's
-        // capture exactly as a remote lock grant's are.
+        // capture exactly as a remote lock grant's are; the commit floor those intents carry travels with them.
         RecordLockGrantTerms(remoteResponse.GrantTerms);
+        LockGrantScope.RaiseCommitFloor(new HLCTimestamp(remoteResponse.CommitFloorNode, remoteResponse.CommitFloorPhysical, remoteResponse.CommitFloorCounter));
 
         List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses = new(remoteResponse.Items.Count);
 

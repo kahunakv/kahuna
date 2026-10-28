@@ -313,6 +313,29 @@ internal static class DurableTransactionMetrics
             description: "Transactions refused at commit because the write intent a staged write relied on was lost.");
 
     /// <summary>
+    /// Durable finalizes whose frozen commit timestamp was dropped and minted again above a snapshot read's
+    /// commit floor. A snapshot read served over one of the transaction's staged writes after the commit
+    /// timestamp was frozen and before the commit probe claimed the intent leaves a floor at or above that
+    /// timestamp; nothing durable carries the frozen identity at that point, so the attempt is re-frozen above
+    /// the floor and driven again. One count per re-freeze; the cost is one more probe round for that commit.
+    /// </summary>
+    internal static readonly Counter<long> CommitFloorRefreezes =
+        Meter.CreateCounter<long>(
+            "kahuna.transactions.commit_floor_refreezes",
+            description: "Durable commits whose commit timestamp was frozen again above a snapshot read's commit floor.");
+
+    private static long commitFloorRefreezes;
+
+    /// <summary>Process-wide count behind <see cref="CommitFloorRefreezes"/>, readable for tests.</summary>
+    internal static long CommitFloorRefreezeCount => Interlocked.Read(ref commitFloorRefreezes);
+
+    internal static void CommitFloorRefrozen()
+    {
+        Interlocked.Increment(ref commitFloorRefreezes);
+        CommitFloorRefreezes.Add(1);
+    }
+
+    /// <summary>
     /// Transactions aborted at the commit barrier because a foreign range lock covered a key they had written —
     /// a range lock acquired after the write was staged, which the write-time fence cannot see. Each occurrence
     /// is a prevented phantom write. A sustained rate means real contention between writers and range-locking

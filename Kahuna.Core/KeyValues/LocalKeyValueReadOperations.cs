@@ -673,7 +673,16 @@ internal sealed class LocalKeyValueReadOperations
                 ? await AskKeyValueActor(ephemeralKeyValuesRouter, request)
                 : await AskKeyValueActor(persistentKeyValuesRouter, request);
 
-            return response?.Type ?? KeyValueResponseType.Errored;
+            if (response is null)
+                return KeyValueResponseType.Errored;
+
+            // The commit floor a held own staged intent carries travels to the coordinator the way a lock grant's
+            // leadership term does: into the capture the probing request opened, which a transport that crossed a
+            // process boundary replays on the caller's side.
+            if (!response.CommitFloor.IsNull())
+                LockGrantScope.RaiseCommitFloor(response.CommitFloor);
+
+            return response.Type;
         }
         finally
         {

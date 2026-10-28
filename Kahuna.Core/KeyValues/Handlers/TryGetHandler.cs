@@ -168,8 +168,9 @@ internal sealed class TryGetHandler : BaseHandler
         }
 
         // A live write intent from another transaction is not a blocking condition for reads
-        // UNLESS the read carries a snapshot timestamp and the intent's pending commit ts could
-        // land at-or-before that snapshot (safe-time wait).
+        // UNLESS the read carries a snapshot timestamp and the intent's pending commit ts is fixed
+        // at-or-before that snapshot (safe-time wait). A commit that can still be moved is pushed
+        // above the snapshot instead, and the read falls through to the committed head.
         if (entry?.WriteIntent != null)
         {
             if (entry.WriteIntent.TransactionId != message.TransactionId)
@@ -177,7 +178,7 @@ internal sealed class TryGetHandler : BaseHandler
                 if (!KeyValueWriteIntentLease.IsLive(context, message.Key, entry.WriteIntent, currentTime))
                     entry.WriteIntent = null;
                 else if (!message.ReadTimestamp.IsNull()
-                         && KeyValueWriteIntentSafeTime.MayCommitAtOrBefore(entry, entry.WriteIntent, message.ReadTimestamp))
+                         && KeyValueWriteIntentSafeTime.MustWait(entry, entry.WriteIntent, message.ReadTimestamp))
                     return KeyValueStaticResponses.WaitingForReplicationResponse;
                 // live write intent from another tx and outside our snapshot window: fall through
             }

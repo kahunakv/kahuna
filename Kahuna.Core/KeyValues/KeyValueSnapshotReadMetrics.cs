@@ -43,4 +43,15 @@ internal static class KeyValueSnapshotReadMetrics
         Meter.CreateCounter<long>(
             "kahuna.kv.snapshot_clock_fence_refused_total",
             description: "Snapshot reads refused because their timestamp was too far ahead of the serving node's clock to be fenced.");
+
+    /// <summary>
+    /// Snapshot reads served the committed head over a foreign staged write whose commit could still be moved:
+    /// the read raised the intent's commit floor to its own timestamp instead of waiting for the writer to decide,
+    /// and the writer's commit is minted above that floor. One count per key the read stepped over. A steady rate
+    /// under write load is the expected shape; it is the reads that used to wait for the writer's open time.
+    /// </summary>
+    internal static readonly Counter<long> CommitsPushedAboveSnapshot =
+        Meter.CreateCounter<long>(
+            "kahuna.kv.snapshot_reads_pushed_commit_total",
+            description: "Snapshot reads served over a foreign staged write by raising the writer's commit floor instead of waiting.");
 }

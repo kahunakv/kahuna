@@ -557,8 +557,9 @@ internal sealed class TryGetByRangeHandler : BaseHandler
         // UNLESS the scan carries a snapshot timestamp and the pending commit ts could land
         // at-or-before that snapshot (safe-time wait). Clear expired intents as housekeeping;
         // otherwise apply the shared safe-time rule (see KeyValueWriteIntentSafeTime): a commit
-        // provably outside the snapshot — a known commit ts above it, or a writer that began at
-        // or after it — falls through to committed state instead of retrying the page.
+        // provably outside the snapshot — a known commit ts above it, or a write staged above it —
+        // and a commit that can still be pushed above it both fall through to committed state
+        // instead of retrying the page.
         if (entry?.WriteIntent != null)
         {
             if (entry.WriteIntent.TransactionId != transactionId)
@@ -568,7 +569,7 @@ internal sealed class TryGetByRangeHandler : BaseHandler
                 // Gated on the caller's explicit timestamp (snapshotRead), not on readTimestamp,
                 // which is normalised to "now" and never null here — see the persistent merge.
                 else if (snapshotRead
-                         && KeyValueWriteIntentSafeTime.MayCommitAtOrBefore(entry, entry.WriteIntent, readTimestamp))
+                         && KeyValueWriteIntentSafeTime.MustWait(entry, entry.WriteIntent, readTimestamp))
                     return KeyValueStaticResponses.WaitingForReplicationResponse;
                 // live write intent from another tx: fall through to committed state
             }

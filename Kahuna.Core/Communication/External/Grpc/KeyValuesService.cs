@@ -1012,6 +1012,15 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
 
         AddLockGrantTerms(response.GrantTerms, grants);
 
+        // The highest commit floor over the caller's staged intents this node confirmed held, beside the terms.
+        HLCTimestamp commitFloor = grants.CommitFloor;
+        if (!commitFloor.IsNull())
+        {
+            response.CommitFloorNode = commitFloor.N;
+            response.CommitFloorPhysical = commitFloor.L;
+            response.CommitFloorCounter = commitFloor.C;
+        }
+
         return response;
     }
 

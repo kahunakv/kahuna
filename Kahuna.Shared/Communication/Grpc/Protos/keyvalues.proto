@@ -581,8 +581,9 @@ message GrpcTryCheckManyWriteIntentsRequestItem {
   GrpcKeyValueDurability Durability = 2;
   // KeyValueConflictChecks bit set: which conflict classes to answer for this key
   // (1 = concurrent write intent, 2 = foreign range lock, 4 = staged base moved, 8 = pin own intent,
-  // 16 = leader term changed). Selected per key
-  // because one probe carries a transaction's read set and its write set, which ask different questions.
+  // 16 = leader term changed, 32 = own staged intent held, 64 = report the commit floor of the own staged
+  // intent). Selected per key because one probe carries a transaction's read set and its write set, which
+  // ask different questions.
   uint32 Checks = 3;
   // For the staged-base check (4): the committed base the caller's read-modify-write of this key was
   // validated against — the revision when the base existed, or -1 when the validated base was
@@ -598,6 +599,12 @@ message GrpcTryCheckManyWriteIntentsResponse {
   // The leadership terms under which the serving node confirmed the caller's own staged intents held
   // (check 32), one per partition, so the caller's one-phase bundle can be fenced to that leadership.
   repeated GrpcLockGrantTerm GrantTerms = 3;
+  // The highest commit floor over the caller's own staged intents the serving node confirmed held (check 64):
+  // the highest snapshot timestamp a read was served the committed head at over one of them. The caller mints
+  // its commit timestamp strictly above it. Zero when no snapshot read passed over those intents.
+  int32 CommitFloorNode = 4;
+  int64 CommitFloorPhysical = 5;
+  uint32 CommitFloorCounter = 6;
 }
 
 message GrpcTryCheckManyWriteIntentsResponseItem {

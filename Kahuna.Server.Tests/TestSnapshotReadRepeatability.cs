@@ -64,13 +64,14 @@ public sealed class TestSnapshotReadRepeatability
 
     /// <summary>
     /// The durable prepared-intent overlay holds a committed, not yet settled transaction T1 on the key, and a
-    /// second transaction T2 — begun before the snapshot — has already staged its own write there. T2's commit
-    /// timestamp can still land at or below the snapshot, so a snapshot read must wait for it exactly as it does
-    /// when no overlay intent is present. Answering T1's value at once is the defect: once T2 commits inside the
-    /// snapshot, the same read answers T2's value.
+    /// second transaction T2 — begun before the snapshot — has already staged its own write there. The overlay
+    /// path applies the same rule to T2's intent as the ordinary path: while T2 has not claimed the intent for
+    /// its commit, the read raises the intent's commit floor to the snapshot and answers T1's value at once, and
+    /// T2's commit is then minted above the snapshot; once T2 claims it, the read waits. Here T2 rolls back, and
+    /// the read asked again still answers T1's value.
     /// </summary>
     [Fact]
-    public async Task OverlayRead_WaitsForAThirdWritersInFlightCommit()
+    public async Task OverlayRead_StepsOverAThirdWritersUnclaimedWrite_AndWaitsOnceClaimed()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         await using EmbeddedKahunaNode node = await StartNode(ct);
@@ -110,27 +111,48 @@ public sealed class TestSnapshotReadRepeatability
         // The overlay intent is still the one answering: T2's staging materialized T1 at T1's own revision.
         Assert.NotNull(store.Get(key));
 
-        // A snapshot above T1's commit and above T2's transaction id.
+        // A snapshot above T1's commit and above T2's staged write.
         HLCTimestamp snapshot = Tick(node);
         Assert.True(snapshot > t2.TransactionId);
 
+        // T2 has not claimed its intent: the read steps over it (raising its commit floor) and answers T1's
+        // committed value from the overlay at once.
         Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> read = kahuna.LocateAndTryGetValue(
             HLCTimestamp.Zero, key, -1, snapshot, KeyValueDurability.Persistent, ct);
 
-        Task finished = await Task.WhenAny(read, Task.Delay(500, ct));
-        if (finished == read)
-        {
-            (KeyValueResponseType earlyType, ReadOnlyKeyValueEntry? earlyEntry) = await read;
-            Assert.Fail($"the snapshot read answered while T2 could still commit inside it: {earlyType} " +
-                        $"{(earlyEntry?.Value is null ? "<null>" : Encoding.UTF8.GetString(earlyEntry.Value))}");
-        }
-
-        // T2 rolls back: nothing else can commit inside the snapshot, so the read answers T1's committed value.
-        Assert.Equal(KeyValueResponseType.RolledBack, await kahuna.LocateAndRollbackTransaction(t2, ct));
+        Task finished = await Task.WhenAny(read, Task.Delay(2_000, ct));
+        Assert.True(finished == read, "the snapshot read waited on an unclaimed staged write it could step over");
 
         (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await read;
         Assert.Equal(KeyValueResponseType.Get, type);
         Assert.Equal("v1", Encoding.UTF8.GetString(entry!.Value!));
+
+        // T2's commit probe claims the intent, as its commit would right before proposing: from here on a read
+        // at a snapshot the commit could land inside waits for the decision instead of stepping over.
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability)> claimed = await kahuna.LocateAndTryCheckManyWriteIntents(
+            t2.TransactionId,
+            [new KeyValueConflictProbe(key, KeyValueDurability.Persistent, KeyValueConflictChecks.OwnStagedIntent | KeyValueConflictChecks.CommitFloor)],
+            ct);
+        Assert.Equal(KeyValueResponseType.DoesNotExist, claimed[0].type);
+
+        HLCTimestamp later = Tick(node);
+        Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> waiting = kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, key, -1, later, KeyValueDurability.Persistent, ct);
+
+        Task finishedWaiting = await Task.WhenAny(waiting, Task.Delay(500, ct));
+        if (finishedWaiting == waiting)
+        {
+            (KeyValueResponseType earlyType, ReadOnlyKeyValueEntry? earlyEntry) = await waiting;
+            Assert.Fail($"the snapshot read answered over a claimed intent whose commit could land inside it: {earlyType} " +
+                        $"{(earlyEntry?.Value is null ? "<null>" : Encoding.UTF8.GetString(earlyEntry.Value))}");
+        }
+
+        // T2 rolls back: nothing else can commit inside either snapshot, so both reads answer T1's committed value.
+        Assert.Equal(KeyValueResponseType.RolledBack, await kahuna.LocateAndRollbackTransaction(t2, ct));
+
+        (KeyValueResponseType waitedType, ReadOnlyKeyValueEntry? waited) = await waiting;
+        Assert.Equal(KeyValueResponseType.Get, waitedType);
+        Assert.Equal("v1", Encoding.UTF8.GetString(waited!.Value!));
 
         (KeyValueResponseType againType, ReadOnlyKeyValueEntry? again) = await kahuna.LocateAndTryGetValue(
             HLCTimestamp.Zero, key, -1, snapshot, KeyValueDurability.Persistent, ct);

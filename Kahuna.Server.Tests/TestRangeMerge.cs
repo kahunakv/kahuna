@@ -550,12 +550,20 @@ public sealed class TestRangeMerge : BaseCluster
                 }, ct);
             Assert.Equal(KeyValueResponseType.Set, startType);
 
-            // Staged into the lower range, never committed.
+            // Staged into the lower range and claimed by the writer's commit probe, never decided. A staged
+            // write that is not yet claimed is stepped over by the count (the read raises its commit floor);
+            // a claimed one cannot be pushed, so the count must wait on it and the range is not a candidate.
             (KeyValueResponseType writeType, _, _) = await metaLeader.LocateAndTrySetKeyValue(
                 writer.TransactionId, spaceInflight + "/k005", Encoding.UTF8.GetBytes("staged"), null, -1,
                 KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct,
                 coordinatorKey: writer.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
             Assert.Equal(KeyValueResponseType.Set, writeType);
+
+            List<(KeyValueResponseType type, string key, KeyValueDurability durability)> claimed = await metaLeader.LocateAndTryCheckManyWriteIntents(
+                writer.TransactionId,
+                [new KeyValueConflictProbe(spaceInflight + "/k005", KeyValueDurability.Persistent, KeyValueConflictChecks.OwnStagedIntent | KeyValueConflictChecks.CommitFloor)],
+                ct);
+            Assert.Equal(KeyValueResponseType.DoesNotExist, claimed[0].type);
 
             List<(RangeDescriptor Left, RangeDescriptor Right)> after =
                 await metaLeader.RangeMerger.FindMergeCandidatesAsync(spaceInflight, minMergeSize: 10, ct);
@@ -572,17 +580,17 @@ public sealed class TestRangeMerge : BaseCluster
 
     /// <summary>
     /// The in-flight-write refusal must not depend on whose clock minted the count's snapshot. A snapshot
-    /// read waits on a live intent only when the intent's transaction id is below the snapshot; a
-    /// transaction id is minted on the coordinator's node, and nothing folds that clock into the node that
-    /// runs the merge check. Under clock skew — or, on one machine, a same-millisecond tie on the logical
-    /// counter — the writer's transaction id lands above a locally minted snapshot, the scan skips the
-    /// intent as "cannot commit inside this snapshot", and a busy range counts as empty and quiet.
+    /// read waits on a claimed intent only when the stamp of its staged write is at or below the snapshot;
+    /// the writer's transaction id is minted on the coordinator's node and says nothing about that stamp.
+    /// Under clock skew — or, on one machine, a same-millisecond tie on the logical counter — a snapshot
+    /// minted on the counting node could sit below the stamp, the scan would skip the intent as "cannot
+    /// commit inside this snapshot", and a busy range would count as empty and quiet.
     ///
     /// <para>The writer here stages its intent under a transaction id sixty seconds ahead of the counting
-    /// node's clock, and the count runs on a node that does not lead the range's partition, so nothing on
-    /// the count's own path advances that node's clock past the intent. The count must still be refused:
-    /// the snapshot is minted on the range's leader, whose clock every intent planted there has already
-    /// advanced.</para>
+    /// node's clock, has its commit probe claim it, and the count runs on a node that does not lead the
+    /// range's partition, so nothing on the count's own path advances that node's clock past the intent.
+    /// The count must still be refused: the snapshot is minted on the range's leader, whose clock every
+    /// intent planted there has already advanced.</para>
     /// </summary>
     [Fact]
     public async Task FindMergeCandidates_WriterClockAheadOfCounter_IsNotACandidate()
@@ -629,6 +637,13 @@ public sealed class TestRangeMerge : BaseCluster
                 aheadWriter, spaceSkew + "/k005", Encoding.UTF8.GetBytes("staged"), null, -1,
                 KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
             Assert.Equal(KeyValueResponseType.Set, writeType);
+
+            // The writer's commit probe claims the intent: an unclaimed one would be stepped over by the count.
+            List<(KeyValueResponseType type, string key, KeyValueDurability durability)> claimed = await counter.LocateAndTryCheckManyWriteIntents(
+                aheadWriter,
+                [new KeyValueConflictProbe(spaceSkew + "/k005", KeyValueDurability.Persistent, KeyValueConflictChecks.OwnStagedIntent | KeyValueConflictChecks.CommitFloor)],
+                ct);
+            Assert.Equal(KeyValueResponseType.DoesNotExist, claimed[0].type);
 
             List<(RangeDescriptor Left, RangeDescriptor Right)> after =
                 await counter.RangeMerger.FindMergeCandidatesAsync(spaceSkew, minMergeSize: 10, ct);

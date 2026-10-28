@@ -1,4 +1,6 @@
 
+using Kommander.Time;
+
 namespace Kahuna.Server.KeyValues;
 
 /// <summary>
@@ -51,6 +53,36 @@ internal sealed class LockGrantCapture
         lock (sync)
             return grants is { Count: > 0 } ? [.. grants] : null;
     }
+
+    private HLCTimestamp commitFloor;
+
+    /// <summary>
+    /// Raises the commit floor collected by this capture: the highest snapshot timestamp a read was served the
+    /// committed head at over one of the request's own staged intents (<see cref="KeyValueWriteIntent.CommitFloor"/>),
+    /// as the commit-time probe reported it. Only the highest matters: the commit timestamp must be above every
+    /// floor, and one timestamp above the highest is above them all.
+    /// </summary>
+    public void RaiseCommitFloor(HLCTimestamp floor)
+    {
+        if (floor.IsNull())
+            return;
+
+        lock (sync)
+        {
+            if (floor.CompareTo(commitFloor) > 0)
+                commitFloor = floor;
+        }
+    }
+
+    /// <summary>The highest commit floor recorded so far, or Zero when no probed intent carried one.</summary>
+    public HLCTimestamp CommitFloor
+    {
+        get
+        {
+            lock (sync)
+                return commitFloor;
+        }
+    }
 }
 
 /// <summary>
@@ -88,6 +120,10 @@ internal static class LockGrantScope
     /// <summary>Records a grant into the open capture, if one is open.</summary>
     public static void Record(int partitionId, long term, string routingKey) =>
         current.Value?.Record(new LockGrantTerm(partitionId, term, routingKey));
+
+    /// <summary>Raises the commit floor of the open capture, if one is open; see <see cref="LockGrantCapture.RaiseCommitFloor"/>.</summary>
+    public static void RaiseCommitFloor(HLCTimestamp floor) =>
+        current.Value?.RaiseCommitFloor(floor);
 
     /// <summary>Restores the capture that was open when this scope was entered.</summary>
     public readonly struct Scope(LockGrantCapture? previous) : IDisposable

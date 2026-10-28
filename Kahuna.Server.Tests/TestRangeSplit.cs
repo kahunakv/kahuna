@@ -305,13 +305,15 @@ public sealed class TestRangeSplit : BaseCluster
 
     /// <summary>
     /// A half that cannot be read is not an empty half. The non-empty check is a limit-1 scan, and a scan
-    /// whose window holds a live uncommitted write refuses the whole page — so reading "no items" as "no
-    /// keys" would decline the split with <see cref="SplitStatus.BelowMinRangeSize"/>, a permanent-sounding
-    /// property of data that is neither empty nor small. The ranges most likely to carry an in-flight write
-    /// are the busy ones a split exists to relieve, so this is the common case, not a corner.
+    /// whose window holds a live write claimed for its commit refuses the whole page — so reading "no items"
+    /// as "no keys" would decline the split with <see cref="SplitStatus.BelowMinRangeSize"/>, a
+    /// permanent-sounding property of data that is neither empty nor small. The ranges most likely to carry
+    /// an in-flight write are the busy ones a split exists to relieve, so this is the common case, not a corner.
     ///
-    /// <para>The transaction here stages its write and never commits, which is exactly the state a
-    /// transaction is in for the duration of its own commit path.</para>
+    /// <para>The transaction here stages its write, has its commit probe claim the intent, and never decides,
+    /// which is exactly the state a transaction is in for the duration of its own commit path. A write that is
+    /// staged but not yet claimed is stepped over by the scan instead (the read raises its commit floor), so
+    /// the claim is what makes the page unreadable.</para>
     /// </summary>
     [Fact]
     public async Task Split_WithInFlightWriteInAHalf_IsProbeIndeterminate()
@@ -343,12 +345,20 @@ public sealed class TestRangeSplit : BaseCluster
                 coordinatorKey: writer.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
             Assert.Equal(KeyValueResponseType.Set, writeType);
 
+            // The writer's commit probe claims the intent, as a coordinator does right before it proposes; from
+            // here on a snapshot read cannot push the commit above itself and waits instead.
+            List<(KeyValueResponseType type, string key, KeyValueDurability durability)> claimed = await metaLeader.LocateAndTryCheckManyWriteIntents(
+                writer.TransactionId,
+                [new KeyValueConflictProbe(Space + "/zz-inflight", KeyValueDurability.Persistent, KeyValueConflictChecks.OwnStagedIntent | KeyValueConflictChecks.CommitFloor)],
+                ct);
+            Assert.Equal(KeyValueResponseType.DoesNotExist, claimed[0].type);
+
             // The probe scan refuses only a writer that may still commit at or before the probe's snapshot.
-            // The writer's begin HLC comes from the session node's clock and the probe timestamp from the meta
-            // leader's; within one millisecond the two are not causally ordered, so a writer that began in the
-            // same millisecond can read as "after the snapshot" and the probe answers HasKeys, which is a valid
+            // The write's stamp comes from the key leader's clock and the probe timestamp from the meta
+            // leader's; within one millisecond the two are not causally ordered, so a write staged in the
+            // same millisecond can read as "above the snapshot" and the probe answers HasKeys, which is a valid
             // outcome (the later settle barrier handles the live intent). Let the wall clock advance so the
-            // writer provably began before the snapshot and the probe must wait on it.
+            // write is provably staged before the snapshot and the probe must wait on it.
             await Task.Delay(5, ct);
 
             SplitOutcome outcome = await metaLeader.RangeSplitter.SplitAsync(

@@ -163,7 +163,11 @@ list of work to finalize. (Details in the coordinator guide.)
 
 - identity `(TransactionId, Epoch)` and the `ManifestHash` — together the record's identity;
 - the **record anchor key** and its partition;
-- one canonical **commit timestamp** (HLC) and a **decision deadline**;
+- one canonical **commit timestamp** (HLC) and a **decision deadline**. The commit timestamp is minted
+  strictly above the transaction id, above every participant's stamp on the staged writes, and above every
+  *commit floor* the commit probe reported: the highest snapshot timestamp at which a read was served the
+  committed head over one of the staged writes instead of waiting for the writer (see the
+  [read semantics guide](transaction-read-and-lock-semantics-guide.md), fixed-timestamp reads);
 - the participant manifest;
 - per-partition groups of **`PreparedIntent`** — the exact committed value, revision, absolute expiry and
   `NoRevision` flag for each modified key.
@@ -188,6 +192,15 @@ still be durably aborted), while `Commit` **cannot** — a commit requires an `U
 
 `DurableTransactionFinalizer.FinalizeAsync`:
 
+0. **Claim the staged intents.** Before the first proposal, one batched probe per node asks each written
+   key's leader whether the transaction's staged write is still covered by the intent it was staged under,
+   claims that intent for the commit, and reports its commit floor. Until the claim, a snapshot read that
+   meets the staged write is served the committed head and raises the floor instead of waiting; from the
+   claim on it waits. A lost intent decides nothing here (step 3 refuses it and names the cause);
+   a floor at or above the frozen commit timestamp answers `MustRetry` with the floor, and the coordinator
+   freezes the input again above it and runs the finalize again (`kahuna.transactions.commit_floor_refreezes`).
+   The claim precedes every proposal that carries the commit timestamp, so no read can push a floor above
+   it afterwards. On the one-phase bundle (§6.3.1) the up-front validation's probe is the claim.
 1. **Initialize + prepare (one barrier).** The anchor key belongs to one of the participant partitions, so
    the record initialization and *that partition's* prepare are submitted as **one atomic ordered
    proposal** `[TransactionRecord init, PreparedIntent prepare]`; every other partition's prepare fans out
@@ -215,7 +228,9 @@ still be durably aborted), while `Commit` **cannot** — a commit requires an `U
 
 When the whole participant set is the anchor partition, steps 1, 3 and 4 collapse into one durable
 barrier: the read set is validated up front and `[record init, prepare, commit decision]` is proposed as
-one atomic batch. When another node leads the anchor partition, the bundle crosses the wire whole as one
+one atomic batch. The validation's commit probe is also the claim of step 0: it reports the staged
+intents' commit floor, and a floor at or above the frozen commit timestamp refuses the attempt before the
+bundle is proposed, for a fresh freeze above it. When another node leads the anchor partition, the bundle crosses the wire whole as one
 typed operation: the receiving leader submits the three entries as one atomic scheduler submission under
 the origin's range fence, and the reply carries the canonical outcome read from its record store after
 the ordered apply (plus the bundled-commit gate's verdict when the record stays `Undecided`) — one extra

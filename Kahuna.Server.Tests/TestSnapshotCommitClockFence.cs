@@ -86,6 +86,17 @@ public sealed class TestSnapshotCommitClockFence : BaseCluster
 
         Assert.True(commit > ahead, $"commit {commit} is not above the staged stamp {ahead}");
         Assert.True(commit > transactionId);
+
+        // A snapshot read served over one of the staged writes left a commit floor above every stamp: the
+        // commit must land above the floor too.
+        HLCTimestamp floor = new(3, 70_000, 2);
+        HLCTimestamp aboveFloor = TransactionCoordinator.MintDurableCommitTimestamp(lagging, 1, transactionId, staged, floor);
+
+        Assert.True(aboveFloor > floor, $"commit {aboveFloor} is not above the commit floor {floor}");
+
+        // A floor below the stamps changes nothing.
+        HLCTimestamp lowFloor = new(3, 10, 0);
+        Assert.True(TransactionCoordinator.MintDurableCommitTimestamp(lagging, 1, transactionId, staged, lowFloor) > ahead);
     }
 
     /// <summary>Restaging a key within one transaction keeps the highest participant stamp the key took.</summary>
@@ -146,6 +157,84 @@ public sealed class TestSnapshotCommitClockFence : BaseCluster
                 KeyValueDurability.Persistent, ct,
                 coordinatorKey: handle.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
             Assert.Equal(KeyValueResponseType.Set, setType);
+
+            (KeyValueResponseType commitType, _) = await coordinator.LocateAndCommitTransaction(handle, ct);
+            Assert.Equal(KeyValueResponseType.Committed, commitType);
+
+            (KeyValueResponseType latestType, ReadOnlyKeyValueEntry? latest) = await reader.LocateAndTryGetValue(
+                HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Get, latestType);
+            Assert.Equal("v1", Encoding.UTF8.GetString(latest!.Value!));
+            Assert.True(latest.LastModified > snapshot,
+                $"commit stamped at {latest.LastModified}, at or below the snapshot {snapshot} a prior read was served at");
+
+            (KeyValueResponseType againType, ReadOnlyKeyValueEntry? again) = await reader.LocateAndTryGetValue(
+                HLCTimestamp.Zero, key, -1, snapshot, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Get, againType);
+            Assert.Equal("v0", Encoding.UTF8.GetString(again!.Value!));
+        }
+        finally
+        {
+            await LeaveCluster(rafts[0], rafts[1], rafts[2]);
+        }
+    }
+
+    /// <summary>
+    /// The write is staged before the snapshot read, and the coordinator runs on another node than the key's
+    /// leader. The read is served the committed head at once over the staged write and leaves its commit floor
+    /// on the intent; the commit probe carries the floor back to the coordinator, whose clock can lag the
+    /// snapshot (minted ahead of every node here), and the commit is minted above it: the read asked again at
+    /// the same snapshot still answers the head.
+    /// </summary>
+    [Fact]
+    public async Task CommitOfAWriteStagedBeforeASnapshotRead_IsStampedAboveTheSnapshot_WithARemoteCoordinator()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft[] rafts, IKahuna[] kahunas) = await AssembleCluster(
+            3, "memory", Partitions, raftLogger, kahunaLogger, replicationFactor: 1);
+
+        KahunaManager[] managers = [.. kahunas.Cast<KahunaManager>()];
+
+        try
+        {
+            (string key, int keyLeader, string coordinatorKey, int coordinatorLeader) = await FindSplitPair(rafts, managers, ct);
+            KahunaManager reader = managers[keyLeader];
+            KahunaManager coordinator = managers[coordinatorLeader];
+
+            (KeyValueResponseType seedType, _, _) = await reader.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, key, "v0"u8.ToArray(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Set, seedType);
+
+            (KeyValueResponseType startType, TransactionHandle handle) = await coordinator.LocateAndStartTransaction(
+                new KeyValueTransactionOptions
+                {
+                    CoordinatorKey = coordinatorKey,
+                    Locking = KeyValueTransactionLocking.Optimistic,
+                    Timeout = 60_000
+                }, ct);
+            Assert.Equal(KeyValueResponseType.Set, startType);
+
+            (KeyValueResponseType setType, _, _) = await coordinator.LocateAndTrySetKeyValue(
+                handle.TransactionId, key, "v1"u8.ToArray(), null, -1, KeyValueFlags.Set, 0,
+                KeyValueDurability.Persistent, ct,
+                coordinatorKey: handle.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
+            Assert.Equal(KeyValueResponseType.Set, setType);
+
+            // A snapshot ahead of every node's clock, within the lead a node folds. The key's leader fences its
+            // clock at it when it serves the read; the coordinator's clock lags it until a Raft message carries
+            // the fold over, so a commit minted from the coordinator's clock alone could land below it.
+            HLCTimestamp snapshot = new(0, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 2_000, 0);
+
+            System.Diagnostics.Stopwatch elapsed = System.Diagnostics.Stopwatch.StartNew();
+            (KeyValueResponseType firstType, ReadOnlyKeyValueEntry? first) = await reader.LocateAndTryGetValue(
+                HLCTimestamp.Zero, key, -1, snapshot, KeyValueDurability.Persistent, ct);
+            elapsed.Stop();
+
+            Assert.Equal(KeyValueResponseType.Get, firstType);
+            Assert.Equal("v0", Encoding.UTF8.GetString(first!.Value!));
+            Assert.True(elapsed.ElapsedMilliseconds < 5_000,
+                $"the read waited {elapsed.ElapsedMilliseconds} ms on a staged write whose commit it could push above its snapshot");
 
             (KeyValueResponseType commitType, _) = await coordinator.LocateAndCommitTransaction(handle, ct);
             Assert.Equal(KeyValueResponseType.Committed, commitType);

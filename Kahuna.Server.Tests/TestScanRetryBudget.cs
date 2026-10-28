@@ -9,8 +9,8 @@ namespace Kahuna.Server.Tests;
 
 /// <summary>
 /// A range scan whose page keeps answering transient must fail loudly instead of retrying forever.
-/// The durable producer of that state is a foreign write intent whose commit timestamp never
-/// resolves: a snapshot page containing the key answers WaitingForReplication on every attempt, and
+/// The durable producer of that state is a foreign write intent that its owner's commit probe claimed
+/// and then never decided: a snapshot page containing the key answers WaitingForReplication on every attempt, and
 /// before the budget existed the scan loop retried in silence for the life of the process — an
 /// aggregate read or a reconciliation pass over the range simply never returned, with no log line
 /// and no counter. The budget converts that permanent invisible hang into a retryable server error
@@ -67,6 +67,32 @@ public sealed class TestScanRetryBudget
         return rows;
     }
 
+    /// <summary>
+    /// A foreign transaction stages a write on one mid-range key and its commit probe claims the intent, as a
+    /// coordinator does right before it proposes; then it never decides, as a coordinator that died there. An
+    /// unclaimed intent would be stepped over (the read raises its commit floor and serves the committed head);
+    /// a claimed one cannot be pushed, so a snapshot page containing the key waits for a decision that never
+    /// comes and answers WaitingForReplication every time.
+    /// </summary>
+    private static async Task<HLCTimestamp> StageAndClaim(EmbeddedKahunaNode node, string key, CancellationToken ct)
+    {
+        KahunaManager manager = (KahunaManager)node.Kahuna;
+
+        HLCTimestamp foreignTx = manager.Raft.HybridLogicalClock.TrySendOrLocalEvent(manager.Raft.GetLocalNodeId());
+        (KeyValueResponseType staged, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+            foreignTx, key, Encoding.UTF8.GetBytes("staged"), null, -1,
+            KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.Set, staged);
+
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability)> claimed = await node.Kahuna.LocateAndTryCheckManyWriteIntents(
+            foreignTx,
+            [new KeyValueConflictProbe(key, KeyValueDurability.Persistent, KeyValueConflictChecks.OwnStagedIntent | KeyValueConflictChecks.CommitFloor)],
+            ct);
+        Assert.Equal(KeyValueResponseType.DoesNotExist, claimed[0].type);
+
+        return foreignTx;
+    }
+
     [Fact]
     public async Task ScanPage_BlockedByUnresolvedForeignIntent_FailsLoudlyWithinBudget()
     {
@@ -87,14 +113,10 @@ public sealed class TestScanRetryBudget
             Assert.Equal(KeyValueResponseType.Set, set);
         }
 
-        // A foreign transaction stages a write on one mid-range key and never decides: the staged
-        // write intent carries no commit timestamp, so a snapshot page containing the key cannot
-        // prove the write lands outside its snapshot and answers WaitingForReplication every time.
-        HLCTimestamp foreignTx = manager.Raft.HybridLogicalClock.TrySendOrLocalEvent(manager.Raft.GetLocalNodeId());
-        (KeyValueResponseType staged, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
-            foreignTx, $"{prefix}/k06", Encoding.UTF8.GetBytes("staged"), null, -1,
-            KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
-        Assert.Equal(KeyValueResponseType.Set, staged);
+        // A foreign transaction stages a write on one mid-range key, claims it for its commit, and never
+        // decides: the claimed intent carries no commit timestamp and cannot be pushed above a snapshot, so a
+        // snapshot page containing the key answers WaitingForReplication every time (see StageAndClaim).
+        HLCTimestamp foreignTx = await StageAndClaim(node, $"{prefix}/k06", ct);
 
         // The snapshot is minted after the staging, so the intent's fate genuinely matters to it.
         HLCTimestamp snapshot = manager.Raft.HybridLogicalClock.TrySendOrLocalEvent(manager.Raft.GetLocalNodeId());
@@ -147,11 +169,7 @@ public sealed class TestScanRetryBudget
             Assert.Equal(KeyValueResponseType.Set, set);
         }
 
-        HLCTimestamp foreignTx = manager.Raft.HybridLogicalClock.TrySendOrLocalEvent(manager.Raft.GetLocalNodeId());
-        (KeyValueResponseType staged, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
-            foreignTx, $"{prefix}/k06", Encoding.UTF8.GetBytes("staged"), null, -1,
-            KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
-        Assert.Equal(KeyValueResponseType.Set, staged);
+        await StageAndClaim(node, $"{prefix}/k06", ct);
 
         HLCTimestamp snapshot = manager.Raft.HybridLogicalClock.TrySendOrLocalEvent(manager.Raft.GetLocalNodeId());
 
@@ -207,11 +225,8 @@ public sealed class TestScanRetryBudget
             Assert.Equal(KeyValueResponseType.Set, set);
         }
 
-        HLCTimestamp foreignTx = manager.Raft.HybridLogicalClock.TrySendOrLocalEvent(manager.Raft.GetLocalNodeId());
-        (KeyValueResponseType staged, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
-            foreignTx, $"{prefix}/k06", Encoding.UTF8.GetBytes("staged"), null, -1,
-            KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
-        Assert.Equal(KeyValueResponseType.Set, staged);
+        // A claimed intent ignores its lease; only the session-owned ceiling ends it.
+        await StageAndClaim(node, $"{prefix}/k06", ct);
 
         HLCTimestamp snapshot = manager.Raft.HybridLogicalClock.TrySendOrLocalEvent(manager.Raft.GetLocalNodeId());
 

@@ -143,6 +143,18 @@ public sealed class KeyValueResponse
     internal static KeyValueResponse NothingHeldHere() => new(KeyValueResponseType.MustRetry) { NothingHeld = true };
 
     /// <summary>
+    /// On the clean answer of a commit-time probe that asked <see cref="KeyValueConflictChecks.CommitFloor"/>: the
+    /// highest snapshot timestamp a read was served the committed head at over the caller's own staged intent on
+    /// the key (<see cref="KeyValueWriteIntent.CommitFloor"/>). The caller mints its commit timestamp strictly
+    /// above it. Zero when no snapshot read passed over the intent, and on every other answer.
+    /// </summary>
+    internal HLCTimestamp CommitFloor { get; private init; }
+
+    /// <summary>The clean probe answer that also reports the commit floor of the caller's intent on the key.</summary>
+    internal static KeyValueResponse HeldWithCommitFloor(HLCTimestamp commitFloor) =>
+        new(KeyValueResponseType.DoesNotExist, KeyValueStaticResponses.DoesNotExistContextResponse.Entry) { CommitFloor = commitFloor };
+
+    /// <summary>
     /// Construtor
     /// </summary>
     /// <param name="type"></param>

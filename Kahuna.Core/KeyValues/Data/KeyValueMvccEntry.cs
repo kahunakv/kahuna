@@ -49,8 +49,9 @@ internal sealed class KeyValueMvccEntry
 
     /// <summary>
     /// The write intent that held the key when this transaction staged its first write here, or null while the
-    /// transaction has only read the key. A snapshot read waits for the staged write only while that same intent
-    /// is live, so the commit-time probe proves the transaction never lost the key by finding this exact intent
+    /// transaction has only read the key. A snapshot read that meets the staged write records its commit floor on
+    /// that same intent, or waits behind it once it is claimed, only while the intent is live; so the commit-time
+    /// probe proves the transaction never lost the key, and learns every floor, by finding this exact intent
     /// still in place and never lapsed (see <see cref="KeyValueWriteIntent.Lapsed"/>).
     /// </summary>
     public KeyValueWriteIntent? StagedUnder { get; set; }

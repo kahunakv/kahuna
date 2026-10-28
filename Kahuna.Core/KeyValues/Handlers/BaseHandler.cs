@@ -994,9 +994,9 @@ internal abstract class BaseHandler
     /// live write intent of a third transaction on the same key. The overlay answers from the covering intent's
     /// committed value, but a different transaction may already have staged a newer write whose commit timestamp
     /// can still land at or below the snapshot; answering now and serving that commit on the next ask breaks
-    /// repeatable snapshot reads. This is the same safe-time rule the ordinary path applies; only the reader's own
-    /// intent and the overlay intent's transaction (already decided) are exempt. An expired intent is cleared, as
-    /// the ordinary path does.
+    /// repeatable snapshot reads. This is the same safe-time rule the ordinary path applies, including the push of
+    /// a commit that can still be moved above the snapshot; only the reader's own intent and the overlay intent's
+    /// transaction (already decided) are exempt. An expired intent is cleared, as the ordinary path does.
     /// </summary>
     protected bool SnapshotMustWaitBehindOverlay(KeyValueRequest message, KeyValueEntry? entry, PreparedIntent overlayIntent, HLCTimestamp currentTime)
     {
@@ -1012,7 +1012,7 @@ internal abstract class BaseHandler
             return false;
         }
 
-        return KeyValueWriteIntentSafeTime.MayCommitAtOrBefore(entry, writeIntent, message.ReadTimestamp);
+        return KeyValueWriteIntentSafeTime.MustWait(entry, writeIntent, message.ReadTimestamp);
     }
 
     /// <summary>
