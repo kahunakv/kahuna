@@ -824,4 +824,42 @@ internal sealed partial class PreparedIntentStore
 
         return result;
     }
+
+    /// <summary>Serializes one gathered page of a moving range's committed heads (the range transaction-state
+    /// gather's wire form of the hand-off set).</summary>
+    internal static byte[] SerializeCommittedHeads(IReadOnlyList<CommittedHeadLedgerEntry> heads)
+    {
+        CommittedHeadLedgerPageMessage message = new();
+
+        foreach (CommittedHeadLedgerEntry head in heads)
+        {
+            message.Heads.Add(new CommittedHeadLedgerEntryMessage
+            {
+                Key = head.Key,
+                Revision = head.Revision,
+                State = (int)head.State,
+                CommittedAtNode = head.CommittedAt.N,
+                CommittedAtPhysical = head.CommittedAt.L,
+                CommittedAtCounter = head.CommittedAt.C
+            });
+        }
+
+        return message.ToByteArray();
+    }
+
+    /// <summary>Decodes a page written by <see cref="SerializeCommittedHeads"/>.</summary>
+    internal static IReadOnlyList<CommittedHeadLedgerEntry> DeserializeCommittedHeads(byte[] data)
+    {
+        CommittedHeadLedgerPageMessage message = CommittedHeadLedgerPageMessage.Parser.ParseFrom(data);
+        List<CommittedHeadLedgerEntry> result = new(message.Heads.Count);
+
+        foreach (CommittedHeadLedgerEntryMessage entry in message.Heads)
+        {
+            result.Add(new CommittedHeadLedgerEntry(
+                entry.Key, entry.Revision, (KeyValueState)entry.State,
+                new HLCTimestamp(entry.CommittedAtNode, entry.CommittedAtPhysical, entry.CommittedAtCounter)));
+        }
+
+        return result;
+    }
 }

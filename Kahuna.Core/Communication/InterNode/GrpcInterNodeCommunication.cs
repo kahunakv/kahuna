@@ -2275,7 +2275,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         return batchResponse.ReplicateKeyValueRangePage?.Success ?? false;
     }
 
-    public async Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents, bool HasMore, string? NextCursor)> GetRangeTransactionState(string node, int partitionId, string? startKey, string? endKey, KeyValueRangeStateKinds kinds, string? cursor, int maxItems, CancellationToken cancellationToken)
+    public async Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents, byte[] CommittedHeads, bool HasMore, string? NextCursor)> GetRangeTransactionState(string node, int partitionId, string? startKey, string? endKey, KeyValueRangeStateKinds kinds, string? cursor, int maxItems, CancellationToken cancellationToken)
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);
 
@@ -2303,7 +2303,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         GrpcGetRangeTransactionStateResponse? response = batchResponse.GetRangeTransactionState;
 
         if (response is null || !response.Success)
-            return (false, [], [], [], false, null);
+            return (false, [], [], [], [], false, null);
 
         List<CompletionReceiptRecord> receipts = new(response.Receipts.Count);
 
@@ -2321,11 +2321,12 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             receipts,
             response.TransactionRecords.ToByteArray(),
             response.PreparedIntents.ToByteArray(),
+            response.CommittedHeads.ToByteArray(),
             response.HasMore,
             response.HasNextCursor ? response.NextCursor : null);
     }
 
-    public async Task<(bool Serviced, IReadOnlyList<KeyValueStagedBaseVerdictEntry> Verdicts)> GetStagedBaseVerdicts(string node, int partitionId, HLCTimestamp transactionId, long epoch, IReadOnlyList<string> keys, int waitMs, CancellationToken cancellationToken)
+    public async Task<(bool Serviced, IReadOnlyList<KeyValueStagedBaseVerdictEntry> Verdicts)> GetStagedBaseVerdicts(string node, int partitionId, HLCTimestamp transactionId, long epoch, IReadOnlyList<string> keys, IReadOnlyList<KeyValueStagedBaseProbe>? probes, int waitMs, CancellationToken cancellationToken)
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);
 
@@ -2341,6 +2342,20 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
 
         for (int i = 0; i < keys.Count; i++)
             request.Keys.Add(keys[i]);
+
+        if (probes is not null && probes.Count == keys.Count)
+        {
+            for (int i = 0; i < probes.Count; i++)
+            {
+                request.Probes.Add(new GrpcStagedBaseProbe
+                {
+                    BaseRevision = probes[i].BaseRevision,
+                    BaseState = probes[i].BaseState,
+                    Revision = probes[i].Revision,
+                    NoRevision = probes[i].NoRevision
+                });
+            }
+        }
 
         GrpcServerBatcherResponse batchResponse;
 

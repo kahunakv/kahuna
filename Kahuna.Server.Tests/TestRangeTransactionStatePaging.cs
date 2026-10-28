@@ -226,7 +226,7 @@ public sealed class TestRangeTransactionStatePaging : BaseCluster
 
         while (true)
         {
-            (bool ok, List<CompletionReceiptRecord> page, _, _, bool hasMore, string? nextCursor) =
+            (bool ok, List<CompletionReceiptRecord> page, _, _, _, bool hasMore, string? nextCursor) =
                 await sourceLeader.KeyValues.GetRangeTransactionStateLocal(
                     sourcePartition, Space + "/", Space + "0", KeyValueRangeStateKinds.Receipts, cursor, 2, ct);
 

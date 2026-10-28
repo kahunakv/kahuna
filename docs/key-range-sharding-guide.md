@@ -445,13 +445,30 @@ Step by step:
    sends `[K, E)` traffic to P'. In-flight requests against P for `[K, E)` fail the generation
    fence and retry onto P'. The quiesce is released in the cutover `finally`.
 
-The transaction-state handoff used by both split and merge gathers and replicates receipts, records
-and intents one page at a time before cutover. Replicated handoff chunks contain at most 512 items;
-intent chunks also target at most 1 MiB of value bytes, allowing a single oversized intent to progress.
-Gather pages keep all entries sharing one range key together, so the 512-item gather target can be
-exceeded for that key. These are batching targets, not a guarantee that arbitrary values fit transport
-limits. Any failed gather or handoff prevents cutover. Whole-partition replica seeding is a separate
-path; see the [snapshot and Raft recovery guide](snapshot-and-raft-recovery-guide.md).
+The transaction-state handoff used by both split and merge gathers and replicates receipts, records,
+intents and committed heads one page at a time before cutover. Replicated handoff chunks contain at
+most 512 items; intent chunks also target at most 1 MiB of value bytes, allowing a single oversized
+intent to progress. Gather pages keep all entries sharing one range key together, so the 512-item
+gather target can be exceeded for that key. These are batching targets, not a guarantee that arbitrary
+values fit transport limits. Any failed gather or handoff prevents cutover. Whole-partition replica
+seeding is a separate path; see the [snapshot and Raft recovery guide](snapshot-and-raft-recovery-guide.md).
+
+**The committed heads travel with the range.** The staged-base fence (see the
+[transaction lifecycle guide](transaction-lifecycle-guide.md)) judges a prepare against a committed-head
+ledger that is sliced per partition: a slice holds the heads whose settlements applied through that
+partition's log. The moving keys' heads therefore sit in the *source* partition's slice, and a
+destination that started with an empty slice could only judge them from each node's own copy of the
+source slice. That copy is not ordered with the destination's log: the destination's leader could hold
+it behind its replicas (apply lag under a split cascade), or not hold it at all (a node that never
+hosted the source, or purged it after a merge). A leader that admits a prepare its replicas refuse is
+the shape that lets a stale-base commit be acknowledged. The handoff now gathers the moving range's
+heads from the source leader (the per-key maximum across its slices, kind `CommittedHeads` of the range
+transaction-state gather) and replicates them onto the destination's log as seed commands
+(`PREPARED_INTENT_SEED_HEAD` in the prepared-intent delta). A seed is a monotonic head record in the
+destination's slice — an older seed, a re-driven handoff and a replay fold as no-ops — and it lands
+before cutover, so every prepare the destination later judges for a moved key is judged against state
+every replica of the destination holds at the same log position. A source leader on a build without the
+kind answers no heads, and the destination then judges as it did before the handoff existed.
 
 ### Two things to know about the current implementation
 

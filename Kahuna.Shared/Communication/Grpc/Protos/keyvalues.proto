@@ -1631,6 +1631,9 @@ message GrpcGetRangeTransactionStateResponse {
   // never sets it — its response already carried everything.
   bool HasMore = 5;
   optional string NextCursor = 6;
+  // Serialized CommittedHeadLedgerPageMessage blob (kind 8: the committed heads the staged-base fence remembers
+  // for the range's keys), empty when none or when the peer predates the kind.
+  bytes CommittedHeads = 7;
 }
 
 // A batch of coordinator decision records serialized as one CoordinatorDecisionSnapshotMessage blob.
@@ -1673,6 +1676,19 @@ message GrpcGetStagedBaseVerdictsRequest {
   // How long the replica may wait for the prepare to apply locally before answering NotApplied for the
   // remaining keys. Bounded server-side; 0 answers immediately.
   int32 WaitMs = 7;
+  // The fields the fence judges for each key, aligned with Keys. With these a replica that has not applied the
+  // prepare judges from its committed-head memory and never answers NotApplied for apply lag; an older replica
+  // ignores them and waits as before. Absent (or misaligned) means the older behaviour.
+  repeated GrpcStagedBaseProbe Probes = 8;
+}
+
+// One key's judged fields: the validated base revision (int64 min when the write carries none) and its observed
+// state, the staged revision, and whether the write stages no revision.
+message GrpcStagedBaseProbe {
+  int64 BaseRevision = 1;
+  int32 BaseState = 2;
+  int64 Revision = 3;
+  bool NoRevision = 4;
 }
 
 // One key's verdict: 0 NotApplied (this node holds no matching intent and cannot attest), 1 Clear,

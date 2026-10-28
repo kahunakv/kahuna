@@ -205,22 +205,24 @@ public interface IInterNodeCommunication
 
     /// <summary>
     /// Reads the transaction state a moving key range carries — completion receipts plus serialized
-    /// canonical transaction records and prepared intents in <c>[startKey, endKey)</c> — from
-    /// <paramref name="node"/> (the source partition's leader). Ok is false when the remote node could
+    /// canonical transaction records, prepared intents and committed heads in <c>[startKey, endKey)</c> —
+    /// from <paramref name="node"/> (the source partition's leader). Ok is false when the remote node could
     /// not confirm leadership of <paramref name="partitionId"/> and refused to answer from possibly
     /// lagging stores.
     /// </summary>
-    public Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents, bool HasMore, string? NextCursor)> GetRangeTransactionState(string node, int partitionId, string? startKey, string? endKey, KeyValueRangeStateKinds kinds, string? cursor, int maxItems, CancellationToken cancellationToken);
+    public Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents, byte[] CommittedHeads, bool HasMore, string? NextCursor)> GetRangeTransactionState(string node, int partitionId, string? startKey, string? endKey, KeyValueRangeStateKinds kinds, string? cursor, int maxItems, CancellationToken cancellationToken);
 
 
     /// <summary>
     /// Asks <paramref name="node"/> — any replica of <paramref name="partitionId"/>, never routed to a
     /// leader — for its staged-base fence verdict on each of one transaction's validated-base prepares,
-    /// judged against that node's own applied intent and committed-head memory. The replica may wait up to
-    /// <paramref name="waitMs"/> for the prepare to apply locally before answering NotApplied. Serviced is
-    /// false only when the remote node refused to answer; a missing verdict is never an objection.
+    /// judged against that node's own applied intent and committed-head memory. With <paramref name="probes"/>
+    /// (the judged fields, aligned with <paramref name="keys"/>) a prepare the replica has not applied is judged
+    /// from its memory at once; without them the replica may wait up to <paramref name="waitMs"/> for the
+    /// prepare to apply locally before answering NotApplied. Serviced is false only when the remote node
+    /// refused to answer; a missing verdict is never an objection.
     /// </summary>
-    public Task<(bool Serviced, IReadOnlyList<KeyValueStagedBaseVerdictEntry> Verdicts)> GetStagedBaseVerdicts(string node, int partitionId, HLCTimestamp transactionId, long epoch, IReadOnlyList<string> keys, int waitMs, CancellationToken cancellationToken);
+    public Task<(bool Serviced, IReadOnlyList<KeyValueStagedBaseVerdictEntry> Verdicts)> GetStagedBaseVerdicts(string node, int partitionId, HLCTimestamp transactionId, long epoch, IReadOnlyList<string> keys, IReadOnlyList<KeyValueStagedBaseProbe>? probes, int waitMs, CancellationToken cancellationToken);
 
     /// <summary>Forwards a snapshot-hold acquire to the meta-partition leader on <paramref name="node"/>.</summary>
     public Task<(KeyValueResponseType Type, string HoldId, HLCTimestamp LeaseExpiry)> AcquireSnapshotHold(string node, string holderId, HLCTimestamp timestamp, int leaseMs, CancellationToken cancellationToken);

@@ -9,6 +9,13 @@ enum PreparedIntentCommandKindMessage {
   PREPARED_INTENT_PREPARE = 0; // install a pending intent (idempotent for an exact-duplicate mutation)
   PREPARED_INTENT_RESOLVE = 1; // record the transaction's terminal decision on the intent (commit/abort)
   PREPARED_INTENT_REMOVE  = 2; // garbage-collect a resolved intent
+  // Seed one key's committed head into the slice of the partition whose log carries it: the range-move hand-off
+  // of the committed-head memory (a split or merge moves the rows but the heads stay in the source slice). It
+  // carries the key (field 6), the head's revision (18) and state (13), and the commit timestamp the head's
+  // retention is measured against (10-12); no transaction identity. Applied as a monotonic head record, so a
+  // re-driven hand-off folds idempotently. An older reader rejects the whole delta as an unknown kind, so no
+  // node may write it until every node reads it.
+  PREPARED_INTENT_SEED_HEAD = 3;
 }
 
 message PreparedIntentCommandMessage {
@@ -106,6 +113,12 @@ message CommittedHeadLedgerEntryMessage {
   int32  committedAtNode     = 4;
   int64  committedAtPhysical = 5;
   uint32 committedAtCounter  = 6;
+}
+
+// One page of committed heads gathered from a moving key range, as the range transaction-state gather answers it
+// to a split/merge driver, which replicates each head onto the destination partition as a seed command.
+message CommittedHeadLedgerPageMessage {
+  repeated CommittedHeadLedgerEntryMessage heads = 1;
 }
 
 // One (transaction identity, key) whose settlement (the removal of the resolved intent on that key) applied

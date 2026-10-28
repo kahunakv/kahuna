@@ -1,3 +1,4 @@
+using Kahuna.Shared.KeyValue;
 using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues.Transactions.Data;
@@ -39,3 +40,23 @@ internal sealed record RemoveIntentCommand(
     HLCTimestamp TransactionId,
     long Epoch,
     string Key) : PreparedIntentCommand;
+
+/// <summary>
+/// Seeds one key's committed head into the ledger slice of the partition whose log carries the command: the
+/// range-move hand-off of the committed-head memory. A split or merge moves a key's rows to another partition, but
+/// the head its last transactional commit left behind lives in the SOURCE partition's slice, fed by the source
+/// log. Without this seed the destination slice starts empty for the moved keys, and the staged-base fence on the
+/// destination falls back to each node's copy of the source slice — a copy the destination's leader may hold
+/// behind its replicas (apply lag), or not hold at all (it never hosted the source, or purged it after a
+/// merge). A leader that admits a prepare its replicas refuse is exactly the shape that lets a stale-base commit
+/// be acknowledged. Seeded through the destination's log, the head is replicated state ordered ahead of every
+/// prepare the destination later judges, so leader and replicas reach the same verdict.
+///
+/// <para>Touches no intent: it applies as a monotonic head record (an older revision never overwrites a newer
+/// one), so a re-driven hand-off and a restart replay fold idempotently. Carries no transaction identity.</para>
+/// </summary>
+internal sealed record SeedCommittedHeadCommand(
+    string Key,
+    long Revision,
+    KeyValueState State,
+    HLCTimestamp CommittedAt) : PreparedIntentCommand;

@@ -2716,7 +2716,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
 
     internal async Task<GrpcGetRangeTransactionStateResponse> GetRangeTransactionStateInternal(GrpcGetRangeTransactionStateRequest request, ServerCallContext context)
     {
-        (bool ok, List<CompletionReceiptRecord> receipts, byte[] records, byte[] intents, bool hasMore, string? nextCursor) =
+        (bool ok, List<CompletionReceiptRecord> receipts, byte[] records, byte[] intents, byte[] heads, bool hasMore, string? nextCursor) =
             await keyValues.GetRangeTransactionStateLocal(
                 request.PartitionId,
                 request.HasStartKey ? request.StartKey : null,
@@ -2732,6 +2732,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             Success = ok,
             TransactionRecords = records.Length > 0 ? UnsafeByteOperations.UnsafeWrap(records) : ByteString.Empty,
             PreparedIntents = intents.Length > 0 ? UnsafeByteOperations.UnsafeWrap(intents) : ByteString.Empty,
+            CommittedHeads = heads.Length > 0 ? UnsafeByteOperations.UnsafeWrap(heads) : ByteString.Empty,
             HasMore = hasMore
         };
 
@@ -2762,8 +2763,21 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     {
         HLCTimestamp transactionId = new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter);
 
+        // The probes count only when aligned with the keys; a misaligned set is an ask this node cannot
+        // interpret and falls back to the applied-intent read.
+        KeyValueStagedBaseProbe[]? probes = null;
+        if (request.Probes.Count > 0 && request.Probes.Count == request.Keys.Count)
+        {
+            probes = new KeyValueStagedBaseProbe[request.Probes.Count];
+            for (int i = 0; i < probes.Length; i++)
+            {
+                GrpcStagedBaseProbe probe = request.Probes[i];
+                probes[i] = new KeyValueStagedBaseProbe(probe.BaseRevision, probe.BaseState, probe.Revision, probe.NoRevision);
+            }
+        }
+
         (bool serviced, IReadOnlyList<KeyValueStagedBaseVerdictEntry> verdicts) = await keyValues.GetStagedBaseVerdictsLocal(
-            request.PartitionId, transactionId, request.Epoch, request.Keys, request.WaitMs, context.CancellationToken);
+            request.PartitionId, transactionId, request.Epoch, request.Keys, probes, request.WaitMs, context.CancellationToken);
 
         GrpcGetStagedBaseVerdictsResponse response = new() { Serviced = serviced };
 

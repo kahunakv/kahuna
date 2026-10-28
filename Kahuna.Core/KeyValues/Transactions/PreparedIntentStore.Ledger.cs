@@ -201,11 +201,21 @@ internal sealed partial class PreparedIntentStore
     /// <see cref="KeyValueStagedBaseVerdict.NotApplied"/> (this node cannot attest), and a resolved intent or
     /// a blind revision-free write answers <see cref="KeyValueStagedBaseVerdict.Clear"/> (nothing left for the
     /// fence to judge). Evaluated under the apply gate so the (intent, head, watermark) read is consistent.
+    ///
+    /// <para>With <paramref name="probes"/> (one per key, the fields the fence judges — the ask of a current
+    /// caller) a key whose prepare this node has not applied is judged from the committed-head memory alone
+    /// instead of answering NotApplied. That verdict is sound: heads only advance and the key's head is frozen
+    /// while the transaction's own intent is live, so the memory now is at or past the memory at the prepare's
+    /// apply position, and a refusal here is one the apply-time fence gives too. The one head that is not a
+    /// competitor's — the transaction's own settlement, already applied here — answers Clear through the
+    /// settled-identity memory. So a replica that lags the prepare's apply attests anyway, and the commit no
+    /// longer proceeds unattested for apply lag; only an unreachable replica stays silent.</para>
     /// </summary>
     internal KeyValueStagedBaseVerdictEntry[] EvaluateReplicaFenceVerdicts(
-        HLCTimestamp transactionId, long epoch, IReadOnlyList<string> keys)
+        HLCTimestamp transactionId, long epoch, IReadOnlyList<string> keys, IReadOnlyList<KeyValueStagedBaseProbe>? probes = null)
     {
         KeyValueStagedBaseVerdictEntry[] verdicts = new KeyValueStagedBaseVerdictEntry[keys.Count];
+        bool probed = probes is not null && probes.Count == keys.Count;
 
         lock (applyGate)
         {
@@ -215,9 +225,9 @@ internal sealed partial class PreparedIntentStore
                     || intent.TransactionId != transactionId
                     || intent.Epoch != epoch)
                 {
-                    verdicts[i] = new(
-                        KeyValueStagedBaseVerdict.NotApplied,
-                        TryFindHead(keys[i], out CommittedHead head) ? head.Revision : -1);
+                    verdicts[i] = probed
+                        ? JudgeFromMemory(transactionId, epoch, keys[i], probes![i])
+                        : new(KeyValueStagedBaseVerdict.NotApplied, TryFindHead(keys[i], out CommittedHead head) ? head.Revision : -1);
                     continue;
                 }
 
@@ -237,6 +247,48 @@ internal sealed partial class PreparedIntentStore
         return verdicts;
     }
 
+    /// <summary>The memory-only verdict for a prepare this node has not applied (see
+    /// <see cref="EvaluateReplicaFenceVerdicts"/>). Caller holds <see cref="applyGate"/>.</summary>
+    private KeyValueStagedBaseVerdictEntry JudgeFromMemory(HLCTimestamp transactionId, long epoch, string key, in KeyValueStagedBaseProbe probe)
+    {
+        DurableTransactionMetrics.ReplicaFenceMemoryVerdicts.Add(1);
+
+        // The transaction's own leg already settled through one of this node's logs: the head the memory would
+        // judge against is (or follows) its own commit, and the record owns the outcome from there.
+        if (IsSettledIdentityOnAnySlice(transactionId, epoch, key))
+            return new(KeyValueStagedBaseVerdict.Clear, -1);
+
+        bool hasValidatedBase = probe.BaseRevision != PreparedIntent.UnknownBaseRevision;
+
+        if (!hasValidatedBase && probe.NoRevision)
+            return new(KeyValueStagedBaseVerdict.Clear, -1);
+
+        string? conflict = JudgeStagedBase(
+            key, transactionId, hasValidatedBase, probe.BaseRevision, (KeyValueState)probe.BaseState, probe.NoRevision, probe.Revision,
+            countAbsentHeadAdmission: false, out long headRevision, out _);
+
+        return new(conflict is null ? KeyValueStagedBaseVerdict.Clear : KeyValueStagedBaseVerdict.StaleBase, headRevision);
+    }
+
+    /// <summary>Whether the leg (<paramref name="transactionId"/>, <paramref name="epoch"/>, <paramref name="key"/>)
+    /// settled through any log this node applies, within that slice's settled-identity window. The replica verdict
+    /// read consults it across slices because, unlike the apply-path rejection, it changes no replicated
+    /// transition — it only keeps a node's own settlement from reading as a competitor's. Caller holds
+    /// <see cref="applyGate"/>.</summary>
+    private bool IsSettledIdentityOnAnySlice(HLCTimestamp transactionId, long epoch, string key)
+    {
+        SettledIdentity identity = new(transactionId, epoch, key);
+
+        foreach (KeyValuePair<int, PartitionLedger> slice in ledgers)
+        {
+            if (slice.Value.Settled.TryGetValue(identity, out HLCTimestamp settledAt)
+                && IsSettledWithinRetention(settledAt, slice.Value.Watermark))
+                return true;
+        }
+
+        return false;
+    }
+
     /// <summary>
     /// The waiting form of <see cref="EvaluateReplicaFenceVerdicts"/>: while any key answers
     /// <see cref="KeyValueStagedBaseVerdict.NotApplied"/>, parks on the intent-set pulse and re-evaluates
@@ -246,11 +298,14 @@ internal sealed partial class PreparedIntentStore
     /// exhausted budget return it as it stands (<c>NotApplied</c> is never an objection to the caller).
     /// </summary>
     internal async Task<KeyValueStagedBaseVerdictEntry[]> EvaluateReplicaFenceVerdictsAsync(
-        HLCTimestamp transactionId, long epoch, IReadOnlyList<string> keys, int waitMs, CancellationToken cancellationToken)
+        HLCTimestamp transactionId, long epoch, IReadOnlyList<string> keys, int waitMs, CancellationToken cancellationToken,
+        IReadOnlyList<KeyValueStagedBaseProbe>? probes = null)
     {
         long deadline = Environment.TickCount64 + waitMs;
 
-        KeyValueStagedBaseVerdictEntry[] verdicts = EvaluateReplicaFenceVerdicts(transactionId, epoch, keys);
+        // With probes every key is attested at once (from the applied intent or from memory), so the wait below
+        // is only ever entered for an ask without them.
+        KeyValueStagedBaseVerdictEntry[] verdicts = EvaluateReplicaFenceVerdicts(transactionId, epoch, keys, probes);
         if (!AnyNotApplied(verdicts))
             return verdicts;
 
@@ -264,7 +319,7 @@ internal sealed partial class PreparedIntentStore
                 // completes the captured instance, so satisfaction can never slip past a parked waiter.
                 Task changed = Volatile.Read(ref intentSetChangedPulse).Task;
 
-                verdicts = EvaluateReplicaFenceVerdicts(transactionId, epoch, keys);
+                verdicts = EvaluateReplicaFenceVerdicts(transactionId, epoch, keys, probes);
                 if (!AnyNotApplied(verdicts))
                     return verdicts;
 
@@ -387,26 +442,79 @@ internal sealed partial class PreparedIntentStore
     /// an older revision never overwrites a newer one, so a replayed settlement is a no-op. Stamps the
     /// partition dirty for the checkpoint guard, because the slice is persisted with the partition's intent
     /// snapshot. Returns whether the head moved. Caller holds <see cref="applyGate"/>.</summary>
-    private bool RecordCommittedHead(PreparedIntent intent, int partitionId)
+    private bool RecordCommittedHead(PreparedIntent intent, int partitionId) =>
+        RecordCommittedHead(intent.Key, intent.Revision, intent.State, intent.CommitTimestamp, partitionId);
+
+    /// <summary>Applies a range move's seed of one key's committed head into the slice of the partition whose log
+    /// carries it (see <see cref="SeedCommittedHeadCommand"/>). The same monotonic record a settlement makes, so
+    /// a seed below a head the slice already holds — a re-driven hand-off, a replay over an installed slice, or a
+    /// commit on the destination that settled before the seed replayed — changes nothing.</summary>
+    private PreparedIntentApplyResult ApplySeededHead(SeedCommittedHeadCommand seed, int partitionId)
+    {
+        bool advanced;
+
+        lock (applyGate)
+            advanced = RecordCommittedHead(seed.Key, seed.Revision, seed.State, seed.CommittedAt, partitionId);
+
+        return new PreparedIntentApplyResult(
+            advanced ? TransactionApplyOutcome.Applied : TransactionApplyOutcome.IdempotentNoop, null, null);
+    }
+
+    /// <summary>
+    /// The committed heads this node remembers for every key in <c>[startKey, endKey)</c>, across every ledger
+    /// slice — for a key several slices remember (a range that moved before), the highest revision, exactly what
+    /// the advisory fence judges by. The hand-off set a range move seeds into its destination slice. Lock-free,
+    /// like the per-operation probes over the same maps; a head recorded during the walk is at worst missing from
+    /// it, and the move's settle barrier and quiesce leave nothing to settle on the moving range while it runs.
+    /// Unordered; the gather pages it by key.
+    /// </summary>
+    internal IReadOnlyList<CommittedHeadLedgerEntry> SnapshotCommittedHeadsRange(string? startKey, string? endKey)
+    {
+        Dictionary<string, CommittedHeadLedgerEntry> heads = [];
+
+        foreach (KeyValuePair<int, PartitionLedger> slice in ledgers)
+        {
+            foreach (KeyValuePair<string, CommittedHead> entry in slice.Value.Heads)
+            {
+                if (startKey is not null && string.CompareOrdinal(entry.Key, startKey) < 0)
+                    continue;
+
+                if (endKey is not null && string.CompareOrdinal(entry.Key, endKey) >= 0)
+                    continue;
+
+                if (heads.TryGetValue(entry.Key, out CommittedHeadLedgerEntry known) && known.Revision >= entry.Value.Revision)
+                    continue;
+
+                heads[entry.Key] = new(entry.Key, entry.Value.Revision, entry.Value.State, entry.Value.CommittedAt);
+            }
+        }
+
+        return [.. heads.Values];
+    }
+
+    /// <summary>Records one key's committed head in <paramref name="partitionId"/>'s slice: the settlement path
+    /// and the range-move seed share it. Monotonic per key; see the intent overload for the contract. Caller
+    /// holds <see cref="applyGate"/>.</summary>
+    private bool RecordCommittedHead(string key, long revision, KeyValueState state, HLCTimestamp committedAt, int partitionId)
     {
         PartitionLedger ledger = ledgers.GetOrAdd(partitionId, static _ => new PartitionLedger());
 
-        bool existed = ledger.Heads.TryGetValue(intent.Key, out CommittedHead current);
-        if (existed && current.Revision >= intent.Revision)
+        bool existed = ledger.Heads.TryGetValue(key, out CommittedHead current);
+        if (existed && current.Revision >= revision)
             return false;
 
-        ledger.Heads[intent.Key] = new(intent.Revision, intent.State, intent.CommitTimestamp);
+        ledger.Heads[key] = new(revision, state, committedAt);
         if (!existed)
-            ledger.Bytes += LedgerEntryBytes(intent.Key);
+            ledger.Bytes += LedgerEntryBytes(key);
 
         // The head moved: whatever refusal streak the key held was measured against the old pair.
-        fenceRefusalStreaks.TryRemove(intent.Key, out _);
+        fenceRefusalStreaks.TryRemove(key, out _);
 
-        if (intent.CommitTimestamp > ledger.Watermark)
-            ledger.Watermark = intent.CommitTimestamp;
+        if (committedAt > ledger.Watermark)
+            ledger.Watermark = committedAt;
 
-        if (intent.CommitTimestamp > ledgerWatermark)
-            ledgerWatermark = intent.CommitTimestamp;
+        if (committedAt > ledgerWatermark)
+            ledgerWatermark = committedAt;
 
         StampPartitionDirty(partitionId);
 

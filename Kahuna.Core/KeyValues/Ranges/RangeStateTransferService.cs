@@ -363,17 +363,21 @@ internal sealed class RangeStateTransferService
                     destinationPartitionId, GetLocalTransactionRecordsForRange(startKey, endKey), GetLocalPreparedIntentsForRange(startKey, endKey), cancellationToken).ConfigureAwait(false))
                 return RangeTransactionStateTransferOutcome.StateHandoffFailed;
 
+            if (!await ImportCommittedHeadsToPartitionLeaderAsync(
+                    destinationPartitionId, preparedIntentStore.SnapshotCommittedHeadsRange(startKey, endKey), cancellationToken).ConfigureAwait(false))
+                return RangeTransactionStateTransferOutcome.StateHandoffFailed;
+
             return RangeTransactionStateTransferOutcome.Transferred;
         }
 
         foreach (KeyValueRangeStateKinds kind in (KeyValueRangeStateKinds[])
-                 [KeyValueRangeStateKinds.Receipts, KeyValueRangeStateKinds.Records, KeyValueRangeStateKinds.Intents])
+                 [KeyValueRangeStateKinds.Receipts, KeyValueRangeStateKinds.Records, KeyValueRangeStateKinds.Intents, KeyValueRangeStateKinds.CommittedHeads])
         {
             string? cursor = null;
 
             while (true)
             {
-                (bool ok, List<CompletionReceiptRecord> receipts, byte[] recordBytes, byte[] intentBytes, bool hasMore, string? nextCursor) =
+                (bool ok, List<CompletionReceiptRecord> receipts, byte[] recordBytes, byte[] intentBytes, byte[] headBytes, bool hasMore, string? nextCursor) =
                     await GetRangeTransactionStatePageAsync(sourcePartitionId, startKey, endKey, kind, cursor, cancellationToken).ConfigureAwait(false);
 
                 if (!ok)
@@ -390,6 +394,12 @@ internal sealed class RangeStateTransferService
                     && !await ImportDurableTransactionStateToPartitionLeaderAsync(destinationPartitionId, records, intents, cancellationToken).ConfigureAwait(false))
                     return RangeTransactionStateTransferOutcome.StateHandoffFailed;
 
+                // The moved keys' committed heads seed the destination's ledger slice (an old source leader
+                // answers none, and the destination then judges the moved keys as before this hand-off existed).
+                if (headBytes.Length > 0
+                    && !await ImportCommittedHeadsToPartitionLeaderAsync(destinationPartitionId, PreparedIntentStore.DeserializeCommittedHeads(headBytes), cancellationToken).ConfigureAwait(false))
+                    return RangeTransactionStateTransferOutcome.StateHandoffFailed;
+
                 // An old peer answers the whole set unpaged (HasMore false) — the loop ends after one page.
                 if (!hasMore || nextCursor is null)
                     break;
@@ -399,6 +409,44 @@ internal sealed class RangeStateTransferService
         }
 
         return RangeTransactionStateTransferOutcome.Transferred;
+    }
+
+    /// <summary>
+    /// Replicates the moving range's committed heads onto the destination partition's log as seed commands (one
+    /// prepared-intent delta per chunk of at most <see cref="TransactionStateHandoffChunkItems"/> heads), through
+    /// the same ordered durable seam as the intents, so every replica of the destination holds the heads in its
+    /// slice before the cutover — ordered ahead of every prepare the destination later judges. Returns whether
+    /// the whole hand-off was durable; a false return must abort the split/merge before cutover, because a
+    /// destination without the heads can acknowledge a prepare validated against a base the source already moved
+    /// past. Each chunk's apply is monotonic per key, so a re-driven hand-off converges. Empty input is a no-op
+    /// success.
+    /// </summary>
+    internal async Task<bool> ImportCommittedHeadsToPartitionLeaderAsync(
+        int partitionId, IReadOnlyList<CommittedHeadLedgerEntry> heads, CancellationToken cancellationToken)
+    {
+        int start = 0;
+
+        while (start < heads.Count)
+        {
+            int end = Math.Min(heads.Count, start + TransactionStateHandoffChunkItems);
+
+            List<Transactions.Data.PreparedIntentCommand> commands = new(end - start);
+            for (int i = start; i < end; i++)
+                commands.Add(new Transactions.Data.SeedCommittedHeadCommand(heads[i].Key, heads[i].Revision, heads[i].State, heads[i].CommittedAt));
+
+            byte[] delta = PreparedIntentStore.SerializeDelta(commands);
+            if (DurableHandoffEntryFault is not null && DurableHandoffEntryFault(partitionId, ReplicationTypes.PreparedIntent, delta.Length))
+                return false;
+
+            // Terminal admission, like the rest of the hand-off: the seed must land during the cutover window
+            // whatever the destination's ordinary write pressure.
+            if (!await ReplicateDurableThroughScheduler(partitionId, ReplicationTypes.PreparedIntent, delta, Writes.WriteAdmissionClass.Terminal, cancellationToken).ConfigureAwait(false))
+                return false;
+
+            start = end;
+        }
+
+        return true;
     }
 
     /// <summary>Decodes one gathered page of records entry by entry, without first building the page's protobuf
@@ -859,21 +907,22 @@ internal sealed class RangeStateTransferService
     /// the resume key in <c>NextCursor</c> when more remain. <paramref name="maxItems"/> of zero
     /// answers everything in one response — the pre-paging behaviour.</para>
     /// </summary>
-    public async Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents, bool HasMore, string? NextCursor)> GetRangeTransactionStateLocal(
+    public async Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents, byte[] CommittedHeads, bool HasMore, string? NextCursor)> GetRangeTransactionStateLocal(
         int partitionId, string? startKey, string? endKey, KeyValueRangeStateKinds kinds, string? cursor, int maxItems, CancellationToken cancellationToken)
     {
         if (!await raft.ConfirmLeadershipIfHosted(partitionId, cancellationToken).ConfigureAwait(false))
-            return (false, [], [], [], false, null);
+            return (false, [], [], [], [], false, null);
 
         if (kinds == 0)
             kinds = KeyValueRangeStateKinds.All;
 
         // Paging needs one unambiguous key domain for the cursor; a multi-kind page has none.
-        bool paged = maxItems > 0 && kinds is KeyValueRangeStateKinds.Receipts or KeyValueRangeStateKinds.Records or KeyValueRangeStateKinds.Intents;
+        bool paged = maxItems > 0 && kinds is KeyValueRangeStateKinds.Receipts or KeyValueRangeStateKinds.Records or KeyValueRangeStateKinds.Intents or KeyValueRangeStateKinds.CommittedHeads;
 
         List<CompletionReceiptRecord> receipts = [];
         IReadOnlyList<TransactionRecord> records = [];
         IReadOnlyList<PreparedIntent> intents = [];
+        IReadOnlyList<CommittedHeadLedgerEntry> heads = [];
         bool hasMore = false;
         string? nextCursor = null;
 
@@ -904,11 +953,23 @@ internal sealed class RangeStateTransferService
                 intents = matched;
         }
 
+        // The committed heads the staged-base fence remembers for the range's keys — read from the leader's
+        // slices for the same reason the intents are: a follower's memory can lag the newest settlement.
+        if (kinds.HasFlag(KeyValueRangeStateKinds.CommittedHeads))
+        {
+            IReadOnlyList<CommittedHeadLedgerEntry> matched = preparedIntentStore.SnapshotCommittedHeadsRange(startKey, endKey);
+            if (paged)
+                (heads, hasMore, nextCursor) = PageByKey(matched, static h => h.Key, cursor, maxItems);
+            else
+                heads = matched;
+        }
+
         return (
             true,
             receipts,
             records.Count > 0 ? TransactionRecordStore.SerializeRecords(records) : [],
             intents.Count > 0 ? PreparedIntentStore.SerializeIntents(intents) : [],
+            heads.Count > 0 ? PreparedIntentStore.SerializeCommittedHeads(heads) : [],
             hasMore,
             nextCursor);
     }
@@ -998,7 +1059,7 @@ internal sealed class RangeStateTransferService
 
             while (true)
             {
-                (bool ok, List<CompletionReceiptRecord> pageReceipts, byte[] recordBytes, byte[] intentBytes, bool hasMore, string? nextCursor) =
+                (bool ok, List<CompletionReceiptRecord> pageReceipts, byte[] recordBytes, byte[] intentBytes, _, bool hasMore, string? nextCursor) =
                     await GetRangeTransactionStatePageAsync(sourcePartitionId, startKey, endKey, kind, cursor, cancellationToken).ConfigureAwait(false);
 
                 if (!ok)
@@ -1027,7 +1088,7 @@ internal sealed class RangeStateTransferService
     /// leader change is exact for every item that existed throughout: the stores replicate through
     /// the partition, and the cursor addresses items by range key, not by store position.
     /// </summary>
-    private async Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents, bool HasMore, string? NextCursor)> GetRangeTransactionStatePageAsync(
+    private async Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents, byte[] CommittedHeads, bool HasMore, string? NextCursor)> GetRangeTransactionStatePageAsync(
         int sourcePartitionId, string? startKey, string? endKey, KeyValueRangeStateKinds kind, string? cursor, CancellationToken cancellationToken)
     {
         long deadline = Environment.TickCount64 + RangeCopyQuiescedDeadlineMs;
@@ -1036,7 +1097,7 @@ internal sealed class RangeStateTransferService
         {
             try
             {
-                (bool ok, List<CompletionReceiptRecord> receipts, byte[] recordBytes, byte[] intentBytes, bool hasMore, string? nextCursor) =
+                (bool ok, List<CompletionReceiptRecord> receipts, byte[] recordBytes, byte[] intentBytes, byte[] headBytes, bool hasMore, string? nextCursor) =
                     await GetRangeTransactionStateLocal(sourcePartitionId, startKey, endKey, kind, cursor, TransactionStatePageSize, cancellationToken).ConfigureAwait(false);
 
                 if (!ok)
@@ -1044,12 +1105,12 @@ internal sealed class RangeStateTransferService
                     string? leader = await raft.TryResolveLeader(sourcePartitionId, cancellationToken).ConfigureAwait(false);
 
                     if (leader is not null && leader != raft.GetLocalEndpoint())
-                        (ok, receipts, recordBytes, intentBytes, hasMore, nextCursor) = await interNodeCommunication.GetRangeTransactionState(
+                        (ok, receipts, recordBytes, intentBytes, headBytes, hasMore, nextCursor) = await interNodeCommunication.GetRangeTransactionState(
                             leader, sourcePartitionId, startKey, endKey, kind, cursor, TransactionStatePageSize, cancellationToken).ConfigureAwait(false);
                 }
 
                 if (ok)
-                    return (true, receipts, recordBytes, intentBytes, hasMore, nextCursor);
+                    return (true, receipts, recordBytes, intentBytes, headBytes, hasMore, nextCursor);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -1061,7 +1122,7 @@ internal sealed class RangeStateTransferService
             }
 
             if (Environment.TickCount64 >= deadline)
-                return (false, [], [], [], false, null);
+                return (false, [], [], [], [], false, null);
 
             await Task.Delay(RangeCopyRetryDelayMs, cancellationToken).ConfigureAwait(false);
         }

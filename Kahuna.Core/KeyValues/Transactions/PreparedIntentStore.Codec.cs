@@ -313,6 +313,12 @@ internal sealed partial class PreparedIntentStore
             case PreparedIntentCommandKindMessage.PreparedIntentRemove:
                 return new RemoveIntentCommand(txId, effectiveEpoch, key);
 
+            case PreparedIntentCommandKindMessage.PreparedIntentSeedHead:
+                // A seed carries no transaction identity; its commit timestamp is its own, never the header's
+                // (the header hoists the timestamp only from prepares).
+                return new SeedCommittedHeadCommand(
+                    key, revision, (KeyValueState)state, new HLCTimestamp(commitNode, commitPhysical, commitCounter));
+
             default:
                 throw new ArgumentOutOfRangeException(nameof(kind), kind, "unknown prepared-intent command kind");
         }
@@ -535,6 +541,12 @@ internal sealed partial class PreparedIntentStore
                 m.Epoch = remove.Epoch; m.Key = remove.Key;
                 return m;
 
+            case SeedCommittedHeadCommand seed:
+                m.Kind = PreparedIntentCommandKindMessage.PreparedIntentSeedHead;
+                m.Key = seed.Key; m.Revision = seed.Revision; m.State = (int)seed.State;
+                m.CommitTimestampNode = seed.CommittedAt.N; m.CommitTimestampPhysical = seed.CommittedAt.L; m.CommitTimestampCounter = seed.CommittedAt.C;
+                return m;
+
             default:
                 throw new ArgumentOutOfRangeException(nameof(command), command.GetType().Name, "unknown prepared-intent command");
         }
@@ -569,6 +581,11 @@ internal sealed partial class PreparedIntentStore
 
             case PreparedIntentCommandKindMessage.PreparedIntentRemove:
                 return new RemoveIntentCommand(txId, epoch, m.Key);
+
+            case PreparedIntentCommandKindMessage.PreparedIntentSeedHead:
+                return new SeedCommittedHeadCommand(
+                    m.Key, m.Revision, (KeyValueState)m.State,
+                    new HLCTimestamp(m.CommitTimestampNode, m.CommitTimestampPhysical, m.CommitTimestampCounter));
 
             default:
                 throw new ArgumentOutOfRangeException(nameof(m), m.Kind, "unknown prepared-intent command kind");

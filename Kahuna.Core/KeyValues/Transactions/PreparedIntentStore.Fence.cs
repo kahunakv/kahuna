@@ -107,7 +107,17 @@ internal sealed partial class PreparedIntentStore
     /// memory held nothing); <paramref name="revisionCollision"/> tells the staged-revision rule refused it.
     /// Only the apply path counts the absent-head admission; a verdict read must not inflate that counter.
     /// Caller holds <see cref="applyGate"/>.</summary>
-    private string? JudgeStagedBase(PreparedIntent intent, bool countAbsentHeadAdmission, out long headRevision, out bool revisionCollision)
+    private string? JudgeStagedBase(PreparedIntent intent, bool countAbsentHeadAdmission, out long headRevision, out bool revisionCollision) =>
+        JudgeStagedBase(
+            intent.Key, intent.TransactionId, intent.HasValidatedBase, intent.BaseRevision, intent.BaseState,
+            intent.NoRevision, intent.Revision, countAbsentHeadAdmission, out headRevision, out revisionCollision);
+
+    /// <summary>The field form of <see cref="JudgeStagedBase(PreparedIntent, bool, out long, out bool)"/>: the
+    /// replica verdict read judges a prepare this node has not applied from the fields the ask carries, against
+    /// the same memory and the same rules. Caller holds <see cref="applyGate"/>.</summary>
+    private string? JudgeStagedBase(
+        string key, HLCTimestamp transactionId, bool hasValidatedBase, long baseRevision, KeyValueState baseState,
+        bool noRevision, long revision, bool countAbsentHeadAdmission, out long headRevision, out bool revisionCollision)
     {
         headRevision = -1;
         revisionCollision = false;
@@ -118,28 +128,28 @@ internal sealed partial class PreparedIntentStore
         // evidence. The transaction id is the begin HLC, so it lower-bounds every read the base came from.
         // Measured against the head watermark — an HLC from replicated commits — never a local clock. A blind
         // write has no base to verify, so the gate does not apply to it.
-        if (intent.HasValidatedBase && IsOlderThanRetention(intent.TransactionId, ledgerWatermark))
-            return $"transaction began before the staged-base fence retention horizon; its validated base for key {intent.Key} cannot be verified";
+        if (hasValidatedBase && IsOlderThanRetention(transactionId, ledgerWatermark))
+            return $"transaction began before the staged-base fence retention horizon; its validated base for key {key} cannot be verified";
 
-        if (!TryFindHead(intent.Key, out CommittedHead head))
+        if (!TryFindHead(key, out CommittedHead head))
         {
             // The only silent path around the fence: nothing to check is indistinguishable from "no commit
             // ever happened" — count it so a loss investigation can tell proof-of-currency from absence.
-            if (countAbsentHeadAdmission && intent.HasValidatedBase)
+            if (countAbsentHeadAdmission && hasValidatedBase)
                 DurableTransactionMetrics.FenceAdmissionsAbsentHead.Add(1);
             return null;
         }
 
         headRevision = head.Revision;
 
-        if (intent.HasValidatedBase)
+        if (hasValidatedBase)
         {
-            string? baseConflict = JudgeBaseAgainstHead(intent.Key, intent.BaseRevision, intent.BaseState, head);
+            string? baseConflict = JudgeBaseAgainstHead(key, baseRevision, baseState, head);
             if (baseConflict is not null)
                 return baseConflict;
         }
 
-        string? revisionConflict = JudgeRevisionAgainstHead(intent, head);
+        string? revisionConflict = JudgeRevisionAgainstHead(key, noRevision, revision, head);
         revisionCollision = revisionConflict is not null;
         return revisionConflict;
     }
@@ -158,12 +168,15 @@ internal sealed partial class PreparedIntentStore
     /// the ordinary case (non-transactional writes never feed the memory, so the head may lag the key).
     /// Revision-free writes allocate nothing and are not judged.</para>
     /// </summary>
-    private static string? JudgeRevisionAgainstHead(PreparedIntent intent, CommittedHead head)
+    private static string? JudgeRevisionAgainstHead(PreparedIntent intent, CommittedHead head) =>
+        JudgeRevisionAgainstHead(intent.Key, intent.NoRevision, intent.Revision, head);
+
+    private static string? JudgeRevisionAgainstHead(string key, bool noRevision, long revision, CommittedHead head)
     {
-        if (intent.NoRevision || head.Revision < intent.Revision)
+        if (noRevision || head.Revision < revision)
             return null;
 
-        return $"staged revision {intent.Revision} for key {intent.Key} is already committed: committed head is revision {head.Revision}";
+        return $"staged revision {revision} for key {key} is already committed: committed head is revision {head.Revision}";
     }
 
     /// <summary>The base-versus-head rule shared by the advisory fence and the deterministic bundled commit

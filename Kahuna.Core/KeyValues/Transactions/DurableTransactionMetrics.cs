@@ -577,6 +577,17 @@ internal static class DurableTransactionMetrics
     }
 
     /// <summary>
+    /// Replica fence verdicts a node answered from its committed-head memory alone, because the ask reached it
+    /// before the transaction's prepare applied there (or the node never applies the partition). Each one is a
+    /// key that would have answered NotApplied — and left the commit unattested on that replica — before the ask
+    /// carried the judged fields. A rising rate marks replicas that lag the leader's prepares.
+    /// </summary>
+    internal static readonly Counter<long> ReplicaFenceMemoryVerdicts =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.replica_fence_memory_verdicts",
+            description: "Replica fence verdicts answered from the committed-head memory for a prepare the replica had not applied.");
+
+    /// <summary>
     /// Replica fence lag-breaker transitions, tagged by <c>state</c>: <c>lagging</c> when commits stop waiting
     /// on a replica's apply, <c>healthy</c> when enough consecutive probes saw it attest with its frontier
     /// caught up. A <c>lagging</c> transition also carries <c>reason</c>: <c>attestation</c> (it failed to attest

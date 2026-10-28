@@ -255,8 +255,8 @@ internal sealed partial class KeyValuesManager
         durableMaintenance.TryResolveDecidedDurableBlockersAsync(partitionId, intents, transactionId, epoch, cancellationToken);
 
     public Task<(bool Serviced, IReadOnlyList<KeyValueStagedBaseVerdictEntry> Verdicts)> GetStagedBaseVerdictsLocal(
-        int partitionId, HLCTimestamp transactionId, long epoch, IReadOnlyList<string> keys, int waitMs, CancellationToken cancellationToken) =>
-        durableMaintenance.GetStagedBaseVerdictsLocal(partitionId, transactionId, epoch, keys, waitMs, cancellationToken);
+        int partitionId, HLCTimestamp transactionId, long epoch, IReadOnlyList<string> keys, IReadOnlyList<KeyValueStagedBaseProbe>? probes, int waitMs, CancellationToken cancellationToken) =>
+        durableMaintenance.GetStagedBaseVerdictsLocal(partitionId, transactionId, epoch, keys, probes, waitMs, cancellationToken);
 
     internal Task<bool> ConfirmReplicaFenceForCommitAsync(DurableFinalizeInput input, CancellationToken cancellationToken) =>
         durableMaintenance.ConfirmReplicaFenceForCommitAsync(input, cancellationToken);

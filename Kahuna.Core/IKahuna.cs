@@ -203,20 +203,22 @@ public interface IKahuna
     public Task<bool> ReplicateKeyValueRangePageOnLeader(int partitionId, byte[] page, CancellationToken cancellationToken);
 
     /// <summary>Answers one page of the transaction state a moving key range carries — completion receipts
-    /// plus the serialized canonical transaction records and prepared intents in <c>[startKey, endKey)</c> —
-    /// routed here because this node leads the source partition. Ok is false when leadership could not be
-    /// confirmed (the caller re-routes), never "no state". <paramref name="kinds"/> selects which kinds the
-    /// answer carries; a positive <paramref name="maxItems"/> pages it (single kind only, resume strictly
-    /// after <paramref name="cursor"/>), because a busy range's item count has no ceiling and an unpaged
-    /// answer can exceed the transport's message limit.</summary>
-    public Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents, bool HasMore, string? NextCursor)> GetRangeTransactionStateLocal(int partitionId, string? startKey, string? endKey, KeyValueRangeStateKinds kinds, string? cursor, int maxItems, CancellationToken cancellationToken);
+    /// plus the serialized canonical transaction records, prepared intents and committed heads in
+    /// <c>[startKey, endKey)</c> — routed here because this node leads the source partition. Ok is false when
+    /// leadership could not be confirmed (the caller re-routes), never "no state". <paramref name="kinds"/>
+    /// selects which kinds the answer carries; a positive <paramref name="maxItems"/> pages it (single kind
+    /// only, resume strictly after <paramref name="cursor"/>), because a busy range's item count has no
+    /// ceiling and an unpaged answer can exceed the transport's message limit.</summary>
+    public Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents, byte[] CommittedHeads, bool HasMore, string? NextCursor)> GetRangeTransactionStateLocal(int partitionId, string? startKey, string? endKey, KeyValueRangeStateKinds kinds, string? cursor, int maxItems, CancellationToken cancellationToken);
 
     /// <summary>Answers THIS node's staged-base fence verdict for each of one transaction's validated-base
     /// prepares — the replica half of the pre-decision fence confirmation. Deliberately not leader-gated: the
     /// verdict is about this node's own applied intent and committed-head memory, and a follower's refusal is
-    /// exactly the evidence the confirmation exists to collect. May wait up to <paramref name="waitMs"/>
-    /// (bounded server-side) for the prepare to apply locally before answering NotApplied.</summary>
-    public Task<(bool Serviced, IReadOnlyList<KeyValueStagedBaseVerdictEntry> Verdicts)> GetStagedBaseVerdictsLocal(int partitionId, HLCTimestamp transactionId, long epoch, IReadOnlyList<string> keys, int waitMs, CancellationToken cancellationToken);
+    /// exactly the evidence the confirmation exists to collect. With <paramref name="probes"/> (the judged
+    /// fields, aligned with <paramref name="keys"/>) a prepare not applied here is judged from memory at once;
+    /// without them it may wait up to <paramref name="waitMs"/> (bounded server-side) for the prepare to apply
+    /// locally before answering NotApplied.</summary>
+    public Task<(bool Serviced, IReadOnlyList<KeyValueStagedBaseVerdictEntry> Verdicts)> GetStagedBaseVerdictsLocal(int partitionId, HLCTimestamp transactionId, long epoch, IReadOnlyList<string> keys, IReadOnlyList<KeyValueStagedBaseProbe>? probes, int waitMs, CancellationToken cancellationToken);
 
     public Task<KeyValueResponseType> TryCheckWriteIntentValue(HLCTimestamp transactionId, string key, KeyValueDurability durability, KeyValueConflictChecks checks = KeyValueConflictChecks.WriteIntent);
 

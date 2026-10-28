@@ -374,6 +374,25 @@ waits on an apply it is not going to see. Once a second one ask is sent with the
 three consecutive attesting probes restore the replica (a relapse within 30 s doubles that requirement,
 up to 24).
 
+**A replica attests from its memory, not only from the applied prepare.** The ask carries the judged
+fields of every fenced intent (`KeyValueStagedBaseProbe`: the validated base revision and state, the
+staged revision, and whether the write stages a revision). A replica that holds the transaction's
+still-pending intent judges the intent, exactly as its apply did. A replica that does not hold it —
+the prepare has not applied there yet, or the node does not host the partition — judges the probe
+against its committed-head memory and answers `Clear` or `StaleBase` at once
+(`kahuna.durable_tx.replica_fence_memory_verdicts`), instead of waiting for the apply and then answering
+`NotApplied`. The memory verdict is sound: heads only advance, and the key's head is frozen while the
+transaction's own intent is live, so the memory now is at or past the memory at the prepare's apply
+position, and a refusal from memory is one the apply-time fence gives too. The one head that is not a
+competitor's — the transaction's own settlement, already applied on that node — answers `Clear` through
+the settled-identity memory. So apply lag no longer leaves a commit unattested; only an unreachable
+replica (or one on a build that ignores the probes) still does, and the lag breaker still bounds how
+long such a replica can hold a commit. Under a range-split cascade, where replicas lag the prepares of
+freshly created partitions, this is what closes the window in which the detached stale-base veto raced
+the commit and lost (`kahuna.durable_tx.stale_base_vetoes_late`); the hand-off of committed heads on a
+range move (see the [key-range sharding guide](key-range-sharding-guide.md)) removes the other half of
+that window, the destination leader's missing memory of the moved keys.
+
 Probe latency alone is the wrong evidence for whether a replica can attest. A replica tens of thousands
 of entries behind the leader answers a probe instantly from state that old, and a replica whose disk is
 paused answers from memory until the entry it is asked about is the one it cannot write. After a

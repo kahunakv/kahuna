@@ -1403,7 +1403,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         throw Unreachable(node);
     }
 
-    public async Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents, bool HasMore, string? NextCursor)> GetRangeTransactionState(string node, int partitionId, string? startKey, string? endKey, KeyValueRangeStateKinds kinds, string? cursor, int maxItems, CancellationToken cancellationToken)
+    public async Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents, byte[] CommittedHeads, bool HasMore, string? NextCursor)> GetRangeTransactionState(string node, int partitionId, string? startKey, string? endKey, KeyValueRangeStateKinds kinds, string? cursor, int maxItems, CancellationToken cancellationToken)
     {
         if (TryGetNode(node, out IKahuna? kahunaNode))
         {
@@ -1427,7 +1427,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// test can assert how the fence asked a replica. Null until a test assigns it.</summary>
     public ConcurrentQueue<(string Node, int WaitMs)>? StagedBaseVerdictAsks { get; set; }
 
-    public async Task<(bool Serviced, IReadOnlyList<KeyValueStagedBaseVerdictEntry> Verdicts)> GetStagedBaseVerdicts(string node, int partitionId, HLCTimestamp transactionId, long epoch, IReadOnlyList<string> keys, int waitMs, CancellationToken cancellationToken)
+    public async Task<(bool Serviced, IReadOnlyList<KeyValueStagedBaseVerdictEntry> Verdicts)> GetStagedBaseVerdicts(string node, int partitionId, HLCTimestamp transactionId, long epoch, IReadOnlyList<string> keys, IReadOnlyList<KeyValueStagedBaseProbe>? probes, int waitMs, CancellationToken cancellationToken)
     {
         StagedBaseVerdictAsks?.Enqueue((node, waitMs));
 
@@ -1447,7 +1447,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         {
             using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
 
-            return await kahunaNode.GetStagedBaseVerdictsLocal(partitionId, transactionId, epoch, keys, waitMs, cancellationToken);
+            return await kahunaNode.GetStagedBaseVerdictsLocal(partitionId, transactionId, epoch, keys, probes, waitMs, cancellationToken);
         }
 
         throw Unreachable(node);

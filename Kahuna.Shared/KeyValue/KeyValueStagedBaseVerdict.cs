@@ -10,7 +10,8 @@ namespace Kahuna.Shared.KeyValue;
 /// </summary>
 public enum KeyValueStagedBaseVerdict
 {
-    /// <summary>The replica does not hold the transaction's prepared intent for the key. It has not applied
+    /// <summary>The replica does not hold the transaction's prepared intent for the key and the ask carried no
+    /// <see cref="KeyValueStagedBaseProbe"/> to judge from memory with (an older caller). It has not applied
     /// the prepare yet, or the intent already settled and was removed. The replica cannot judge the base, and
     /// absence of a verdict is never an objection.</summary>
     NotApplied = 0,

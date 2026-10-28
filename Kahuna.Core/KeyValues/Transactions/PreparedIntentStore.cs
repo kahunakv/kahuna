@@ -1037,6 +1037,12 @@ internal sealed partial class PreparedIntentStore
     /// <param name="logIndex">The log entry that carries the command; zero for an apply with no entry behind it.</param>
     private PreparedIntentApplyResult Apply(PreparedIntentCommand command, int partitionId, HistoryWindow window, bool replay, HLCTimestamp entryTime, long logIndex)
     {
+        // A range move's hand-off of a committed head touches no intent: it only feeds this partition's ledger
+        // slice. Applied identically on every path (live, replay, history an installed slice already reflects):
+        // the record is monotonic per key, so a re-delivery or an older seed over an installed head is a no-op.
+        if (command is SeedCommittedHeadCommand seed)
+            return ApplySeededHead(seed, partitionId);
+
         string key = KeyOf(command);
         bool judgeFence = window == HistoryWindow.Live;
 
@@ -1465,6 +1471,7 @@ internal sealed partial class PreparedIntentStore
         PrepareIntentCommand prepare => prepare.Intent.Key,
         ResolveIntentCommand resolve => resolve.Key,
         RemoveIntentCommand remove => remove.Key,
+        SeedCommittedHeadCommand seed => seed.Key,
         _ => throw new ArgumentOutOfRangeException(nameof(command), command.GetType().Name, "unknown prepared-intent command")
     };
 
