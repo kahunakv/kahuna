@@ -61,7 +61,7 @@ internal sealed class PartitionDataEnumerator
     /// "which spaces belong to P" question is answerable (and testable) without a backend or a live node.
     /// </summary>
     public static int HashPartitionOfKeySpace(string keySpace, int hashPoolSize) =>
-        1 + HashPlacement.BucketOfKeySpace(keySpace, hashPoolSize);
+        DataPartitionRouter.HashPartitionOfKeySpace(keySpace, hashPoolSize);
 
     /// <summary>
     /// The partition that owns <paramref name="key"/> under <paramref name="map"/>: the covering

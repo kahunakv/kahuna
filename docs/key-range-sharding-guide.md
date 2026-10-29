@@ -281,16 +281,26 @@ Three consequences to keep in mind:
 * **Renaming moves data.** Adding or changing a group on a key space that already holds data is a
   placement change; the old keys stay where they were hashed. Introduce a group when a key space is
   created, not after.
-* **Key-range spaces seed by group too.** `RegisterKeyRangeAsync` seeds a new space's whole-space
-  descriptor on the partition of its group (`KeySpaceAdminService.SeedPartitionFor`), so ranged
-  rows and ranged index entries start together. Later splits move ranges independently. The seed is
-  committed **before** the space flips to key-range routing on the registering node (the range-map
-  apply flips it on every node as the descriptor lands), so a writer racing the registration is
-  routed by hash until the descriptor is visible and never meets a key-range space with no
-  descriptor. Should that state ever be observed (a space registered with the mode-only
-  `RegisterKeyRange`, or a removal whose registry prune is still pending), the lookup refuses with
-  `RangeDescriptorMissingException`, a `KahunaServerException` carrying `MustRetry` that every
-  public surface answers as a retryable refusal.
+* **Key-range spaces start where hash routing places them.** `RegisterKeyRangeAsync` seeds a new
+  space's whole-space descriptor through `KeyRangeSeedPlacement`. A space whose placement group has
+  no descriptor yet seeds on the partition `DataPartitionRouter.HashPartitionOfKeySpace` gives the
+  group, the one function hash routing also answers with, so a table's initial partition is the
+  same in both routing modes and a group flipped to key-range routing lands where its hash-routed
+  rows already are. A space whose group is already seeded (a table's index space registered after
+  its rows) follows the group instead of the hash bucket: the anchor is the sibling space named
+  exactly like the group when one is seeded, otherwise the lowest sibling by ordinal name, and the
+  partition is that of the anchor's head descriptor (`StartKey = null`). The anchor is read from
+  the map the seed entry extends, under the mutate gate, so two spaces of one group registered
+  concurrently, or under different meta leaders, still start together. Existing descriptors never
+  change and no data moves. After the seed, only a split or a manual range move changes where a
+  range lives; the leader balancer moves partition *leadership* between nodes and never moves a
+  range between partitions. The seed is committed **before** the space flips to key-range routing
+  on the registering node (the range-map apply flips it on every node as the descriptor lands), so
+  a writer racing the registration is routed by hash until the descriptor is visible and never
+  meets a key-range space with no descriptor. Should that state ever be observed (a space
+  registered with the mode-only `RegisterKeyRange`, or a removal whose registry prune is still
+  pending), the lookup refuses with `RangeDescriptorMissingException`, a `KahunaServerException`
+  carrying `MustRetry` that every public surface answers as a retryable refusal.
 * **Clients see the rule.** The routing metadata (`GET /v1/cluster/routing`) publishes the hash
   identifier `kahuna.placement-group-jump-xxh32-v1` together with `prefixSeparator` (`/`) and
   `groupSeparator` (`|`); a client that does not implement exactly that stays on learned routes
@@ -630,10 +640,13 @@ Every call exists on REST, on gRPC, and in `kahuna-cli`, and all three reach the
 ### Registration and propagation
 
 Registration changes the local routing registry and seeds a covering `[-inf,+inf)` descriptor on
-P0. A nonleader forwards the seed request to the meta leader and waits for the descriptor to become
-locally visible. The routing registry is in memory, but it is **reconciled from the committed range
-map** at startup, restore, live range-map apply and P0 snapshot install. Nodes learn committed
-registrations through that map; operators need not manually recreate the registry after restart.
+P0. The descriptor's partition is the one hash routing gives the space's placement group, or the
+partition of a sibling space of that group that is already seeded (see *Placement groups* in
+section 4), so a space starts on the same partition in both routing modes. A nonleader forwards the
+seed request to the meta leader and waits for the descriptor to become locally visible. The routing
+registry is in memory, but it is **reconciled from the committed range map** at startup, restore,
+live range-map apply and P0 snapshot install. Nodes learn committed registrations through that map;
+operators need not manually recreate the registry after restart.
 
 The CLI still fans registration out to all configured endpoints and fails if any refuses. `--node`
 targets one endpoint. Fan-out verifies visibility on those endpoints; it is not the replication

@@ -7,7 +7,6 @@ using Kommander.Time;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues.Logging;
 using Kahuna.Shared.KeyValue;
-using Kahuna.Shared.Routing;
 
 namespace Kahuna.Server.KeyValues.Ranges;
 
@@ -175,7 +174,7 @@ internal sealed class KeySpaceAdminService
             }
         }
 
-        int seedPartition = SeedPartitionFor(keySpace);
+        int poolSize = SeedPoolSizeFor(keySpace);
 
         // Tracks whether this call actually appended the seed. A concurrent seed of the same space
         // can land between the fast-path check and the mutate gate; in that race the transform returns
@@ -189,6 +188,11 @@ internal sealed class KeySpaceAdminService
             foreach (RangeDescriptor existing in current)
                 if (string.Equals(existing.KeySpace, keySpace, StringComparison.Ordinal))
                     return current; // already seeded — leave the map untouched (committed stays false)
+
+            // The seed partition is chosen against the very map this entry extends, under the mutate
+            // gate: a sibling space of the same placement group that a concurrent registration seeded a
+            // moment ago is visible here, so the two spaces still start together.
+            int seedPartition = KeyRangeSeedPlacement.SeedPartitionFor(keySpace, current, poolSize);
 
             RangeDescriptor[] next = new RangeDescriptor[current.Count + 1];
             for (int i = 0; i < current.Count; i++)
@@ -268,27 +272,21 @@ internal sealed class KeySpaceAdminService
     }
 
     /// <summary>
-    /// Picks the data partition for a key space's initial descriptor: a deterministic hash over the
-    /// data-partition pool <c>[<see cref="RangeMapStore.FirstDataPartitionId"/>, hash pool size]</c>
-    /// (key-range data never lives on the reserved system/meta partition 0). Spreads different spaces'
-    /// initial ranges across partitions instead of piling them all on partition 1.
+    /// The hash pool a seed for <paramref name="keySpace"/> is placed over: the user partitions
+    /// <c>[<see cref="RangeMapStore.FirstDataPartitionId"/>, pool size]</c>, the same pool hash routing
+    /// spreads the space's placement group over (<see cref="KeyRangeSeedPlacement"/>). Key-range data
+    /// never lives on the reserved system/meta partition 0, so a pool without a data partition is refused.
     /// </summary>
-    private int SeedPartitionFor(string keySpace)
+    private int SeedPoolSizeFor(string keySpace)
     {
         int poolSize = dataPartitionRouter.PoolSize;
-        int dataPartitions = poolSize - (RangeMapStore.FirstDataPartitionId - 1); // count of [1 .. poolSize]
-        if (dataPartitions < 1)
+
+        if (poolSize < RangeMapStore.FirstDataPartitionId)
             throw new KahunaServerException(
                 $"Key-range space '{keySpace}' requires at least {RangeMapStore.FirstDataPartitionId} partition(s) " +
                 $"(hash pool={poolSize}); key-range data cannot live on the reserved partition 0.");
 
-        // Seed by the key space's placement group (the prefix before its first '|', or the whole key
-        // space), so key-range spaces that name one group start on the same partition — as their
-        // hash-routed counterparts would. Later splits move ranges independently; the seed is only
-        // the starting point. A key space with no group separator seeds exactly where it always did.
-        string group = HashPlacement.GroupOf(keySpace);
-        int offset = (int)(HashUtils.SimpleHash(group) % (ulong)dataPartitions);
-        return RangeMapStore.FirstDataPartitionId + offset;
+        return poolSize;
     }
 
     /// <summary>

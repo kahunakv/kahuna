@@ -295,7 +295,7 @@ internal sealed class KeyValueWatchService
                 }
                 else
                 {
-                    partitions.Add(DataPartitionRouter.FirstUserPartitionId + HashPlacement.BucketOfKeySpace(scope.Value, dataPartitionRouter.PoolSize));
+                    partitions.Add(dataPartitionRouter.LocateKeySpace(scope.Value));
                 }
                 break;
 
@@ -325,7 +325,7 @@ internal sealed class KeyValueWatchService
 
         if (group >= 0 && prefix.AsSpan(0, group).IndexOf(HashPlacement.KeySpaceSeparator) < 0)
         {
-            partitions.Add(DataPartitionRouter.FirstUserPartitionId + HashPlacement.BucketOfKeySpace(prefix[..group], dataPartitionRouter.PoolSize));
+            partitions.Add(dataPartitionRouter.LocateKeySpace(prefix[..group]));
         }
         else
         {

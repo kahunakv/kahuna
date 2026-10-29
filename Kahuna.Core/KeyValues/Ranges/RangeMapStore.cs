@@ -45,8 +45,9 @@ internal sealed class RangeMapStore : IDisposable
     public const int MetaPartitionId = 0;
 
     /// <summary>Lowest partition id usable for ranged data (partition 0 is reserved for the map +
-    /// system coordinator).</summary>
-    public const int FirstDataPartitionId = 1;
+    /// system coordinator). It is the first partition of the hash pool, so the pool a key-range seed
+    /// is spread over is exactly the pool hash routing uses.</summary>
+    public const int FirstDataPartitionId = DataPartitionRouter.FirstUserPartitionId;
 
     /// <summary>Default number of committed mutations between meta-partition checkpoints.</summary>
     public const int DefaultCheckpointEveryMutations = 32;

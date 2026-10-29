@@ -123,4 +123,22 @@ internal sealed class DataPartitionRouter
     /// table's rows and index entries together. Deterministic and stable for a given pool size.
     /// </summary>
     public int Locate(string key) => FirstUserPartitionId + HashPlacement.BucketOfKey(key, PoolSize);
+
+    /// <summary>
+    /// The user partition in <c>[1, PoolSize]</c> that hash routing gives every key of
+    /// <paramref name="keySpace"/>: the same rule as <see cref="Locate"/>, for callers that hold the key
+    /// space rather than a key.
+    /// </summary>
+    public int LocateKeySpace(string keySpace) => HashPartitionOfKeySpace(keySpace, PoolSize);
+
+    /// <summary>
+    /// The user partition in <c>[1, poolSize]</c> that hash routing gives every key of
+    /// <paramref name="keySpace"/> over a pool of <paramref name="poolSize"/> partitions. This is the
+    /// one definition of "the hash partition of a key space": <see cref="Locate"/>, the partition data
+    /// enumerator, the watch service and the key-range seed all answer through it, so a key space
+    /// starts on the same partition whichever routing mode it is in. Pure, so it is answerable without
+    /// a live node.
+    /// </summary>
+    internal static int HashPartitionOfKeySpace(string keySpace, int poolSize) =>
+        FirstUserPartitionId + HashPlacement.BucketOfKeySpace(keySpace, poolSize);
 }
