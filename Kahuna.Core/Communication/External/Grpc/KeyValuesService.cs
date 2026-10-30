@@ -27,6 +27,7 @@ using Kahuna.Shared.Communication.Grpc;
 using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
 using Kommander.Diagnostics;
+using static Kahuna.Communication.External.Grpc.KeyValues.KeyValueGrpcWire;
 
 namespace Kahuna.Communication.External.Grpc;
 
@@ -40,18 +41,36 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     private readonly IKahuna keyValues;
 
     private readonly NodeTransportGate gate;
-    
+
     private readonly ILogger<IKahuna> logger;
-    
+
+    private readonly KeyValueWriteHandler writes;
+
+    private readonly KeyValueReadHandler reads;
+
+    private readonly KeyValueLockHandler locks;
+
+    private readonly KeyValueMutationHandler mutations;
+
+    private readonly KeyValueScanHandler scans;
+
+    private readonly KeyValueTransactionHandler transactions;
+
+    private readonly KeyValueRangeAdminHandler rangeAdmin;
+
+    private readonly KeyValueDurableHandler durable;
+
+    private readonly KeyValueSnapshotHandler snapshots;
+
     private readonly KeyValueClientBatcher clientBatcher;
-    
+
     private readonly KeyValueServerBatcher serverBatcher;
 
     // The most watches one Watch call may hold open; zero for no limit.
     private readonly int maxWatchesPerCall;
 
     private static readonly KahunaConfiguration DefaultConfiguration = new();
-    
+
     /// <summary>
     /// Constructor
     /// </summary>
@@ -65,7 +84,17 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         this.gate = gate;
         this.logger = logger;
         maxWatchesPerCall = (configuration ?? DefaultConfiguration).WatchMaxPerCall;
-        
+
+        writes = new(keyValues);
+        reads = new(keyValues);
+        locks = new(keyValues);
+        mutations = new(keyValues);
+        scans = new(keyValues);
+        transactions = new(keyValues);
+        rangeAdmin = new(keyValues);
+        durable = new(keyValues);
+        snapshots = new(keyValues);
+
         clientBatcher = new(this, logger);
         serverBatcher = new(this, logger);
     }
@@ -81,67 +110,6 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return TrySetKeyValueInternal(request, context).AsTask();
     }
 
-    /// <summary>
-    /// Attempts to set a key-value pair within the key-value store with additional parameters such as expiration, flags, and durability.
-    /// </summary>
-    /// <param name="request">The request containing the key, value, comparison value, flags, expiration time, durability level, and transaction details.</param>
-    /// <param name="context">The server call context associated with the operation, including cancellation tokens and call metadata.</param>
-    /// <returns>A response indicating the result of the operation, including the response type, revision number, last modified timestamp, and elapsed time in milliseconds.</returns>
-    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
-    private async ValueTask<GrpcTrySetKeyValueResponse> TrySetKeyValueCore(GrpcTrySetKeyValueRequest request, ServerCallContext context)
-    {
-        if (string.IsNullOrEmpty(request.Key) || request.ExpiresMs < 0)
-            return new()
-            {
-                Type = GrpcKeyValueResponseType.TypeInvalidInput
-            };
-
-        ValueStopwatch stopwatch = ValueStopwatch.StartNew();
-
-        // Presence, not content: the client leaves the field unset for a null payload, so decoding the field
-        // alone would store zero bytes for a key the caller set to no value. The REST transport carries the
-        // same call as an explicit null, and the two must reach the store as the same write.
-        byte[]? value = ByteStringPayload.GetArrayOrNull(request.HasValue, request.Value);
-
-        byte[]? compareValue = ByteStringPayload.GetArrayOrNull(request.HasCompareValue, request.CompareValue);
-        
-        using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
-
-        using YieldingIntentPolicyScope.Scope setPolicyScope = YieldingIntentPolicyScope.Enter(TransactionConflictPolicyWire.FromGrpc(request.ConflictPolicy));
-        (KeyValueResponseType response, long revision, HLCTimestamp lastModified) = await keyValues.LocateAndTrySetKeyValue(
-            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
-            request.Key,
-            value,
-            compareValue,
-            request.CompareRevision,
-            (KeyValueFlags)request.Flags,
-            request.ExpiresMs,
-            (KeyValueDurability)request.Durability,
-            context.CancellationToken,
-            request.RoutedGeneration,
-            request.CoordinatorKey,
-            new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
-        );
-
-        GrpcTrySetKeyValueResponse setResponse = new()
-        {
-            Type = (GrpcKeyValueResponseType)response,
-            Revision = revision,
-            LastModifiedNode = lastModified.N,
-            LastModifiedPhysical = lastModified.L,
-            LastModifiedCounter = lastModified.C,
-            TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
-        };
-
-        // A conditional write that failed its compare is a terminal answer about a key whose owner
-        // was resolved, so it carries the hint like a success does.
-        GrpcRouteHint? setRoute = RouteHintWriter.Grpc(capture, KahunaRoutingDomain.KeyValue, request.Key);
-        if (setRoute is not null)
-            setResponse.Route = setRoute;
-
-        return setResponse;
-    }
-    
     /// <summary>
     /// Attempts to set many key-value pairs.
     /// </summary>
@@ -230,178 +198,6 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             });
         return response;
     }
-    
-    /// <summary>
-    /// Attempts to set many key-value pairs within the key-value store with additional parameters such as expiration, flags, and durability.
-    /// </summary>
-    /// <param name="request">The request containing the key, value, comparison value, flags, expiration time, durability level, and transaction details.</param>
-    /// <param name="context">The server call context associated with the operation, including cancellation tokens and call metadata.</param>
-    /// <returns>A response indicating the result of the operation, including the response type, revision number, last modified timestamp, and elapsed time in milliseconds.</returns>
-    private async Task<GrpcTrySetManyKeyValueResponse> TrySetManyKeyValueCore(GrpcTrySetManyKeyValueRequest request, ServerCallContext context)
-    {       
-        ValueStopwatch stopwatch = ValueStopwatch.StartNew();
-   
-        using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
-
-        List<KahunaSetKeyValueResponseItem> responses = await keyValues.LocateAndTrySetManyKeyValue(
-            GetRequestSetManyItems(request.Items),
-            context.CancellationToken
-        );
-               
-        GrpcTrySetManyKeyValueResponse response = new()        
-        {
-            TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
-        };
-
-        RouteHintWriter.Table routes = new(capture);
-
-        AddResponseSetManyItems(response.Items, responses, routes);
-
-        if (routes.HasRoutes)
-            routes.WriteGrpc(response.Routes);
-
-        return response;
-    }
-
-    private static List<KahunaSetKeyValueRequestItem> GetRequestSetManyItems(RepeatedField<GrpcTrySetManyKeyValueRequestItem> items)
-    {                 
-        List<KahunaSetKeyValueRequestItem> requestItems = new(items.Count);
-        
-        foreach (GrpcTrySetManyKeyValueRequestItem item in items)
-        {
-            // An absent value is a null payload, not an empty one — see TrySetKeyValueCore.
-            byte[]? value = ByteStringPayload.GetArrayOrNull(item.HasValue, item.Value);
-
-            byte[]? compareValue = ByteStringPayload.GetArrayOrNull(item.HasCompareValue, item.CompareValue);
-            
-            requestItems.Add(new()
-            {
-                TransactionId = new(item.TransactionIdNode, item.TransactionIdPhysical, item.TransactionIdCounter),
-                Key = item.Key,
-                Value = value,
-                CompareValue = compareValue,
-                CompareRevision = item.CompareRevision,
-                ExpiresMs = item.ExpiresMs,
-                Flags = (KeyValueFlags)item.Flags,
-                Durability = (KeyValueDurability)item.Durability,
-                RoutedGeneration = item.RoutedGeneration,
-                ConflictPolicy = TransactionConflictPolicyWire.FromGrpc(item.ConflictPolicy),
-            });
-        }
-
-        return requestItems;
-    }
-    
-    /// <summary>
-    /// Reserves room for a batch of known size before its items are added one by one. Without the
-    /// reservation the repeated field grows its backing array several times per batch.
-    /// </summary>
-    private static void ReserveItemCapacity<T>(RepeatedField<T> target, int count)
-    {
-        if (count == 0)
-            return;
-
-        // The field is empty at every current call site, but a later caller may append to a
-        // populated one, so the existing items are part of the requirement.
-        int required = checked(target.Count + count);
-
-        if (required > target.Capacity)
-            target.Capacity = required;
-    }
-
-    private static void AddResponseSetManyItems(RepeatedField<GrpcTrySetManyKeyValueResponseItem> target, List<KahunaSetKeyValueResponseItem> responses, RouteHintWriter.Table routes)
-    {
-        ReserveItemCapacity(target, responses.Count);
-
-        foreach (KahunaSetKeyValueResponseItem response in responses)
-        {
-            target.Add(new GrpcTrySetManyKeyValueResponseItem
-            {
-                Type = (GrpcKeyValueResponseType)response.Type,
-                Key = response.Key,
-                Revision = response.Revision,
-                LastModifiedNode = response.LastModified.N,
-                LastModifiedPhysical = response.LastModified.L,
-                LastModifiedCounter = response.LastModified.C,
-                Durability = (GrpcKeyValueDurability)response.Durability,
-                RouteIndex = routes.IndexOf(KahunaRoutingDomain.KeyValue, response.Key ?? ""),
-                HolderTransactionIdNode = response.HolderTransactionId.N,
-                HolderTransactionIdPhysical = response.HolderTransactionId.L,
-                HolderTransactionIdCounter = response.HolderTransactionId.C
-            });
-        }
-    }
-
-    private async Task<GrpcTryDeleteManyKeyValueResponse> TryDeleteManyKeyValueCore(GrpcTryDeleteManyKeyValueRequest request, ServerCallContext context)
-    {
-        ValueStopwatch stopwatch = ValueStopwatch.StartNew();
-
-        string coordinatorKey = request.HasCoordinatorKey ? request.CoordinatorKey : "";
-        TransactionOperationId operationId = request is { HasOperationIdHigh: true, HasOperationIdLow: true }
-            ? new(request.OperationIdHigh, request.OperationIdLow)
-            : default;
-
-        using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
-
-        List<KahunaDeleteKeyValueResponseItem> responses = await keyValues.LocateAndTryDeleteManyKeyValue(
-            GetRequestDeleteManyItems(request.Items),
-            context.CancellationToken,
-            coordinatorKey,
-            operationId
-        );
-
-        GrpcTryDeleteManyKeyValueResponse response = new()
-        {
-            TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
-        };
-
-        RouteHintWriter.Table routes = new(capture);
-
-        AddResponseDeleteManyItems(response.Items, responses, routes);
-
-        if (routes.HasRoutes)
-            routes.WriteGrpc(response.Routes);
-
-        return response;
-    }
-
-    private static List<KahunaDeleteKeyValueRequestItem> GetRequestDeleteManyItems(RepeatedField<GrpcTryDeleteManyKeyValueRequestItem> items)
-    {
-        List<KahunaDeleteKeyValueRequestItem> requestItems = new(items.Count);
-
-        foreach (GrpcTryDeleteManyKeyValueRequestItem item in items)
-        {
-            requestItems.Add(new()
-            {
-                TransactionId = new(item.TransactionIdNode, item.TransactionIdPhysical, item.TransactionIdCounter),
-                Key = item.Key,
-                Durability = (KeyValueDurability)item.Durability,
-                ConflictPolicy = TransactionConflictPolicyWire.FromGrpc(item.ConflictPolicy)
-            });
-        }
-
-        return requestItems;
-    }
-
-    private static void AddResponseDeleteManyItems(RepeatedField<GrpcTryDeleteManyKeyValueResponseItem> target, List<KahunaDeleteKeyValueResponseItem> responses, RouteHintWriter.Table routes)
-    {
-        ReserveItemCapacity(target, responses.Count);
-
-        foreach (KahunaDeleteKeyValueResponseItem response in responses)
-        {
-            target.Add(new GrpcTryDeleteManyKeyValueResponseItem
-            {
-                Type = (GrpcKeyValueResponseType)response.Type,
-                Key = response.Key,
-                Revision = response.Revision,
-                LastModifiedNode = response.LastModified.N,
-                LastModifiedPhysical = response.LastModified.L,
-                LastModifiedCounter = response.LastModified.C,
-                Durability = (GrpcKeyValueDurability)response.Durability,
-                RouteIndex = routes.IndexOf(KahunaRoutingDomain.KeyValue, response.Key ?? "")
-            });
-        }
-    }
 
     /// <summary>
     /// Attempts to extend the expiration of a key-value pair in the store.
@@ -412,52 +208,6 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     public override async Task<GrpcTryExtendKeyValueResponse> TryExtendKeyValue(GrpcTryExtendKeyValueRequest request, ServerCallContext context)
     {
         return await TryExtendKeyValueInternal(request, context);
-    }
-
-    /// <summary>
-    /// Attempts to extend the expiration time for a key-value pair.
-    /// </summary>
-    /// <param name="request">The request containing the key, expiration time, and other parameters for the operation.</param>
-    /// <param name="context">The server call context for the gRPC operation.</param>
-    /// <returns>A response containing the result of the extension operation, including the type, revision, and last modified timestamp.</returns>
-    private async Task<GrpcTryExtendKeyValueResponse> TryExtendKeyValueCore(GrpcTryExtendKeyValueRequest request, ServerCallContext context)
-    {
-        if (string.IsNullOrEmpty(request.Key) || request.ExpiresMs < 0)
-            return new()
-            {
-                Type = GrpcKeyValueResponseType.TypeInvalidInput
-            };
-
-        ValueStopwatch stopwatch = ValueStopwatch.StartNew();
-        
-        using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
-
-        using YieldingIntentPolicyScope.Scope extendPolicyScope = YieldingIntentPolicyScope.Enter(TransactionConflictPolicyWire.FromGrpc(request.ConflictPolicy));
-        (KeyValueResponseType type, long revision, HLCTimestamp lastModified) = await keyValues.LocateAndTryExtendKeyValue(
-            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
-            request.Key,
-            request.ExpiresMs,
-            (KeyValueDurability)request.Durability,
-            context.CancellationToken,
-            request.CoordinatorKey,
-            new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
-        );
-
-        GrpcTryExtendKeyValueResponse extendResponse = new()
-        {
-            Type = (GrpcKeyValueResponseType)type,
-            Revision = revision,
-            LastModifiedNode = lastModified.N,
-            LastModifiedPhysical = lastModified.L,
-            LastModifiedCounter = lastModified.C,
-            TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
-        };
-
-        GrpcRouteHint? extendRoute = RouteHintWriter.Grpc(capture, KahunaRoutingDomain.KeyValue, request.Key);
-        if (extendRoute is not null)
-            extendResponse.Route = extendRoute;
-
-        return extendResponse;
     }
 
     /// <summary>
@@ -472,51 +222,6 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     }
 
     /// <summary>
-    /// Attempts to delete a key-value pair based on the provided request and returns the outcome.
-    /// </summary>
-    /// <param name="request">The request containing the key to be deleted and associated parameters.</param>
-    /// <param name="context">The gRPC server call context for the current operation.</param>
-    /// <returns>A task that represents the asynchronous operation. The task result contains a GrpcTryDeleteKeyValueResponse object which indicates the result of the delete operation.</returns>
-    private async Task<GrpcTryDeleteKeyValueResponse> TryDeleteKeyValueCore(GrpcTryDeleteKeyValueRequest request, ServerCallContext context)
-    {
-        if (string.IsNullOrEmpty(request.Key))
-            return new()
-            {
-                Type = GrpcKeyValueResponseType.TypeInvalidInput
-            };
-        
-        ValueStopwatch stopwatch = ValueStopwatch.StartNew();
-        
-        using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
-
-        using YieldingIntentPolicyScope.Scope deletePolicyScope = YieldingIntentPolicyScope.Enter(TransactionConflictPolicyWire.FromGrpc(request.ConflictPolicy));
-        (KeyValueResponseType type, long revision, HLCTimestamp lastModified) = await keyValues.LocateAndTryDeleteKeyValue(
-            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
-            request.Key,
-            (KeyValueDurability)request.Durability,
-            context.CancellationToken,
-            request.CoordinatorKey,
-            new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
-        );
-
-        GrpcTryDeleteKeyValueResponse deleteResponse = new()
-        {
-            Type = (GrpcKeyValueResponseType)type,
-            Revision = revision,
-            LastModifiedNode = lastModified.N,
-            LastModifiedPhysical = lastModified.L,
-            LastModifiedCounter = lastModified.C,
-            TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
-        };
-
-        GrpcRouteHint? deleteRoute = RouteHintWriter.Grpc(capture, KahunaRoutingDomain.KeyValue, request.Key);
-        if (deleteRoute is not null)
-            deleteResponse.Route = deleteRoute;
-
-        return deleteResponse;
-    }
-
-    /// <summary>
     /// Retrieves the value associated with the specified key if it exists.
     /// </summary>
     /// <param name="request">The request containing the key to get the associated value for.</param>
@@ -528,207 +233,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     }
 
     public override Task<GrpcTryGetManyValuesResponse> TryGetManyValues(GrpcTryGetManyValuesRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.TryGetManyValuesRoutedCore(r, c), static r => KeyValueMustRetry.TryGetManyValues(r));
-
-    private async Task<GrpcTryGetManyValuesResponse> TryGetManyValuesRoutedCore(GrpcTryGetManyValuesRequest request, ServerCallContext context)
-    {
-        // The get-many wire carries no registration identity: a transactional batch read from a client
-        // would skip read-set registration and silently weaken isolation, so it is rejected outright.
-        if (request.TransactionIdNode != 0 || request.TransactionIdPhysical != 0 || request.TransactionIdCounter != 0)
-        {
-            GrpcTryGetManyValuesResponse rejected = new();
-            ReserveItemCapacity(rejected.Items, request.Items.Count);
-            foreach (GrpcTryManyValuesRequestItem item in request.Items)
-                rejected.Items.Add(new GrpcTryGetManyValuesResponseItem
-                {
-                    Type = GrpcKeyValueResponseType.TypeInvalidInput,
-                    Key = item.Key,
-                    Durability = item.Durability
-                });
-            return rejected;
-        }
-
-        // A client sends the whole batch to one node as a unary RPC without routing per key, so this endpoint must
-        // route each key to its partition leader itself — exactly as the single-key TryGetKeyValue does. Reading
-        // the local actors directly returns this node's own state, which for a key whose partition this node does
-        // not lead is stale or absent, so a batched read would miss a committed value a routed single-key read (or
-        // a same-transaction scan) sees. The inter-node handler (TryGetManyValuesInternal) routes on arrival for
-        // the same reason: the sender's belief about who leads is not proof.
-        using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
-
-        List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses = await keyValues.LocateAndTryGetManyValues(
-            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
-            new(request.ReadTimestampNode, request.ReadTimestampPhysical, request.ReadTimestampCounter),
-            GetRequestManyValuesItems(request.Items),
-            context.CancellationToken
-        );
-
-        GrpcTryGetManyValuesResponse response = new();
-        RouteHintWriter.Table routes = new(capture);
-        AddResponseGetManyValuesItems(response.Items, responses, routes);
-
-        if (routes.HasRoutes)
-            routes.WriteGrpc(response.Routes);
-
-        return response;
-    }
-
-    /// <summary>
-    /// Attempts to retrieve a key-value pair based on the specified request.
-    /// </summary>
-    /// <param name="request">The request containing details such as key, transaction IDs, revision, and durability settings.</param>
-    /// <param name="context">The gRPC server call context providing runtime information about the request.</param>
-    /// <returns>Returns a <see cref="GrpcTryGetKeyValueResponse"/> object indicating the result of the retrieval operation.</returns>
-    private async Task<GrpcTryGetKeyValueResponse> TryGetKeyValueCore(GrpcTryGetKeyValueRequest request, ServerCallContext context)
-    {
-        if (string.IsNullOrEmpty(request.Key))
-            return new()
-            {
-                Type = GrpcKeyValueResponseType.TypeInvalidInput
-            };
-        
-        ValueStopwatch stopwatch = ValueStopwatch.StartNew();
-        
-        using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
-
-        (KeyValueResponseType type, ReadOnlyKeyValueEntry? keyValueContext) = await keyValues.LocateAndTryGetValue(
-            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
-            request.Key,
-            request.Revision,
-            new(request.ReadTimestampNode, request.ReadTimestampPhysical, request.ReadTimestampCounter),
-            (KeyValueDurability)request.Durability,
-            context.CancellationToken,
-            request.CoordinatorKey,
-            new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow),
-            (KeyValueReadMode)request.ReadMode
-        );
-        
-        if (keyValueContext is not null)
-        {
-            GrpcTryGetKeyValueResponse response = new()
-            {
-                ServedFrom = "",
-                Type = (GrpcKeyValueResponseType)type,
-                Revision = keyValueContext.Revision,
-                ExpiresNode = keyValueContext.Expires.N,
-                ExpiresPhysical = keyValueContext.Expires.L,
-                ExpiresCounter = keyValueContext.Expires.C,
-                LastUsedNode = keyValueContext.LastUsed.N,
-                LastUsedPhysical = keyValueContext.LastUsed.L,
-                LastUsedCounter = keyValueContext.LastUsed.C,
-                LastModifiedNode = keyValueContext.LastModified.N,
-                LastModifiedPhysical = keyValueContext.LastModified.L,
-                LastModifiedCounter = keyValueContext.LastModified.C,
-                State = (GrpcKeyValueState)keyValueContext.State,
-                TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
-            };
-
-            if (keyValueContext.Value is not null)
-                response.Value = UnsafeByteOperations.UnsafeWrap(keyValueContext.Value);
-
-            GrpcRouteHint? foundRoute = RouteHintWriter.Grpc(capture, KahunaRoutingDomain.KeyValue, request.Key);
-            if (foundRoute is not null)
-                response.Route = foundRoute;
-
-            return response;
-        }
-
-        GrpcTryGetKeyValueResponse missing = new()
-        {
-            Type = (GrpcKeyValueResponseType)type,
-            TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
-        };
-
-        // "The key does not exist" is a terminal answer about a key whose owner was resolved. Left
-        // without a hint, a read-mostly workload over absent keys would never learn a route.
-        GrpcRouteHint? missingRoute = RouteHintWriter.Grpc(capture, KahunaRoutingDomain.KeyValue, request.Key);
-        if (missingRoute is not null)
-            missing.Route = missingRoute;
-
-        return missing;
-    }
-
-    /// <summary>
-    /// Inter-node batch read (<c>KeyValueServerBatcher</c>): the sending node grouped the keys by the leader it
-    /// believes in and forwarded each group here. That belief is not proof. A gateway that hosts none of the
-    /// partition's replicas resolves the leader from a gossiped hint, and on a hint miss it picks any voter of the
-    /// committed replica set, so a group can land on a follower, or on a leader the partition has since moved
-    /// away from. The keys are therefore routed again on arrival, exactly as the single-key handler does: a
-    /// partition this node leads is served from local state after a quorum-confirmed leadership check, and a
-    /// partition it does not lead is forwarded to its leader within the hop budget (the one extra hop
-    /// <c>ForwardedRequestScope.MaxForwardHops</c> keeps for this case) or answered <c>MustRetry</c>. Serving the
-    /// group from this node's actors on the sender's word alone returned a follower's state as a committed
-    /// read, and a read-modify-write computed over it erased the writes the follower had not applied yet.
-    /// </summary>
-    /// <summary>
-    /// Inter-node batched probe: the sender grouped the keys by the leader it believes in. That belief is not
-    /// proof, so the keys are routed again on arrival exactly as the batch read above does, and the leaderships the
-    /// probe's locks were granted under travel back with the answers.
-    /// </summary>
-    private async Task<GrpcTryProbeManyResponse> TryProbeManyCore(GrpcTryProbeManyRequest request, ServerCallContext context)
-    {
-        string[] keys = new string[request.Keys.Count];
-        request.Keys.CopyTo(keys, 0);
-
-        using LockGrantScope.Scope grantScope = LockGrantScope.Begin(out LockGrantCapture grants);
-
-        KeyValueProbeResult[] results = await keyValues.LocateAndTryProbeMany(
-            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
-            new(request.ReadTimestampNode, request.ReadTimestampPhysical, request.ReadTimestampCounter),
-            keys,
-            (KeyValueProbeLock)request.LockMode,
-            request.ExpiresMs,
-            (KeyValueDurability)request.Durability,
-            context.CancellationToken,
-            readMode: (KeyValueReadMode)request.ReadMode
-        );
-
-        GrpcTryProbeManyResponse response = new();
-        ProbeManyWire.AddItems(response.Items, results);
-        AddLockGrantTerms(response.GrantTerms, grants);
-        return response;
-    }
-
-    /// <summary>
-    /// Inter-node batched range probe: the sender grouped the seeks by the leader it believes in. That belief is not
-    /// proof, so the seeks are routed again on arrival, and the leaderships the probe's locks were granted under travel
-    /// back with the answers.
-    /// </summary>
-    private async Task<GrpcTryProbeManyRangesResponse> TryProbeManyRangesCore(GrpcTryProbeManyRangesRequest request, ServerCallContext context)
-    {
-        using LockGrantScope.Scope grantScope = LockGrantScope.Begin(out LockGrantCapture grants);
-
-        KeyValueProbeRangeResult[] results = await keyValues.LocateAndTryProbeManyRanges(
-            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
-            new(request.ReadTimestampNode, request.ReadTimestampPhysical, request.ReadTimestampCounter),
-            request.Prefix,
-            ProbeManyRangesWire.FromRequest(request),
-            (KeyValueProbeLock)request.LockMode,
-            request.ExpiresMs,
-            (KeyValueDurability)request.Durability,
-            context.CancellationToken,
-            readMode: (KeyValueReadMode)request.ReadMode
-        );
-
-        GrpcTryProbeManyRangesResponse response = new();
-        ProbeManyRangesWire.AddItems(response.Items, results);
-        AddLockGrantTerms(response.GrantTerms, grants);
-        return response;
-    }
-
-    private async Task<GrpcTryGetManyValuesResponse> TryGetManyValuesCore(GrpcTryGetManyValuesRequest request, ServerCallContext context)
-    {
-        List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses = await keyValues.LocateAndTryGetManyValues(
-            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
-            new(request.ReadTimestampNode, request.ReadTimestampPhysical, request.ReadTimestampCounter),
-            GetRequestManyValuesItems(request.Items),
-            context.CancellationToken
-        );
-
-        GrpcTryGetManyValuesResponse response = new();
-        AddResponseGetManyValuesItems(response.Items, responses);
-        return response;
-    }
+        => Guard(request, context, static (s, r, c) => s.reads.TryGetManyValuesRoutedCore(r, c), static r => KeyValueMustRetry.TryGetManyValues(r));
 
     /// <summary>
     /// Handles the gRPC request to check if a specific key exists in the key-value store.
@@ -742,287 +247,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     }
 
     public override Task<GrpcTryExistsManyValuesResponse> TryExistsManyValues(GrpcTryExistsManyValuesRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.TryExistsManyValuesRoutedCore(r, c), static r => KeyValueMustRetry.TryExistsManyValues(r));
-
-    private async Task<GrpcTryExistsManyValuesResponse> TryExistsManyValuesRoutedCore(GrpcTryExistsManyValuesRequest request, ServerCallContext context)
-    {
-        // Same rejection as TryGetManyValues: no identity on the wire means a transactional batch
-        // existence check cannot register its read set.
-        if (request.TransactionIdNode != 0 || request.TransactionIdPhysical != 0 || request.TransactionIdCounter != 0)
-        {
-            GrpcTryExistsManyValuesResponse rejected = new();
-            ReserveItemCapacity(rejected.Items, request.Items.Count);
-            foreach (GrpcTryManyValuesRequestItem item in request.Items)
-                rejected.Items.Add(new GrpcTryExistsManyValuesResponseItem
-                {
-                    Type = GrpcKeyValueResponseType.TypeInvalidInput,
-                    Key = item.Key,
-                    Durability = item.Durability
-                });
-            return rejected;
-        }
-
-        // Route per key for the same reason as TryGetManyValues: the non-locating internal reads only this node's
-        // actors and is correct only on the already-routed inter-node path.
-        using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
-
-        List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses = await keyValues.LocateAndTryExistsManyValues(
-            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
-            new(request.ReadTimestampNode, request.ReadTimestampPhysical, request.ReadTimestampCounter),
-            GetRequestManyValuesItems(request.Items),
-            context.CancellationToken
-        );
-
-        GrpcTryExistsManyValuesResponse response = new();
-        RouteHintWriter.Table routes = new(capture);
-        AddResponseExistsManyValuesItems(response.Items, responses, routes);
-
-        if (routes.HasRoutes)
-            routes.WriteGrpc(response.Routes);
-
-        return response;
-    }
-
-    /// <summary>
-    /// Attempts to check the existence of a key-value entry within a specified context.
-    /// </summary>
-    /// <param name="request">The request containing the details required to check the key-value existence, such as the key, transaction identifiers, revision, and durability settings.</param>
-    /// <param name="context">The server call context used for managing RPC communication and cancellation tokens.</param>
-    /// <returns>Returns a <see cref="GrpcTryExistsKeyValueResponse"/> representing the result of the existence check, including the response type and time elapsed during execution.</returns>
-    private async Task<GrpcTryExistsKeyValueResponse> TryExistsKeyValueCore(GrpcTryExistsKeyValueRequest request, ServerCallContext context)
-    {
-        if (string.IsNullOrEmpty(request.Key))
-            return new()
-            {
-                Type = GrpcKeyValueResponseType.TypeInvalidInput
-            };
-        
-        ValueStopwatch stopwatch = ValueStopwatch.StartNew();
-        
-        using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
-
-        (KeyValueResponseType type, ReadOnlyKeyValueEntry? keyValueContext) = await keyValues.LocateAndTryExistsValue(
-            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
-            request.Key,
-            request.Revision,
-            new(request.ReadTimestampNode, request.ReadTimestampPhysical, request.ReadTimestampCounter),
-            (KeyValueDurability)request.Durability,
-            context.CancellationToken,
-            request.CoordinatorKey,
-            new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
-        );
-        
-        if (keyValueContext is not null)
-        {
-            GrpcTryExistsKeyValueResponse response = new()
-            {
-                ServedFrom = "",
-                Type = (GrpcKeyValueResponseType)type,
-                Revision = keyValueContext.Revision,
-                ExpiresNode = keyValueContext.Expires.N,
-                ExpiresPhysical = keyValueContext.Expires.L,
-                ExpiresCounter = keyValueContext.Expires.C,
-                LastUsedNode = keyValueContext.LastUsed.N,
-                LastUsedPhysical = keyValueContext.LastUsed.L,
-                LastUsedCounter = keyValueContext.LastUsed.C,
-                LastModifiedNode = keyValueContext.LastModified.N,
-                LastModifiedPhysical = keyValueContext.LastModified.L,
-                LastModifiedCounter = keyValueContext.LastModified.C,
-                State = (GrpcKeyValueState)keyValueContext.State,
-                TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
-            };
-
-            GrpcRouteHint? presentRoute = RouteHintWriter.Grpc(capture, KahunaRoutingDomain.KeyValue, request.Key);
-            if (presentRoute is not null)
-                response.Route = presentRoute;
-
-            return response;
-        }
-
-        GrpcTryExistsKeyValueResponse absent = new()
-        {
-            Type = (GrpcKeyValueResponseType)type,
-            TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
-        };
-
-        GrpcRouteHint? absentRoute = RouteHintWriter.Grpc(capture, KahunaRoutingDomain.KeyValue, request.Key);
-        if (absentRoute is not null)
-            absent.Route = absentRoute;
-
-        return absent;
-    }
-
-    /// <summary>
-    /// Inter-node batch exists: the counterpart of <see cref="TryGetManyValuesInternal"/>, with the same routing on
-    /// arrival and for the same reason. A commit-time base check that reaches a follower through a stale forward
-    /// would otherwise confirm a base the leader has already moved past.
-    /// </summary>
-    private async Task<GrpcTryExistsManyValuesResponse> TryExistsManyValuesCore(GrpcTryExistsManyValuesRequest request, ServerCallContext context)
-    {
-        List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses = await keyValues.LocateAndTryExistsManyValues(
-            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
-            new(request.ReadTimestampNode, request.ReadTimestampPhysical, request.ReadTimestampCounter),
-            GetRequestManyValuesItems(request.Items),
-            context.CancellationToken
-        );
-
-        GrpcTryExistsManyValuesResponse response = new();
-        AddResponseExistsManyValuesItems(response.Items, responses);
-        return response;
-    }
-
-    private static List<(string key, long revision, KeyValueDurability durability)> GetRequestManyValuesItems(
-        RepeatedField<GrpcTryManyValuesRequestItem> items
-    )
-    {
-        List<(string key, long revision, KeyValueDurability durability)> rItems = new(items.Count);
-
-        foreach (GrpcTryManyValuesRequestItem item in items)
-            rItems.Add((item.Key, item.Revision, (KeyValueDurability)item.Durability));
-
-        return rItems;
-    }
-
-    private static void AddResponseGetManyValuesItems(
-        RepeatedField<GrpcTryGetManyValuesResponseItem> target,
-        List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses,
-        RouteHintWriter.Table? routes = null
-    )
-    {
-        ReserveItemCapacity(target, responses.Count);
-
-        foreach ((KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry) in responses)
-        {
-            GrpcTryGetManyValuesResponseItem item = new()
-            {
-                Type = (GrpcKeyValueResponseType)type,
-                Key = key,
-                Durability = (GrpcKeyValueDurability)durability
-            };
-
-            if (entry is not null)
-            {
-                item.Revision = entry.Revision;
-                item.ExpiresNode = entry.Expires.N;
-                item.ExpiresPhysical = entry.Expires.L;
-                item.ExpiresCounter = entry.Expires.C;
-                item.LastUsedNode = entry.LastUsed.N;
-                item.LastUsedPhysical = entry.LastUsed.L;
-                item.LastUsedCounter = entry.LastUsed.C;
-                item.LastModifiedNode = entry.LastModified.N;
-                item.LastModifiedPhysical = entry.LastModified.L;
-                item.LastModifiedCounter = entry.LastModified.C;
-                item.State = (GrpcKeyValueState)entry.State;
-
-                if (entry.Value is not null)
-                    item.Value = UnsafeByteOperations.UnsafeWrap(entry.Value);
-            }
-
-            if (routes is not null)
-                item.RouteIndex = routes.IndexOf(KahunaRoutingDomain.KeyValue, key);
-
-            target.Add(item);
-        }
-    }
-
-    private static void AddResponseExistsManyValuesItems(
-        RepeatedField<GrpcTryExistsManyValuesResponseItem> target,
-        List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> responses,
-        RouteHintWriter.Table? routes = null
-    )
-    {
-        ReserveItemCapacity(target, responses.Count);
-
-        foreach ((KeyValueResponseType type, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry) in responses)
-        {
-            GrpcTryExistsManyValuesResponseItem item = new()
-            {
-                Type = (GrpcKeyValueResponseType)type,
-                Key = key,
-                Durability = (GrpcKeyValueDurability)durability
-            };
-
-            if (entry is not null)
-            {
-                item.Revision = entry.Revision;
-                item.ExpiresNode = entry.Expires.N;
-                item.ExpiresPhysical = entry.Expires.L;
-                item.ExpiresCounter = entry.Expires.C;
-                item.LastUsedNode = entry.LastUsed.N;
-                item.LastUsedPhysical = entry.LastUsed.L;
-                item.LastUsedCounter = entry.LastUsed.C;
-                item.LastModifiedNode = entry.LastModified.N;
-                item.LastModifiedPhysical = entry.LastModified.L;
-                item.LastModifiedCounter = entry.LastModified.C;
-                item.State = (GrpcKeyValueState)entry.State;
-            }
-
-            if (routes is not null)
-                item.RouteIndex = routes.IndexOf(KahunaRoutingDomain.KeyValue, key);
-
-            target.Add(item);
-        }
-    }
-
-    private async Task<GrpcTryCheckWriteIntentResponse> TryCheckWriteIntentCore(GrpcTryCheckWriteIntentRequest request, ServerCallContext context)
-    {
-        if (string.IsNullOrEmpty(request.Key))
-            return new() { Type = GrpcKeyValueResponseType.TypeInvalidInput };
-
-        KeyValueResponseType type = await keyValues.LocateAndTryCheckWriteIntent(
-            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
-            request.Key,
-            (KeyValueDurability)request.Durability,
-            context.CancellationToken
-        );
-
-        return new() { ServedFrom = "", Type = (GrpcKeyValueResponseType)type };
-    }
-
-    /// <summary>
-    /// Probes a group of keys this node leads for concurrent write intents. The sender already grouped the keys
-    /// by owning node, so — as with the batched many-key reads — this serves them locally rather than routing
-    /// each one again, after confirming this node's leadership of the keys' partitions. The leadership terms
-    /// the held staged intents were confirmed under travel back on the response, as lock grants' terms do.
-    /// </summary>
-    private async Task<GrpcTryCheckManyWriteIntentsResponse> TryCheckManyWriteIntentsCore(GrpcTryCheckManyWriteIntentsRequest request, ServerCallContext context)
-    {
-        List<KeyValueConflictProbe> keys = new(request.Items.Count);
-
-        foreach (GrpcTryCheckManyWriteIntentsRequestItem item in request.Items)
-            keys.Add(new(item.Key, (KeyValueDurability)item.Durability, (KeyValueConflictChecks)item.Checks, item.BaseRevision));
-
-        using LockGrantScope.Scope grantScope = LockGrantScope.Begin(out LockGrantCapture grants);
-
-        List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses =
-            await keyValues.TryCheckManyWriteIntentValuesConfirmed(
-                new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
-                keys,
-                context.CancellationToken);
-
-        GrpcTryCheckManyWriteIntentsResponse response = new() { ServedFrom = "" };
-
-        foreach ((KeyValueResponseType type, string key, KeyValueDurability durability) in responses)
-            response.Items.Add(new GrpcTryCheckManyWriteIntentsResponseItem
-            {
-                Type = (GrpcKeyValueResponseType)type,
-                Key = key,
-                Durability = (GrpcKeyValueDurability)durability
-            });
-
-        AddLockGrantTerms(response.GrantTerms, grants);
-
-        // The highest commit floor over the caller's staged intents this node confirmed held, beside the terms.
-        HLCTimestamp commitFloor = grants.CommitFloor;
-        if (!commitFloor.IsNull())
-        {
-            response.CommitFloorNode = commitFloor.N;
-            response.CommitFloorPhysical = commitFloor.L;
-            response.CommitFloorCounter = commitFloor.C;
-        }
-
-        return response;
-    }
+        => Guard(request, context, static (s, r, c) => s.reads.TryExistsManyValuesRoutedCore(r, c), static r => KeyValueMustRetry.TryExistsManyValues(r));
 
     /// <summary>
     /// Attempts to acquire an exclusive lock on a key-value resource.
@@ -1035,63 +260,6 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return await TryAcquireExclusiveLockInternal(request, context);
     }
 
-    /// <summary>
-    /// Attempts to acquire an exclusive lock for a given key with the specified expiration and durability settings.
-    /// </summary>
-    /// <param name="request">The request containing the key, transaction details, expiration time, and durability level.</param>
-    /// <param name="context">The server call context that provides access to information about the RPC call.</param>
-    /// <returns>A task that represents the asynchronous operation. The task result contains a response indicating whether the lock acquisition attempt succeeded or failed.</returns>
-    private async Task<GrpcTryAcquireExclusiveLockResponse> TryAcquireExclusiveLockCore(GrpcTryAcquireExclusiveLockRequest request, ServerCallContext context)
-    {
-        if (string.IsNullOrEmpty(request.Key))
-            return new()
-            {
-                Type = GrpcKeyValueResponseType.TypeInvalidInput
-            };
-        
-        using YieldingIntentPolicyScope.Scope lockPolicyScope = YieldingIntentPolicyScope.Enter(TransactionConflictPolicyWire.FromGrpc(request.ConflictPolicy));
-        using LockGrantScope.Scope grantScope = LockGrantScope.Begin(out LockGrantCapture grants);
-        (KeyValueResponseType type, _, _, HLCTimestamp holder, long baseRevision) = await keyValues.LocateAndTryAcquireExclusiveLockObserved(
-            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
-            request.Key,
-            request.ExpiresMs,
-            (KeyValueDurability)request.Durability,
-            context.CancellationToken,
-            request.CoordinatorKey,
-            new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
-        );
-
-        bool baseObserved = baseRevision != PointLockBase.None;
-
-        GrpcTryAcquireExclusiveLockResponse response = new()
-        {
-            Type = (GrpcKeyValueResponseType)type,
-            HolderTransactionIdNode     = holder.N,
-            HolderTransactionIdPhysical = holder.L,
-            HolderTransactionIdCounter  = holder.C,
-            BaseObserved = baseObserved,
-            BaseRevision = baseObserved ? baseRevision : 0
-        };
-
-        AddLockGrantTerms(response.GrantTerms, grants);
-
-        return response;
-    }
-
-    /// <summary>
-    /// Copies the leaderships the locks of the served request were granted under into its response, so the
-    /// node that forwarded the request can hand them to the transaction's coordinator. Empty when the request
-    /// was registered with a coordinator here, which already received them with the operation's completion.
-    /// </summary>
-    private static void AddLockGrantTerms(RepeatedField<GrpcLockGrantTerm> target, LockGrantCapture grants)
-    {
-        if (grants.Take() is not { } taken)
-            return;
-
-        foreach (LockGrantTerm grant in taken)
-            target.Add(new GrpcLockGrantTerm { PartitionId = grant.PartitionId, Term = grant.Term, RoutingKey = grant.RoutingKey });
-    }
-    
     /// <summary>
     /// Attempts to acquire an exclusive lock on group of key-value resource prefixed by the given prefix key.
     /// </summary>
@@ -1107,41 +275,6 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     }
 
     /// <summary>
-    /// Attempts to acquire an exclusive lock on a group of key-value pairs prefixed by the given key with the specified expiration and durability settings.
-    /// </summary>
-    /// <param name="request">The request containing the key, transaction details, expiration time, and durability level.</param>
-    /// <param name="context">The server call context that provides access to information about the RPC call.</param>
-    /// <returns>A task that represents the asynchronous operation. The task result contains a response indicating whether the lock acquisition attempt succeeded or failed.</returns>
-    private async Task<GrpcTryAcquireExclusivePrefixLockResponse> TryAcquireExclusivePrefixLockCore(GrpcTryAcquireExclusivePrefixLockRequest request, ServerCallContext context)
-    {
-        if (string.IsNullOrEmpty(request.PrefixKey))
-            return new()
-            {
-                Type = GrpcKeyValueResponseType.TypeInvalidInput
-            };
-        
-        using LockGrantScope.Scope grantScope = LockGrantScope.Begin(out LockGrantCapture grants);
-        KeyValueResponseType type = await keyValues.LocateAndTryAcquireExclusivePrefixLock(
-            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
-            request.PrefixKey,
-            request.ExpiresMs,
-            (KeyValueDurability)request.Durability,
-            context.CancellationToken,
-            request.CoordinatorKey,
-            new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
-        );
-
-        GrpcTryAcquireExclusivePrefixLockResponse response = new()
-        {
-            Type = (GrpcKeyValueResponseType)type
-        };
-
-        AddLockGrantTerms(response.GrantTerms, grants);
-
-        return response;
-    }
-
-    /// <summary>
     /// Attempts to acquire multiple exclusive locks based on the provided request.
     /// </summary>
     /// <param name="request">The request containing the details for acquiring multiple exclusive locks.</param>
@@ -1150,79 +283,6 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     public override async Task<GrpcTryAcquireManyExclusiveLocksResponse> TryAcquireManyExclusiveLocks(GrpcTryAcquireManyExclusiveLocksRequest request, ServerCallContext context)
     {
         return await TryAcquireManyExclusiveLocksInternal(request, context);
-    }
-
-    /// <summary>
-    /// 
-    /// </summary>
-    /// <param name="request"></param>
-    /// <param name="context"></param>
-    /// <returns></returns>
-    private async Task<GrpcTryAcquireManyExclusiveLocksResponse> TryAcquireManyExclusiveLocksCore(GrpcTryAcquireManyExclusiveLocksRequest request, ServerCallContext context)
-    {
-        using YieldingIntentPolicyScope.Scope manyLockPolicyScope = YieldingIntentPolicyScope.Enter(TransactionConflictPolicyWire.FromGrpc(request.ConflictPolicy));
-        using LockGrantScope.Scope grantScope = LockGrantScope.Begin(out LockGrantCapture grants);
-        List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp, long)> responses = await keyValues.LocateAndTryAcquireManyExclusiveLocksObserved(
-            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
-            GetRequestLocksItems(request.Items),
-            context.CancellationToken
-        );
-
-        GrpcTryAcquireManyExclusiveLocksResponse response = new();
-
-        AddResponseLocksItems(response.Items, responses);
-        AddLockGrantTerms(response.GrantTerms, grants);
-
-        return response;
-    }
-
-    /// <summary>
-    /// Converts a collection of gRPC exclusive lock request items into a list of tuples
-    /// containing key, expiration time in milliseconds, and durability type.
-    /// </summary>
-    /// <param name="items">A collection of gRPC exclusive lock request items to be processed.</param>
-    /// <returns>A list of tuples with each tuple containing a key, expiration time in milliseconds,
-    /// and durability type derived from the input collection.</returns>
-    private static List<(string key, int expiresMs, KeyValueDurability durability)> GetRequestLocksItems(
-        RepeatedField<GrpcTryAcquireManyExclusiveLocksRequestItem> items
-    )
-    {
-        List<(string key, int expiresMs, KeyValueDurability durability)> rItems = new(items.Count);
-        
-        foreach (GrpcTryAcquireManyExclusiveLocksRequestItem item in items)
-            rItems.Add((item.Key, item.ExpiresMs, (KeyValueDurability)item.Durability));
-        
-        return rItems;
-    }
-
-    /// <summary>
-    /// Converts a list of key-value response tuples into a collection of gRPC response items.
-    /// </summary>
-    /// <param name="responses">A list of tuples containing the key-value response type, key, and durability information.</param>
-    /// <returns>An enumerable collection of gRPC response items corresponding to the provided key-value responses.</returns>
-    private static void AddResponseLocksItems(
-        RepeatedField<GrpcTryAcquireManyExclusiveLocksResponseItem> target,
-        List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp, long)> responses
-    )
-    {
-        ReserveItemCapacity(target, responses.Count);
-
-        foreach ((KeyValueResponseType response, string key, KeyValueDurability durability, HLCTimestamp holder, long baseRevision) in responses)
-        {
-            bool baseObserved = baseRevision != PointLockBase.None;
-
-            target.Add(new GrpcTryAcquireManyExclusiveLocksResponseItem
-            {
-                Type = (GrpcKeyValueResponseType)response,
-                Key = key,
-                Durability = (GrpcKeyValueDurability)durability,
-                HolderTransactionIdNode     = holder.N,
-                HolderTransactionIdPhysical = holder.L,
-                HolderTransactionIdCounter  = holder.C,
-                BaseObserved = baseObserved,
-                BaseRevision = baseObserved ? baseRevision : 0
-            });
-        }
     }
 
     /// <summary>
@@ -1237,33 +297,6 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     }
 
     /// <summary>
-    /// Attempts to release an exclusive lock for the specified key and transaction.
-    /// </summary>
-    /// <param name="request">The request containing the key, transaction details, and durability level.</param>
-    /// <param name="context">The context for the server call.</param>
-    /// <returns>A response indicating the result of the release lock attempt.</returns>
-    private async Task<GrpcTryReleaseExclusiveLockResponse> TryReleaseExclusiveLockCore(GrpcTryReleaseExclusiveLockRequest request, ServerCallContext context)
-    {
-        if (string.IsNullOrEmpty(request.Key))
-            return new()
-            {
-                Type = GrpcKeyValueResponseType.TypeInvalidInput
-            };
-        
-        (KeyValueResponseType type, string _) = await keyValues.LocateAndTryReleaseExclusiveLock(
-            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter), 
-            request.Key, 
-            (KeyValueDurability)request.Durability, 
-            context.CancellationToken
-        );
-
-        return new()
-        {
-            Type = (GrpcKeyValueResponseType)type
-        };
-    }
-    
-    /// <summary>
     /// Attempts to release an exclusive lock on group of key-value resource prefixed by the given prefix key.
     /// </summary>
     /// <param name="request">The request containing details about the lock acquisition operation.</param>
@@ -1277,33 +310,6 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return await TryReleaseExclusivePrefixLockInternal(request, context);
     }
 
-    /// <summary>
-    /// Attempts to release an exclusive lock on a group of key-value pairs prefixed by the given key with the specified expiration and durability settings.
-    /// </summary>
-    /// <param name="request">The request containing the key, transaction details, expiration time, and durability level.</param>
-    /// <param name="context">The server call context that provides access to information about the RPC call.</param>
-    /// <returns>A task that represents the asynchronous operation. The task result contains a response indicating whether the lock acquisition attempt succeeded or failed.</returns>
-    private async Task<GrpcTryReleaseExclusivePrefixLockResponse> TryReleaseExclusivePrefixLockCore(GrpcTryReleaseExclusivePrefixLockRequest request, ServerCallContext context)
-    {
-        if (string.IsNullOrEmpty(request.PrefixKey))
-            return new()
-            {
-                Type = GrpcKeyValueResponseType.TypeInvalidInput
-            };
-        
-        KeyValueResponseType type = await keyValues.LocateAndTryReleaseExclusivePrefixLock(
-            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter), 
-            request.PrefixKey,
-            (KeyValueDurability)request.Durability, 
-            context.CancellationToken
-        );
-
-        return new()
-        {
-            Type = (GrpcKeyValueResponseType)type
-        };
-    }
-    
     public override async Task<GrpcTryAcquireExclusiveRangeLockResponse> TryAcquireExclusiveRangeLock(
         GrpcTryAcquireExclusiveRangeLockRequest request,
         ServerCallContext context
@@ -1312,84 +318,12 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return await TryAcquireExclusiveRangeLockInternal(request, context);
     }
 
-    private async Task<GrpcTryAcquireExclusiveRangeLockResponse> TryAcquireExclusiveRangeLockCore(GrpcTryAcquireExclusiveRangeLockRequest request, ServerCallContext context)
-    {
-        if (string.IsNullOrEmpty(request.Prefix))
-            return new() { Type = GrpcKeyValueResponseType.TypeInvalidInput };
-
-        string? startKey = request.HasStartKey ? request.StartKey : null;
-        string? endKey   = request.HasEndKey   ? request.EndKey   : null;
-
-        using LockGrantScope.Scope grantScope = LockGrantScope.Begin(out LockGrantCapture grants);
-        (KeyValueResponseType type, HLCTimestamp holder) = await keyValues.LocateAndTryAcquireRangeLock(
-            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
-            request.Prefix,
-            startKey, request.StartInclusive,
-            endKey,   request.EndInclusive,
-            request.ExpiresMs,
-            (KeyValueDurability)request.Durability,
-            (RangeLockMode)request.Mode,
-            context.CancellationToken,
-            request.CoordinatorKey,
-            new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
-        );
-
-        GrpcTryAcquireExclusiveRangeLockResponse response = new()
-        {
-            Type = (GrpcKeyValueResponseType)type,
-            HolderTransactionIdNode     = holder.N,
-            HolderTransactionIdPhysical = holder.L,
-            HolderTransactionIdCounter  = holder.C
-        };
-
-        AddLockGrantTerms(response.GrantTerms, grants);
-
-        return response;
-    }
-
     public override async Task<GrpcTryReleaseExclusiveRangeLockResponse> TryReleaseExclusiveRangeLock(
         GrpcTryReleaseExclusiveRangeLockRequest request,
         ServerCallContext context
     )
     {
         return await TryReleaseExclusiveRangeLockInternal(request, context);
-    }
-
-    private async Task<GrpcTryReleaseExclusiveRangeLockResponse> TryReleaseExclusiveRangeLockCore(GrpcTryReleaseExclusiveRangeLockRequest request, ServerCallContext context)
-    {
-        if (string.IsNullOrEmpty(request.Prefix))
-            return new() { Type = GrpcKeyValueResponseType.TypeInvalidInput };
-
-        string? startKey = request.HasStartKey ? request.StartKey : null;
-        string? endKey   = request.HasEndKey   ? request.EndKey   : null;
-
-        // A partition-pinned release executes on this node's own actor state: the sender targeted
-        // the node where the lock was acquired (a split/merge quiesce release), and re-routing
-        // through the locator would misdirect the release after a cutover moved the bounds to a
-        // new partition — stranding the lock's per-key write intents until their lease expires.
-        if (request.HasTargetPartitionId)
-        {
-            KeyValueResponseType pinnedType = await keyValues.TryReleaseExclusiveRangeLock(
-                new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
-                request.Prefix,
-                startKey, request.StartInclusive,
-                endKey,   request.EndInclusive,
-                (KeyValueDurability)request.Durability
-            );
-
-            return new() { Type = (GrpcKeyValueResponseType)pinnedType };
-        }
-
-        KeyValueResponseType type = await keyValues.LocateAndTryReleaseExclusiveRangeLock(
-            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
-            request.Prefix,
-            startKey, request.StartInclusive,
-            endKey,   request.EndInclusive,
-            (KeyValueDurability)request.Durability,
-            context.CancellationToken
-        );
-
-        return new() { Type = (GrpcKeyValueResponseType)type };
     }
 
     public override async Task<GrpcGetByRangeResponse> GetByRange(
@@ -1415,55 +349,6 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     }
 
     /// <summary>
-    /// Attempts to release multiple exclusive locks based on the provided request and context.
-    /// </summary>
-    /// <param name="request">The request containing transaction details and items to release.</param>
-    /// <param name="context">The gRPC server call context for the current operation.</param>
-    /// <returns>A task representing the asynchronous operation, containing a response with the release results.</returns>
-    private async Task<GrpcTryReleaseManyExclusiveLocksResponse> TryReleaseManyExclusiveLocksCore(GrpcTryReleaseManyExclusiveLocksRequest request, ServerCallContext context)
-    {
-        List<(KeyValueResponseType, string, KeyValueDurability)> responses = await keyValues.LocateAndTryReleaseManyExclusiveLocks(
-            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter), 
-            GetRequestReleaseItems(request.Items), 
-            context.CancellationToken
-        );
-
-        GrpcTryReleaseManyExclusiveLocksResponse response = new();
-
-        AddResponseReleaseItems(response.Items, responses);
-
-        return response;
-    }
-
-    /// <summary>
-    /// Converts a collection of gRPC request items into a list of tuples containing the key and its associated durability.
-    /// </summary>
-    /// <param name="items">The collection of gRPC request items containing the key and durability information.</param>
-    /// <returns>A list of tuples, where each tuple contains a key as a string and a durability type.</returns>
-    private static List<(string key, KeyValueDurability durability)> GetRequestReleaseItems(RepeatedField<GrpcTryReleaseManyExclusiveLocksRequestItem> items)
-    {
-        List<(string key, KeyValueDurability durability)> rItems = new(items.Count);
-        
-        foreach (GrpcTryReleaseManyExclusiveLocksRequestItem item in items)
-            rItems.Add((item.Key, (KeyValueDurability)item.Durability));
-        
-        return rItems;
-    }
-    
-    private static void AddResponseReleaseItems(RepeatedField<GrpcTryReleaseManyExclusiveLocksResponseItem> target, List<(KeyValueResponseType, string, KeyValueDurability)> responses)
-    {
-        ReserveItemCapacity(target, responses.Count);
-
-        foreach ((KeyValueResponseType response, string key, KeyValueDurability durability) in responses)
-            target.Add(new GrpcTryReleaseManyExclusiveLocksResponseItem
-            {
-                Type = (GrpcKeyValueResponseType)response,
-                Key = key,
-                Durability = (GrpcKeyValueDurability)durability
-            });
-    }
-
-    /// <summary>
     /// Handles the request to prepare mutations for a set of key-value changes.
     /// </summary>
     /// <param name="request">The incoming request containing key-value mutation details.</param>
@@ -1476,39 +361,6 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         gate.RequirePeer(context);
 
         return await TryPrepareMutationsInternal(request, context); 
-    }
-
-    /// <summary>
-    /// Attempts to prepare mutations internally using the provided request and context.
-    /// </summary>
-    /// <param name="request">The request containing details about the mutations to be prepared.</param>
-    /// <param name="context">The server call context associated with this operation.</param>
-    /// <returns>A task representing the asynchronous operation, containing the response with the result of the preparation attempt.</returns>
-    private async Task<GrpcTryPrepareMutationsResponse> TryPrepareMutationsCore(GrpcTryPrepareMutationsRequest request, ServerCallContext context)
-    {
-        if (string.IsNullOrEmpty(request.Key))
-            return new()
-            {
-                Type = GrpcKeyValueResponseType.TypeInvalidInput
-            };
-        
-        (KeyValueResponseType type, HLCTimestamp proposalTicket, _, _) = await keyValues.LocateAndTryPrepareMutations(
-            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
-            new(request.CommitIdNode, request.CommitIdPhysical, request.CommitIdCounter),
-            request.Key,
-            (KeyValueDurability)request.Durability,
-            context.CancellationToken,
-            request.RoutedGeneration,
-            request.HasRecordAnchorKey ? request.RecordAnchorKey : null
-        );
-
-        return new()
-        {
-            Type = (GrpcKeyValueResponseType)type,
-            ProposalTicketNode = proposalTicket.N,
-            ProposalTicketPhysical = proposalTicket.L,
-            ProposalTicketCounter = proposalTicket.C
-        };
     }
 
     /// <summary>
@@ -1525,65 +377,6 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     }
 
     /// <summary>
-    /// Attempts to prepare multiple mutations for processing internally.
-    /// </summary>
-    /// <param name="request">The request containing the transaction and mutation details.</param>
-    /// <param name="context">The server call context for processing the request.</param>
-    /// <returns>A task resolving to the response that contains the result of the mutation preparation.</returns>
-    private async Task<GrpcTryPrepareManyMutationsResponse> TryPrepareManyMutationsCore(GrpcTryPrepareManyMutationsRequest request, ServerCallContext context)
-    {
-        List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> responses = await keyValues.LocateAndTryPrepareManyMutations(
-            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
-            new(request.CommitIdNode, request.CommitIdPhysical, request.CommitIdCounter),
-            GetRequestPrepareItems(request.Items),
-            context.CancellationToken,
-            request.HasRecordAnchorKey ? request.RecordAnchorKey : null
-        );
-
-        GrpcTryPrepareManyMutationsResponse response = new();
-
-        AddResponsePrepareItems(response.Items, responses);
-
-        return response;
-    }
-
-    /// <summary>
-    /// Converts a collection of gRPC request items into a list of key-durability pairs.
-    /// </summary>
-    /// <param name="requestItems">The collection of gRPC request items to process.</param>
-    /// <returns>A list of tuples where each tuple contains a key and its associated durability.</returns>
-    private static List<(string key, KeyValueDurability durability)> GetRequestPrepareItems(RepeatedField<GrpcTryPrepareManyMutationsRequestItem> requestItems)
-    {
-        List<(string key, KeyValueDurability durability)> rItems = new(requestItems.Count);
-        
-        foreach (GrpcTryPrepareManyMutationsRequestItem item in requestItems)
-            rItems.Add((item.Key, (KeyValueDurability)item.Durability));
-
-        return rItems;
-    }
-
-    /// <summary>
-    /// Converts a list of response details into a collection of gRPC response items.
-    /// </summary>
-    /// <param name="responses">The list of tuples containing response details, including response type, ticket ID, key, and durability.</param>
-    /// <returns>A collection of <see cref="GrpcTryPrepareManyMutationsResponseItem"/> objects representing the prepared response items.</returns>
-    private static void AddResponsePrepareItems(RepeatedField<GrpcTryPrepareManyMutationsResponseItem> target, List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> responses)
-    {
-        ReserveItemCapacity(target, responses.Count);
-
-        foreach ((KeyValueResponseType type, HLCTimestamp ticketId, string key, KeyValueDurability durability) in responses)
-            target.Add(new GrpcTryPrepareManyMutationsResponseItem
-            {
-                Type = (GrpcKeyValueResponseType)type,
-                ProposalTicketNode = ticketId.N,
-                ProposalTicketPhysical = ticketId.L,
-                ProposalTicketCounter = ticketId.C,
-                Key = key,
-                Durability = (GrpcKeyValueDurability)durability
-            });
-    }
-
-    /// <summary>
     /// Attempts to commit a series of mutations represented by the request.
     /// </summary>
     /// <param name="request">The request containing the mutations to be committed.</param>
@@ -1594,35 +387,6 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         gate.RequirePeer(context);
 
         return await TryCommitMutationsInternal(request, context);
-    }
-
-    /// <summary>
-    /// Attempts to commit mutations for the provided request with specified transaction details.
-    /// </summary>
-    /// <param name="request">The request containing mutation details, transaction identifiers, and durability settings.</param>
-    /// <param name="context">The server call context providing metadata and cancellation token for the operation.</param>
-    /// <returns>A task that represents the asynchronous operation, with a result of type <see cref="GrpcTryCommitMutationsResponse"/> indicating the outcome of the commit operation.</returns>
-    private async Task<GrpcTryCommitMutationsResponse> TryCommitMutationsCore(GrpcTryCommitMutationsRequest request, ServerCallContext context)
-    {
-        if (string.IsNullOrEmpty(request.Key))
-            return new()
-            {
-                Type = GrpcKeyValueResponseType.TypeInvalidInput
-            };
-        
-        (KeyValueResponseType type, long commitIndex) = await keyValues.LocateAndTryCommitMutations(
-            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter), 
-            request.Key, 
-            new(request.ProposalTicketNode, request.ProposalTicketPhysical, request.ProposalTicketCounter),
-            (KeyValueDurability)request.Durability, 
-            context.CancellationToken
-        );
-
-        return new()
-        {
-            Type = (GrpcKeyValueResponseType)type,
-            ProposalIndex = commitIndex
-        };
     }
 
     /// <summary>
@@ -1639,65 +403,6 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     }
 
     /// <summary>
-    /// Attempts to commit multiple mutations internally.
-    /// </summary>
-    /// <param name="request">The request containing the mutations to be committed.</param>
-    /// <param name="context">The context of the server call.</param>
-    /// <returns>A task representing the asynchronous operation, containing the response of the mutations commit.</returns>
-    private async Task<GrpcTryCommitManyMutationsResponse> TryCommitManyMutationsCore(GrpcTryCommitManyMutationsRequest request, ServerCallContext context)
-    {
-        List<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)> responses = await keyValues.LocateAndTryCommitManyMutations(
-            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter), 
-            GetRequestCommitItems(request.Items), 
-            context.CancellationToken
-        );
-
-        GrpcTryCommitManyMutationsResponse response = new();
-
-        AddResponseCommitItems(response.Items, responses);
-
-        return response;
-    }
-
-    /// <summary>
-    /// Converts a collection of gRPC request items into a list of tuples containing the key, timestamp, and durability.
-    /// </summary>
-    /// <param name="requestItems">A collection of gRPC request items to be converted.</param>
-    /// <returns>A list of tuples, each containing a key, a high-level logical clock timestamp, and a durability value.</returns>
-    private static List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> GetRequestCommitItems(RepeatedField<GrpcTryCommitManyMutationsRequestItem> requestItems)
-    {
-        List<(string key, HLCTimestamp proposalTicketId, KeyValueDurability durability)> rItems = new(requestItems.Count);
-        
-        foreach (GrpcTryCommitManyMutationsRequestItem item in requestItems)
-            rItems.Add((
-                item.Key, 
-                new(item.ProposalTicketNode, item.ProposalTicketPhysical, item.ProposalTicketCounter), 
-                (KeyValueDurability)item.Durability
-            ));
-
-        return rItems;
-    }
-
-    /// <summary>
-    /// Converts a list of response tuples into a collection of GrpcTryCommitManyMutationsResponseItem objects.
-    /// </summary>
-    /// <param name="responses">A list of tuples containing the response type, key, proposal index, and durability information.</param>
-    /// <returns>An enumerable collection of GrpcTryCommitManyMutationsResponseItem objects.</returns>
-    private static void AddResponseCommitItems(RepeatedField<GrpcTryCommitManyMutationsResponseItem> target, List<(KeyValueResponseType, string, long, KeyValueDurability)> responses)
-    {
-        ReserveItemCapacity(target, responses.Count);
-
-        foreach ((KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability) in responses)
-            target.Add(new GrpcTryCommitManyMutationsResponseItem
-            {
-                Type = (GrpcKeyValueResponseType)type,
-                Key = key,
-                ProposalIndex = proposalIndex,
-                Durability = (GrpcKeyValueDurability)durability
-            });
-    }
-    
-    /// <summary>
     /// Receives requests for the key/value "RollbackMutations" service 
     /// </summary>
     /// <param name="request"></param>
@@ -1711,35 +416,6 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     }
 
     /// <summary>
-    /// Attempts to rollback mutations based on the provided request and context.
-    /// </summary>
-    /// <param name="request">The rollback mutations request containing transaction and key details.</param>
-    /// <param name="context">The gRPC server call context for the operation.</param>
-    /// <returns>A task representing the asynchronous operation, with a result of type <see cref="GrpcTryRollbackMutationsResponse"/> containing the response details.</returns>
-    private async Task<GrpcTryRollbackMutationsResponse> TryRollbackMutationsCore(GrpcTryRollbackMutationsRequest request, ServerCallContext context)
-    {
-        if (string.IsNullOrEmpty(request.Key))
-            return new()
-            {
-                Type = GrpcKeyValueResponseType.TypeInvalidInput
-            };
-        
-        (KeyValueResponseType type, long rollbackIndex) = await keyValues.LocateAndTryRollbackMutations(
-            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter), 
-            request.Key, 
-            new(request.ProposalTicketNode, request.ProposalTicketPhysical, request.ProposalTicketCounter),
-            (KeyValueDurability)request.Durability, 
-            context.CancellationToken
-        );
-
-        return new()
-        {
-            Type = (GrpcKeyValueResponseType)type,
-            ProposalIndex = rollbackIndex
-        };
-    }
-    
-    /// <summary>
     /// Receives requests for the key/value "RollbackManyMutations" service 
     /// </summary>
     /// <param name="request"></param>
@@ -1750,72 +426,6 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         gate.RequirePeer(context);
 
         return await TryRollbackManyMutationsInternal(request, context);
-    }
-    
-    /// <summary>
-    /// Receives requests for the key/value "CommitManyMutations" service 
-    /// </summary>
-    /// <param name="request"></param>
-    /// <param name="context"></param>
-    /// <returns></returns>
-    private async Task<GrpcTryRollbackManyMutationsResponse> TryRollbackManyMutationsCore(GrpcTryRollbackManyMutationsRequest request, ServerCallContext context)
-    {
-        List<(KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability)> responses = await keyValues.LocateAndTryRollbackManyMutations(
-            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter), 
-            GetRequestRollbackItems(request.Items), 
-            context.CancellationToken
-        );
-
-        GrpcTryRollbackManyMutationsResponse response = new();
-
-        AddResponseRollbackItems(response.Items, responses);
-
-        return response;
-    }
-
-    /// <summary>
-    /// Converts a collection of rollback request items into a list of rollback details
-    /// containing the key, proposal ticket ID, and durability.
-    /// </summary>
-    /// <param name="requestItems">The collection of rollback request items to process.</param>
-    /// <returns>A list of tuples, each containing the key, proposal ticket ID, and durability.</returns>
-    private static List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> GetRequestRollbackItems(RepeatedField<GrpcTryRollbackManyMutationsRequestItem> requestItems)
-    {
-        List<(string key, HLCTimestamp proposalTicketId, KeyValueDurability durability)> rItems = new(requestItems.Count);
-        
-        foreach (GrpcTryRollbackManyMutationsRequestItem item in requestItems)
-            rItems.Add((
-                item.Key, 
-                new(item.ProposalTicketNode, item.ProposalTicketPhysical, item.ProposalTicketCounter),
-                (KeyValueDurability)item.Durability
-            ));
-
-        return rItems;
-    }
-
-    /// <summary>
-    /// Transforms a list of rollback response tuples into enumerable gRPC response items.
-    /// </summary>
-    /// <param name="responses">
-    /// A list of tuples containing rollback response information.
-    /// Each tuple includes the response type, key, proposal index, and durability.
-    /// </param>
-    /// <returns>
-    /// An enumerable collection of gRPC response items
-    /// represented as <see cref="GrpcTryRollbackManyMutationsResponseItem"/>.
-    /// </returns>
-    private static void AddResponseRollbackItems(RepeatedField<GrpcTryRollbackManyMutationsResponseItem> target, List<(KeyValueResponseType, string, long, KeyValueDurability)> responses)
-    {
-        ReserveItemCapacity(target, responses.Count);
-
-        foreach ((KeyValueResponseType type, string key, long proposalIndex, KeyValueDurability durability) in responses)
-            target.Add(new GrpcTryRollbackManyMutationsResponseItem
-            {
-                Type = (GrpcKeyValueResponseType)type,
-                Key = key,
-                ProposalIndex = proposalIndex,
-                Durability = (GrpcKeyValueDurability)durability
-            });
     }
 
     /// <summary>
@@ -1830,75 +440,6 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     }
 
     /// <summary>
-    /// Attempts to execute a transaction script by processing the request and returning the result.
-    /// </summary>
-    /// <param name="request">The transaction script request containing the script, hash, and parameters.</param>
-    /// <param name="context">The server call context for the request.</param>
-    /// <returns>A task that represents the asynchronous operation. The task result contains the response detailing the execution outcome, elapsed time, and any additional information.</returns>
-    private async Task<GrpcTryExecuteTransactionScriptResponse> TryExecuteTransactionScriptCore(GrpcTryExecuteTransactionScriptRequest request, ServerCallContext context)
-    {
-        if (request.Script is null)
-            return new()
-            {
-                Type = GrpcKeyValueResponseType.TypeInvalidInput
-            };
-        
-        ValueStopwatch stopwatch = ValueStopwatch.StartNew();
-
-        // Forward the protobuf payload memory directly; it carries offset and length and is
-        // parsed synchronously downstream, so no owned copy is materialized here.
-        KeyValueTransactionResult result = await keyValues.TryExecuteTransactionScript(
-            request.Script.Memory,
-            request.Hash,
-            GetParameters(request.Parameters),
-            TransactionPriorityWire.FromGrpc(request.Priority)
-        );
-
-        GrpcTryExecuteTransactionScriptResponse response = new()
-        {
-            Type = (GrpcKeyValueResponseType) result.Type,
-            TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
-        };
-                                  
-        if (result.ServedFrom is not null)
-            response.ServedFrom = result.ServedFrom;
-        
-        if (result.Reason is not null)
-            response.Reason = result.Reason;
-        
-        List<GrpcTryExecuteTransactionResponseValue> values = new(result.Values?.Count ?? 0);
-
-        if (result.Values is not null)
-        {
-            foreach (KeyValueTransactionResultValue value in result.Values)
-            {
-                GrpcTryExecuteTransactionResponseValue responseValue = new()
-                {
-                    Revision = value.Revision,
-                    ExpiresNode = value.Expires.N,
-                    ExpiresPhysical = value.Expires.L,
-                    ExpiresCounter = value.Expires.C,
-                    LastModifiedNode = value.LastModified.N,
-                    LastModifiedPhysical = value.LastModified.L,
-                    LastModifiedCounter = value.LastModified.C
-                };
-                
-                if (value.Key is not null)
-                    responseValue.Key = value.Key;
-                
-                if (value.Value is not null)
-                    responseValue.Value = UnsafeByteOperations.UnsafeWrap(value.Value);
-                
-                values.Add(responseValue);
-            }
-        }
-        
-        response.Values.AddRange(values);
-        
-        return response;
-    }    
-
-    /// <summary>
     /// Retrieves key-value pairs matching a specific prefix.
     /// </summary>
     /// <param name="request">The request containing the prefix to match against.</param>
@@ -1909,40 +450,6 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return await GetByBucketInternal(request, context);
     }
 
-    /// <summary>
-    /// Handles the logic to retrieve key-value pairs based on a specified prefix.
-    /// </summary>
-    /// <param name="request">The request containing the prefix key and additional parameters for the operation.</param>
-    /// <param name="context">The server call context for managing RPC settings and cancellation.</param>
-    /// <returns>A task that represents the asynchronous operation, returning a response with the matching key-value pairs or an error type.</returns>
-    private async Task<GrpcGetByBucketResponse> GetByBucketCore(GrpcGetByBucketRequest request, ServerCallContext context)
-    {
-        if (request.PrefixKey is null)
-            return new()
-            {
-                Type = GrpcKeyValueResponseType.TypeInvalidInput
-            };
-            
-        KeyValueGetByBucketResult result = await keyValues.LocateAndGetByBucket(
-            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
-            request.PrefixKey,
-            new(request.ReadTimestampNode, request.ReadTimestampPhysical, request.ReadTimestampCounter),
-            (KeyValueDurability)request.Durability,
-            context.CancellationToken,
-            request.CoordinatorKey,
-            new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
-        );
-
-        GrpcGetByBucketResponse response = new()
-        {
-            Type = (GrpcKeyValueResponseType)result.Type
-        };
-        
-        AddKeyValueItems(response.Items, result.Items);
-        
-        return response;
-    }
-    
     /// <summary>
     /// Server-streaming RPC: pages through all items in the given range, emitting one
     /// <see cref="GrpcGetByRangePageResponse"/> per page so the leader never buffers the full table.
@@ -2010,51 +517,6 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     }
 
     /// <summary>
-    /// Batch-batcher entry point: handles a single GetByRange page request, matching the pattern
-    /// used by <see cref="GetByBucketInternal"/>.
-    /// </summary>
-    private async Task<GrpcGetByRangeResponse> GetByRangeCore(GrpcGetByRangeRequest request, ServerCallContext context)
-    {
-        if (string.IsNullOrEmpty(request.Prefix))
-            return new() { Type = GrpcKeyValueResponseType.TypeInvalidInput };
-
-        string? startKey = request.HasStartKey ? request.StartKey : null;
-        string? endKey   = request.HasEndKey   ? request.EndKey   : null;
-
-        KeyValueGetByRangeResult result = await keyValues.LocateAndGetByRange(
-            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
-            request.Prefix,
-            startKey,
-            startKey is null || request.StartInclusive,
-            endKey,
-            endKey is not null && request.EndInclusive,
-            request.Limit,
-            new(request.ReadTimestampNode, request.ReadTimestampPhysical, request.ReadTimestampCounter),
-            (KeyValueDurability)request.Durability,
-            context.CancellationToken,
-            request.CoordinatorKey,
-            new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow),
-            request.SnapshotAtLeader,
-            (KeyValueReadMode)request.ReadMode);
-
-        GrpcGetByRangeResponse response = new()
-        {
-            Type    = (GrpcKeyValueResponseType)result.Type,
-            HasMore = result.HasMore,
-        };
-
-        if (result.NextCursor is not null)
-            response.NextCursor = result.NextCursor;
-
-        if (result.Observation is { } observation)
-            response.Observation = ScanObservationWire.ToGrpc(observation);
-
-        AddKeyValueItems(response.Items, result.Items);
-
-        return response;
-    }
-
-    /// <summary>
     /// Scans for key-value pairs based on a specified prefix.
     /// </summary>
     /// <param name="request">The request containing the prefix and relevant parameters for the scan operation.</param>
@@ -2066,34 +528,6 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     }
 
     /// <summary>
-    /// Handles the internal logic for scanning key-value items by a given prefix.
-    /// </summary>
-    /// <param name="request">The request containing the prefix key and other parameters for the scan operation.</param>
-    /// <param name="context">The server call context for the gRPC operation.</param>
-    /// <returns>A task representing the asynchronous operation, containing the response with the scanned key-value items.</returns>
-    private async Task<GrpcScanByPrefixResponse> ScanByPrefixCore(GrpcScanByPrefixRequest request, ServerCallContext context)
-    {
-        if (request.PrefixKey is null)
-            return new()
-            {
-                Type = GrpcKeyValueResponseType.TypeInvalidInput
-            };
-            
-        HLCTimestamp readTimestamp = new(request.ReadTimestampNode, request.ReadTimestampPhysical, request.ReadTimestampCounter);
-
-        KeyValueGetByBucketResult result = await keyValues.ScanByPrefix(request.PrefixKey, readTimestamp, (KeyValueDurability) request.Durability, request.IncludeTombstones);
-
-        GrpcScanByPrefixResponse response = new()
-        {
-            Type = GrpcKeyValueResponseType.TypeGot,
-        };
-        
-        AddKeyValueItems(response.Items, result.Items);
-        
-        return response;
-    }
-    
-    /// <summary>
     /// Scans all nodes in the cluster and returns key/value pairs by prefix
     /// </summary>
     /// <param name="request"></param>
@@ -2102,37 +536,6 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     public override async Task<GrpcScanAllByPrefixResponse> ScanAllByPrefix(GrpcScanAllByPrefixRequest request, ServerCallContext context)
     {
         return await ScanAllByPrefixInternal(request, context);
-    }
-
-    /// <summary>
-    /// Processes a request to scan all key-value pairs with a specified prefix internally.
-    /// </summary>
-    /// <param name="request">The gRPC request containing the prefix key and additional scan criteria.</param>
-    /// <param name="context">The server call context providing details about the request context.</param>
-    /// <returns>A task that represents the asynchronous operation, returning a response with the scan results or an error type.</returns>
-    private async Task<GrpcScanAllByPrefixResponse> ScanAllByPrefixCore(GrpcScanAllByPrefixRequest request, ServerCallContext context)
-    {
-        if (request.PrefixKey is null)
-            return new()
-            {
-                Type = GrpcKeyValueResponseType.TypeInvalidInput
-            };
-            
-        HLCTimestamp readTimestamp = request.ReadTimestampNode == 0 && request.ReadTimestampPhysical == 0
-            ? HLCTimestamp.Zero
-            : new HLCTimestamp(request.ReadTimestampNode, request.ReadTimestampPhysical, request.ReadTimestampCounter);
-
-        KeyValueGetByBucketResult result = await keyValues.ScanAllByPrefix(request.PrefixKey, readTimestamp, (KeyValueDurability) request.Durability, context.CancellationToken);
-
-        GrpcScanAllByPrefixResponse response = new()
-        {
-            Type = GrpcKeyValueResponseType.TypeGot,
-        };
-        
-        if (result.Items.Count > 0)
-            AddKeyValueItems(response.Items, result.Items);
-        
-        return response;
     }
 
     /// <summary>
@@ -2147,51 +550,6 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     }
 
     /// <summary>
-    /// Handles the internal logic for starting a transaction with the provided request and context.
-    /// </summary>
-    /// <param name="request">The transaction request containing details such as unique identifier, locking type, timeout, and async release options.</param>
-    /// <param name="context">The server call context associated with the gRPC request.</param>
-    /// <returns>A response containing the transaction status and transaction ID (physical and counter).</returns>
-    private async Task<GrpcStartTransactionResponse> StartTransactionCore(GrpcStartTransactionRequest request, ServerCallContext context)
-    {
-        if (string.IsNullOrEmpty(request.CoordinatorKey))
-            return new()
-            {
-                Type = GrpcKeyValueResponseType.TypeInvalidInput
-            };
-
-        (KeyValueResponseType type, TransactionHandle handle) = await keyValues.LocateAndStartTransaction(new()
-        {
-            CoordinatorKey = request.CoordinatorKey,
-            CoordinatorPartitionId = request.HasCoordinatorPartitionId ? request.CoordinatorPartitionId : null,
-            Locking = (KeyValueTransactionLocking)request.LockingType,
-            Timeout = request.Timeout,
-            AsyncRelease = request.AsyncRelease,
-            AutoCommit = request.AutoCommit,
-            ReadValidation = (ReadValidation)request.ReadValidation,
-            DecisionDurability = (DecisionDurability)request.DecisionDurability,
-            Priority = TransactionPriorityWire.FromGrpc(request.Priority),
-            ReadTimestamp = new HLCTimestamp(request.ReadTimestampNode, request.ReadTimestampPhysical, request.ReadTimestampCounter),
-            AdmissionWaitMs = request.AdmissionWaitMs,
-            ConflictPolicy = TransactionConflictPolicyWire.FromGrpc(request.ConflictPolicy),
-            Origin = request.HasOrigin ? request.Origin : null,
-        }, context.CancellationToken);
-
-        GrpcStartTransactionResponse response = new()
-        {
-            Type = (GrpcKeyValueResponseType)type,
-            TransactionIdNode = handle.TransactionId.N,
-            TransactionIdPhysical = handle.TransactionId.L,
-            TransactionIdCounter = handle.TransactionId.C
-        };
-
-        if (!string.IsNullOrEmpty(handle.CoordinatorKey))
-            response.CoordinatorKey = handle.CoordinatorKey;
-
-        return response;
-    }
-
-    /// <summary>
     /// Commits a transaction in the key-value store.
     /// </summary>
     /// <param name="request">The request containing transaction details to be committed.</param>
@@ -2200,49 +558,6 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     public override async Task<GrpcCommitTransactionResponse> CommitTransaction(GrpcCommitTransactionRequest request, ServerCallContext context)
     {
         return await CommitTransactionInternal(request, context);
-    }
-
-    /// <summary>
-    /// Handles the internal logic for committing a transaction in the KeyValues service.
-    /// </summary>
-    /// <param name="request">The transaction commit request containing necessary details such as unique ID and keys.</param>
-    /// <param name="context">The server call context providing metadata and call-specific context.</param>
-    /// <returns>Returns a response indicating the outcome of the transaction commit operation.</returns>
-    private async Task<GrpcCommitTransactionResponse> CommitTransactionCore(GrpcCommitTransactionRequest request, ServerCallContext context)
-    {
-        if (string.IsNullOrEmpty(request.CoordinatorKey))
-            return new()
-            {
-                Type = GrpcKeyValueResponseType.TypeInvalidInput
-            };
-
-        HLCTimestamp transactionId = new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter);
-        // Carry the caller's record anchor: after the coordinator session is gone, it is the only route to the
-        // durable decision, so a commit retry that supplies it resolves the outcome instead of unknown Errored.
-        TransactionHandle handle = new(transactionId, request.CoordinatorKey,
-            request.HasRecordAnchorKey ? request.RecordAnchorKey : null);
-
-        // Commit returns the coordinator's canonical record anchor captured from the frozen finalize
-        // snapshot under the fence, so there is no race window between reading the anchor and freezing the
-        // working set. The anchor is null when the transaction confirmed no persistent write.
-        TransactionCommitAnswer answer = await keyValues.LocateAndCommitTransaction(handle, context.CancellationToken);
-
-        GrpcCommitTransactionResponse response = new()
-        {
-            Type = (GrpcKeyValueResponseType)answer.Type,
-            Refusal = (int)answer.Refusal,
-            CommitTimestampNode = answer.CommitTimestamp.N,
-            CommitTimestampPhysical = answer.CommitTimestamp.L,
-            CommitTimestampCounter = answer.CommitTimestamp.C
-        };
-
-        if (answer.RecordAnchorKey is not null)
-            response.RecordAnchorKey = answer.RecordAnchorKey;
-
-        if (answer.Reason is not null)
-            response.Reason = answer.Reason;
-
-        return response;
     }
 
     /// <summary>
@@ -2256,263 +571,20 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         return await RollbackTransactionInternal(request, context);
     }
 
-    /// <summary>
-    /// Handles the internal rollback of a transaction based on the provided request and context.
-    /// </summary>
-    /// <param name="request">The rollback transaction request containing details such as transaction ID and related keys.</param>
-    /// <param name="context">The server call context for the RPC request.</param>
-    /// <returns>A task representing the operation, returning a <see cref="GrpcRollbackTransactionResponse"/> indicating the result of the rollback operation.</returns>
-    private async Task<GrpcRollbackTransactionResponse> RollbackTransactionCore(GrpcRollbackTransactionRequest request, ServerCallContext context)
-    {
-        if (string.IsNullOrEmpty(request.CoordinatorKey))
-            return new()
-            {
-                Type = GrpcKeyValueResponseType.TypeInvalidInput
-            };
+    internal Task<GrpcBeginOperationResponse> BeginOperationInternal(GrpcBeginOperationRequest request, ServerCallContext context)
+        => transactions.BeginOperationInternal(request, context);
 
-        TransactionHandle handle = new(
-            new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
-            request.CoordinatorKey,
-            // The anchor lets a rollback retry consult the durable decision (a decided commit cannot be undone).
-            request.HasRecordAnchorKey ? request.RecordAnchorKey : null
-        );
+    internal Task<GrpcCompleteOperationResponse> CompleteOperationInternal(GrpcCompleteOperationRequest request, ServerCallContext context)
+        => transactions.CompleteOperationInternal(request, context);
 
-        KeyValueResponseType type = await keyValues.LocateAndRollbackTransaction(handle, context.CancellationToken);
-
-        GrpcRollbackTransactionResponse response = new()
-        {
-            Type = (GrpcKeyValueResponseType)type,
-        };
-
-        return response;
-    }
-
-    /// <summary>
-    /// Inter-node landing point for a register-remote operation registration. Routed through the
-    /// locator rather than straight into the node-local session table: under replica placement the
-    /// sender may have picked a coordinator-partition replica that does not hold the session, and a
-    /// hosting non-leader receiver must redirect once to its accurately-resolved local leader
-    /// instead of answering RejectedSessionClosed from the wrong node.
-    /// </summary>
-    internal async Task<GrpcBeginOperationResponse> BeginOperationInternal(GrpcBeginOperationRequest request, ServerCallContext context)
-    {
-        HLCTimestamp transactionId = new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter);
-        TransactionOperationId operationId = new(request.OperationIdHigh, request.OperationIdLow);
-        byte[]? digest = request.HasPayloadDigest ? request.PayloadDigest.ToByteArray() : null;
-
-        (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy) =
-            await keyValues.LocateAndBeginOperation(request.CoordinatorKey, transactionId, operationId, (OperationKind)request.Kind, digest, context.CancellationToken);
-
-        GrpcBeginOperationResponse response = new()
-        {
-            Outcome = (GrpcOperationRegistrationOutcome)outcome,
-            CachedType = (GrpcKeyValueResponseType)cachedType,
-            CachedRevision = cachedRevision,
-            CachedTimestampNode = cachedTimestamp.N,
-            CachedTimestampPhysical = cachedTimestamp.L,
-            CachedTimestampCounter = cachedTimestamp.C,
-            ConflictPolicy = TransactionConflictPolicyWire.ToGrpc(conflictPolicy)
-        };
-
-        if (recordAnchorKey is not null)
-            response.RecordAnchorKey = recordAnchorKey;
-
-        return response;
-    }
-
-    /// <summary>Inter-node landing point for a register-remote operation completion.</summary>
-    internal async Task<GrpcCompleteOperationResponse> CompleteOperationInternal(GrpcCompleteOperationRequest request, ServerCallContext context)
-    {
-        HLCTimestamp transactionId = new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter);
-        TransactionOperationId operationId = new(request.OperationIdHigh, request.OperationIdLow);
-
-        OperationCompletionPayload payload = FromGrpcCompleteOperationRequest(request);
-
-        (KeyValueResponseType outcome, string? recordAnchorKey) = await keyValues.CompleteOperationInbound(request.CoordinatorKey, transactionId, operationId, payload);
-
-        // This landing point created the shell from the wire and nothing downstream retains it: the
-        // fold copies what it keeps, and a redirect re-serializes before sending. Recycle it here.
-        OperationCompletionPayloadPool.Return(payload);
-
-        GrpcCompleteOperationResponse response = new()
-        {
-            Acknowledged = outcome == KeyValueResponseType.Set
-        };
-        if (recordAnchorKey is not null)
-            response.RecordAnchorKey = recordAnchorKey;
-
-        return response;
-    }
-
-    /// <summary>
-    /// Restores the completion payload from the inter-node request — the inverse of the sender-side
-    /// mapping. Every effect-bearing field must be restored here; a dropped field silently narrows the
-    /// coordinator's working set. The shell is rented; the caller recycles it after the fold.
-    /// </summary>
     internal static OperationCompletionPayload FromGrpcCompleteOperationRequest(GrpcCompleteOperationRequest request)
-    {
-        OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
-        payload.ModifiedKey = request.HasModifiedKey ? request.ModifiedKey : null;
-        payload.AcquiredPointLock = request.HasAcquiredPointLock ? request.AcquiredPointLock : null;
-        payload.ReleasedPointLock = request.HasReleasedPointLock ? request.ReleasedPointLock : null;
-        payload.AcquiredPrefixLock = request.HasAcquiredPrefixLock ? request.AcquiredPrefixLock : null;
-        payload.ReleasedPrefixLock = request.HasReleasedPrefixLock ? request.ReleasedPrefixLock : null;
-        payload.AcquiredRangeLock = request.AcquiredRangeLock is null ? null : (ToRangeLockKey(request.AcquiredRangeLock), (RangeLockMode)request.AcquiredRangeLock.Mode);
-        payload.ReleasedRangeLock = request.ReleasedRangeLock is null ? null : ToRangeLockKey(request.ReleasedRangeLock);
-        payload.AcquiredRangeLocks = request.AcquiredRangeLocks.Count == 0 ? null : request.AcquiredRangeLocks.Select(r => (ToRangeLockKey(r), (RangeLockMode)r.Mode)).ToList();
-        payload.Read = request.Read is null ? null : ToReadKey(request.Read);
-        payload.ReadObservations = request.ReadObservations.Count == 0 ? null : request.ReadObservations.Select(ToReadKey).ToList();
-        payload.ModifiedKeys = request.ModifiedKeys.Count == 0 ? null : request.ModifiedKeys.Select(m => (m.Key, (KeyValueDurability)m.Durability)).ToList();
-        payload.StagedMutations = request.StagedMutations.Count == 0 ? null : request.StagedMutations.Select(FromGrpcStagedMutation).ToList();
-        payload.AcquiredPointLocks = request.AcquiredPointLocks.Count == 0 ? null : request.AcquiredPointLocks.Select(l => (l.Key, (KeyValueDurability)l.Durability)).ToList();
-        payload.LockGrantTerms = request.LockGrantTerms.Count == 0 ? null : request.LockGrantTerms.Select(g => new LockGrantTerm(g.PartitionId, g.Term, g.RoutingKey)).ToList();
-        payload.LockExpiresMs = request.LockExpiresMs;
-        payload.Durability = (KeyValueDurability)request.Durability;
-        payload.CachedType = (KeyValueResponseType)request.CachedType;
-        payload.CachedRevision = request.CachedRevision;
-        payload.CachedTimestamp = new(request.CachedTimestampNode, request.CachedTimestampPhysical, request.CachedTimestampCounter);
-        return payload;
-    }
+        => KeyValueTransactionHandler.FromGrpcCompleteOperationRequest(request);
 
-    /// <summary>Inter-node landing point for a working-set query against the node-local session.</summary>
     internal Task<GrpcGetTransactionWorkingSetResponse> GetTransactionWorkingSetInternal(GrpcGetTransactionWorkingSetRequest request, ServerCallContext context)
-    {
-        HLCTimestamp transactionId = new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter);
+        => transactions.GetTransactionWorkingSetInternal(request, context);
 
-        TransactionWorkingSet? workingSet = keyValues.GetTransactionWorkingSet(transactionId);
-
-        GrpcGetTransactionWorkingSetResponse response = new()
-        {
-            Found = workingSet is not null,
-            WorkingSet = workingSet is null ? new GrpcTransactionWorkingSet() : ToGrpcWorkingSet(workingSet)
-        };
-
-        return Task.FromResult(response);
-    }
-
-    /// <summary>Inter-node landing point for a close-and-snapshot against the node-local session.</summary>
-    private async Task<GrpcCloseTransactionResponse> CloseTransactionCore(GrpcCloseTransactionRequest request, ServerCallContext context)
-    {
-        HLCTimestamp transactionId = new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter);
-
-        (KeyValueResponseType type, TransactionWorkingSet? workingSet) = await keyValues.CloseTransaction(transactionId, context.CancellationToken);
-
-        GrpcCloseTransactionResponse response = new()
-        {
-            Type = (GrpcKeyValueResponseType)type,
-            HasWorkingSet = workingSet is not null,
-            WorkingSet = workingSet is null ? new GrpcTransactionWorkingSet() : ToGrpcWorkingSet(workingSet)
-        };
-
-        return response;
-    }
-
-    private static RangeLockKey ToRangeLockKey(GrpcTransactionRangeLock g) =>
-        new(g.Prefix, g.HasStartKey ? g.StartKey : null, g.StartInclusive, g.HasEndKey ? g.EndKey : null, g.EndInclusive, (KeyValueDurability)g.Durability);
-
-    private static KeyValueTransactionReadKey ToReadKey(GrpcTransactionReadKey g) =>
-        new() { Key = g.Key, Durability = (KeyValueDurability)g.Durability, Exists = g.Exists, Revision = g.Revision };
-
-    // Set-versus-delete comes from the explicit State field; an absent Value stays distinct from an empty one.
-    // A sender from a build without the field sends STATE_UNDEFINED, so fall back to the old presence-derived
-    // rule for exactly that case: absent value = deletion, present value — even empty — = set.
-    internal static StagedMutationEffect FromGrpcStagedMutation(GrpcStagedMutationEffect g) =>
-        new(g.Key,
-            g.HasValue ? g.Value.ToByteArray() : null,
-            g.State != GrpcKeyValueState.StateUndefined
-                ? (KeyValueState)g.State
-                : g.HasValue ? KeyValueState.Set : KeyValueState.Deleted,
-            g.Revision, g.ExpiresMs, g.NoRevision,
-            new HLCTimestamp(g.StagedAtNode, g.StagedAtPhysical, g.StagedAtCounter));
-
-    private static GrpcTransactionWorkingSet ToGrpcWorkingSet(TransactionWorkingSet ws)
-    {
-        GrpcTransactionWorkingSet result = new()
-        {
-            PendingOperationCount = ws.PendingOperationCount
-        };
-
-        if (ws.RecordAnchorKey is not null)
-            result.RecordAnchorKey = ws.RecordAnchorKey;
-
-        foreach (KeyValueTransactionModifiedKey m in ws.ModifiedKeys)
-            result.ModifiedKeys.Add(new GrpcTransactionModifiedKey { Key = m.Key ?? "", Durability = (GrpcKeyValueDurability)m.Durability });
-
-        foreach (KeyValueTransactionModifiedKey m in ws.AcquiredLocks)
-            result.AcquiredLocks.Add(new GrpcTransactionModifiedKey { Key = m.Key ?? "", Durability = (GrpcKeyValueDurability)m.Durability });
-
-        foreach (KeyValueTransactionModifiedKey m in ws.AcquiredPrefixLocks)
-            result.AcquiredPrefixLocks.Add(new GrpcTransactionModifiedKey { Key = m.Key ?? "", Durability = (GrpcKeyValueDurability)m.Durability });
-
-        foreach (KeyValueTransactionRangeLock r in ws.AcquiredRangeLocks)
-        {
-            GrpcTransactionRangeLock grpcRange = new()
-            {
-                Prefix = r.Prefix ?? "",
-                StartInclusive = r.StartInclusive,
-                EndInclusive = r.EndInclusive,
-                Durability = (GrpcKeyValueDurability)r.Durability,
-                Mode = (GrpcRangeLockMode)r.Mode
-            };
-            if (r.StartKey is not null) grpcRange.StartKey = r.StartKey;
-            if (r.EndKey is not null) grpcRange.EndKey = r.EndKey;
-            result.AcquiredRangeLocks.Add(grpcRange);
-        }
-
-        foreach (KeyValueTransactionReadKey rk in ws.ReadKeys)
-            result.ReadKeys.Add(new GrpcTransactionReadKey { Key = rk.Key ?? "", Durability = (GrpcKeyValueDurability)rk.Durability, Exists = rk.Exists, Revision = rk.Revision });
-
-        return result;
-    }
-
-    /// <summary>
-    /// Converts a list of key-value result items into a collection of gRPC key-value prefix item responses.
-    /// </summary>
-    /// <param name="resultItems">A list containing key-value pairs and their associated context.</param>
-    /// <returns>A collection of gRPC key-value prefix item responses.</returns>
-    private static void AddKeyValueItems(RepeatedField<GrpcKeyValueByPrefixItemResponse> target, List<(string, ReadOnlyKeyValueEntry)> resultItems)
-    {
-        ReserveItemCapacity(target, resultItems.Count);
-
-        foreach ((string key, ReadOnlyKeyValueEntry context) in resultItems)
-        {
-            GrpcKeyValueByPrefixItemResponse response = new()
-            {
-                Key = key,
-                Revision = context.Revision,
-                ExpiresNode = context.Expires.N,
-                ExpiresPhysical = context.Expires.L,
-                ExpiresCounter = context.Expires.C,
-                LastUsedNode = context.LastUsed.N,
-                LastUsedPhysical = context.LastUsed.L,
-                LastUsedCounter = context.LastUsed.C,
-                LastModifiedNode = context.LastModified.N,
-                LastModifiedPhysical = context.LastModified.L,
-                LastModifiedCounter = context.LastModified.C,
-                State = (GrpcKeyValueState)context.State,
-            };
-            
-            if (context.Value is not null)
-                response.Value = UnsafeByteOperations.UnsafeWrap(context.Value);
-
-            target.Add(response);
-        }
-    }
-
-    /// <summary>
-    /// Converts a collection of gRPC key-value parameters into a list of KeyValueParameter objects.
-    /// </summary>
-    /// <param name="requestParameters">The collection of gRPC key-value parameters to be converted.</param>
-    /// <returns>A list of KeyValueParameter objects derived from the given gRPC key-value parameters.</returns>
-    private static List<KeyValueParameter> GetParameters(RepeatedField<GrpcKeyValueParameter> requestParameters)
-    {
-        List<KeyValueParameter> parameters = new(requestParameters.Count);
-        
-        foreach (GrpcKeyValueParameter? parameter in requestParameters)
-            parameters.Add(new() { Key = parameter.Key, Value = parameter.Value });
-        
-        return parameters;
-    }
+    internal static StagedMutationEffect FromGrpcStagedMutation(GrpcStagedMutationEffect g)
+        => KeyValueTransactionHandler.FromGrpcStagedMutation(g);
 
     /// <summary>
     /// Processes a batch of client key-value requests using a gRPC bidirectional stream
@@ -2627,395 +699,65 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         };
     }
 
-    internal async Task<GrpcEnsureKeyRangeSeededResponse> EnsureKeyRangeSeededInternal(GrpcEnsureKeyRangeSeededRequest request, ServerCallContext context)
-    {
-        bool success = await keyValues.RegisterKeyRangeAsync(request.KeySpace, context.CancellationToken);
-        return new GrpcEnsureKeyRangeSeededResponse { Success = success };
-    }
+    internal Task<GrpcEnsureKeyRangeSeededResponse> EnsureKeyRangeSeededInternal(GrpcEnsureKeyRangeSeededRequest request, ServerCallContext context)
+        => rangeAdmin.EnsureKeyRangeSeededInternal(request, context);
 
-    internal async Task<GrpcEnsureKeyRangeRemovedResponse> EnsureKeyRangeRemovedInternal(GrpcEnsureKeyRangeRemovedRequest request, ServerCallContext context)
-    {
-        bool success = await keyValues.RemoveKeyRangeAsync(request.KeySpace, context.CancellationToken);
-        return new GrpcEnsureKeyRangeRemovedResponse { Success = success };
-    }
+    internal Task<GrpcEnsureKeyRangeRemovedResponse> EnsureKeyRangeRemovedInternal(GrpcEnsureKeyRangeRemovedRequest request, ServerCallContext context)
+        => rangeAdmin.EnsureKeyRangeRemovedInternal(request, context);
 
-    internal async Task<GrpcGetRangeLocksResponse> GetRangeLocksInternal(GrpcGetRangeLocksRequest request, ServerCallContext context)
-    {
-        List<KeyValueRangeLock> locks = await keyValues.GetRangeLocks(request.KeySpace);
-        GrpcGetRangeLocksResponse response = new();
+    internal Task<GrpcGetRangeLocksResponse> GetRangeLocksInternal(GrpcGetRangeLocksRequest request, ServerCallContext context)
+        => rangeAdmin.GetRangeLocksInternal(request, context);
 
-        foreach (KeyValueRangeLock rl in locks)
-        {
-            GrpcRangeLockEntry entry = new()
-            {
-                TransactionIdNode     = rl.TransactionId.N,
-                TransactionIdPhysical = rl.TransactionId.L,
-                TransactionIdCounter  = rl.TransactionId.C,
-                StartInclusive        = rl.StartInclusive,
-                EndInclusive          = rl.EndInclusive,
-                Mode                  = (GrpcRangeLockMode)rl.Mode,
-                ExpiresNode           = rl.Expires.N,
-                ExpiresPhysical       = rl.Expires.L,
-                ExpiresCounter        = rl.Expires.C,
-            };
+    internal Task<GrpcImportRangeLocksResponse> ImportRangeLocksInternal(GrpcImportRangeLocksRequest request, ServerCallContext context)
+        => rangeAdmin.ImportRangeLocksInternal(request, context);
 
-            if (rl.StartKey is not null) entry.StartKey = rl.StartKey;
-            if (rl.EndKey is not null) entry.EndKey = rl.EndKey;
+    internal Task<GrpcImportCompletionReceiptsResponse> ImportCompletionReceiptsInternal(GrpcImportCompletionReceiptsRequest request, ServerCallContext context)
+        => rangeAdmin.ImportCompletionReceiptsInternal(request, context);
 
-            response.Locks.Add(entry);
-        }
+    internal Task<GrpcReplicateKeyValueRangePageResponse> ReplicateKeyValueRangePageInternal(GrpcReplicateKeyValueRangePageRequest request, ServerCallContext context)
+        => rangeAdmin.ReplicateKeyValueRangePageInternal(request, context);
 
-        return response;
-    }
+    internal Task<GrpcGetRangeTransactionStateResponse> GetRangeTransactionStateInternal(GrpcGetRangeTransactionStateRequest request, ServerCallContext context)
+        => rangeAdmin.GetRangeTransactionStateInternal(request, context);
 
-    internal async Task<GrpcImportRangeLocksResponse> ImportRangeLocksInternal(GrpcImportRangeLocksRequest request, ServerCallContext context)
-    {
-        List<KeyValueRangeLock> locks = new(request.Locks.Count);
+    internal Task<GrpcGetStagedBaseVerdictsResponse> GetStagedBaseVerdictsInternal(GrpcGetStagedBaseVerdictsRequest request, ServerCallContext context)
+        => rangeAdmin.GetStagedBaseVerdictsInternal(request, context);
 
-        foreach (GrpcRangeLockEntry entry in request.Locks)
-        {
-            locks.Add(new KeyValueRangeLock
-            {
-                TransactionId  = new HLCTimestamp(entry.TransactionIdNode, entry.TransactionIdPhysical, entry.TransactionIdCounter),
-                StartKey       = entry.HasStartKey ? entry.StartKey : null,
-                StartInclusive = entry.StartInclusive,
-                EndKey         = entry.HasEndKey ? entry.EndKey : null,
-                EndInclusive   = entry.EndInclusive,
-                Mode           = (RangeLockMode)entry.Mode,
-                Expires        = new HLCTimestamp(entry.ExpiresNode, entry.ExpiresPhysical, entry.ExpiresCounter),
-            });
-        }
+    internal Task<GrpcDurableOperationResponse> DurableOperationInternal(GrpcDurableOperationRequest request, ServerCallContext context)
+        => durable.DurableOperationInternal(request, context);
 
-        await keyValues.ImportRangeLocks(request.KeySpace, locks);
-        return new GrpcImportRangeLocksResponse { Success = true };
-    }
+    internal Task<GrpcLookupTransactionRecordResponse> LookupTransactionRecordInternal(GrpcLookupTransactionRecordRequest request, ServerCallContext context)
+        => durable.LookupTransactionRecordInternal(request, context);
 
-    internal async Task<GrpcImportCompletionReceiptsResponse> ImportCompletionReceiptsInternal(GrpcImportCompletionReceiptsRequest request, ServerCallContext context)
-    {
-        List<CompletionReceiptRecord> receipts = new(request.Receipts.Count);
+    internal Task<GrpcDurableBundleResponse> DurableBundleInternal(GrpcDurableBundleRequest request, ServerCallContext context)
+        => durable.DurableBundleInternal(request, context);
 
-        foreach (GrpcCompletionReceiptEntry entry in request.Receipts)
-        {
-            receipts.Add(new CompletionReceiptRecord(
-                new HLCTimestamp(entry.TransactionIdNode, entry.TransactionIdPhysical, entry.TransactionIdCounter),
-                entry.Key,
-                entry.HasRecordAnchorKey ? entry.RecordAnchorKey : null,
-                (KeyValueDurability)entry.Durability));
-        }
+    internal Task<GrpcDurableDecisionResponse> DurableDecisionInternal(GrpcDurableDecisionRequest request, ServerCallContext context)
+        => durable.DurableDecisionInternal(request, context);
 
-        // The forwarding node routed here because this node is the destination/participant partition leader:
-        // replicate the record (handoff) or forget (durable-acknowledgement release) onto that partition's log
-        // and report whether it was durable so the caller can gate cutover or the receipt release.
-        bool durable = request.Forget
-            ? await keyValues.ForgetCompletionReceiptsReplicated(request.DestinationPartitionId, receipts)
-            : await keyValues.ImportCompletionReceiptsReplicated(request.DestinationPartitionId, receipts);
-        return new GrpcImportCompletionReceiptsResponse { Success = durable };
-    }
-
-    internal async Task<GrpcReplicateKeyValueRangePageResponse> ReplicateKeyValueRangePageInternal(GrpcReplicateKeyValueRangePageRequest request, ServerCallContext context)
-    {
-        // The forwarding node only guessed a replica of the destination partition from its
-        // committed map: apply the page locally when this node leads the group, and otherwise
-        // relay it to the leader this node's own Raft state resolves — waiting out an in-flight
-        // election on the freshly created partition a split targets.
-        bool committed = await keyValues.ReplicateKeyValueRangePageOnLeader(
-            request.PartitionId, request.Page.ToByteArray(), context.CancellationToken);
-        return new GrpcReplicateKeyValueRangePageResponse { Success = committed };
-    }
-
-    internal async Task<GrpcGetRangeTransactionStateResponse> GetRangeTransactionStateInternal(GrpcGetRangeTransactionStateRequest request, ServerCallContext context)
-    {
-        (bool ok, List<CompletionReceiptRecord> receipts, byte[] records, byte[] intents, byte[] heads, bool hasMore, string? nextCursor) =
-            await keyValues.GetRangeTransactionStateLocal(
-                request.PartitionId,
-                request.HasStartKey ? request.StartKey : null,
-                request.HasEndKey ? request.EndKey : null,
-                // Kinds 0 (an old peer's request) means all three — the pre-paging behaviour.
-                (KeyValueRangeStateKinds)request.Kinds,
-                request.HasCursor ? request.Cursor : null,
-                request.MaxItems,
-                context.CancellationToken);
-
-        GrpcGetRangeTransactionStateResponse response = new()
-        {
-            Success = ok,
-            TransactionRecords = records.Length > 0 ? UnsafeByteOperations.UnsafeWrap(records) : ByteString.Empty,
-            PreparedIntents = intents.Length > 0 ? UnsafeByteOperations.UnsafeWrap(intents) : ByteString.Empty,
-            CommittedHeads = heads.Length > 0 ? UnsafeByteOperations.UnsafeWrap(heads) : ByteString.Empty,
-            HasMore = hasMore
-        };
-
-        if (nextCursor is not null)
-            response.NextCursor = nextCursor;
-
-        foreach (CompletionReceiptRecord receipt in receipts)
-        {
-            GrpcCompletionReceiptEntry entry = new()
-            {
-                TransactionIdNode     = receipt.TransactionId.N,
-                TransactionIdPhysical = receipt.TransactionId.L,
-                TransactionIdCounter  = receipt.TransactionId.C,
-                Key                   = receipt.Key,
-                Durability            = (int)receipt.Durability,
-            };
-
-            if (receipt.RecordAnchorKey is not null)
-                entry.RecordAnchorKey = receipt.RecordAnchorKey;
-
-            response.Receipts.Add(entry);
-        }
-
-        return response;
-    }
-
-    internal async Task<GrpcGetStagedBaseVerdictsResponse> GetStagedBaseVerdictsInternal(GrpcGetStagedBaseVerdictsRequest request, ServerCallContext context)
-    {
-        HLCTimestamp transactionId = new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter);
-
-        // The probes count only when aligned with the keys; a misaligned set is an ask this node cannot
-        // interpret and falls back to the applied-intent read.
-        KeyValueStagedBaseProbe[]? probes = null;
-        if (request.Probes.Count > 0 && request.Probes.Count == request.Keys.Count)
-        {
-            probes = new KeyValueStagedBaseProbe[request.Probes.Count];
-            for (int i = 0; i < probes.Length; i++)
-            {
-                GrpcStagedBaseProbe probe = request.Probes[i];
-                probes[i] = new KeyValueStagedBaseProbe(probe.BaseRevision, probe.BaseState, probe.Revision, probe.NoRevision);
-            }
-        }
-
-        (bool serviced, IReadOnlyList<KeyValueStagedBaseVerdictEntry> verdicts) = await keyValues.GetStagedBaseVerdictsLocal(
-            request.PartitionId, transactionId, request.Epoch, request.Keys, probes, request.WaitMs, context.CancellationToken);
-
-        GrpcGetStagedBaseVerdictsResponse response = new() { Serviced = serviced };
-
-        for (int i = 0; i < verdicts.Count; i++)
-            response.Verdicts.Add(new GrpcStagedBaseVerdict
-            {
-                Verdict = (int)verdicts[i].Verdict,
-                HeadRevision = verdicts[i].HeadRevision
-            });
-
-        return response;
-    }
-
-    internal async Task<GrpcDurableOperationResponse> DurableOperationInternal(GrpcDurableOperationRequest request, ServerCallContext context)
-    {
-        bool committed = await keyValues.DurableOperationLocal(
-            request.PartitionId, request.Kind, request.LogType, request.Payload.ToByteArray(), context.CancellationToken);
-        return new GrpcDurableOperationResponse { Committed = committed };
-    }
-
-    internal async Task<GrpcLookupTransactionRecordResponse> LookupTransactionRecordInternal(GrpcLookupTransactionRecordRequest request, ServerCallContext context)
-    {
-        HLCTimestamp transactionId = new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter);
-
-        // Runs on the anchor partition leader (the caller routed it here): the local canonical record store is
-        // authoritative. The record crosses the wire serialized; an absent record answers Found=false.
-        byte[]? record = await keyValues.LookupTransactionRecordLocal(
-            request.PartitionId, transactionId, request.Epoch, request.AnchorKey, context.CancellationToken);
-
-        return new GrpcLookupTransactionRecordResponse
-        {
-            Found = record is not null,
-            Record = record is not null ? UnsafeByteOperations.UnsafeWrap(record) : ByteString.Empty
-        };
-    }
-
-    internal async Task<GrpcDurableBundleResponse> DurableBundleInternal(GrpcDurableBundleRequest request, ServerCallContext context)
-    {
-        (string LogType, byte[] Payload)[] entries = new (string, byte[])[request.Entries.Count];
-        for (int i = 0; i < request.Entries.Count; i++)
-            entries[i] = (request.Entries[i].LogType, request.Entries[i].Payload.ToByteArray());
-
-        DurableBundleWireReply? reply = await keyValues.DurableBundleLocal(
-            request.PartitionId, entries, terminal: request.AdmissionClass == 1, stage: request.Stage,
-            RangeFenceWire.Read(request.Fences, request.FenceKey, request.FenceGeneration), context.CancellationToken);
-
-        // A null reply here means the receiver could not run the bundle at all (an unresolved leadership); the
-        // origin reads a not-committed batch and retries.
-        return new GrpcDurableBundleResponse
-        {
-            BatchCommitted = reply?.BatchCommitted ?? false,
-            PrepareAcknowledged = reply?.PrepareAcknowledged ?? false,
-            PrepareRejection = reply?.PrepareRejection ?? 0
-        };
-    }
-
-    internal async Task<GrpcDurableDecisionResponse> DurableDecisionInternal(GrpcDurableDecisionRequest request, ServerCallContext context)
-    {
-        HLCTimestamp transactionId = new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter);
-
-        DurableDecisionWireReply? reply = await keyValues.DurableDecisionLocal(
-            request.PartitionId, request.DecisionDelta.ToByteArray(), transactionId, request.Epoch,
-            RangeFenceWire.Read(request.Fences, request.FenceKey, request.FenceGeneration), context.CancellationToken);
-
-        return new GrpcDurableDecisionResponse
-        {
-            Replicated = reply?.Replicated ?? false,
-            Known = reply?.Known ?? false,
-            Decision = reply?.Decision ?? 0,
-            AbortClass = reply?.AbortClass ?? 0
-        };
-    }
-
-    internal async Task<GrpcDurableOnePhaseResponse> DurableOnePhaseInternal(GrpcDurableOnePhaseRequest request, ServerCallContext context)
-    {
-        HLCTimestamp transactionId = new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter);
-        HLCTimestamp opId = new(request.OpIdNode, request.OpIdPhysical, request.OpIdCounter);
-
-        // A null reply here means the receiver could not run the bundle at all (an unresolved leadership); the
-        // origin reads a not-committed batch and retries.
-        DurableOnePhaseWireReply? reply = await keyValues.DurableOnePhaseLocal(
-            request.PartitionId, request.RecordInitDelta.ToByteArray(), request.AnchorPrepareDelta.ToByteArray(),
-            request.DecisionDelta.ToByteArray(), transactionId, request.Epoch, opId,
-            RangeFenceWire.Read(request.Fences, request.FenceKey, request.FenceGeneration), request.ExpectedTerm, context.CancellationToken);
-
-        return new GrpcDurableOnePhaseResponse
-        {
-            BatchCommitted = reply?.BatchCommitted ?? false,
-            PrepareAcknowledged = reply?.PrepareAcknowledged ?? false,
-            PrepareRejection = reply?.PrepareRejection ?? 0,
-            DecisionKnown = reply?.DecisionKnown ?? false,
-            Decision = reply?.Decision ?? 0,
-            AbortClass = reply?.AbortClass ?? 0,
-            GatedVerdict = reply?.GatedVerdict ?? 0,
-            BundleMs = reply?.BundleMs ?? -1
-        };
-    }
-
-
-
-
+    internal Task<GrpcDurableOnePhaseResponse> DurableOnePhaseInternal(GrpcDurableOnePhaseRequest request, ServerCallContext context)
+        => durable.DurableOnePhaseInternal(request, context);
 
     public override Task<GrpcAcquireSnapshotHoldResponse> AcquireSnapshotHold(GrpcAcquireSnapshotHoldRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.AcquireSnapshotHoldCore(r, c), static _ => KeyValueMustRetry.AcquireSnapshotHold());
-
-    private async Task<GrpcAcquireSnapshotHoldResponse> AcquireSnapshotHoldCore(
-        GrpcAcquireSnapshotHoldRequest request, ServerCallContext context)
-    {
-        if (request.LeaseMs <= 0)
-            return new() { Type = GrpcKeyValueResponseType.TypeInvalidInput };
-
-        (KeyValueResponseType type, string holdId, HLCTimestamp leaseExpiry) =
-            await keyValues.LocateAndAcquireSnapshotHold(
-                request.HolderId,
-                new(request.TimestampNode, request.TimestampPhysical, request.TimestampCounter),
-                request.LeaseMs,
-                context.CancellationToken).ConfigureAwait(false);
-
-        return new()
-        {
-            Type               = (GrpcKeyValueResponseType)type,
-            HoldId             = holdId,
-            LeaseExpiryNode     = leaseExpiry.N,
-            LeaseExpiryPhysical = leaseExpiry.L,
-            LeaseExpiryCounter  = leaseExpiry.C
-        };
-    }
+        => Guard(request, context, static (s, r, c) => s.snapshots.AcquireSnapshotHoldCore(r, c), static _ => KeyValueMustRetry.AcquireSnapshotHold());
 
     public override Task<GrpcRenewSnapshotHoldResponse> RenewSnapshotHold(GrpcRenewSnapshotHoldRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.RenewSnapshotHoldCore(r, c), static _ => KeyValueMustRetry.RenewSnapshotHold());
-
-    private async Task<GrpcRenewSnapshotHoldResponse> RenewSnapshotHoldCore(
-        GrpcRenewSnapshotHoldRequest request, ServerCallContext context)
-    {
-        if (request.LeaseMs <= 0)
-            return new() { Type = GrpcKeyValueResponseType.TypeInvalidInput };
-
-        (KeyValueResponseType type, HLCTimestamp leaseExpiry) =
-            await keyValues.LocateAndRenewSnapshotHold(
-                request.HoldId,
-                request.LeaseMs,
-                context.CancellationToken).ConfigureAwait(false);
-
-        return new()
-        {
-            Type               = (GrpcKeyValueResponseType)type,
-            LeaseExpiryNode     = leaseExpiry.N,
-            LeaseExpiryPhysical = leaseExpiry.L,
-            LeaseExpiryCounter  = leaseExpiry.C
-        };
-    }
+        => Guard(request, context, static (s, r, c) => s.snapshots.RenewSnapshotHoldCore(r, c), static _ => KeyValueMustRetry.RenewSnapshotHold());
 
     public override Task<GrpcReleaseSnapshotHoldResponse> ReleaseSnapshotHold(GrpcReleaseSnapshotHoldRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.ReleaseSnapshotHoldCore(r, c), static _ => KeyValueMustRetry.ReleaseSnapshotHold());
-
-    private async Task<GrpcReleaseSnapshotHoldResponse> ReleaseSnapshotHoldCore(
-        GrpcReleaseSnapshotHoldRequest request, ServerCallContext context)
-    {
-        KeyValueResponseType type =
-            await keyValues.LocateAndReleaseSnapshotHold(
-                request.HoldId,
-                context.CancellationToken).ConfigureAwait(false);
-
-        return new() { Type = (GrpcKeyValueResponseType)type };
-    }
+        => Guard(request, context, static (s, r, c) => s.snapshots.ReleaseSnapshotHoldCore(r, c), static _ => KeyValueMustRetry.ReleaseSnapshotHold());
 
     public override Task<GrpcGetSnapshotFloorResponse> GetSnapshotFloor(GrpcGetSnapshotFloorRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.GetSnapshotFloorCore(r, c), static _ => KeyValueMustRetry.GetSnapshotFloor());
-
-    private async Task<GrpcGetSnapshotFloorResponse> GetSnapshotFloorCore(
-        GrpcGetSnapshotFloorRequest request, ServerCallContext context)
-    {
-        (KeyValueResponseType type, HLCTimestamp floor, int liveHolds) =
-            await keyValues.GetSnapshotFloor(context.CancellationToken).ConfigureAwait(false);
-
-        return new()
-        {
-            Type                   = (GrpcKeyValueResponseType)type,
-            EffectiveFloorNode     = floor.N,
-            EffectiveFloorPhysical = floor.L,
-            EffectiveFloorCounter  = floor.C,
-            LiveHolds              = liveHolds
-        };
-    }
+        => Guard(request, context, static (s, r, c) => s.snapshots.GetSnapshotFloorCore(r, c), static _ => KeyValueMustRetry.GetSnapshotFloor());
 
     public override Task<GrpcHistoryHoldResponse> HistoryHold(GrpcHistoryHoldRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.HistoryHoldCore(r, c), static _ => KeyValueMustRetry.HistoryHold());
-
-    private async Task<GrpcHistoryHoldResponse> HistoryHoldCore(GrpcHistoryHoldRequest request, ServerCallContext context) =>
-        HistoryHoldWire.ToGrpc(await keyValues.HistoryHold(HistoryHoldWire.FromGrpc(request), context.CancellationToken).ConfigureAwait(false));
+        => Guard(request, context, static (s, r, c) => s.snapshots.HistoryHoldCore(r, c), static _ => KeyValueMustRetry.HistoryHold());
 
     public override Task<GrpcGetPartitionApplyFingerprintResponse> GetPartitionApplyFingerprint(GrpcGetPartitionApplyFingerprintRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.GetPartitionApplyFingerprintCore(r, c), static _ => KeyValueMustRetry.GetPartitionApplyFingerprint());
-
-    private async Task<GrpcGetPartitionApplyFingerprintResponse> GetPartitionApplyFingerprintCore(
-        GrpcGetPartitionApplyFingerprintRequest request, ServerCallContext context)
-    {
-        (KeyValueResponseType type, KeyValueApplyFingerprint fingerprint) =
-            await keyValues.GetPartitionApplyFingerprint(request.PartitionId, context.CancellationToken).ConfigureAwait(false);
-
-        return new()
-        {
-            Type           = (GrpcKeyValueResponseType)type,
-            AppliedLogId   = fingerprint.AppliedLogId,
-            CommittedHeads = fingerprint.CommittedHeads,
-            LiveIntents    = fingerprint.LiveIntents
-        };
-    }
+        => Guard(request, context, static (s, r, c) => s.snapshots.GetPartitionApplyFingerprintCore(r, c), static _ => KeyValueMustRetry.GetPartitionApplyFingerprint());
 
     public override Task<GrpcGetPreparedIntentPresenceResponse> GetPreparedIntentPresence(GrpcGetPreparedIntentPresenceRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.GetPreparedIntentPresenceCore(r, c), static _ => KeyValueMustRetry.GetPreparedIntentPresence());
-
-    private async Task<GrpcGetPreparedIntentPresenceResponse> GetPreparedIntentPresenceCore(
-        GrpcGetPreparedIntentPresenceRequest request, ServerCallContext context)
-    {
-        (KeyValueResponseType type, bool held, long appliedLogId) = await keyValues.GetPreparedIntentPresence(
-            request.PartitionId,
-            new HLCTimestamp(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
-            request.Epoch,
-            request.Key,
-            context.CancellationToken).ConfigureAwait(false);
-
-        return new()
-        {
-            Type         = (GrpcKeyValueResponseType)type,
-            Held         = held,
-            AppliedLogId = appliedLogId
-        };
-    }
+        => Guard(request, context, static (s, r, c) => s.snapshots.GetPreparedIntentPresenceCore(r, c), static _ => KeyValueMustRetry.GetPreparedIntentPresence());
 
     // ── Retryable-failure guards ────────────────────────────────────────────────────────────────
     //
@@ -3079,122 +821,122 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     }
 
     internal ValueTask<GrpcTrySetKeyValueResponse> TrySetKeyValueInternal(GrpcTrySetKeyValueRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.TrySetKeyValueCore(r, c), static _ => KeyValueMustRetry.TrySetKeyValue());
+        => Guard(request, context, static (s, r, c) => s.writes.TrySetKeyValueCore(r, c), static _ => KeyValueMustRetry.TrySetKeyValue());
 
     internal Task<GrpcTrySetManyKeyValueResponse> TrySetManyKeyValueInternal(GrpcTrySetManyKeyValueRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.TrySetManyKeyValueCore(r, c), static r => KeyValueMustRetry.TrySetManyKeyValue(r));
+        => Guard(request, context, static (s, r, c) => s.writes.TrySetManyKeyValueCore(r, c), static r => KeyValueMustRetry.TrySetManyKeyValue(r));
 
     internal Task<GrpcTryDeleteManyKeyValueResponse> TryDeleteManyKeyValueInternal(GrpcTryDeleteManyKeyValueRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.TryDeleteManyKeyValueCore(r, c), static r => KeyValueMustRetry.TryDeleteManyKeyValue(r));
+        => Guard(request, context, static (s, r, c) => s.writes.TryDeleteManyKeyValueCore(r, c), static r => KeyValueMustRetry.TryDeleteManyKeyValue(r));
 
     internal Task<GrpcTryExtendKeyValueResponse> TryExtendKeyValueInternal(GrpcTryExtendKeyValueRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.TryExtendKeyValueCore(r, c), static _ => KeyValueMustRetry.TryExtendKeyValue());
+        => Guard(request, context, static (s, r, c) => s.writes.TryExtendKeyValueCore(r, c), static _ => KeyValueMustRetry.TryExtendKeyValue());
 
     internal Task<GrpcTryDeleteKeyValueResponse> TryDeleteKeyValueInternal(GrpcTryDeleteKeyValueRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.TryDeleteKeyValueCore(r, c), static _ => KeyValueMustRetry.TryDeleteKeyValue());
+        => Guard(request, context, static (s, r, c) => s.writes.TryDeleteKeyValueCore(r, c), static _ => KeyValueMustRetry.TryDeleteKeyValue());
 
     internal Task<GrpcTryGetKeyValueResponse> TryGetKeyValueInternal(GrpcTryGetKeyValueRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.TryGetKeyValueCore(r, c), static _ => KeyValueMustRetry.TryGetKeyValue());
+        => Guard(request, context, static (s, r, c) => s.reads.TryGetKeyValueCore(r, c), static _ => KeyValueMustRetry.TryGetKeyValue());
 
     internal Task<GrpcTryGetManyValuesResponse> TryGetManyValuesInternal(GrpcTryGetManyValuesRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.TryGetManyValuesCore(r, c), static r => KeyValueMustRetry.TryGetManyValues(r));
+        => Guard(request, context, static (s, r, c) => s.reads.TryGetManyValuesCore(r, c), static r => KeyValueMustRetry.TryGetManyValues(r));
 
     internal Task<GrpcTryProbeManyResponse> TryProbeManyInternal(GrpcTryProbeManyRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.TryProbeManyCore(r, c), static r => ProbeManyWire.MustRetry(r));
+        => Guard(request, context, static (s, r, c) => s.reads.TryProbeManyCore(r, c), static r => ProbeManyWire.MustRetry(r));
 
     internal Task<GrpcTryProbeManyRangesResponse> TryProbeManyRangesInternal(GrpcTryProbeManyRangesRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.TryProbeManyRangesCore(r, c), static r => ProbeManyRangesWire.MustRetry(r));
+        => Guard(request, context, static (s, r, c) => s.reads.TryProbeManyRangesCore(r, c), static r => ProbeManyRangesWire.MustRetry(r));
 
     internal Task<GrpcTryExistsKeyValueResponse> TryExistsKeyValueInternal(GrpcTryExistsKeyValueRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.TryExistsKeyValueCore(r, c), static _ => KeyValueMustRetry.TryExistsKeyValue());
+        => Guard(request, context, static (s, r, c) => s.reads.TryExistsKeyValueCore(r, c), static _ => KeyValueMustRetry.TryExistsKeyValue());
 
     internal Task<GrpcTryExistsManyValuesResponse> TryExistsManyValuesInternal(GrpcTryExistsManyValuesRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.TryExistsManyValuesCore(r, c), static r => KeyValueMustRetry.TryExistsManyValues(r));
+        => Guard(request, context, static (s, r, c) => s.reads.TryExistsManyValuesCore(r, c), static r => KeyValueMustRetry.TryExistsManyValues(r));
 
     internal Task<GrpcTryCheckWriteIntentResponse> TryCheckWriteIntentInternal(GrpcTryCheckWriteIntentRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.TryCheckWriteIntentCore(r, c), static _ => KeyValueMustRetry.TryCheckWriteIntent());
+        => Guard(request, context, static (s, r, c) => s.reads.TryCheckWriteIntentCore(r, c), static _ => KeyValueMustRetry.TryCheckWriteIntent());
 
     internal Task<GrpcTryCheckManyWriteIntentsResponse> TryCheckManyWriteIntentsInternal(GrpcTryCheckManyWriteIntentsRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.TryCheckManyWriteIntentsCore(r, c), static r => KeyValueMustRetry.TryCheckManyWriteIntents(r));
+        => Guard(request, context, static (s, r, c) => s.reads.TryCheckManyWriteIntentsCore(r, c), static r => KeyValueMustRetry.TryCheckManyWriteIntents(r));
 
     internal Task<GrpcTryAcquireExclusiveLockResponse> TryAcquireExclusiveLockInternal(GrpcTryAcquireExclusiveLockRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.TryAcquireExclusiveLockCore(r, c), static _ => KeyValueMustRetry.TryAcquireExclusiveLock());
+        => Guard(request, context, static (s, r, c) => s.locks.TryAcquireExclusiveLockCore(r, c), static _ => KeyValueMustRetry.TryAcquireExclusiveLock());
 
     internal Task<GrpcTryAcquireExclusivePrefixLockResponse> TryAcquireExclusivePrefixLockInternal(GrpcTryAcquireExclusivePrefixLockRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.TryAcquireExclusivePrefixLockCore(r, c), static _ => KeyValueMustRetry.TryAcquireExclusivePrefixLock());
+        => Guard(request, context, static (s, r, c) => s.locks.TryAcquireExclusivePrefixLockCore(r, c), static _ => KeyValueMustRetry.TryAcquireExclusivePrefixLock());
 
     internal Task<GrpcTryAcquireManyExclusiveLocksResponse> TryAcquireManyExclusiveLocksInternal(GrpcTryAcquireManyExclusiveLocksRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.TryAcquireManyExclusiveLocksCore(r, c), static r => KeyValueMustRetry.TryAcquireManyExclusiveLocks(r));
+        => Guard(request, context, static (s, r, c) => s.locks.TryAcquireManyExclusiveLocksCore(r, c), static r => KeyValueMustRetry.TryAcquireManyExclusiveLocks(r));
 
     internal Task<GrpcTryReleaseExclusiveLockResponse> TryReleaseExclusiveLockInternal(GrpcTryReleaseExclusiveLockRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.TryReleaseExclusiveLockCore(r, c), static _ => KeyValueMustRetry.TryReleaseExclusiveLock());
+        => Guard(request, context, static (s, r, c) => s.locks.TryReleaseExclusiveLockCore(r, c), static _ => KeyValueMustRetry.TryReleaseExclusiveLock());
 
     internal Task<GrpcTryReleaseExclusivePrefixLockResponse> TryReleaseExclusivePrefixLockInternal(GrpcTryReleaseExclusivePrefixLockRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.TryReleaseExclusivePrefixLockCore(r, c), static _ => KeyValueMustRetry.TryReleaseExclusivePrefixLock());
+        => Guard(request, context, static (s, r, c) => s.locks.TryReleaseExclusivePrefixLockCore(r, c), static _ => KeyValueMustRetry.TryReleaseExclusivePrefixLock());
 
     internal Task<GrpcTryAcquireExclusiveRangeLockResponse> TryAcquireExclusiveRangeLockInternal(GrpcTryAcquireExclusiveRangeLockRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.TryAcquireExclusiveRangeLockCore(r, c), static _ => KeyValueMustRetry.TryAcquireExclusiveRangeLock());
+        => Guard(request, context, static (s, r, c) => s.locks.TryAcquireExclusiveRangeLockCore(r, c), static _ => KeyValueMustRetry.TryAcquireExclusiveRangeLock());
 
     internal Task<GrpcTryReleaseExclusiveRangeLockResponse> TryReleaseExclusiveRangeLockInternal(GrpcTryReleaseExclusiveRangeLockRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.TryReleaseExclusiveRangeLockCore(r, c), static _ => KeyValueMustRetry.TryReleaseExclusiveRangeLock());
+        => Guard(request, context, static (s, r, c) => s.locks.TryReleaseExclusiveRangeLockCore(r, c), static _ => KeyValueMustRetry.TryReleaseExclusiveRangeLock());
 
     internal Task<GrpcTryReleaseManyExclusiveLocksResponse> TryReleaseManyExclusiveLocksInternal(GrpcTryReleaseManyExclusiveLocksRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.TryReleaseManyExclusiveLocksCore(r, c), static r => KeyValueMustRetry.TryReleaseManyExclusiveLocks(r));
+        => Guard(request, context, static (s, r, c) => s.locks.TryReleaseManyExclusiveLocksCore(r, c), static r => KeyValueMustRetry.TryReleaseManyExclusiveLocks(r));
 
     internal Task<GrpcTryPrepareMutationsResponse> TryPrepareMutationsInternal(GrpcTryPrepareMutationsRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.TryPrepareMutationsCore(r, c), static _ => KeyValueMustRetry.TryPrepareMutations());
+        => Guard(request, context, static (s, r, c) => s.mutations.TryPrepareMutationsCore(r, c), static _ => KeyValueMustRetry.TryPrepareMutations());
 
     internal Task<GrpcTryPrepareManyMutationsResponse> TryPrepareManyMutationsInternal(GrpcTryPrepareManyMutationsRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.TryPrepareManyMutationsCore(r, c), static r => KeyValueMustRetry.TryPrepareManyMutations(r));
+        => Guard(request, context, static (s, r, c) => s.mutations.TryPrepareManyMutationsCore(r, c), static r => KeyValueMustRetry.TryPrepareManyMutations(r));
 
     internal Task<GrpcTryCommitMutationsResponse> TryCommitMutationsInternal(GrpcTryCommitMutationsRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.TryCommitMutationsCore(r, c), static _ => KeyValueMustRetry.TryCommitMutations());
+        => Guard(request, context, static (s, r, c) => s.mutations.TryCommitMutationsCore(r, c), static _ => KeyValueMustRetry.TryCommitMutations());
 
     internal Task<GrpcTryCommitManyMutationsResponse> TryCommitManyMutationsInternal(GrpcTryCommitManyMutationsRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.TryCommitManyMutationsCore(r, c), static r => KeyValueMustRetry.TryCommitManyMutations(r));
+        => Guard(request, context, static (s, r, c) => s.mutations.TryCommitManyMutationsCore(r, c), static r => KeyValueMustRetry.TryCommitManyMutations(r));
 
     internal Task<GrpcTryRollbackMutationsResponse> TryRollbackMutationsInternal(GrpcTryRollbackMutationsRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.TryRollbackMutationsCore(r, c), static _ => KeyValueMustRetry.TryRollbackMutations());
+        => Guard(request, context, static (s, r, c) => s.mutations.TryRollbackMutationsCore(r, c), static _ => KeyValueMustRetry.TryRollbackMutations());
 
     internal Task<GrpcTryRollbackManyMutationsResponse> TryRollbackManyMutationsInternal(GrpcTryRollbackManyMutationsRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.TryRollbackManyMutationsCore(r, c), static r => KeyValueMustRetry.TryRollbackManyMutations(r));
+        => Guard(request, context, static (s, r, c) => s.mutations.TryRollbackManyMutationsCore(r, c), static r => KeyValueMustRetry.TryRollbackManyMutations(r));
 
     internal Task<GrpcTryExecuteTransactionScriptResponse> TryExecuteTransactionScriptInternal(GrpcTryExecuteTransactionScriptRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.TryExecuteTransactionScriptCore(r, c), static _ => KeyValueMustRetry.TryExecuteTransactionScript());
+        => Guard(request, context, static (s, r, c) => s.transactions.TryExecuteTransactionScriptCore(r, c), static _ => KeyValueMustRetry.TryExecuteTransactionScript());
 
     internal Task<GrpcGetByBucketResponse> GetByBucketInternal(GrpcGetByBucketRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.GetByBucketCore(r, c), static _ => KeyValueMustRetry.GetByBucket());
+        => Guard(request, context, static (s, r, c) => s.scans.GetByBucketCore(r, c), static _ => KeyValueMustRetry.GetByBucket());
 
     internal Task<GrpcGetByRangeResponse> GetByRangeInternal(GrpcGetByRangeRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.GetByRangeCore(r, c), static _ => KeyValueMustRetry.GetByRange());
+        => Guard(request, context, static (s, r, c) => s.scans.GetByRangeCore(r, c), static _ => KeyValueMustRetry.GetByRange());
 
     internal Task<GrpcScanByPrefixResponse> ScanByPrefixInternal(GrpcScanByPrefixRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.ScanByPrefixCore(r, c), static _ => KeyValueMustRetry.ScanByPrefix());
+        => Guard(request, context, static (s, r, c) => s.scans.ScanByPrefixCore(r, c), static _ => KeyValueMustRetry.ScanByPrefix());
 
     internal Task<GrpcScanAllByPrefixResponse> ScanAllByPrefixInternal(GrpcScanAllByPrefixRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.ScanAllByPrefixCore(r, c), static _ => KeyValueMustRetry.ScanAllByPrefix());
+        => Guard(request, context, static (s, r, c) => s.scans.ScanAllByPrefixCore(r, c), static _ => KeyValueMustRetry.ScanAllByPrefix());
 
     internal Task<GrpcStartTransactionResponse> StartTransactionInternal(GrpcStartTransactionRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.StartTransactionCore(r, c), static _ => KeyValueMustRetry.StartTransaction());
+        => Guard(request, context, static (s, r, c) => s.transactions.StartTransactionCore(r, c), static _ => KeyValueMustRetry.StartTransaction());
 
     internal Task<GrpcCommitTransactionResponse> CommitTransactionInternal(GrpcCommitTransactionRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.CommitTransactionCore(r, c), static _ => KeyValueMustRetry.CommitTransaction());
+        => Guard(request, context, static (s, r, c) => s.transactions.CommitTransactionCore(r, c), static _ => KeyValueMustRetry.CommitTransaction());
 
     internal Task<GrpcRollbackTransactionResponse> RollbackTransactionInternal(GrpcRollbackTransactionRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.RollbackTransactionCore(r, c), static _ => KeyValueMustRetry.RollbackTransaction());
+        => Guard(request, context, static (s, r, c) => s.transactions.RollbackTransactionCore(r, c), static _ => KeyValueMustRetry.RollbackTransaction());
 
     internal Task<GrpcCloseTransactionResponse> CloseTransactionInternal(GrpcCloseTransactionRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.CloseTransactionCore(r, c), static _ => KeyValueMustRetry.CloseTransaction());
+        => Guard(request, context, static (s, r, c) => s.transactions.CloseTransactionCore(r, c), static _ => KeyValueMustRetry.CloseTransaction());
 
     internal Task<GrpcAcquireSnapshotHoldResponse> AcquireSnapshotHoldInternal(GrpcAcquireSnapshotHoldRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.AcquireSnapshotHoldCore(r, c), static _ => KeyValueMustRetry.AcquireSnapshotHold());
+        => Guard(request, context, static (s, r, c) => s.snapshots.AcquireSnapshotHoldCore(r, c), static _ => KeyValueMustRetry.AcquireSnapshotHold());
 
     internal Task<GrpcRenewSnapshotHoldResponse> RenewSnapshotHoldInternal(GrpcRenewSnapshotHoldRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.RenewSnapshotHoldCore(r, c), static _ => KeyValueMustRetry.RenewSnapshotHold());
+        => Guard(request, context, static (s, r, c) => s.snapshots.RenewSnapshotHoldCore(r, c), static _ => KeyValueMustRetry.RenewSnapshotHold());
 
     internal Task<GrpcReleaseSnapshotHoldResponse> ReleaseSnapshotHoldInternal(GrpcReleaseSnapshotHoldRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.ReleaseSnapshotHoldCore(r, c), static _ => KeyValueMustRetry.ReleaseSnapshotHold());
+        => Guard(request, context, static (s, r, c) => s.snapshots.ReleaseSnapshotHoldCore(r, c), static _ => KeyValueMustRetry.ReleaseSnapshotHold());
 
     internal Task<GrpcGetSnapshotFloorResponse> GetSnapshotFloorInternal(GrpcGetSnapshotFloorRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.GetSnapshotFloorCore(r, c), static _ => KeyValueMustRetry.GetSnapshotFloor());
+        => Guard(request, context, static (s, r, c) => s.snapshots.GetSnapshotFloorCore(r, c), static _ => KeyValueMustRetry.GetSnapshotFloor());
 }
