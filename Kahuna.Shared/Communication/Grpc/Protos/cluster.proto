@@ -174,8 +174,8 @@ message GrpcSplitRangeRequest {
 message GrpcSplitRangeResponse {
   bool Success = 1;
   // Outcome name: Succeeded, NotLeader, NoRange, InvalidSplitKey, BelowMinRangeSize,
-  // PartitionCreationFailed, TransferFailed, QuiesceFailed, CutoverFailed, ConcurrentSplit,
-  // Indeterminate, InvalidInput or KeyRangeDisabled.
+  // PartitionCreationFailed, PartitionLimitReached, TransferFailed, QuiesceFailed, CutoverFailed,
+  // ConcurrentSplit, Indeterminate, InvalidInput or KeyRangeDisabled.
   string Status = 2;
   // False when the map may still change despite this answer. A caller that treats an
   // indeterminate outcome as "the split did not happen" will report phantom violations.

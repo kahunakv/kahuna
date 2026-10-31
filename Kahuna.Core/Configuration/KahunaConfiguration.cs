@@ -921,6 +921,18 @@ public sealed class KahunaConfiguration
     public int RangeMergeMinSize { get; set; } = 10;
 
     /// <summary>
+    /// Most ranges one key space may hold. 0 (the default) means no quota. Each range is a Raft
+    /// partition, and the cluster-wide ceiling on partitions belongs to Kommander
+    /// (<c>RaftConfiguration.MaxPartitions</c>); without this quota one hot key space can take every
+    /// remaining slot under that ceiling. The meta-partition leader checks it under the split lock
+    /// against the committed range map before it creates the destination partition, so a split past
+    /// the quota is refused as <c>PartitionLimitReached</c> with nothing created, and other key
+    /// spaces can still split. This is a policy, not a safety bound: the Kommander ceiling is the
+    /// safety bound.
+    /// </summary>
+    public int RangeMaxRangesPerKeySpace { get; set; }
+
+    /// <summary>
     /// Length of the point-in-time recovery window. WAL entries older than
     /// <c>now - PitrWindow</c> may be compacted away. Valid range: (0, 6h].
     /// </summary>

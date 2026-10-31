@@ -128,6 +128,9 @@ public sealed class KahunaCommandLineOptions
 
     [Option("initial-cluster-partitions", Required = false, HelpText = "Initial cluster number of partitions", Default = 3)] // 32
     public int InitialClusterPartitions { get; set; } = 3;
+
+    [Option("raft-max-partitions", Required = false, HelpText = "Most data partitions (ranges) the cluster may hold. Past it a range split is refused as PartitionLimitReached with nothing created. Only the system leader checks it, so set the same value on every node; it must not be below --initial-cluster-partitions. 0 (the default) means no bound.", Default = 0)]
+    public int RaftMaxPartitions { get; set; }
     
     [Option("raft-nodename", Required = false, HelpText = "Unique name to identify the node in the cluster")]
     public string RaftNodeName { get; set; } = "";
@@ -890,6 +893,9 @@ public sealed class KahunaCommandLineOptions
 
     [Option("range-merge-min-size", Required = false, HelpText = "Key count below which two adjacent ranges become eligible to be merged back together. 0 disables auto-merge entirely (the checker is not started). Default 10.", Default = 10)]
     public int RangeMergeMinSize { get; set; } = 10;
+
+    [Option("range-max-ranges-per-key-space", Required = false, HelpText = "Most ranges one key space may hold. A split past it is refused as PartitionLimitReached and other key spaces can still split. 0 (the default) means no quota; the cluster-wide ceiling is --raft-max-partitions.", Default = 0)]
+    public int RangeMaxRangesPerKeySpace { get; set; }
 
     [Option("range-collection-interval", Required = false, HelpText = "Seconds between range split/merge sampling passes. Shared with the key-value collector, prepared-intent recovery and session range-lock renewal (whose lease is twice this interval), so lowering it to make splits fire sooner also shortens those; refused below the phase-two commit timeout. Default 60.", Default = 60)]
     public int RangeCollectionIntervalSeconds { get; set; } = 60;

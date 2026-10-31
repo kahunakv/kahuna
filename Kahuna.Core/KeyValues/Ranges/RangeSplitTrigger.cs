@@ -107,6 +107,29 @@ internal sealed class RangeSplitTrigger : IDisposable
     /// <summary>Ceiling for the doubled delay.</summary>
     private readonly TimeSpan drainRefusalBackoffMax;
 
+    // Cluster-wide pause after Kommander refused a create at its partition-count bound. Every split
+    // needs a new partition, so while the cluster is full every candidate gets the same refusal, and
+    // without the pause the load branch would re-sample and re-ask on every poll. The pause ends when
+    // the committed partition map holds fewer partitions than it did at the refusal (a removal or a
+    // merge freed a slot) or when a split succeeds. Once partitionLimitBackoff passes, one more
+    // attempt is allowed; a refusal then restarts the wait without a new warning, because the episode
+    // (and its single warning) lasts until a slot frees. Null when no episode is open.
+    private PartitionLimitEpisode? partitionLimitEpisode;
+
+    /// <summary>When the last partition-limit refusal happened, and the partition count it saw.</summary>
+    private sealed record PartitionLimitEpisode(long Tick, int Partitions);
+
+    /// <summary>Longest wait before re-trying a split at the partition limit when no slot freed.</summary>
+    private readonly TimeSpan partitionLimitBackoff;
+
+    /// <summary>Most ranges one key space may hold; 0 means no quota.</summary>
+    private readonly int maxRangesPerKeySpace;
+
+    // Key spaces whose split was refused at their range quota. The automatic branches skip a listed
+    // space while it stays at the quota, so the refusal is counted and logged once per episode; the
+    // entry is dropped (and the resume logged) when a pass sees the space below its quota again.
+    private readonly ConcurrentDictionary<string, byte> keySpacesAtQuota = new(StringComparer.Ordinal);
+
     // Serializes the allocate + create-partition + split-async region across every split entry
     // point. RangeSplitCheckerActor (count, ~60s), RangeSplitLoadCheckerActor (load, ~5s) and the
     // manual admin split all reach it, the first two as separate Nixie actors with separate
@@ -153,6 +176,10 @@ internal sealed class RangeSplitTrigger : IDisposable
         // Both are derived, so a drain refusal needs no configuration of its own.
         this.drainRefusalBackoff    = configuration.CollectionInterval;
         this.drainRefusalBackoffMax = configuration.RangeSplitIndivisibleCooldown;
+        // The same ceiling bounds the partition-limit pause: a removal or a merge ends it at once, so
+        // this only caps how long a cluster that freed a slot some other way waits to notice.
+        this.partitionLimitBackoff  = configuration.RangeSplitIndivisibleCooldown;
+        this.maxRangesPerKeySpace   = configuration.RangeMaxRangesPerKeySpace;
         this.settleWindow           = configuration.RangeSplitSettleWindow;
         this.logger                 = logger;
     }
@@ -177,6 +204,7 @@ internal sealed class RangeSplitTrigger : IDisposable
             settledAt.Clear();
             indivisibleAt.Clear();
             drainRefusedAt.Clear();
+            ClearLimitEpisodes();
             return 0;
         }
 
@@ -200,6 +228,14 @@ internal sealed class RangeSplitTrigger : IDisposable
         // PruneExpiredCooldowns() so both run regardless of which branch is enabled.
         if (threshold <= 0)
             return 0;
+
+        // Every split needs a new partition: while the cluster is at its partition limit, sampling
+        // ranges only to have the create refused is wasted work.
+        if (IsPausedAtPartitionLimit())
+            return 0;
+
+        Dictionary<string, int> rangesPerKeySpace = CountRangesPerKeySpace(map);
+        PartitionLimitEpisode? limitAtPassStart = Volatile.Read(ref partitionLimitEpisode);
 
         // Collect all unique KeyRange spaces from the descriptor map.
         // We use the map rather than KeySpaceRegistry.GetMode to avoid a cross-assembly enum import
@@ -236,6 +272,10 @@ internal sealed class RangeSplitTrigger : IDisposable
                     if (IsInDrainRefusalBackoff(descriptor.PartitionId))
                         continue;
 
+                    // Skip a key space whose split was refused at its range quota while it stays there.
+                    if (IsPausedAtKeySpaceQuota(descriptor.KeySpace, rangesPerKeySpace))
+                        continue;
+
                     // Count branch: split when sampled key count >= threshold.
                     string? splitKey = await TryComputeSplitKeyAsync(descriptor, threshold, rangeIsHot: false, ct);
                     if (splitKey is null)
@@ -243,6 +283,9 @@ internal sealed class RangeSplitTrigger : IDisposable
 
                     if (await ExecuteSplitAsync(descriptor, splitKey, ct))
                         splitsDone++;
+                    else if (RefusedAtPartitionLimitSince(limitAtPassStart))
+                        // The cluster is full: every other candidate in this pass would get the same answer.
+                        return splitsDone;
                 }
                 catch (OperationCanceledException)
                 {
@@ -286,12 +329,19 @@ internal sealed class RangeSplitTrigger : IDisposable
             // starts clean and doesn't inherit timestamps from the previous leadership tenure.
             hotSince.Clear();
             settledAt.Clear();
+            ClearLimitEpisodes();
             return 0;
         }
 
         RangeMap map = rangeMapStore.Current;
         long now = Stopwatch.GetTimestamp();
         int splitsDone = 0;
+
+        // Read once per poll: both answers hold for the whole pass, and the partition-limit check
+        // reads the committed partition map while an episode is open.
+        bool pausedAtPartitionLimit = IsPausedAtPartitionLimit();
+        Dictionary<string, int> rangesPerKeySpace = CountRangesPerKeySpace(map);
+        PartitionLimitEpisode? limitAtPassStart = Volatile.Read(ref partitionLimitEpisode);
 
         foreach (RangeDescriptor descriptor in map.Descriptors)
         {
@@ -325,6 +375,14 @@ internal sealed class RangeSplitTrigger : IDisposable
 
             if (elapsedMs < loadWindow.TotalMilliseconds)
                 continue; // debounce window not yet elapsed
+
+            // A split now would need a partition the cluster or the key space cannot have. Re-arm a
+            // full window, as the other skips below do, so the range is not re-evaluated every poll.
+            if (pausedAtPartitionLimit || IsPausedAtKeySpaceQuota(descriptor.KeySpace, rangesPerKeySpace))
+            {
+                hotSince.TryRemove(partitionId, out _);
+                continue;
+            }
 
             // Debounce window satisfied — log using the values already read by EvaluateLoadPredicate.
             logger.LogRangeSplitTriggerLoadHot(descriptor.KeySpace, partitionId, elapsedMs, ops, depth, commitWait);
@@ -368,6 +426,9 @@ internal sealed class RangeSplitTrigger : IDisposable
 
                 if (await ExecuteSplitAsync(descriptor, splitKey, ct))
                     splitsDone++;
+                else if (RefusedAtPartitionLimitSince(limitAtPassStart))
+                    // The cluster is full: hold every other hot range for the rest of this poll too.
+                    pausedAtPartitionLimit = true;
             }
             catch (OperationCanceledException)
             {
@@ -486,6 +547,13 @@ internal sealed class RangeSplitTrigger : IDisposable
     /// The serialized allocate → create → split → cleanup region shared by every split entry point.
     /// <paramref name="preflight"/> runs under the lock against the freshly read map and aborts the
     /// split when it returns <c>false</c>.
+    /// <para>
+    /// Both partition-count bounds answer <see cref="SplitStatus.PartitionLimitReached"/> before
+    /// anything is created: the key-space quota is checked here against the fresh map, and
+    /// Kommander's cluster-wide bound comes back as the create's status. Neither leaves an orphan
+    /// partition, so neither runs the orphan cleanup. Each refusal is counted and opens a pause
+    /// that keeps the automatic branches from re-asking every tick.
+    /// </para>
     /// </summary>
     private async Task<SplitOutcome> ExecuteSplitCoreAsync(
         string keySpace,
@@ -503,6 +571,19 @@ internal sealed class RangeSplitTrigger : IDisposable
 
             if (preflight is not null && !preflight(freshMap))
                 return SplitOutcome.ConcurrentSplit;
+
+            // The quota is checked here, under the lock and against the freshly read map: only the
+            // meta leader splits and the lock serializes this node's splits, so no other split can
+            // add a range to this key space between the check and the create.
+            if (maxRangesPerKeySpace > 0)
+            {
+                int ranges = CountRanges(freshMap, keySpace);
+                if (ranges >= maxRangesPerKeySpace)
+                {
+                    RecordKeySpaceQuotaRefusal(keySpace, ranges);
+                    return SplitOutcome.KeySpaceQuotaReached(keySpace, ranges, maxRangesPerKeySpace);
+                }
+            }
 
             int newId = RangeSplitter.ComputeNextPartitionId(raft, freshMap);
 
@@ -523,6 +604,14 @@ internal sealed class RangeSplitTrigger : IDisposable
 
             if (!createResult.Success)
             {
+                // Kommander refused before the map changed: nothing was created and the id was not
+                // spent, so there is no orphan to remove and the refusal is determinate.
+                if (createResult.Status == RaftOperationStatus.PartitionLimitReached)
+                {
+                    RecordPartitionLimitRefusal(keySpace);
+                    return SplitOutcome.PartitionLimitReached;
+                }
+
                 logger.LogRangeSplitTriggerCreateFailed(newId, keySpace);
                 return SplitOutcome.PartitionCreationFailed;
             }
@@ -538,12 +627,153 @@ internal sealed class RangeSplitTrigger : IDisposable
 
             logger.LogRangeSplitTriggerSplit(keySpace, splitKey, newId);
 
+            // A create just succeeded, so the cluster is not at its partition limit any more.
+            EndPartitionLimitEpisode();
+
             return outcome;
         }
         finally
         {
             splitLock.Release();
         }
+    }
+
+    /// <summary>Data partitions in the committed map (tombstones excluded), the count Kommander bounds.</summary>
+    private int CountDataPartitions()
+    {
+        int count = 0;
+
+        foreach (RaftPartitionRange range in raft.GetPartitionMap())
+        {
+            if (range.PartitionId != RaftSystemConfig.SystemPartition)
+                count++;
+        }
+
+        return count;
+    }
+
+    private static int CountRanges(RangeMap map, string keySpace)
+    {
+        int count = 0;
+
+        foreach (RangeDescriptor descriptor in map.Descriptors)
+        {
+            if (string.Equals(descriptor.KeySpace, keySpace, StringComparison.Ordinal))
+                count++;
+        }
+
+        return count;
+    }
+
+    private static Dictionary<string, int> CountRangesPerKeySpace(RangeMap map)
+    {
+        Dictionary<string, int> counts = new(StringComparer.Ordinal);
+
+        foreach (RangeDescriptor descriptor in map.Descriptors)
+            counts[descriptor.KeySpace] = counts.GetValueOrDefault(descriptor.KeySpace) + 1;
+
+        return counts;
+    }
+
+    /// <summary>
+    /// Counts a create that Kommander refused at its partition-count bound and opens (or extends) the
+    /// cluster-wide pause. Only the first refusal of an episode logs a warning.
+    /// </summary>
+    private void RecordPartitionLimitRefusal(string keySpace)
+    {
+        int partitions = CountDataPartitions();
+
+        RangeSplitMetrics.LimitRefusals.Add(1,
+            new KeyValuePair<string, object?>("reason", RangeSplitMetrics.PartitionLimitReason),
+            new KeyValuePair<string, object?>("keyspace", keySpace));
+
+        PartitionLimitEpisode? previous = Interlocked.Exchange(
+            ref partitionLimitEpisode, new PartitionLimitEpisode(Stopwatch.GetTimestamp(), partitions));
+
+        if (previous is null)
+            logger.LogRangeSplitTriggerPartitionLimitReached(partitions, keySpace, partitionLimitBackoff.TotalMilliseconds);
+    }
+
+    /// <summary>
+    /// Returns <c>true</c> while the automatic branches should not attempt a split because the cluster
+    /// was at its partition limit. Ends the episode as soon as the committed map holds fewer
+    /// partitions than at the refusal; otherwise the pause holds until <see cref="partitionLimitBackoff"/>
+    /// passes, after which one attempt is allowed.
+    /// </summary>
+    private bool IsPausedAtPartitionLimit()
+    {
+        PartitionLimitEpisode? episode = Volatile.Read(ref partitionLimitEpisode);
+        if (episode is null)
+            return false;
+
+        int partitions = CountDataPartitions();
+        if (partitions < episode.Partitions)
+        {
+            if (Interlocked.CompareExchange(ref partitionLimitEpisode, null, episode) == episode)
+                logger.LogRangeSplitTriggerPartitionLimitCleared(partitions);
+
+            return false;
+        }
+
+        double elapsedMs = (Stopwatch.GetTimestamp() - episode.Tick) * 1000.0 / Stopwatch.Frequency;
+        return elapsedMs < partitionLimitBackoff.TotalMilliseconds;
+    }
+
+    /// <summary>
+    /// True when a partition-limit refusal happened after <paramref name="atPassStart"/> was read: every
+    /// refusal installs a new episode record, so a different non-null record means this pass was refused.
+    /// </summary>
+    private bool RefusedAtPartitionLimitSince(PartitionLimitEpisode? atPassStart)
+    {
+        PartitionLimitEpisode? current = Volatile.Read(ref partitionLimitEpisode);
+        return current is not null && !ReferenceEquals(current, atPassStart);
+    }
+
+    private void EndPartitionLimitEpisode()
+    {
+        if (Interlocked.Exchange(ref partitionLimitEpisode, null) is not null)
+            logger.LogRangeSplitTriggerPartitionLimitCleared(CountDataPartitions());
+    }
+
+    /// <summary>Counts a split refused at the key space's range quota; logs the first one of an episode.</summary>
+    private void RecordKeySpaceQuotaRefusal(string keySpace, int ranges)
+    {
+        RangeSplitMetrics.LimitRefusals.Add(1,
+            new KeyValuePair<string, object?>("reason", RangeSplitMetrics.KeySpaceQuotaReason),
+            new KeyValuePair<string, object?>("keyspace", keySpace));
+
+        if (keySpacesAtQuota.TryAdd(keySpace, 0))
+            logger.LogRangeSplitTriggerKeySpaceQuotaReached(keySpace, ranges, maxRangesPerKeySpace);
+    }
+
+    /// <summary>
+    /// Returns <c>true</c> while <paramref name="keySpace"/> had a split refused at its quota and still
+    /// holds that many ranges. A space that dropped below the quota (a merge folded two of its ranges,
+    /// or the quota was raised) leaves the list here and splits again.
+    /// </summary>
+    private bool IsPausedAtKeySpaceQuota(string keySpace, Dictionary<string, int> rangesPerKeySpace)
+    {
+        if (!keySpacesAtQuota.ContainsKey(keySpace))
+            return false;
+
+        int ranges = rangesPerKeySpace.GetValueOrDefault(keySpace);
+        if (maxRangesPerKeySpace > 0 && ranges >= maxRangesPerKeySpace)
+            return true;
+
+        if (keySpacesAtQuota.TryRemove(keySpace, out _))
+            logger.LogRangeSplitTriggerKeySpaceQuotaCleared(keySpace, ranges, maxRangesPerKeySpace);
+
+        return false;
+    }
+
+    /// <summary>
+    /// Drops both limit episodes on leadership loss: a re-promoted leader re-learns the cluster's
+    /// state from its first attempt instead of inheriting a pause from an earlier tenure.
+    /// </summary>
+    private void ClearLimitEpisodes()
+    {
+        Interlocked.Exchange(ref partitionLimitEpisode, null);
+        keySpacesAtQuota.Clear();
     }
 
     /// <summary>
@@ -604,7 +834,8 @@ internal sealed class RangeSplitTrigger : IDisposable
 
     /// <summary>
     /// Removes expired and partition-no-longer-exists entries from <see cref="settledAt"/>,
-    /// <see cref="indivisibleAt"/>, and <see cref="hotSince"/>. Called once per slow-cadence
+    /// <see cref="indivisibleAt"/>, and <see cref="hotSince"/>, and quota episodes of key spaces
+    /// that no longer have a descriptor from <see cref="keySpacesAtQuota"/>. Called once per slow-cadence
     /// <see cref="TriggerAsync"/> pass to bound dict growth within a leadership tenure.
     /// </summary>
     private void PruneExpiredCooldowns(RangeMap map)
@@ -634,6 +865,13 @@ internal sealed class RangeSplitTrigger : IDisposable
         {
             if (!activeIds.Contains(id))
                 hotSince.TryRemove(id, out _);
+        }
+
+        // A key space with no descriptor left cannot split, so its quota episode has nothing to pause.
+        foreach (string space in keySpacesAtQuota.Keys)
+        {
+            if (!map.Descriptors.Any(d => string.Equals(d.KeySpace, space, StringComparison.Ordinal)))
+                keySpacesAtQuota.TryRemove(space, out _);
         }
 
         foreach (int id in drainRefusedAt.Keys)

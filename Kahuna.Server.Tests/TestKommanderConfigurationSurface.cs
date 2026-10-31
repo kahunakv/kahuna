@@ -12,6 +12,7 @@ public sealed class TestKommanderConfigurationSurface
         [nameof(RaftConfiguration.Host)] = nameof(KahunaCommandLineOptions.RaftHost),
         [nameof(RaftConfiguration.Port)] = nameof(KahunaCommandLineOptions.RaftPort),
         [nameof(RaftConfiguration.InitialPartitions)] = nameof(KahunaCommandLineOptions.InitialClusterPartitions),
+        [nameof(RaftConfiguration.MaxPartitions)] = nameof(KahunaCommandLineOptions.RaftMaxPartitions),
         [nameof(RaftConfiguration.HttpScheme)] = nameof(KahunaCommandLineOptions.RaftHttpScheme),
         [nameof(RaftConfiguration.HttpAuthBearerToken)] = nameof(KahunaCommandLineOptions.RaftHttpAuthBearerToken),
         [nameof(RaftConfiguration.HttpTimeout)] = nameof(KahunaCommandLineOptions.RaftHttpTimeout),

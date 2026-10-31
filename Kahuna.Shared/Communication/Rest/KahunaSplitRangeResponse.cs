@@ -31,6 +31,10 @@ namespace Kahuna.Shared.Communication.Rest;
 ///     changed, so this is determinate <i>for the range map</i>; a destination partition may still
 ///     have been created and left unused. A retry allocates a fresh partition ID — IDs are never
 ///     reused — so retrying does not run back into the same refusal.</description></item>
+///   <item><description><c>PartitionLimitReached</c> — the split needs one more partition and was refused
+///     before anything was created: the cluster is at its partition limit, or the key space is at its
+///     range quota (<c>reason</c> says which). Nothing changed and no partition is left unused.
+///     Determinate. A retry gets the same answer until a removal or a merge frees a slot.</description></item>
 ///   <item><description><c>TransferFailed</c>, <c>QuiesceFailed</c>, <c>CutoverFailed</c>,
 ///     <c>ConcurrentSplit</c> — <b>indeterminate</b>. Re-read the map.</description></item>
 ///   <item><description><c>Indeterminate</c> — leadership or transport was lost mid-split.</description></item>

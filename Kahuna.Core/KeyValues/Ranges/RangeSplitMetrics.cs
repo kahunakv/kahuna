@@ -75,6 +75,23 @@ internal static class RangeSplitMetrics
             description: "Moves refused because the moving range still held unsettled durable intents.");
 
     /// <summary>
+    /// Splits refused because they needed one more partition than allowed, tagged by <c>reason</c>:
+    /// <c>partition_limit</c> (Kommander refused the create at its cluster-wide partition bound) or
+    /// <c>key_space_quota</c> (the key space is at <c>RangeMaxRangesPerKeySpace</c>). Nothing was
+    /// created and the range map is untouched. The automatic splitters back off after a refusal, so
+    /// a steady climb comes from manual splits or from the back-off expiring while the cluster is
+    /// still full.
+    /// </summary>
+    internal static readonly Counter<long> LimitRefusals =
+        Meter.CreateCounter<long>(
+            "kahuna.range.split.limit_refusals",
+            description: "Splits refused at the partition-count bound or the per-key-space range quota, by reason.");
+
+    internal const string PartitionLimitReason = "partition_limit";
+
+    internal const string KeySpaceQuotaReason = "key_space_quota";
+
+    /// <summary>
     /// Merge candidate pairs skipped because at least one partition's write rate meets or
     /// exceeds the split threshold. Merging would immediately re-trigger a split; the pair
     /// is left to cool before the next checker pass.

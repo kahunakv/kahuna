@@ -985,6 +985,12 @@ public sealed class EmbeddedKahunaOptions
     public int RangeMergeMinSize { get; set; } = 10;
 
     /// <summary>
+    /// Most ranges one key space may hold; 0 (the default) means no quota. See
+    /// <see cref="Server.Configuration.KahunaConfiguration.RangeMaxRangesPerKeySpace"/>.
+    /// </summary>
+    public int RangeMaxRangesPerKeySpace { get; set; }
+
+    /// <summary>
     /// Milliseconds a transactional staged write's in-memory write intent stays live before other
     /// transactions may treat it as abandoned and write past it. See
     /// <see cref="Server.Configuration.KahunaConfiguration.StagedWriteIntentLeaseMs"/>.
@@ -1189,6 +1195,16 @@ public sealed class EmbeddedKahunaOptions
     /// odd values.
     /// </summary>
     public int ReplicationFactor { get; set; }
+
+    /// <summary>
+    /// Upper bound on how many data partitions the cluster may hold; 0 (the default) means no
+    /// bound. Passed to Kommander as <c>RaftConfiguration.MaxPartitions</c>: past it, the system
+    /// leader refuses a partition create, so a range split answers <c>PartitionLimitReached</c> with
+    /// nothing created. Every range is a partition with its own WAL, elections and heartbeats on
+    /// each replica, so this caps that cost. Only the system leader checks it, so set the same value
+    /// on every node. Must not be below <see cref="InitialPartitions"/>.
+    /// </summary>
+    public int MaxPartitions { get; set; }
 
     /// <summary>
     /// Master switch for the continual replica-placement rebalancer on the P0 leader. When

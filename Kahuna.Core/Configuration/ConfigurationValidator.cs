@@ -185,6 +185,10 @@ public static class ConfigurationValidator
             throw new KahunaServerException(
                 "SnapshotHoldMaxLeaseMs, SnapshotHoldMaxPerHolder and SnapshotHoldMaxTotal must not be negative (0 means no bound).");
 
+        if (configuration.RangeMaxRangesPerKeySpace < 0)
+            throw new KahunaServerException(
+                $"RangeMaxRangesPerKeySpace ({configuration.RangeMaxRangesPerKeySpace}, --range-max-ranges-per-key-space) must not be negative (0 means no quota).");
+
         if (configuration.MaxTransactionMutations < 0)
             throw new KahunaServerException(
                 $"MaxTransactionMutations ({configuration.MaxTransactionMutations}) must not be negative (0 means no limit).");

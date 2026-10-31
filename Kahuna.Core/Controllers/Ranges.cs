@@ -424,6 +424,20 @@ public sealed partial class KahunaManager
                    + "one landed."
         },
 
+        // Refused before anything was created: Kommander commits nothing at its partition bound, and
+        // the key-space quota is checked before the create. Unlike PartitionCreationFailed there is no
+        // unused partition to mention, and a retry gets the same answer until a slot frees.
+        SplitStatus.PartitionLimitReached => new()
+        {
+            Status = nameof(SplitStatus.PartitionLimitReached),
+            Determinate = true,
+            Reason = outcome.Detail is null
+                ? "The cluster is at its partition limit, so no partition was created and nothing changed. "
+                  + "Remove or merge ranges, or raise --raft-max-partitions on every node, before splitting again."
+                : $"The split would exceed the range quota: {outcome.Detail}. No partition was created and "
+                  + "nothing changed. Merge ranges of this key space, or raise --range-max-ranges-per-key-space."
+        },
+
         SplitStatus.UnsettledMovingIntents => new()
         {
             Status = nameof(SplitStatus.UnsettledMovingIntents),

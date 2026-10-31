@@ -724,6 +724,12 @@ internal enum SplitStatus
     /// deadline reopened the moving range while the move was still running, so a write may have been admitted
     /// on the source after the catch-up copy. Cutting over would route the range away from it. Retryable.</summary>
     QuiesceExpired,
+    /// <summary>The split needs one more Raft partition and was refused before anything changed: either the
+    /// cluster is at Kommander's partition-count bound, or the key space is at
+    /// <see cref="KahunaConfiguration.RangeMaxRangesPerKeySpace"/> (<see cref="SplitOutcome.Detail"/> names the key
+    /// space and the quota). No partition was created and the range map is untouched. Retrying succeeds only once
+    /// a removal or a merge frees a slot.</summary>
+    PartitionLimitReached,
 }
 
 /// <summary>Result of <see cref="RangeSplitter.SplitAsync"/>.</summary>
@@ -761,6 +767,12 @@ internal readonly struct SplitOutcome
     public static SplitOutcome UnsettledMovingIntents => new(SplitStatus.UnsettledMovingIntents);
     public static SplitOutcome SourceStateIncomplete => new(SplitStatus.SourceStateIncomplete);
     public static SplitOutcome QuiesceExpired => new(SplitStatus.QuiesceExpired);
+    public static SplitOutcome PartitionLimitReached => new(SplitStatus.PartitionLimitReached);
+
+    /// <summary>A <see cref="SplitStatus.PartitionLimitReached"/> outcome for a key space at its range quota.</summary>
+    public static SplitOutcome KeySpaceQuotaReached(string keySpace, int ranges, int quota) =>
+        new(SplitStatus.PartitionLimitReached,
+            detail: $"key space '{keySpace}' holds {ranges} ranges and its quota (RangeMaxRangesPerKeySpace) is {quota}");
 
     /// <summary>A <see cref="SplitStatus.TransferFailed"/> outcome naming the step that failed.</summary>
     public static SplitOutcome TransferFailedAt(string detail) => new(SplitStatus.TransferFailed, detail: detail);

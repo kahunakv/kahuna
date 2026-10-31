@@ -707,6 +707,7 @@ cutover — and a failure in the later steps leaves the outcome genuinely unknow
 | `InvalidSplitKey` | ✓ | The key is a range's start, which would leave an empty half. |
 | `BelowMinRangeSize` | ✓ | Policy refused: one half holds no keys. Map untouched. |
 | `PartitionCreationFailed` | ✓ (for the map) | The destination partition could not be created — usually leadership moved mid-call. No descriptor changed, though a partition may have been created and left unused. Retry: the next attempt allocates a fresh partition id. |
+| `PartitionLimitReached` | ✓ | The split needs one more partition and was refused before anything was created: the cluster is at `--raft-max-partitions`, or the key space is at `--range-max-ranges-per-key-space` (the `reason` says which). Nothing changed and no partition is left unused. A retry gets the same answer until a removal or a merge frees a slot. |
 | `TransferFailed`, `QuiesceFailed`, `CutoverFailed`, `ConcurrentSplit` | ✗ | **The map may still change.** Re-read `GET /v1/ranges` before concluding anything. |
 | `Indeterminate` | ✗ | Leadership or transport was lost mid-split. Same advice. |
 
@@ -743,9 +744,18 @@ The count-based knobs (the load-based ones live in the
 | `--range-move-settle-timeout` | 10s | Maximum time a split or merge waits, inside its quiesce, for the moving range's in-flight transactions to decide and settle before the cutover. `0` disables the wait — a range under sustained writes may then never split. Clamped to 15s. |
 | `--range-move-quiesce-ttl` | 30s | How long a split or merge may hold its quiesce (the write fence on the moving range and the deadline on its descriptor). A move still running when the quiesce lapses refuses its attempt with `QuiesceExpired` instead of cutting over, because a write admitted after the catch-up copy would be unreachable once the range moves. Values below 1s are raised to 1s. |
 | `--range-collection-interval` | 60s | Sampling cadence. See the warning below. |
+| `--raft-max-partitions` | 0 | Most data partitions the cluster may hold; `0` means no bound. Every range is a partition with its own WAL, elections and heartbeats on each replica, so this caps that cost. Kommander's system leader enforces it, so set the same value on every node. Must not be below `--initial-cluster-partitions`. |
+| `--range-max-ranges-per-key-space` | 0 | Most ranges one key space may hold; `0` means no quota. Keeps one hot key space from taking every slot under `--raft-max-partitions`. A policy, not a safety bound. |
 
 A `0` on a threshold is not "no limit" — the corresponding background actor is never spawned, so the
 feature is off.
+
+`--raft-max-partitions` and `--range-max-ranges-per-key-space` are the exception: there `0` does mean
+"no limit". When either bound refuses a split, the automatic splitters count it in
+`kahuna.range.split.limit_refusals{reason="partition_limit"|"key_space_quota"}`, log one warning for
+the episode, and stop asking: at the partition limit they pause until the committed partition map
+shrinks (a removal or a merge) or `RangeSplitIndivisibleCooldown` (embedded only, 5 min) passes; at the quota they skip
+that key space until it holds fewer ranges than the quota.
 
 > **`--range-collection-interval` is not only a sampling cadence.** It also sets the session
 > range-lock lease (twice the interval) and bounds the renewal sweep. Lower it to make splits fire

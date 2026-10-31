@@ -249,6 +249,18 @@ public static partial class KahunaLoggerExtensions
     [LoggerMessage(Level = LogLevel.Warning, Message = "RangeSplitTrigger: CreatePartitionAsync({Id}) failed for {Space}")]
     public static partial void LogRangeSplitTriggerCreateFailed(this ILogger<IKahuna> logger, int id, string space);
 
+    [LoggerMessage(Level = LogLevel.Warning, Message = "RangeSplitTrigger: the cluster is at its partition limit ({Partitions} partitions), so the split of {Space} was refused with nothing created; automatic splits pause until a partition is removed or merged away, re-trying at most every {BackoffMs} ms")]
+    public static partial void LogRangeSplitTriggerPartitionLimitReached(this ILogger<IKahuna> logger, int partitions, string space, double backoffMs);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "RangeSplitTrigger: the cluster is below its partition limit again ({Partitions} partitions); automatic splits resume")]
+    public static partial void LogRangeSplitTriggerPartitionLimitCleared(this ILogger<IKahuna> logger, int partitions);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "RangeSplitTrigger: key space {Space} holds {Ranges} ranges and its quota is {Quota}; splits of it are refused until a merge frees a slot")]
+    public static partial void LogRangeSplitTriggerKeySpaceQuotaReached(this ILogger<IKahuna> logger, string space, int ranges, int quota);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "RangeSplitTrigger: key space {Space} is below its range quota again ({Ranges} of {Quota}); automatic splits of it resume")]
+    public static partial void LogRangeSplitTriggerKeySpaceQuotaCleared(this ILogger<IKahuna> logger, string space, int ranges, int quota);
+
     [LoggerMessage(Level = LogLevel.Information, Message = "RangeSplitTrigger: split {Space} at {Key} → P{Id}")]
     public static partial void LogRangeSplitTriggerSplit(this ILogger<IKahuna> logger, string space, string key, int id);
 
