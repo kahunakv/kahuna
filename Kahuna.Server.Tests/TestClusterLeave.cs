@@ -255,6 +255,8 @@ public sealed class TestClusterLeave : BaseCluster
     // that code is this surface's contract for "never retry".
     [InlineData(LeaveClusterOutcome.RefusedDrainInProgress, StatusCodes.Status503ServiceUnavailable, false, true)]
     [InlineData(LeaveClusterOutcome.DrainTimedOut, StatusCodes.Status504GatewayTimeout, false, true)]
+    // An eviction mid-request is reversed by auto-rejoin, so it is retryable and never "left".
+    [InlineData(LeaveClusterOutcome.Evicted, StatusCodes.Status503ServiceUnavailable, false, true)]
     public void OutcomeMapping_IsStableAcrossTransports(
         LeaveClusterOutcome outcome, int expectedStatus, bool expectedLeft, bool expectedRetryable)
     {

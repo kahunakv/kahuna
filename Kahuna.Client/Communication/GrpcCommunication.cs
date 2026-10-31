@@ -2824,6 +2824,7 @@ public class GrpcCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
         GrpcLeaveClusterOutcome.LeaveClusterOutcomeNoLeader                  => "NoLeader",
         GrpcLeaveClusterOutcome.LeaveClusterOutcomeRefusedDrainInProgress    => "RefusedDrainInProgress",
         GrpcLeaveClusterOutcome.LeaveClusterOutcomeDrainTimedOut             => "DrainTimedOut",
+        GrpcLeaveClusterOutcome.LeaveClusterOutcomeEvicted                   => "Evicted",
         _                                                                    => "Timeout"
     };
 

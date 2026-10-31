@@ -106,6 +106,9 @@ public static class ClusterLeave
         // running elsewhere clears on its own.
         LeaveClusterOutcome.RefusedDrainInProgress => StatusCodes.Status503ServiceUnavailable,
         LeaveClusterOutcome.DrainTimedOut => StatusCodes.Status504GatewayTimeout,
+        // The cluster evicted the node as dead mid-request; auto-rejoin brings it back, so the
+        // decommission is retried later. Not 409: the refusal clears on its own.
+        LeaveClusterOutcome.Evicted => StatusCodes.Status503ServiceUnavailable,
         _ => StatusCodes.Status504GatewayTimeout
     };
 
@@ -125,6 +128,8 @@ public static class ClusterLeave
             "Refused: another node is already draining, and only one decommission may run at a time. Nothing changed — retry once that drain finishes.",
         LeaveClusterOutcome.DrainTimedOut =>
             "The node's replicas were not fully evacuated before the drain deadline, so it stays in the roster and keeps serving. Replicas already moved stay moved — retry to resume the drain, or raise the drain timeout.",
+        LeaveClusterOutcome.Evicted =>
+            "The cluster evicted this node as a dead member while the request was in progress, so it is out of the roster without its replicas having been evacuated. Do not stop the process — the node re-admits itself; retry the leave once it is a member again.",
         _ =>
             "The removal was not confirmed before the deadline. It may still commit — re-read the membership roster before deciding."
     };

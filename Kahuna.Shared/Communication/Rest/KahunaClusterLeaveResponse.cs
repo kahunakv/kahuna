@@ -34,7 +34,7 @@ public sealed class KahunaClusterLeaveResponse
 
     /// <summary>
     /// What happened, as the outcome name reported by consensus: <c>Committed</c>, <c>NotAMember</c>,
-    /// <c>RefusedInsufficientVoters</c>, <c>RefusedDrainInProgress</c>, <c>DrainTimedOut</c>,
+    /// <c>RefusedInsufficientVoters</c>, <c>RefusedDrainInProgress</c>, <c>DrainTimedOut</c>, <c>Evicted</c>,
     /// <c>NotInitialized</c>, <c>NoLeader</c> or <c>Timeout</c>.
     /// </summary>
     [JsonPropertyName("outcome")]

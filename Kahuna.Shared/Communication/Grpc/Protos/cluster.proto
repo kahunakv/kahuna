@@ -51,6 +51,10 @@ enum GrpcLeaveClusterOutcome {
   // Evacuation did not finish before the drain deadline; the node stays in the roster and keeps
   // serving. Replicas already moved stay moved, so retrying resumes the drain.
   LEAVE_CLUSTER_OUTCOME_DRAIN_TIMED_OUT = 7;
+  // The cluster evicted the node as a dead member while the request was in flight: it is out of the
+  // roster, but nothing was evacuated and auto-rejoin brings it back. Never "left"; retry once it is a
+  // member again.
+  LEAVE_CLUSTER_OUTCOME_EVICTED = 8;
 }
 
 message GrpcClusterMember {

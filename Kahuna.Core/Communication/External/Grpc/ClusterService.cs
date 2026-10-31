@@ -337,6 +337,7 @@ public sealed class ClusterService : Cluster.ClusterBase
         LeaveClusterOutcome.NoLeader                  => GrpcLeaveClusterOutcome.LeaveClusterOutcomeNoLeader,
         LeaveClusterOutcome.RefusedDrainInProgress    => GrpcLeaveClusterOutcome.LeaveClusterOutcomeRefusedDrainInProgress,
         LeaveClusterOutcome.DrainTimedOut             => GrpcLeaveClusterOutcome.LeaveClusterOutcomeDrainTimedOut,
+        LeaveClusterOutcome.Evicted                   => GrpcLeaveClusterOutcome.LeaveClusterOutcomeEvicted,
         // Anything unrecognised is treated as unresolved rather than as a success: the caller must
         // re-read the roster instead of concluding the node left.
         _                                             => GrpcLeaveClusterOutcome.LeaveClusterOutcomeTimeout

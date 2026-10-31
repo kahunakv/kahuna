@@ -161,6 +161,7 @@ routing to it. Stopping the process is your next step, and only when the answer 
 | `NotInitialized` / `NoLeader` | 503 | It could not attempt the removal. Retry later. |
 | `Timeout` | 504 | Genuinely unresolved: the removal may still commit. **Re-read the roster** (§7) before deciding — do not assume either result. |
 | `DrainTimedOut` | 504 | Its replicas were not fully evacuated in time, so it stays in the roster and keeps serving. Replicas already moved stay moved — retry to resume, or raise the drain timeout. |
+| `Evicted` | 503 | The cluster evicted the node as a dead member while the request was in flight. It is out of the roster, but nothing was evacuated and it re-admits itself. **Do not stop the process**; retry once it is a member again. |
 
 The response carries a `retryable` flag saying the same thing, so a script can branch on one field.
 409 is the only status that is never worth retrying. The CLI exits non-zero whenever the node is
