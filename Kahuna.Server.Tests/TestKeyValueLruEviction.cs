@@ -302,7 +302,7 @@ public sealed class TestKeyValueLruEviction : RaftTrackingTest
     {
         config ??= CreateConfiguration();
 
-        BTree<string, KeyValueEntry> store = new(32);
+        KeyValueStore store = new();
         ILogger<IKahuna> logger = NullLogger<IKahuna>.Instance;
         ILogger<IRaft> raftLogger = NullLogger<IRaft>.Instance;
 

@@ -494,7 +494,7 @@ public sealed class TestPublishedHeadTable : RaftTrackingTest
 
         KeyValueContext context = new(
             null!,
-            new BTree<string, KeyValueEntry>(32),
+            new KeyValueStore(),
             new Dictionary<string, KeyValueWriteIntent>(),
             new Dictionary<string, List<KeyValueRangeLock>>(),
             new Dictionary<int, KeyValueProposal>(),

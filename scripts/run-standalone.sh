@@ -20,6 +20,9 @@
 #   KAHUNA_RESTORE_STORAGE_PATH when set, use this directory as the storage path instead of DATA_DIR/data.
 #                               Point this at the target-dir produced by "kahuna-control --restore".
 #                               Must be used with the same KAHUNA_STORAGE type that created the backup.
+#   KAHUNA_SKIP_PUBLISH         when set to 1, start the binary already published at /tmp/kahuna-standalone-bin
+#                               instead of publishing again (a measurement script restarts the same build)
+#   KAHUNA_EXTRA_ARGS           extra server flags appended verbatim, word-split (e.g. "--pinned-value-payloads")
 #
 set -euo pipefail
 
@@ -35,11 +38,17 @@ DATA_DIR="${KAHUNA_DATA_DIR:-/tmp/kahuna-standalone}"
 BACKUP_DIR="${KAHUNA_BACKUP_DIR:-}"
 RESTORE_STORAGE_PATH="${KAHUNA_RESTORE_STORAGE_PATH:-}"
 LOG_LEVEL="${KAHUNA_LOG_LEVEL:-Warning}"
+SKIP_PUBLISH="${KAHUNA_SKIP_PUBLISH:-0}"
+EXTRA_ARGS="${KAHUNA_EXTRA_ARGS:-}"
 
 PUBLISH_DIR="/tmp/kahuna-standalone-bin"
 
-echo ">> Publishing Kahuna.Server to ${PUBLISH_DIR}"
-dotnet publish Kahuna.Server/Kahuna.Server.csproj -c Release -p:PublishReadyToRun=true -o "${PUBLISH_DIR}"
+if [ "${SKIP_PUBLISH}" = "1" ] && [ -f "${PUBLISH_DIR}/Kahuna.Server.dll" ]; then
+  echo ">> Reusing the build already published at ${PUBLISH_DIR} (KAHUNA_SKIP_PUBLISH=1)"
+else
+  echo ">> Publishing Kahuna.Server to ${PUBLISH_DIR}"
+  dotnet publish Kahuna.Server/Kahuna.Server.csproj -c Release -p:PublishReadyToRun=true -o "${PUBLISH_DIR}"
+fi
 
 cp "${REPO_ROOT}/certs/development-certificate.pfx" "${PUBLISH_DIR}/certificate.pfx"
 
@@ -90,6 +99,13 @@ if [ -n "${BACKUP_DIR}" ]; then
   ARGS+=(--pitr-backup-dir "${BACKUP_DIR}")
 else
   echo ">> Backup: disabled (set KAHUNA_BACKUP_DIR to enable PITR)"
+fi
+
+if [ -n "${EXTRA_ARGS}" ]; then
+  echo ">> Extra server flags: ${EXTRA_ARGS}"
+  # Intentional word split: the variable carries several flags.
+  # shellcheck disable=SC2206
+  ARGS+=(${EXTRA_ARGS})
 fi
 
 echo ">> Starting standalone node on https://127.0.0.1:${HTTPS_PORT} (http ${HTTP_PORT}, h2c ${H2C_PORT:-disabled})"

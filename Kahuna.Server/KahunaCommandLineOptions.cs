@@ -648,6 +648,15 @@ public sealed class KahunaCommandLineOptions
     [Option("revisions-to-cache", Required = false, HelpText = "Number of recent revisions per key kept in memory to answer revision and as-of reads (at least 1). An older revision of a persistent key is read from disk; an ephemeral key has no disk history, so its older revisions are gone. Default 4.", Default = Kahuna.Server.Configuration.KahunaConfiguration.DefaultRevisionRetention)]
     public int RevisionsToKeepCached { get; set; } = Kahuna.Server.Configuration.KahunaConfiguration.DefaultRevisionRetention;
 
+    [Option("trim-flushed-revisions", Required = false, HelpText = "Keep a persistent key's archived revisions in memory only until the background writer confirms them on disk; an as-of or by-revision read of a flushed revision is then served from the persisted history. Fewer retained payload bytes per hot key, more disk reads for as-of reads. Ephemeral keys keep the full --revisions-to-cache archive. Default off.")]
+    public bool TrimFlushedRevisions { get; set; }
+
+    [Option("pinned-value-payloads", Required = false, HelpText = "Copy each committed value payload onto the pinned object heap when it becomes a resident head, so the garbage collector never copies it again while it ages. One copy per write; the request's wire array dies young. Default off.")]
+    public bool PinnedValuePayloads { get; set; }
+
+    [Option("pinned-value-payload-min-bytes", Required = false, HelpText = "With --pinned-value-payloads, payloads shorter than this many bytes stay on the normal heap. Default 256.", Default = Kahuna.Server.Configuration.KahunaConfiguration.DefaultPinnedValuePayloadMinBytes)]
+    public int PinnedValuePayloadMinBytes { get; set; } = Kahuna.Server.Configuration.KahunaConfiguration.DefaultPinnedValuePayloadMinBytes;
+
     [Option("cache-entry-ttl", Required = false, HelpText = "Maximum age of cache entries before eviction (in seconds)", Default = 1800)]
     public int CacheEntryTtl { get; set; } = 1800; // 30 minutes
     

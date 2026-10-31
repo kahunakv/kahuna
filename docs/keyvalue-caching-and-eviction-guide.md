@@ -45,8 +45,14 @@ works, how the collector decides what to remove, and the safety rules that make 
 ## 2. The in-memory store
 
 Inside each actor, keys are kept in a **B-tree** ordered by key. A B-tree is a balanced, sorted
-structure that keeps related keys near each other on disk-page-sized nodes, which makes both
-single-key lookups and ordered range scans efficient.
+structure that keeps related keys near each other on disk-page-sized nodes, which makes ordered
+range scans efficient. Beside the tree sits an **ordinal hash index** over the same entries; a
+single-key lookup (a get, an exists, a lock check, a write that loads its base) goes through the
+index, because a cold tree lookup at a million resident keys costs 700-850 ns of pointer chasing
+while the hash index answers in about 100 ns. The two structures are mutated only through the
+store's insert and remove funnels, so they always hold the same keys and the same entry objects.
+The index costs about 48 bytes per resident key (counted in the actor's byte budget) and starts at
+an eighth of `MaxEntriesPerActor`, so it reaches the cap in three doublings.
 
 > **Concept — why sorted order matters.** A database asking Kahuna to "read all rows of a table" is
 > really asking to "read every key with this prefix, in order." A sorted store answers that by
@@ -234,6 +240,36 @@ where they grow, so the collector never has to sweep the whole store to bound th
 > the *only* enforcement. Any new code path that archives a revision or resolves a transaction must
 > perform the corresponding trim, or that history can grow unbounded.
 
+### 6.1 Retained payload bytes and the garbage collector
+
+Every committed value stays referenced for as long as its key is resident: as the head, then as an
+archived revision, and by the writer's row until the flush lands. Allocated in gen0 like every request
+payload, it survives the first collection and is copied into gen1, then into gen2. At tens of thousands
+of kilobyte-sized writes per second that copying is the bulk of every gen0 and gen1 pause. Two options,
+both off by default, shrink that volume:
+
+- **`PinnedValuePayloads`** (`--pinned-value-payloads`; embedded `EmbeddedKahunaOptions.PinnedValuePayloads`).
+  When a committed value becomes a resident head the actor copies it into an array on the **pinned
+  object heap**, which is collected only with gen2 and never compacted, so the payload is written once
+  and never moved again. The wire array dies young. Published heads, revision entries, persistence rows
+  and zero-copy responses share the retained array exactly as they shared the wire array, so nothing
+  copies on read. Costs one copy per write. Payloads shorter than `PinnedValuePayloadMinBytes`
+  (`--pinned-value-payload-min-bytes`, default 256) stay on the normal heap.
+- **`TrimFlushedRevisions`** (`--trim-flushed-revisions`; embedded `EmbeddedKahunaOptions.TrimFlushedRevisions`).
+  A persistent key's archived revisions stay resident only until the background writer confirms them on
+  disk: the archive-time trim drops every flushed revision, and the flush acknowledgement drops the
+  revisions it confirms. The resident archive then holds the revisions still queued for the writer, the
+  floor-boundary revision a snapshot hold pins, and nothing else. An as-of or by-revision read of a
+  flushed revision takes the disk-fallback path. Ephemeral keys have no disk copy and keep the full
+  `RevisionRetention` window. A snapshot read that hydrates a key from disk still installs its recent
+  revisions into the archive; the next flush acknowledgement or write trims them again.
+
+Measure before turning either on: `scripts/gc-bench.sh` runs a standalone node under `kahuna-bench`
+with `dotnet-counters` attached and prints the GC pause share, the gen1 growth per gen0 collection,
+the pinned object heap size and fragmentation, and the benchmark latencies. On the memory storage
+backend the backend itself keeps every revision as a managed row, and Kommander keeps the Raft log
+entries in memory; both populations are outside the actor and are not reduced by these options.
+
 ---
 
 ## 7. Reading data back: scans and disk fallback
@@ -343,6 +379,9 @@ too small for the workload.
 | `RevisionRetention` (`--revisions-to-cache`) | 4 | answer more "as of" reads from memory (ephemeral keys have no disk fallback) | shrink per-entry history |
 | `DirtyObjectsWriterDelay` | 1,000 ms (embedded) | batch disk writes more aggressively | flush sooner (smaller dirty window) |
 | `PublishedHeadReads` | on | — | turn it off to send every point read through the actor (diagnosis only) |
+| `PinnedValuePayloads` (`--pinned-value-payloads`) | off | keep committed payloads out of the gen0/gen1 copy path (one copy per write) | — |
+| `PinnedValuePayloadMinBytes` (`--pinned-value-payload-min-bytes`) | 256 | leave more small payloads on the normal heap | pin smaller payloads too |
+| `TrimFlushedRevisions` (`--trim-flushed-revisions`) | off | keep archived revisions resident only until flushed (as-of reads of flushed revisions go to disk) | — |
 
 General guidance:
 

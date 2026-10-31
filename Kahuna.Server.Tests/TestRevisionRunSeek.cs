@@ -277,7 +277,7 @@ public sealed class TestRevisionRunSeek : RaftTrackingTest
 
         return new(
             actorContext: null!,
-            store: new BTree<string, KeyValueEntry>(32),
+            store: new KeyValueStore(),
             locksByPrefix: [],
             locksByRange: [],
             proposals: [],

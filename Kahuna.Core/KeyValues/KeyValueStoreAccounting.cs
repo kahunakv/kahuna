@@ -23,6 +23,21 @@ internal static class KeyValueStoreAccounting
     public const int EntryOverheadBytes = 152; // +24 for StoreKey ref + LruPrev ref + LruNext ref
 
     /// <summary>
+    /// Per-key cost of the point-lookup hash index beside the ordered tree (<see cref="KeyValueStore"/>): one
+    /// slot in the entries array (hash code 4 + next 4 + key ref 8 + value ref 8 = 24 bytes) plus one bucket
+    /// (4 bytes), so 28 bytes at full load and up to twice that right after a resize. The key string is shared
+    /// with the tree and is not charged again. Rounded up to bias toward earlier eviction.
+    /// </summary>
+    public const int PointIndexSlotBytes = 48;
+
+    /// <summary>
+    /// Bytes charged per resident key outside the entry's own estimate: the key's characters and its slot in the
+    /// point-lookup index. Charged by <see cref="KeyValueContext.InsertStoreEntry"/>, reclaimed by
+    /// <see cref="KeyValueContext.RemoveStoreEntry"/>, and projected by the collector when it sizes an eviction batch.
+    /// </summary>
+    public static long StoreKeyBytes(string key) => (key.Length * sizeof(char)) + PointIndexSlotBytes;
+
+    /// <summary>
     /// Charged once when the first entry is added to <c>entry.MvccEntries</c> (a
     /// <c>Dictionary&lt;HLCTimestamp, KeyValueMvccEntry&gt;</c>). Covers the Dictionary object
     /// itself (~96 bytes) plus its lazily-allocated initial backing arrays at minimum capacity:

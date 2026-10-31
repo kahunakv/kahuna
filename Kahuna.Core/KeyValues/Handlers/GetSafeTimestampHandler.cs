@@ -30,7 +30,7 @@ internal sealed class GetSafeTimestampHandler : BaseHandler
     /// Returns <see cref="HLCTimestamp.Zero"/> when no prepared intents exist.
     /// </summary>
     internal static HLCTimestamp FindMinInFlightCommitTimestamp(
-        BTree<string, KeyValueEntry> store,
+        KeyValueStore store,
         Dictionary<string, KeyValueWriteIntent> locksByPrefix)
     {
         HLCTimestamp min = HLCTimestamp.Zero;

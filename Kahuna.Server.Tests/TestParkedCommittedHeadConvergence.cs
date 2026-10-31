@@ -79,7 +79,7 @@ public sealed class TestParkedCommittedHeadConvergence : RaftTrackingTest
         TryGetHandler Get,
         CompleteProposalHandler Complete,
         ReleaseProposalHandler Release,
-        BTree<string, KeyValueEntry> Store,
+        KeyValueStore Store,
         MemoryPersistenceBackend Backend,
         RaftManager Raft);
 
@@ -88,7 +88,7 @@ public sealed class TestParkedCommittedHeadConvergence : RaftTrackingTest
         IActorRef<BackgroundWriterActor, BackgroundWriteRequest>? backgroundWriter = null)
     {
         RaftManager raft = BuildRaft(raftName);
-        BTree<string, KeyValueEntry> store = new(32);
+        KeyValueStore store = new();
         MemoryPersistenceBackend backend = new();
 
         KeyValueContext context = new(

@@ -39,13 +39,14 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
     private readonly IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext;
 
     /// <summary>
-    /// Stores and manages key-value pairs in memory with efficient retrieval and modification operations.
-    /// Utilizes a B-tree data structure to provide scalable performance for large datasets. This
-    /// in-memory store is used as a primary cache, with further data coordination to disk
-    /// or external systems when necessary. All operations leverage the underlying B-tree
-    /// to maintain ordered keys and ensure quick lookups, inserts, updates, and deletions.
+    /// The resident key-value entries this actor owns: an ordered B-tree for range and bucket walks with a hash
+    /// index beside it for point lookups (see <see cref="KeyValueStore"/>). The in-memory store is the primary
+    /// cache; committed state is coordinated to disk by the background writer. Sized from the actor's entry cap.
     /// </summary>
-    private readonly BTree<string, KeyValueEntry> keyValuesStore = new(32);
+    private readonly KeyValueStore keyValuesStore;
+
+    // Scratch set for the flush-time revision trim; the actor is single-threaded so one instance is enough.
+    private readonly HashSet<long> flushedRevisionsToTrim = [];
     
     /// <summary>
     /// Stores write intents for key prefixes. This ensure consistent reads for operations like
@@ -372,6 +373,8 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
     {
         this.actorContext = actorContext;
         this.logger = logger;
+
+        keyValuesStore = new KeyValueStore(KeyValueStore.DefaultOrder, configuration.MaxEntriesPerActor);
 
         kvContext = new(
             actorContext,
@@ -949,7 +952,15 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
 
         long ackedRevision = message.CompareRevision;
         if (ackedRevision <= entry.Revision && ackedRevision > entry.FlushedRevision)
+        {
             entry.FlushedRevision = ackedRevision;
+
+            // The persisted history now holds every revision at or below the acknowledged one, so with
+            // flushed-revision trimming on the resident archive drops them: a later as-of read of one of them
+            // takes the disk-fallback path. The floor-boundary revision a snapshot hold pins stays.
+            if (kvContext.Configuration.TrimFlushedRevisions)
+                Handlers.RevisionArchiveTrim.Trim(kvContext, entry, ackedRevision + 1, flushedRevisionsToTrim);
+        }
 
         return null;
     }

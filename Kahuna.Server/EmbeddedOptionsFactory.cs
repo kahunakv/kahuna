@@ -110,6 +110,9 @@ public static class EmbeddedOptionsFactory
         // the retention is unset. Both carry the flag, so the two fields never disagree.
         RevisionRetention = opts.RevisionsToKeepCached,
         RevisionsToKeepCached = opts.RevisionsToKeepCached,
+        TrimFlushedRevisions = opts.TrimFlushedRevisions,
+        PinnedValuePayloads = opts.PinnedValuePayloads,
+        PinnedValuePayloadMinBytes = opts.PinnedValuePayloadMinBytes,
         CacheEntriesToRemove = opts.CacheEntriesToRemove,
         KeyValueWriteLingerMs = opts.KeyValueWriteLingerMs,
         KeyValueWritePostCompletionHoldMs = opts.KeyValueWritePostCompletionHoldMs,

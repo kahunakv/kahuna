@@ -81,7 +81,7 @@ public sealed class TestInvalidateOrApplyConvergence : RaftTrackingTest
     private sealed record Harness(
         KeyValueContext Context,
         InvalidateOrApplyHandler Handler,
-        BTree<string, KeyValueEntry> Store,
+        KeyValueStore Store,
         RaftManager Raft);
 
     private Harness BuildHarness(
@@ -91,7 +91,7 @@ public sealed class TestInvalidateOrApplyConvergence : RaftTrackingTest
         CompletionReceiptStore? receiptStore = null)
     {
         RaftManager raft = BuildRaft(raftName);
-        BTree<string, KeyValueEntry> store = new(32);
+        KeyValueStore store = new();
 
         KeyValueContext context = new(
             actorContext: null!,

@@ -562,7 +562,7 @@ internal sealed class TryCollectHandler : BaseHandler
         foreach (string key in keys)
         {
             if (context.Store.TryGetValue(key, out KeyValueEntry? entry))
-                bytes += (key.Length * sizeof(char)) + entry.CachedBytes;
+                bytes += KeyValueStoreAccounting.StoreKeyBytes(key) + entry.CachedBytes;
         }
 
         return bytes;

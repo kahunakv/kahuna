@@ -53,6 +53,9 @@ public sealed class TestServerConfigurationSurface
         BackupApplyBarrierTimeoutSeconds = 21,
         CheckpointIntervalSeconds = 17,
         DisablePublishedHeadReads = true,
+        TrimFlushedRevisions = true,
+        PinnedValuePayloads = true,
+        PinnedValuePayloadMinBytes = 64,
         RaftGrpcScheme = "http://",
         AdvertisedClientEndpoint = "https://node9:8082",
         AdvertisedClientScheme = "http://",
@@ -301,6 +304,33 @@ public sealed class TestServerConfigurationSurface
         Assert.False(standalone.PublishedHeadReads);
         Assert.Equal(TimeSpan.FromSeconds(17), server.CheckpointInterval);
         Assert.False(server.PublishedHeadReads);
+    }
+
+    [Fact]
+    public void RetainedPayloadFlags_ReachBothNodeShapes_AndDefaultOff()
+    {
+        EmbeddedKahunaOptions embedded = EmbeddedOptionsFactory.CreateEmbeddedOptions(NonDefaultOptions());
+        KahunaConfiguration standalone = EmbeddedKahunaNode.CreateKahunaConfiguration(embedded, singleProcessRaftGroup: true);
+        KahunaConfiguration server = ServerConfigurationFactory.Create(NonDefaultOptions());
+
+        foreach (KahunaConfiguration configuration in new[] { standalone, server })
+        {
+            Assert.True(configuration.TrimFlushedRevisions);
+            Assert.True(configuration.PinnedValuePayloads);
+            Assert.Equal(64, configuration.PinnedValuePayloadMinBytes);
+        }
+
+        KahunaCommandLineOptions parsed = CommandLine.Parser.Default
+            .ParseArguments<KahunaCommandLineOptions>(["--storage-revision", "v1"]).Value;
+        KahunaConfiguration defaults = ServerConfigurationFactory.Create(parsed);
+        Assert.False(defaults.TrimFlushedRevisions);
+        Assert.False(defaults.PinnedValuePayloads);
+        Assert.Equal(KahunaConfiguration.DefaultPinnedValuePayloadMinBytes, defaults.PinnedValuePayloadMinBytes);
+
+        KahunaConfiguration embeddedDefaults = EmbeddedKahunaNode.CreateKahunaConfiguration(new EmbeddedKahunaOptions(), singleProcessRaftGroup: true);
+        Assert.False(embeddedDefaults.TrimFlushedRevisions);
+        Assert.False(embeddedDefaults.PinnedValuePayloads);
+        Assert.Equal(KahunaConfiguration.DefaultPinnedValuePayloadMinBytes, embeddedDefaults.PinnedValuePayloadMinBytes);
     }
 
     [Fact]

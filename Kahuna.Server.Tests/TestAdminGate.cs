@@ -172,8 +172,8 @@ public sealed class TestAdminGate
             },
             AdminGate.GrpcAdminMethods.ToHashSet());
 
-        Assert.False(AdminGate.GrpcAdminMethods.Contains("/Backups/CaptureBackupPart"));
-        Assert.False(AdminGate.GrpcAdminMethods.Contains("/KeyValuer/BatchServerKeyValueRequests"));
+        Assert.DoesNotContain("/Backups/CaptureBackupPart", (IReadOnlySet<string>)AdminGate.GrpcAdminMethods);
+        Assert.DoesNotContain("/KeyValuer/BatchServerKeyValueRequests", (IReadOnlySet<string>)AdminGate.GrpcAdminMethods);
     }
 
     [Fact]

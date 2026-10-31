@@ -56,6 +56,10 @@ internal sealed class CompleteProposalHandler : BaseHandler
         
         ApplyCommittedHead(entry, proposal, HLCTimestamp.Zero);
 
+        // The head the apply installed is the array to persist: the same bytes as the proposal's, retained on
+        // the pinned object heap when that is on, so the overlay and the writer keep no second long-lived array.
+        byte[]? committedValue = entry.Value;
+
         // This enqueue duplicates the consumer-apply path's (Kommander also delivers the leader's
         // own committed entries to KeyValueReplicator.Replicate), but it cannot be dropped: the
         // proposal waiter completes BEFORE the consumer apply runs, so this is the only enqueue
@@ -64,14 +68,14 @@ internal sealed class CompleteProposalHandler : BaseHandler
 
         // Record before enqueueing so a read that misses the actor cache (e.g. on a later promoted
         // leader) observes this committed write even before the background flush lands it.
-        context.UnflushedWrites?.Record(proposal.Key, proposal.Value, proposal.Revision,
+        context.UnflushedWrites?.Record(proposal.Key, committedValue, proposal.Revision,
             proposal.Expires, proposal.LastUsed, proposal.LastModified, proposal.State, proposal.NoRevision);
 
         context.BackgroundWriter.Send(BackgroundWriteRequestPool.Shared.Rent(
             BackgroundWriteType.QueueStoreKeyValue,
             message.PartitionId,
             proposal.Key,
-            proposal.Value,
+            committedValue,
             proposal.Revision,
             proposal.Expires,
             proposal.LastUsed,

@@ -731,7 +731,11 @@ internal sealed class RangeSplitTrigger : IDisposable
 
     private void EndPartitionLimitEpisode()
     {
-        if (Interlocked.Exchange(ref partitionLimitEpisode, null) is not null)
+        if (Interlocked.Exchange(ref partitionLimitEpisode, null) is null)
+            return;
+
+        // The partition count is a walk over the range map; take it only when the line will be written.
+        if (logger.IsEnabled(LogLevel.Information))
             logger.LogRangeSplitTriggerPartitionLimitCleared(CountDataPartitions());
     }
 

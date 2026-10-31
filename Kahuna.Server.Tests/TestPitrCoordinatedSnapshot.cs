@@ -534,7 +534,7 @@ public sealed class TestPitrCoordinatedSnapshot : IDisposable
     [Fact]
     public void FindMinInFlightCommitTimestamp_ReturnsMin()
     {
-        BTree<string, KeyValueEntry> store = new(4);
+        KeyValueStore store = new();
 
         store.Insert("k1", new KeyValueEntry
         {
@@ -571,7 +571,7 @@ public sealed class TestPitrCoordinatedSnapshot : IDisposable
     [Fact]
     public void FindMinInFlightCommitTimestamp_IncludesLocksByPrefix()
     {
-        BTree<string, KeyValueEntry> store = new(4);
+        KeyValueStore store = new();
         store.Insert("k1", new KeyValueEntry
         {
             WriteIntent = new KeyValueWriteIntent { CommitTimestamp = T(500) }
@@ -594,7 +594,7 @@ public sealed class TestPitrCoordinatedSnapshot : IDisposable
     [Fact]
     public void FindMinInFlightCommitTimestamp_EmptyStore_ReturnsZero()
     {
-        BTree<string, KeyValueEntry> store = new(4);
+        KeyValueStore store = new();
         store.Insert("k1", new KeyValueEntry()); // no write intent
         store.Insert("k2", new KeyValueEntry
         {

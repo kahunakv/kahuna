@@ -1068,7 +1068,7 @@ public sealed class TestTryGetHandler : RaftTrackingTest
             RevisionRetention = 16
         });
 
-        BTree<string, KeyValueEntry> store = new(32);
+        KeyValueStore store = new();
         ILogger<IKahuna> logger = NullLogger<IKahuna>.Instance;
         ILogger<IRaft> raftLogger = NullLogger<IRaft>.Instance;
 

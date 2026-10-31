@@ -384,7 +384,7 @@ public sealed class TestSessionOwnedIntentCeiling : RaftTrackingTest
         config ??= CreateConfiguration();
         logger ??= NullLogger<IKahuna>.Instance;
 
-        BTree<string, KeyValueEntry> store = new(32);
+        KeyValueStore store = new();
         ILogger<IRaft> raftLogger = NullLogger<IRaft>.Instance;
 
         RaftManager raft = Track(new RaftManager(

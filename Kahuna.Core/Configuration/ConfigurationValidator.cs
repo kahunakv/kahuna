@@ -128,6 +128,10 @@ public static class ConfigurationValidator
         if (configuration.RevisionRetention <= 0)
             configuration.RevisionRetention = configuration.RevisionsToKeepCached > 0 ? configuration.RevisionsToKeepCached : KahunaConfiguration.DefaultRevisionRetention;
 
+        // A negative threshold has no meaning; zero pins every payload, which is a legitimate measurement setting.
+        if (configuration.PinnedValuePayloadMinBytes < 0)
+            configuration.PinnedValuePayloadMinBytes = KahunaConfiguration.DefaultPinnedValuePayloadMinBytes;
+
         if (configuration.DefaultTransactionTimeout <= 0)
             throw new KahunaServerException(
                 $"DefaultTransactionTimeout ({configuration.DefaultTransactionTimeout} ms) must be greater than zero; " +

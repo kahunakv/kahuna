@@ -115,7 +115,12 @@ internal sealed class KeyValueContext
     /// </summary>
     public UnflushedKeyValueWritesIndex? UnflushedWrites { get; }
 
-    public BTree<string, KeyValueEntry> Store  { get; }
+    /// <summary>
+    /// The resident entries: an ordered tree for range, bucket and whole-store walks and a hash index for point
+    /// lookups, kept coherent by <see cref="InsertStoreEntry"/> and <see cref="RemoveStoreEntry"/>, the only two
+    /// paths that mutate it.
+    /// </summary>
+    public KeyValueStore Store  { get; }
     
     public Dictionary<string, KeyValueWriteIntent> LocksByPrefix  { get; }
 
@@ -217,7 +222,7 @@ internal sealed class KeyValueContext
 
     public KeyValueContext(
         IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext,
-        BTree<string, KeyValueEntry> store,
+        KeyValueStore store,
         Dictionary<string, KeyValueWriteIntent> locksByPrefix,
         Dictionary<string, List<KeyValueRangeLock>> locksByRange,
         Dictionary<int, KeyValueProposal> proposals,
@@ -345,7 +350,7 @@ internal sealed class KeyValueContext
                 existing.CachedBytes == KeyValueStoreAccounting.EstimateEntryBytes(key, existing) - (key.Length * sizeof(char)),
                 $"CachedBytes drift on replace: key={key}, cached={existing.CachedBytes}, computed={KeyValueStoreAccounting.EstimateEntryBytes(key, existing) - (key.Length * sizeof(char))}");
 #endif
-            approximateStoreBytes -= (key.Length * sizeof(char)) + existing.CachedBytes;
+            approximateStoreBytes -= KeyValueStoreAccounting.StoreKeyBytes(key) + existing.CachedBytes;
             if (existing != entry)
             {
                 Unlink(existing); // replacing with a new entry object; unlink the old one
@@ -367,7 +372,7 @@ internal sealed class KeyValueContext
 
         entry.StoreKey = key;
         Store.Insert(key, entry);
-        approximateStoreBytes += (key.Length * sizeof(char)) + entry.CachedBytes;
+        approximateStoreBytes += KeyValueStoreAccounting.StoreKeyBytes(key) + entry.CachedBytes;
         if (entry != existing)   // same guard as Unlink above — symmetric, prevents double-link
             LinkAtTail(entry);
 
@@ -397,7 +402,7 @@ internal sealed class KeyValueContext
             return false;
 
         Store.Remove(key);
-        approximateStoreBytes -= (key.Length * sizeof(char)) + entry.CachedBytes;
+        approximateStoreBytes -= KeyValueStoreAccounting.StoreKeyBytes(key) + entry.CachedBytes;
         Unlink(entry);
         entry.StoreKey = null;
         DetachPublishedHead(entry);

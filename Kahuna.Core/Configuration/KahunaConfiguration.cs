@@ -730,6 +730,37 @@ public sealed class KahunaConfiguration
     /// <summary>The one default of <see cref="RevisionRetention"/>, shared by the server flag and the embedded options.</summary>
     public const int DefaultRevisionRetention = 4;
 
+    /// <summary>
+    /// Keep a persistent key's archived revisions resident only until the background writer confirms them on disk.
+    /// The persisted history answers every flushed revision, so the resident archive then holds the revisions still
+    /// queued for the writer, the floor-boundary revision a snapshot hold pins, and nothing else: an as-of or
+    /// by-revision read of a flushed revision takes the disk-fallback path instead of a memory hit. Trades those
+    /// reads for fewer retained payload bytes per hot key. Ephemeral keys have no disk copy and keep the full
+    /// <see cref="RevisionRetention"/> archive. Off by default; the server sets it with
+    /// <c>--trim-flushed-revisions</c>.
+    /// </summary>
+    public bool TrimFlushedRevisions { get; set; }
+
+    /// <summary>
+    /// Copy every committed value payload of at least <see cref="PinnedValuePayloadMinBytes"/> bytes into an array on
+    /// the pinned object heap when it becomes a resident head. A resident payload survives every gen0 and gen1
+    /// collection and is copied by each; an array on the pinned object heap is collected only with gen2 and never
+    /// moved, so the payload is written once. The request's wire array dies young. The <c>byte[]</c> contract is
+    /// unchanged: published heads, revision entries, persistence rows and zero-copy responses share the retained
+    /// array as they shared the wire array. Costs one copy per write and a slower allocator than the gen0 bump
+    /// pointer. Off by default; the server sets it with <c>--pinned-value-payloads</c>.
+    /// </summary>
+    public bool PinnedValuePayloads { get; set; }
+
+    /// <summary>
+    /// Payloads shorter than this stay on the normal heap when <see cref="PinnedValuePayloads"/> is on: for a small
+    /// array the pinned allocation and the copy cost more than its promotion. Default 256.
+    /// </summary>
+    public int PinnedValuePayloadMinBytes { get; set; } = DefaultPinnedValuePayloadMinBytes;
+
+    /// <summary>The one default of <see cref="PinnedValuePayloadMinBytes"/>, shared by the server flag and the embedded options.</summary>
+    public const int DefaultPinnedValuePayloadMinBytes = 256;
+
     public int DirtyObjectsWriterDelay { get; set; }
 
     /// <summary>

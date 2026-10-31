@@ -483,13 +483,13 @@ public sealed class TestKeyValueCollection : RaftTrackingTest
         Assert.True(surviving < 100);
     }
 
-    private (TryCollectHandler Handler, KeyValueContext Context, BTree<string, KeyValueEntry> Store, RaftManager Raft) CreateHandler(
+    private (TryCollectHandler Handler, KeyValueContext Context, KeyValueStore Store, RaftManager Raft) CreateHandler(
         KahunaConfiguration? configuration = null
     )
     {
         configuration ??= CreateConfiguration();
 
-        BTree<string, KeyValueEntry> store = new(32);
+        KeyValueStore store = new();
         ILogger<IKahuna> logger = NullLogger<IKahuna>.Instance;
         ILogger<IRaft> raftLogger = NullLogger<IRaft>.Instance;
 

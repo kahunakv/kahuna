@@ -1022,6 +1022,25 @@ public sealed class EmbeddedKahunaOptions
     public bool PublishedHeadReads { get; set; } = true;
 
     /// <summary>
+    /// Keep a persistent key's archived revisions resident only until the background writer confirms them on
+    /// disk. See <see cref="Server.Configuration.KahunaConfiguration.TrimFlushedRevisions"/>. Off by default.
+    /// </summary>
+    public bool TrimFlushedRevisions { get; set; }
+
+    /// <summary>
+    /// Copy committed value payloads onto the pinned object heap when they become resident heads, so the garbage
+    /// collector never copies them again. See
+    /// <see cref="Server.Configuration.KahunaConfiguration.PinnedValuePayloads"/>. Off by default.
+    /// </summary>
+    public bool PinnedValuePayloads { get; set; }
+
+    /// <summary>
+    /// Payloads shorter than this stay on the normal heap when <see cref="PinnedValuePayloads"/> is on. See
+    /// <see cref="Server.Configuration.KahunaConfiguration.PinnedValuePayloadMinBytes"/>.
+    /// </summary>
+    public int PinnedValuePayloadMinBytes { get; set; } = Server.Configuration.KahunaConfiguration.DefaultPinnedValuePayloadMinBytes;
+
+    /// <summary>
     /// Milliseconds the prepare-apply staged-base fence remembers a key's last transactionally committed
     /// head. Must comfortably exceed the longest transaction lifetime the deployment allows, and must be
     /// identical on every node while <see cref="OnePhaseApplyTimeValidation"/> is on. See

@@ -72,7 +72,7 @@ public sealed class TestCommittedApplyKeepsLockHolderState : RaftTrackingTest
 
         KeyValueContext context = new(
             actorContext: null!,
-            store: new BTree<string, KeyValueEntry>(32),
+            store: new KeyValueStore(),
             locksByPrefix: [],
             locksByRange: [],
             proposals: [],

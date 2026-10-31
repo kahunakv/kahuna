@@ -486,7 +486,7 @@ internal abstract class BaseHandler
     internal static bool RemovalSetDropsFloorBoundary(ISet<long> revisionsToRemove, long floorBoundaryRevision) =>
         floorBoundaryRevision >= 0 && revisionsToRemove.Contains(floorBoundaryRevision);
 
-    protected void RemoveExpiredRevisions(KeyValueEntry entry, long refRevision)
+    protected void RemoveExpiredRevisions(KeyValueEntry entry, long refRevision, KeyValueDurability durability = KeyValueDurability.Persistent)
     {
         if (entry.Revisions is null)
             return;
@@ -494,7 +494,15 @@ internal abstract class BaseHandler
         int toBeKept = context.Configuration.RevisionRetention;
         // Keep the newest RevisionRetention revisions (refRevision down to refRevision-toBeKept+1);
         // anything strictly below the cutoff is trimmed unless the floor pins it as the boundary.
-        long cutoff = refRevision - toBeKept + 1;
+        long countCutoff = refRevision - toBeKept + 1;
+        long cutoff = countCutoff;
+
+        // With flushed-revision trimming on, a persistent key's archive keeps no flushed revision at all: the
+        // persisted history answers for them, so every archived revision is a candidate and only the unflushed
+        // floor below protects what the writer has not confirmed. An ephemeral key has no disk copy and keeps
+        // the count-based window.
+        if (durability == KeyValueDurability.Persistent && context.Configuration.TrimFlushedRevisions)
+            cutoff = refRevision;
 
         // Never trim a revision the background writer has not confirmed: until its flush lands the
         // persisted history does not hold it, so a snapshot read that missed the archive would get an
@@ -504,89 +512,11 @@ internal abstract class BaseHandler
         if (unflushedFloor < cutoff)
         {
             cutoff = unflushedFloor;
-            KeyValueSnapshotReadMetrics.RetainedUnflushed.Add(1);
+            if (unflushedFloor < countCutoff)
+                KeyValueSnapshotReadMetrics.RetainedUnflushed.Add(1);
         }
 
-        // Determine the floor-boundary revision: the highest revision that would normally
-        // be trimmed (< cutoff) but whose timestamp is at-or-before the reclamation floor.
-        // We protect exactly this one revision so snapshot reads at floor-timestamp still
-        // hit memory without disk I/O for the boundary version itself. The reclamation floor
-        // honors every registered hold, expired or not — a hold's protection ends only when
-        // its replicated removal (release or purge) commits, never at bare lease expiry — so
-        // a lapsed hold that is later revived by a renew still finds its boundary pinned.
-        long floorBoundaryRevision = -1;
-        SnapshotFloorStore? floorStore = context.SnapshotFloorStore;
-        if (floorStore is not null && floorStore.Holds.Count > 0)
-        {
-            HLCTimestamp protectiveFloor = floorStore.GetProtectiveFloor();
-            if (protectiveFloor != HLCTimestamp.Zero)
-            {
-                foreach (KeyValuePair<long, KeyValueRevisionEntry> kv in entry.Revisions)
-                {
-                    if (kv.Key < cutoff && kv.Value.LastModified.CompareTo(protectiveFloor) <= 0)
-                    {
-                        if (kv.Key > floorBoundaryRevision)
-                            floorBoundaryRevision = kv.Key;
-                    }
-                }
-            }
-        }
-
-        // Record which revision is pinned as the boundary so snapshot reads can tell an
-        // authoritative in-memory hit from a boundary hit that sits below trimmed, disk-only
-        // revisions. A newly pinned boundary starts with full coverage (Zero — nothing trimmed
-        // above it yet); the coverage bound then shrinks as removals above it accumulate below.
-        // A stale record from a released floor is left in place: its revision is trimmed by this
-        // same pass (it is no longer exempt), after which no lookup can hit it.
-        if (floorBoundaryRevision >= 0 && floorBoundaryRevision != entry.FloorBoundaryRevision)
-        {
-            entry.FloorBoundaryRevision = floorBoundaryRevision;
-            entry.FloorBoundaryCoverageEnd = HLCTimestamp.Zero;
-        }
-
-        foreach (KeyValuePair<long, KeyValueRevisionEntry> kv in entry.Revisions)
-        {
-            if (kv.Key < cutoff && kv.Key != floorBoundaryRevision)
-                revisionsToRemove.Add(kv.Key);
-        }
-
-        // Fail-loud floor guard. The floor pins exactly one in-memory revision: the boundary
-        // (newest revision whose LastModified is at-or-before the floor). The loop above exempts
-        // it, so a correct trim never schedules it for removal. If it ever appears in the removal
-        // set the boundary computation has regressed and a floor-protected version would be dropped
-        // from memory — count it (this counter must stay 0 in normal operation) and retain the revision.
-        if (RemovalSetDropsFloorBoundary(revisionsToRemove, floorBoundaryRevision))
-        {
-            SnapshotFloorMetrics.MissingProtectedVersion.Add(1);
-            context.Logger.LogError(
-                "Floor-boundary revision {Revision} was scheduled for trimming while a snapshot hold protects it; retaining it instead",
-                floorBoundaryRevision);
-            revisionsToRemove.Remove(floorBoundaryRevision);
-        }
-
-        if (revisionsToRemove.Count > 0)
-        {
-            long bytesFreed = 0;
-
-            foreach (long revision in revisionsToRemove)
-            {
-                entry.Revisions.TryGetValue(revision, out KeyValueRevisionEntry removed);
-                entry.Revisions.Remove(revision);
-                bytesFreed += KeyValueStoreAccounting.EstimateRevisionRemovedBytes(entry.Revisions.Count == 0, removed.Value);
-
-                // Removing a revision above the pinned boundary opens (or widens) the gap between
-                // the boundary and the retention window. Track the earliest timestamp ever trimmed
-                // above the boundary: at-or-after it, a boundary hit is no longer authoritative
-                // and the read must consult the persisted revision history instead.
-                if (entry.FloorBoundaryRevision >= 0 && revision > entry.FloorBoundaryRevision
-                    && (entry.FloorBoundaryCoverageEnd == HLCTimestamp.Zero
-                        || removed.LastModified.CompareTo(entry.FloorBoundaryCoverageEnd) < 0))
-                    entry.FloorBoundaryCoverageEnd = removed.LastModified;
-            }
-
-            context.AdjustEstimatedEntryBytes(entry, -bytesFreed);
-            revisionsToRemove.Clear();
-        }
+        RevisionArchiveTrim.Trim(context, entry, cutoff, revisionsToRemove);
     }
 
     /// <summary>
@@ -758,7 +688,7 @@ internal abstract class BaseHandler
         HLCTimestamp transactionId)
     {
         if (entry.Revisions is not null)
-            RemoveExpiredRevisions(entry, proposal.Revision);
+            RemoveExpiredRevisions(entry, proposal.Revision, proposal.Durability);
 
         // Only archive a *real* prior committed revision. A freshly-materialized cache-miss stub has
         // Revision == -1 (State Undefined, LastModified zero); archiving it would insert a phantom
@@ -802,7 +732,10 @@ internal abstract class BaseHandler
 
         int previousValueLength = entry.Value?.Length ?? 0;
 
-        entry.Value = proposal.Value;
+        // The payload becomes long-lived here: the head, later an archived revision, and the row the writer
+        // persists. Callers that queue the persistence of this head read the array back from the entry so the
+        // writer, the unflushed overlay and the backend share the retained array, not the wire one.
+        entry.Value = RetainedPayload.Retain(proposal.Value, context.Configuration);
         entry.Expires = proposal.Expires;
         entry.Revision = proposal.Revision;
         context.TouchEntry(entry, proposal.LastUsed);
@@ -1100,16 +1033,20 @@ internal abstract class BaseHandler
 
         ApplyCommittedHead(entry, proposal, txId);
 
+        // The head the apply installed is the array to persist: the same bytes as the proposal's, retained on
+        // the pinned object heap when that is on, so the overlay and the writer keep no second long-lived array.
+        byte[]? committedValue = entry.Value;
+
         // Record before enqueueing so a read that misses the actor cache (e.g. on a later promoted
         // leader) observes this committed write even before the background flush lands it.
-        context.UnflushedWrites?.Record(proposal.Key, proposal.Value, proposal.Revision,
+        context.UnflushedWrites?.Record(proposal.Key, committedValue, proposal.Revision,
             proposal.Expires, proposal.LastUsed, proposal.LastModified, proposal.State, proposal.NoRevision);
 
         context.BackgroundWriter.Send(BackgroundWriteRequestPool.Shared.Rent(
             BackgroundWriteType.QueueStoreKeyValue,
             partitionId,
             proposal.Key,
-            proposal.Value,
+            committedValue,
             proposal.Revision,
             proposal.Expires,
             proposal.LastUsed,
