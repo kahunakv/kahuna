@@ -1705,7 +1705,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         throw Unreachable(node);
     }
 
-    public async Task<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy)> BeginOperation(string node, string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken)
+    public async Task<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy)> BeginOperation(string node, string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken, int itemCount = 0)
     {
         if (TryGetNode(node, out IKahuna? kahunaNode))
         {
@@ -1717,7 +1717,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             // RejectedSessionClosed from the wrong node's session table.
             using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
 
-            return await kahunaNode.LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken);
+            return await kahunaNode.LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, payloadDigest, itemCount, cancellationToken);
         }
 
         throw Unreachable(node);

@@ -308,6 +308,14 @@ public interface IKahuna
     public Task<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy)> LocateAndBeginOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken);
 
     /// <summary>
+    /// Registers an operation that may add <paramref name="itemCount"/> keys or locks to the session's working set, so
+    /// the coordinator can hold the session to its mutation limit. An implementation that does not override it
+    /// registers without the count.
+    /// </summary>
+    public Task<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy)> LocateAndBeginOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, int itemCount, CancellationToken cancellationToken) =>
+        LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken);
+
+    /// <summary>
     /// Records a transaction-scoped operation's confirmed effect (modified key, point lock, and/or read
     /// observation) into the coordinator-owned working set and caches its write response, keyed by
     /// <paramref name="operationId"/>. Routed by <paramref name="coordinatorKey"/> to the coordinator node.
@@ -317,6 +325,13 @@ public interface IKahuna
 
     /// <summary>Node-local operation registration on the coordinator that owns the session (called after routing).</summary>
     public (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy) BeginOperation(HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest);
+
+    /// <summary>
+    /// Coordinator-side registration of an operation that may add <paramref name="itemCount"/> keys or locks to the
+    /// session's working set. An implementation that does not override it registers without the count.
+    /// </summary>
+    public (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy) BeginOperation(HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, int itemCount) =>
+        BeginOperation(transactionId, operationId, kind, payloadDigest);
 
     /// <summary>Node-local operation completion on the coordinator that owns the session (called after routing). Returns the record anchor after the effect folds in, or null if none.</summary>
     public string? CompleteOperation(HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload);
@@ -395,6 +410,13 @@ public interface IKahuna
     /// a multi-statement script); a standalone single-command script is not admission-gated and ignores it.
     /// </param>
     public Task<KeyValueTransactionResult> TryExecuteTransactionScript(ReadOnlyMemory<byte> script, string? hash, List<KeyValueParameter>? parameters, TransactionPriority priority = TransactionPriority.Normal);
+
+    /// <summary>
+    /// Runs a script transaction a client sent, held to <paramref name="mutationLimit"/> written keys and held locks
+    /// (zero: no limit). An implementation that does not override it runs the script without the limit.
+    /// </summary>
+    public Task<KeyValueTransactionResult> TryExecuteTransactionScript(ReadOnlyMemory<byte> script, string? hash, List<KeyValueParameter>? parameters, TransactionPriority priority, int mutationLimit) =>
+        TryExecuteTransactionScript(script, hash, parameters, priority);
     
     public Task<KeyValueGetByBucketResult> GetByBucket(HLCTimestamp transactionId, string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability);
 

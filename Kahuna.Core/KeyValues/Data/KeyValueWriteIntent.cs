@@ -226,10 +226,21 @@ internal static class KeyValueWriteIntentLease
 
     /// <summary>
     /// Converts a validated lock duration into its stored deadline. Callers must reject negative
-    /// durations before invoking this method.
+    /// durations before invoking this method. A positive duration is cut to <paramref name="maxLeaseMs"/>
+    /// (see <see cref="Bound"/>).
     /// </summary>
-    internal static HLCTimestamp FromRequest(HLCTimestamp currentTime, int expiresMs) =>
-        expiresMs == 0 ? HLCTimestamp.Zero : currentTime + expiresMs;
+    internal static HLCTimestamp FromRequest(HLCTimestamp currentTime, int expiresMs, int maxLeaseMs) =>
+        expiresMs == 0 ? HLCTimestamp.Zero : currentTime + Bound(expiresMs, maxLeaseMs);
+
+    /// <summary>
+    /// Cuts a requested lock duration to <paramref name="maxLeaseMs"/>, the session-owned ceiling. No session
+    /// can still own a lock older than that ceiling, so a longer explicit deadline serves no transaction: it
+    /// only lets a caller pin a key — and the store entry under it, which the collector cannot evict — for as
+    /// long as an int of milliseconds allows, and renew it forever. Zero (session-owned) and a non-positive
+    /// bound pass through unchanged.
+    /// </summary>
+    internal static int Bound(int expiresMs, int maxLeaseMs) =>
+        maxLeaseMs > 0 && expiresMs > maxLeaseMs ? maxLeaseMs : expiresMs;
 
     /// <summary>
     /// Returns whether an intent still owns its lock, and reports the first ceiling expiry of that intent —

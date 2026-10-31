@@ -136,6 +136,9 @@ public sealed class KahunaControlOptions
     [Option("insecure", Required = false, HelpText = "Skip TLS certificate validation (useful for self-signed certs in dev/standalone mode)")]
     public bool Insecure { get; set; }
 
+    [Option("admin-key-file", Required = false, HelpText = "Path to a file that holds the admin key (the first line that is not blank and does not start with #). Sent only with admin commands: cluster leave, replication factor, range register/split/merge, backups and restore. Required against a node started with --admin-api-key-file")]
+    public string? AdminKeyFile { get; set; }
+
     [Option("cluster-members", Required = false, HelpText = "Prints the live cluster membership roster")]
     public bool ClusterMembers { get; set; }
 

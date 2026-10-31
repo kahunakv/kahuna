@@ -23,11 +23,12 @@ repository. This guide covers what is specific to Kahuna.
 Use `MutualTls` for full node-to-node coverage. `SharedSecret` protects Raft only, because Kahuna's own
 messages carry no signature. The node logs a warning at startup in that mode.
 
-**Administrative surfaces are not gated.** Leave, split, merge, replication factor, key-range
-registration, backups, restore, the membership, placement, range and routing views, the dashboard and
-`/v1/cluster/health` accept any caller that can reach the port, in every mode. `Kahuna.Control` reaches
-them through `KahunaClient`, which cannot present a client certificate. Restrict these ports at the
-network layer until application authentication exists.
+**Administrative operations use their own credential, not node mTLS.** Leave, replication factor,
+key-range registration, split, merge, backups and restore require an admin key when the node is started
+with `--admin-api-key-file`; see `docs/admin-operations-authorization-guide.md`. Without a key file they
+accept any caller that can reach the port. The read-only views (membership, placement, ranges, routing
+metadata, the backup list), the dashboard and `/v1/cluster/health` are never gated. Restrict the client
+ports at the network layer in either case.
 
 ---
 
@@ -223,6 +224,8 @@ A host that serves Kahuna's gRPC services itself must:
 
 - call `services.AddNodeTransportGate()` before it builds the application. `MapGrpcKahunaRoutes()` refuses
   to start without it;
+- call `services.AddAdminGate(AdminGate.LoadKeys(path))` to gate the admin operations. A host that does not
+  call it leaves them open, like a node started without `--admin-api-key-file`;
 - construct `GrpcInterNodeCommunication` with the transport-security options of the node's own
   `RaftConfiguration`. Kahuna and Kommander share one channel pool per peer URL, and the first caller's
   options decide whether that pool presents a certificate. Different options there can strip the

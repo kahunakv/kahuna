@@ -29,7 +29,13 @@ public enum OperationRegistrationOutcome
     /// <summary>The session reached its total retained-operation budget (pending + completed). Unlike
     /// <see cref="RejectedCapacity"/> this does not clear as in-flight work drains — the transaction must
     /// be retried as a new one, so callers surface a terminal outcome, never MustRetry.</summary>
-    RejectedSessionBudget
+    RejectedSessionBudget,
+
+    /// <summary>The session already writes its maximum number of keys, or holds its maximum number of locks
+    /// (<see cref="TransactionContext.MutationLimit"/>). Nothing was registered and the session stays open, but no
+    /// retry of this operation can succeed, so callers surface
+    /// <see cref="Kahuna.Shared.KeyValue.KeyValueResponseType.TransactionMutationLimitReached"/>.</summary>
+    RejectedMutationLimit
 }
 
 /// <summary>

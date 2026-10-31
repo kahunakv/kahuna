@@ -74,6 +74,16 @@ internal class TransactionContext
     /// </summary>
     public TransactionConflictPolicy ConflictPolicy { get; init; } = TransactionConflictPolicy.Normal;
 
+    /// <summary>
+    /// The most keys this session may write, and separately the most locks it may take; zero means no limit. Set only
+    /// for a session a client entry point started, from that node's <c>MaxTransactionMutations</c>. A registration is
+    /// refused once its kind's count plus the pending reservations plus its own item count would pass the limit, so
+    /// the working set stays within the limit. A key both locked and written counts once in each count, so a
+    /// transaction that locks N keys and writes them fits a limit of N. The counts never fall during the session: a
+    /// lock released and taken again counts twice.
+    /// </summary>
+    public int MutationLimit { get; init; }
+
     /// <summary>What produced this transaction's writes, stamped onto every prepared intent it freezes and so onto
     /// every watch event it produces; null for an ordinary transaction, and always null while the cluster does not
     /// enable origin tags.</summary>
@@ -423,6 +433,13 @@ internal class TransactionContext
     private int pendingOperationCount;
     private int retainedOperationCount;
 
+    // Against MutationLimit, under registryLock: the keys written and the locks taken so far, and what pending
+    // operations reserved for each.
+    private int writesUsed;
+    private int locksUsed;
+    private int writesReserved;
+    private int locksReserved;
+
     /// <summary>
     /// Overrides <see cref="MaxOperationsPerSession"/> for test scenarios. Zero or negative restores
     /// the production default. Only set from test assemblies via <c>InternalsVisibleTo</c>.
@@ -585,7 +602,8 @@ internal class TransactionContext
     internal OperationRegistrationResult BeginOperation(
         TransactionOperationId operationId,
         OperationKind kind,
-        byte[]? payloadDigest)
+        byte[]? payloadDigest,
+        int itemCount = 0)
     {
         lock (registryLock)
         {
@@ -616,7 +634,22 @@ internal class TransactionContext
             if (pendingOperationCount >= MaxPendingOperations)
                 return new(OperationRegistrationOutcome.RejectedCapacity, recordAnchorKey: RecordAnchorKey, conflictPolicy: ConflictPolicy);
 
-            operations[operationId] = new() { Kind = kind, PayloadDigest = payloadDigest };
+            int reserved = Math.Max(0, itemCount);
+            bool writes = IsWriteKind(kind);
+
+            if (MutationLimit > 0 && reserved > 0
+                && (long)(writes ? writesUsed + writesReserved : locksUsed + locksReserved) + reserved > MutationLimit)
+            {
+                DurableTransactionMetrics.MutationLimitRefusals.Add(1, new KeyValuePair<string, object?>("count", writes ? "writes" : "locks"));
+                return new(OperationRegistrationOutcome.RejectedMutationLimit, recordAnchorKey: RecordAnchorKey, conflictPolicy: ConflictPolicy);
+            }
+
+            if (writes)
+                writesReserved += reserved;
+            else
+                locksReserved += reserved;
+
+            operations[operationId] = new() { Kind = kind, PayloadDigest = payloadDigest, Reserved = reserved };
             pendingOperationCount++;
             retainedOperationCount++;
             return new(OperationRegistrationOutcome.New, recordAnchorKey: RecordAnchorKey, conflictPolicy: ConflictPolicy);
@@ -659,6 +692,7 @@ internal class TransactionContext
 
             record.Status = OperationStatus.Completed;
             record.CachedResponse = response;
+            ReleaseReservationLocked(record);
             ApplyPayloadLocked(payload, record.Kind);
             DecrementPending();
             return RecordAnchorKey;
@@ -674,7 +708,8 @@ internal class TransactionContext
     private void FoldModifiedKeyLocked((string Key, KeyValueDurability Durability) modified)
     {
         ModifiedKeys ??= [];
-        ModifiedKeys.Add(modified);
+        if (ModifiedKeys.Add(modified))
+            writesUsed++;
 
         // A write supersedes any earlier read observation of the same key: it leaves the read set (so a later
         // read of the key's own staged value never trips the two-inconsistent-snapshots conflict against that
@@ -736,17 +771,25 @@ internal class TransactionContext
                 StageMutation(staged.Key, staged.Value, staged.State, staged.Revision, staged.ExpiresMs, staged.NoRevision, staged.StagedAt);
         }
 
+        // A write's own point lock on the key it writes is counted by the write; only a lock taken by a lock or read
+        // operation counts against the lock limit.
+        bool countsLocks = !IsWriteKind(kind);
+
         if (!string.IsNullOrEmpty(payload.AcquiredPointLock))
         {
             LocksAcquired ??= [];
-            LocksAcquired.Add((payload.AcquiredPointLock, durability));
+            if (LocksAcquired.Add((payload.AcquiredPointLock, durability)) && countsLocks)
+                locksUsed++;
         }
 
         if (payload.AcquiredPointLocks is { } acquiredPointLocks)
         {
             LocksAcquired ??= [];
             foreach ((string, KeyValueDurability) batchLock in acquiredPointLocks)
-                LocksAcquired.Add(batchLock);
+            {
+                if (LocksAcquired.Add(batchLock) && countsLocks)
+                    locksUsed++;
+            }
         }
 
         if (!string.IsNullOrEmpty(payload.ReleasedPointLock))
@@ -755,7 +798,8 @@ internal class TransactionContext
         if (!string.IsNullOrEmpty(payload.AcquiredPrefixLock))
         {
             PrefixLocksAcquired ??= [];
-            PrefixLocksAcquired.Add((payload.AcquiredPrefixLock, durability));
+            if (PrefixLocksAcquired.Add((payload.AcquiredPrefixLock, durability)))
+                locksUsed++;
         }
 
         if (!string.IsNullOrEmpty(payload.ReleasedPrefixLock))
@@ -764,6 +808,8 @@ internal class TransactionContext
         if (payload.AcquiredRangeLock is { } rangeLock)
         {
             RangeLocksAcquired ??= new();
+            if (!RangeLocksAcquired.ContainsKey(rangeLock.Range))
+                locksUsed++;
             // Add on first acquire; replace the mode on a confirmed upgrade or renewal of the same bounds.
             RangeLocksAcquired[rangeLock.Range] = rangeLock.Mode;
         }
@@ -774,7 +820,10 @@ internal class TransactionContext
             // (the actor keeps an Exclusive lock on a Shared re-entry), so the fold never records a downgrade.
             RangeLocksAcquired ??= new();
             foreach ((RangeLockKey range, RangeLockMode mode) in batchRangeLocks)
-                RangeLocksAcquired.TryAdd(range, mode);
+            {
+                if (RangeLocksAcquired.TryAdd(range, mode))
+                    locksUsed++;
+            }
         }
 
         if (payload.ReleasedRangeLock is { } removedRangeLock)
@@ -865,10 +914,39 @@ internal class TransactionContext
             // result — nothing was folded into the working set — so the id is safe to release for a fresh
             // registration that re-drives the operation.
             operations.Remove(operationId);
+            ReleaseReservationLocked(record);
             DecrementPending();
             return true;
         }
     }
+
+    /// <summary>
+    /// Whether an operation of <paramref name="kind"/> writes keys, so its reservation and its growth count against the
+    /// write limit. Every other kind counts the locks it takes against the lock limit.
+    /// </summary>
+    private static bool IsWriteKind(OperationKind kind) =>
+        kind is OperationKind.Set or OperationKind.SetMany or OperationKind.Delete or OperationKind.DeleteMany or OperationKind.Extend;
+
+    /// <summary>Caller must hold <see cref="registryLock"/>. Returns a pending operation's reservation.</summary>
+    private void ReleaseReservationLocked(OperationRecord record)
+    {
+        if (record.Reserved == 0)
+            return;
+
+        if (IsWriteKind(record.Kind))
+            writesReserved -= record.Reserved;
+        else
+            locksReserved -= record.Reserved;
+    }
+
+    /// <summary>
+    /// Whether a script transaction still fits <see cref="MutationLimit"/>: the keys it wrote and the locks it holds. A
+    /// script does not register its operations, so its working set itself is the count.
+    /// </summary>
+    internal bool WithinMutationLimit() =>
+        MutationLimit <= 0
+        || ((ModifiedKeys?.Count ?? 0) <= MutationLimit
+            && (LocksAcquired?.Count ?? 0) + (PrefixLocksAcquired?.Count ?? 0) + (RangeLocksAcquired?.Count ?? 0) <= MutationLimit);
 
     /// <summary>Caller must hold <see cref="registryLock"/>. Drops the pending count and wakes a drain waiter.</summary>
     private void DecrementPending()

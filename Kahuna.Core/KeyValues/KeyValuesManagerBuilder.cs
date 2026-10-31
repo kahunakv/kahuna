@@ -158,7 +158,8 @@ internal sealed class KeyValuesManagerBuilder
         // Snapshot-floor registry: replicated on the same meta partition as the range map.
         // When an external store is provided (shared with BackgroundWriterActor) use it directly;
         // otherwise create a new instance owned by this manager.
-        snapshotFloorStore = externalFloorStore ?? new(raft, configuration.StoragePath, configuration.StorageRevision, logger, configuration.SnapshotHoldStartupGraceWindow);
+        snapshotFloorStore = externalFloorStore ?? new(raft, configuration.StoragePath, configuration.StorageRevision, logger, configuration.SnapshotHoldStartupGraceWindow,
+            new SnapshotHoldLimits(configuration.SnapshotHoldMaxLeaseMs, configuration.SnapshotHoldMaxPerHolder, configuration.SnapshotHoldMaxTotal));
 
         // History hold registry: replicated on the meta partition too. Loaded from its durable copy here, before Raft
         // starts the partitions, so each restored partition can be pinned before its first compaction.

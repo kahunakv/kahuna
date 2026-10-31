@@ -181,6 +181,22 @@ public static class ConfigurationValidator
             throw new KahunaServerException(
                 "HistoryHoldMaxLeaseMs, HistoryHoldMaxPerHolder and HistoryHoldMaxTotal must not be negative (0 means no bound).");
 
+        if (configuration.SnapshotHoldMaxLeaseMs < 0 || configuration.SnapshotHoldMaxPerHolder < 0 || configuration.SnapshotHoldMaxTotal < 0)
+            throw new KahunaServerException(
+                "SnapshotHoldMaxLeaseMs, SnapshotHoldMaxPerHolder and SnapshotHoldMaxTotal must not be negative (0 means no bound).");
+
+        if (configuration.MaxTransactionMutations < 0)
+            throw new KahunaServerException(
+                $"MaxTransactionMutations ({configuration.MaxTransactionMutations}) must not be negative (0 means no limit).");
+
+        if (configuration.MaxBatchItems < 0)
+            throw new KahunaServerException(
+                $"MaxBatchItems ({configuration.MaxBatchItems}) must not be negative (0 means no bound).");
+
+        if (configuration.MaxKeyBytes < 0 || configuration.MaxValueBytes < 0)
+            throw new KahunaServerException(
+                $"MaxKeyBytes ({configuration.MaxKeyBytes}) and MaxValueBytes ({configuration.MaxValueBytes}) must not be negative (0 means no bound).");
+
         if (configuration.WatchMaxCapacity <= 0 || configuration.WatchMaxBufferedBytes <= 0)
             throw new KahunaServerException(
                 "WatchMaxCapacity and WatchMaxBufferedBytes must be greater than zero.");
@@ -300,6 +316,25 @@ public static class ConfigurationValidator
                 $"RangeSplitSettleWindow / --range-split-settle-window ({configuration.RangeSplitSettleWindow.TotalMilliseconds:F0} ms) " +
                 $"must be at least MinLeaderStabilityMs / --raft-min-leader-stability-ms ({minLeaderStabilityMs} ms); " +
                 "a shorter window allows re-splitting before the new partition's leader has stabilised.");
+    }
+
+    /// <summary>
+    /// Refuses a client value bound that one Raft message cannot carry. A write is replicated as one log entry that
+    /// holds its key and its value, so an accepted write larger than the peer message limit can never reach a
+    /// follower. Call this once the Raft message limit is known, passing <c>RaftConfiguration.GrpcMaxMessageBytes</c>.
+    /// No-op when the value bound or the message limit is zero.
+    /// </summary>
+    /// <exception cref="KahunaServerException">Thrown when the constraint is violated.</exception>
+    public static void ValidateValueBound(KahunaConfiguration configuration, int raftMaxMessageBytes)
+    {
+        if (configuration.MaxValueBytes <= 0 || raftMaxMessageBytes <= 0)
+            return;
+
+        if ((long)configuration.MaxValueBytes + configuration.MaxKeyBytes >= raftMaxMessageBytes)
+            throw new KahunaServerException(
+                $"MaxValueBytes / --max-value-bytes ({configuration.MaxValueBytes}) plus MaxKeyBytes / --max-key-bytes ({configuration.MaxKeyBytes}) " +
+                $"must stay below the Raft message limit / --raft-grpc-max-message-bytes ({raftMaxMessageBytes}); " +
+                "a write larger than one Raft message is accepted but cannot replicate.");
     }
 
     /// <summary>

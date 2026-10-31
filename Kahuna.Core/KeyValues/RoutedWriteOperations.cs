@@ -55,8 +55,8 @@ internal sealed class RoutedWriteOperations
         registrar.AbandonRegisteredOperation(coordinatorKey, transactionId, operationId);
 
     private ValueTask<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy)> LocateAndBeginOperation(
-        string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken) =>
-        registrar.LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken);
+        string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken, int itemCount = 0) =>
+        registrar.LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken, itemCount);
 
     private ValueTask<(KeyValueResponseType outcome, string? anchor)> LocateAndCompleteOperation(
         string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload, CancellationToken cancellationToken) =>
@@ -117,7 +117,7 @@ internal sealed class RoutedWriteOperations
         KeyValueDurability durability, byte[] digest, long routedGeneration, CancellationToken cancellationToken)
     {
         (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, _, TransactionConflictPolicy sessionPolicy) =
-            await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.Set, digest, cancellationToken);
+            await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.Set, digest, cancellationToken, 1);
 
         switch (outcome)
         {
@@ -132,6 +132,8 @@ internal sealed class RoutedWriteOperations
                 return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
             case OperationRegistrationOutcome.RejectedSessionBudget:
                 return (KeyValueResponseType.Aborted, 0, HLCTimestamp.Zero);
+            case OperationRegistrationOutcome.RejectedMutationLimit:
+                return (KeyValueResponseType.TransactionMutationLimitReached, 0, HLCTimestamp.Zero);
             case OperationRegistrationOutcome.RejectedSessionClosed:
                 return (KeyValueResponseType.Aborted, 0, HLCTimestamp.Zero);
             case OperationRegistrationOutcome.RejectedDuplicate:
@@ -217,7 +219,7 @@ internal sealed class RoutedWriteOperations
         List<KahunaSetKeyValueRequestItem> setManyItems, CancellationToken cancellationToken)
     {
         (OperationRegistrationOutcome outcome, _, _, _, _, TransactionConflictPolicy sessionPolicy) =
-            await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.SetMany, OperationDigest.ForSetMany(setManyItems), cancellationToken);
+            await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.SetMany, OperationDigest.ForSetMany(setManyItems), cancellationToken, setManyItems.Count);
 
 
         switch (outcome)
@@ -246,6 +248,8 @@ internal sealed class RoutedWriteOperations
                 return AllSetItemsResponse(setManyItems, KeyValueResponseType.MustRetry);
             case OperationRegistrationOutcome.RejectedSessionBudget:
                 return AllSetItemsResponse(setManyItems, KeyValueResponseType.Aborted);
+            case OperationRegistrationOutcome.RejectedMutationLimit:
+                return AllSetItemsResponse(setManyItems, KeyValueResponseType.TransactionMutationLimitReached);
             case OperationRegistrationOutcome.RejectedSessionClosed:
                 return AllSetItemsResponse(setManyItems, KeyValueResponseType.Aborted);
             case OperationRegistrationOutcome.RejectedDuplicate:
@@ -372,7 +376,7 @@ internal sealed class RoutedWriteOperations
             canonicalItems.Add((item.Key ?? "", item.Durability));
 
         (OperationRegistrationOutcome outcome, _, _, _, _, TransactionConflictPolicy sessionPolicy) =
-            await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.DeleteMany, OperationDigest.ForDeleteMany(canonicalItems), cancellationToken);
+            await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.DeleteMany, OperationDigest.ForDeleteMany(canonicalItems), cancellationToken, canonicalItems.Count);
 
         switch (outcome)
         {
@@ -396,6 +400,8 @@ internal sealed class RoutedWriteOperations
                 return AllItemsResponse(deleteManyItems, KeyValueResponseType.MustRetry);
             case OperationRegistrationOutcome.RejectedSessionBudget:
                 return AllItemsResponse(deleteManyItems, KeyValueResponseType.Aborted);
+            case OperationRegistrationOutcome.RejectedMutationLimit:
+                return AllItemsResponse(deleteManyItems, KeyValueResponseType.TransactionMutationLimitReached);
             case OperationRegistrationOutcome.RejectedSessionClosed:
                 return AllItemsResponse(deleteManyItems, KeyValueResponseType.Aborted);
             case OperationRegistrationOutcome.RejectedDuplicate:
@@ -537,7 +543,7 @@ internal sealed class RoutedWriteOperations
         KeyValueDurability durability, byte[] digest, CancellationToken cancellationToken)
     {
         (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, _, TransactionConflictPolicy sessionPolicy) =
-            await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.Delete, digest, cancellationToken);
+            await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.Delete, digest, cancellationToken, 1);
 
         switch (outcome)
         {
@@ -552,6 +558,8 @@ internal sealed class RoutedWriteOperations
                 return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
             case OperationRegistrationOutcome.RejectedSessionBudget:
                 return (KeyValueResponseType.Aborted, 0, HLCTimestamp.Zero);
+            case OperationRegistrationOutcome.RejectedMutationLimit:
+                return (KeyValueResponseType.TransactionMutationLimitReached, 0, HLCTimestamp.Zero);
             case OperationRegistrationOutcome.RejectedSessionClosed:
                 return (KeyValueResponseType.Aborted, 0, HLCTimestamp.Zero);
             case OperationRegistrationOutcome.RejectedDuplicate:
@@ -625,7 +633,7 @@ internal sealed class RoutedWriteOperations
         int expiresMs, KeyValueDurability durability, byte[] digest, CancellationToken cancellationToken)
     {
         (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, _, TransactionConflictPolicy sessionPolicy) =
-            await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.Extend, digest, cancellationToken);
+            await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.Extend, digest, cancellationToken, 1);
 
         switch (outcome)
         {
@@ -640,6 +648,8 @@ internal sealed class RoutedWriteOperations
                 return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
             case OperationRegistrationOutcome.RejectedSessionBudget:
                 return (KeyValueResponseType.Aborted, 0, HLCTimestamp.Zero);
+            case OperationRegistrationOutcome.RejectedMutationLimit:
+                return (KeyValueResponseType.TransactionMutationLimitReached, 0, HLCTimestamp.Zero);
             case OperationRegistrationOutcome.RejectedSessionClosed:
                 return (KeyValueResponseType.Aborted, 0, HLCTimestamp.Zero);
             case OperationRegistrationOutcome.RejectedDuplicate:

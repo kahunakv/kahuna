@@ -54,6 +54,7 @@
     <!-- The script parser pool. The default build gets it from the ASP.NET Core shared framework. -->
     <Compile Remove="Communication/InterNodeHeaders.cs" />
     <Compile Remove="Communication/NodeTransportGate.cs" />
+    <Compile Remove="Communication/AdminGate.cs" />
     <Compile Remove="Communication/External/ClusterLeave.cs" />
     <Compile Remove="Communication/External/Grpc/**/*.cs" />
     <Compile Remove="Communication/InterNode/GrpcInterNodeCommunication.cs" />

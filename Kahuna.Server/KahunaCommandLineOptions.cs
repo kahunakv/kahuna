@@ -846,6 +846,30 @@ public sealed class KahunaCommandLineOptions
     [Option("history-hold-max-total", Required = false, HelpText = "Most history holds the cluster may hold. 0 means no bound. Default 65536.", Default = 65_536)]
     public int HistoryHoldMaxTotal { get; set; } = 65_536;
 
+    [Option("snapshot-hold-max-lease-ms", Required = false, HelpText = "Longest lease, in milliseconds, a snapshot hold may ask for on acquire or renew. A hold keeps MVCC reclamation from passing its timestamp until it is released or purged after its lease. 0 means no bound. Default 86400000 (one day).", Default = 86_400_000)]
+    public int SnapshotHoldMaxLeaseMs { get; set; } = 86_400_000;
+
+    [Option("snapshot-hold-max-per-holder", Required = false, HelpText = "Most snapshot holds one holder may register. 0 means no bound. Default 4096.", Default = 4_096)]
+    public int SnapshotHoldMaxPerHolder { get; set; } = 4_096;
+
+    [Option("snapshot-hold-max-total", Required = false, HelpText = "Most snapshot holds the cluster may hold. 0 means no bound. Default 65536.", Default = 65_536)]
+    public int SnapshotHoldMaxTotal { get; set; } = 65_536;
+
+    [Option("max-key-bytes", Required = false, HelpText = "Largest key, in UTF-8 bytes, a client may write or lock through REST or gRPC. A larger key is refused as invalid input. Delete and extend are not checked. 0 means no bound. Default 16384.", Default = 16 * 1024)]
+    public int MaxKeyBytes { get; set; } = 16 * 1024;
+
+    [Option("max-value-bytes", Required = false, HelpText = "Largest value, in bytes, a client may write through REST or gRPC. A larger value is refused as invalid input. Keep it well below --raft-grpc-max-message-bytes, or a write cannot replicate. 0 means no bound. Default 4194304 (4 MiB).", Default = 4 * 1024 * 1024)]
+    public int MaxValueBytes { get; set; } = 4 * 1024 * 1024;
+
+    [Option("max-batch-items", Required = false, HelpText = "Most items one client batch call may carry (set-many, delete-many, get-many, exists-many, many-locks acquire) through REST or gRPC. A larger batch is refused whole as invalid input. 0 means no bound. Default 20000, CamusDB's default per-transaction mutation limit.", Default = 20_000)]
+    public int MaxBatchItems { get; set; } = 20_000;
+
+    [Option("max-transaction-mutations", Required = false, HelpText = "Most keys one client transaction (REST or gRPC session, or script) may write, and separately the most locks it may take. An operation past it is refused with TransactionMutationLimitReached; the session can still commit or roll back. Embedded sessions are not limited. 0 means no limit. Default 20000, CamusDB's default per-transaction mutation limit.", Default = 20_000)]
+    public int MaxTransactionMutations { get; set; } = 20_000;
+
+    [Option("admin-api-key-file", Required = false, HelpText = "Path to a file of admin keys, one per line (blank lines and lines starting with # are ignored; each key at least 32 characters). When set, node removal, replication factor, range-map DDL, backups and restore require one of the keys in the X-Kahuna-Admin-Key header (REST) or the x-kahuna-admin-key metadata (gRPC). List two keys to rotate. Keep the file readable only by the server user. Empty leaves those operations open to any caller.", Default = "")]
+    public string AdminApiKeyFile { get; set; } = "";
+
     [Option("watch-max-capacity", Required = false, HelpText = "Largest frame capacity a key-value watch may ask for; a request above it is refused. Default 65536.", Default = 65_536)]
     public int WatchMaxCapacity { get; set; } = 65_536;
 

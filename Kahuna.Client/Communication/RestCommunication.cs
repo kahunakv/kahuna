@@ -13,6 +13,7 @@ using System.Text.Json;
 using Flurl.Http;
 using Kommander.Diagnostics;
 using Kahuna.Client.Routing;
+using Kahuna.Shared.Communication;
 using Kahuna.Shared.Communication.Grpc;
 using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
@@ -148,9 +149,13 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
     /// </summary>
     private readonly AsyncRetryPolicy loggingRetryPolicy;
 
+    /// <summary>The admin key sent with the admin calls only; null or empty sends none.</summary>
+    private readonly string? adminApiKey;
+
     public RestCommunication(ILogger? logger, KahunaOptions? options = null)
     {
         this.logger = logger;
+        adminApiKey = options?.AdminApiKey;
         loggingRetryPolicy = BuildRetryPolicy(logger);
         ConfigureFlurl(options);
     }
@@ -1834,6 +1839,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             .WithOAuthBearerToken("xxx")
             .AppendPathSegments("v1/ranges/register")
             .WithHeader("Accept", "application/json")
+            .WithAdminKey(adminApiKey)
             .WithSettings(KahunaRestJson.Http2Settings)
             .AllowAnyHttpStatus()
             .PostJsonAsync(new KahunaKeyRangeRequest { KeySpace = keySpace }, cancellationToken: cancellationToken)
@@ -1852,6 +1858,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             .WithOAuthBearerToken("xxx")
             .AppendPathSegments("v1/ranges/unregister")
             .WithHeader("Accept", "application/json")
+            .WithAdminKey(adminApiKey)
             .WithSettings(KahunaRestJson.Http2Settings)
             .AllowAnyHttpStatus()
             .PostJsonAsync(new KahunaKeyRangeRequest { KeySpace = keySpace }, cancellationToken: cancellationToken)
@@ -1895,6 +1902,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             .WithOAuthBearerToken("xxx")
             .AppendPathSegments("v1/ranges/split")
             .WithHeader("Accept", "application/json")
+            .WithAdminKey(adminApiKey)
             .WithSettings(KahunaRestJson.Http2Settings)
             .AllowAnyHttpStatus()
             .PostJsonAsync(
@@ -1915,6 +1923,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             .WithOAuthBearerToken("xxx")
             .AppendPathSegments("v1/ranges/merge")
             .WithHeader("Accept", "application/json")
+            .WithAdminKey(adminApiKey)
             .WithSettings(KahunaRestJson.Http2Settings)
             .AllowAnyHttpStatus()
             .PostAsync(cancellationToken: cancellationToken)
@@ -2092,6 +2101,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             .WithOAuthBearerToken("xxx")
             .AppendPathSegments("v1/cluster/replication-factor")
             .WithHeader("Accept", "application/json")
+            .WithAdminKey(adminApiKey)
             .WithSettings(KahunaRestJson.Http2Settings)
             .AllowAnyHttpStatus()
             .PostJsonAsync(
@@ -2116,6 +2126,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             .WithOAuthBearerToken("xxx")
             .AppendPathSegments("v1/cluster/leave")
             .WithHeader("Accept", "application/json")
+            .WithAdminKey(adminApiKey)
             .WithSettings(KahunaRestJson.Http2Settings)
             .AllowAnyHttpStatus()
             .PostJsonAsync(KahunaEmptyRequest.Instance, cancellationToken: cancellationToken)
@@ -2131,7 +2142,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
     public async Task<KahunaBackupInfo> TakeFullBackup(string url, CancellationToken cancellationToken)
     {
         KahunaBackupInfo? response = await InvokeBackupRest(() => loggingRetryPolicy.ExecuteAsync(() =>
-            url.WithOAuthBearerToken("xxx")
+            url.WithOAuthBearerToken("xxx").WithAdminKey(adminApiKey)
                .AppendPathSegments("v1/backups/full")
                .WithSettings(KahunaRestJson.Http2Settings)
                .PostJsonAsync(KahunaEmptyRequest.Instance, cancellationToken: cancellationToken)
@@ -2142,7 +2153,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
     public async Task<KahunaBackupInfo> TakeIncrementalBackup(string url, Guid parentBackupId, CancellationToken cancellationToken)
     {
         KahunaBackupInfo? response = await InvokeBackupRest(() => loggingRetryPolicy.ExecuteAsync(() =>
-            url.WithOAuthBearerToken("xxx")
+            url.WithOAuthBearerToken("xxx").WithAdminKey(adminApiKey)
                .AppendPathSegments("v1/backups/incremental")
                .WithSettings(KahunaRestJson.Http2Settings)
                .PostJsonAsync(new KahunaBackupIncrementalRequest { ParentBackupId = parentBackupId }, cancellationToken: cancellationToken)
@@ -2153,7 +2164,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
     public async Task<KahunaBackupInfo> TakeCoordinatedBackup(string url, CancellationToken cancellationToken)
     {
         KahunaBackupInfo? response = await InvokeBackupRest(() => loggingRetryPolicy.ExecuteAsync(() =>
-            url.WithOAuthBearerToken("xxx")
+            url.WithOAuthBearerToken("xxx").WithAdminKey(adminApiKey)
                .AppendPathSegments("v1/backups/coordinated")
                .WithSettings(KahunaRestJson.Http2Settings)
                .PostJsonAsync(KahunaEmptyRequest.Instance, cancellationToken: cancellationToken)
@@ -2295,7 +2306,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
     public async Task<KahunaRestoreResponse> Restore(string url, Guid leafBackupId, string targetDir, long targetTimeMs, CancellationToken cancellationToken)
     {
         KahunaRestoreResponse? response = await InvokeBackupRest(() => loggingRetryPolicy.ExecuteAsync(() =>
-            url.WithOAuthBearerToken("xxx")
+            url.WithOAuthBearerToken("xxx").WithAdminKey(adminApiKey)
                .AppendPathSegments("v1/restore")
                .WithSettings(KahunaRestJson.Http2Settings)
                .PostJsonAsync(new KahunaBackupRestoreRequest
@@ -2311,7 +2322,7 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
     public async Task<KahunaBackupGcResult> RunBackupGarbageCollection(string url, bool dryRun, CancellationToken cancellationToken)
     {
         KahunaBackupGcResult? response = await InvokeBackupRest(() => loggingRetryPolicy.ExecuteAsync(() =>
-            url.WithOAuthBearerToken("xxx")
+            url.WithOAuthBearerToken("xxx").WithAdminKey(adminApiKey)
                .AppendPathSegments("v1/backups/gc")
                .SetQueryParam("dryRun", dryRun)
                .WithSettings(KahunaRestJson.Http2Settings)
@@ -2339,5 +2350,25 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
                 throw new KahunaBackupException(outcome, ex.Message);
             throw;
         }
+    }
+}
+
+/// <summary>
+/// Marks a request as an admin call: adds the admin key header when one is configured, and turns the node's 401
+/// refusal into an error that names the missing key. Without it a refused call reads as an empty answer.
+/// </summary>
+internal static class AdminKeyRequestExtensions
+{
+    public static IFlurlRequest WithAdminKey(this IFlurlRequest request, string? adminApiKey)
+    {
+        request.AfterCall(static call =>
+        {
+            if (call.Response?.StatusCode == (int)HttpStatusCode.Unauthorized)
+                throw new KahunaException(
+                    $"The node refused the admin operation {call.Request.Url.Path}: a valid admin key is required (KahunaOptions.AdminApiKey).",
+                    LockResponseType.Errored);
+        });
+
+        return string.IsNullOrEmpty(adminApiKey) ? request : request.WithHeader(KahunaAdminCredential.HeaderName, adminApiKey);
     }
 }

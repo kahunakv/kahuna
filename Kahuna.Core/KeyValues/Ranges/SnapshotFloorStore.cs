@@ -11,6 +11,12 @@ using Kahuna.Shared.KeyValue;
 namespace Kahuna.Server.KeyValues.Ranges;
 
 /// <summary>
+/// The bounds of the snapshot hold registry. Zero or less means no bound. Each live or lapsed registered hold
+/// pins MVCC reclamation at its timestamp, so these bound how long and how widely a caller can pin it.
+/// </summary>
+internal readonly record struct SnapshotHoldLimits(int MaxLeaseMs, int MaxHoldsPerHolder, int MaxHolds);
+
+/// <summary>
 /// Replicated, refcounted, leased registry of MVCC snapshot holds. While any hold is live the
 /// effective floor — the minimum held <see cref="SnapshotHold.Timestamp"/> among all live holds —
 /// constrains revision reclamation so that the revision current at any held timestamp remains
@@ -59,6 +65,8 @@ internal sealed class SnapshotFloorStore : IDisposable
     private readonly string? snapshotPath;
 
     private readonly object fileLock = new();
+
+    private readonly SnapshotHoldLimits limits;
 
     // Per-instance Meter owns the observable gauges. Disposing it removes the gauge callbacks
     // and breaks the strong reference from the meter to the capturing lambdas, so a disposed
@@ -169,11 +177,13 @@ internal sealed class SnapshotFloorStore : IDisposable
         string? storagePath,
         string? storageRevision,
         ILogger<IKahuna> logger,
-        TimeSpan startupGraceWindow = default)
+        TimeSpan startupGraceWindow = default,
+        SnapshotHoldLimits limits = default)
     {
         this.raft = raft;
         this.logger = logger;
         this.startupGraceWindow = startupGraceWindow;
+        this.limits = limits;
 
         snapshotPath = string.IsNullOrEmpty(storagePath)
             ? null
@@ -363,7 +373,10 @@ internal sealed class SnapshotFloorStore : IDisposable
     /// (no registered match) protects from its commit forward only; it does not prove the
     /// revision current at the requested timestamp survived earlier reclamation. Only the
     /// meta-partition leader can commit holds; followers return
-    /// <see cref="KeyValueResponseType.MustRetry"/>.
+    /// <see cref="KeyValueResponseType.MustRetry"/>. A lease above the configured maximum is
+    /// <see cref="KeyValueResponseType.InvalidInput"/>, and a fresh hold past the per-holder or the
+    /// registry bound is <see cref="KeyValueResponseType.SnapshotHoldLimitReached"/>; a repeat of a
+    /// registered hold is never refused by a bound, because it adds nothing to the registry.
     /// </summary>
     public async Task<(KeyValueResponseType Type, string HoldId, HLCTimestamp LeaseExpiry)> AcquireAsync(
         string holderId,
@@ -374,7 +387,7 @@ internal sealed class SnapshotFloorStore : IDisposable
         if (string.IsNullOrEmpty(holderId))
             return (KeyValueResponseType.Errored, string.Empty, HLCTimestamp.Zero);
 
-        if (leaseMs <= 0)
+        if (!LeaseAllowed(leaseMs))
             return (KeyValueResponseType.InvalidInput, string.Empty, HLCTimestamp.Zero);
 
         // Capture the prune-delete generation before replicating. If any delete window opens,
@@ -398,6 +411,12 @@ internal sealed class SnapshotFloorStore : IDisposable
 
             // Check for an existing hold with the same (holderId, timestamp) — idempotent acquire.
             SnapshotHold? existing = FindExistingHold(holderId, timestamp);
+
+            if (existing is null && LimitReached(holderId) is { } bound)
+            {
+                SnapshotFloorMetrics.HoldsRefusedByLimit.Add(1, new KeyValuePair<string, object?>("bound", bound));
+                return (KeyValueResponseType.SnapshotHoldLimitReached, string.Empty, HLCTimestamp.Zero);
+            }
 
             HLCTimestamp expiry = AddMs(now, leaseMs);
 
@@ -439,7 +458,7 @@ internal sealed class SnapshotFloorStore : IDisposable
         if (string.IsNullOrEmpty(holdId))
             return (KeyValueResponseType.Errored, HLCTimestamp.Zero);
 
-        if (leaseMs <= 0)
+        if (!LeaseAllowed(leaseMs))
             return (KeyValueResponseType.InvalidInput, HLCTimestamp.Zero);
 
         await mutateGate.WaitAsync(ct).ConfigureAwait(false);
@@ -502,6 +521,32 @@ internal sealed class SnapshotFloorStore : IDisposable
     }
 
     /// <summary>Finds the registered hold matching (holderId, timestamp), or null.</summary>
+    private bool LeaseAllowed(int leaseMs) => leaseMs > 0 && (limits.MaxLeaseMs <= 0 || leaseMs <= limits.MaxLeaseMs);
+
+    /// <summary>
+    /// Names the bound one more hold of <paramref name="holderId"/> would pass ("holder" or "total"), or null when
+    /// it fits. Lapsed holds count: they stay registered, and pin reclamation, until a release or a purge commits.
+    /// </summary>
+    private string? LimitReached(string holderId)
+    {
+        IReadOnlyDictionary<string, SnapshotHold> snapshot = holds;
+
+        if (limits.MaxHolds > 0 && snapshot.Count >= limits.MaxHolds)
+            return "total";
+
+        if (limits.MaxHoldsPerHolder <= 0)
+            return null;
+
+        int ofHolder = 0;
+        foreach (SnapshotHold h in snapshot.Values)
+        {
+            if (string.Equals(h.HolderId, holderId, StringComparison.Ordinal) && ++ofHolder >= limits.MaxHoldsPerHolder)
+                return "holder";
+        }
+
+        return null;
+    }
+
     private SnapshotHold? FindExistingHold(string holderId, HLCTimestamp timestamp)
     {
         foreach (SnapshotHold h in holds.Values)

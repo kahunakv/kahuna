@@ -117,4 +117,18 @@ public enum KeyValueResponseType
     /// longer needed, open the watch on another call or node, or raise the limit.
     /// </summary>
     WatchLimitReached = 111,
+
+    /// <summary>
+    /// A snapshot hold was refused because a bound of the registry was reached: the holder already holds the
+    /// maximum number of snapshot holds, or the cluster does. Nothing was registered. Release holds the holder no
+    /// longer needs, or raise the bound.
+    /// </summary>
+    SnapshotHoldLimitReached = 112,
+
+    /// <summary>
+    /// A transaction operation was refused because the session already writes its maximum number of keys, or holds
+    /// its maximum number of locks (<c>MaxTransactionMutations</c>). Nothing was applied, and the session stays open:
+    /// it can still commit what it holds, or roll back. Not retryable; split the work into smaller transactions.
+    /// </summary>
+    TransactionMutationLimitReached = 113,
 }

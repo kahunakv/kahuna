@@ -21,4 +21,10 @@ internal sealed class OperationRecord
     /// receive the same answer without re-executing the operation.
     /// </summary>
     public object? CachedResponse { get; set; }
+
+    /// <summary>
+    /// The working-set entries this operation reserved against the session's mutation limit while it is pending: how
+    /// many keys it may write, or how many locks it may take. Released when it completes or is cancelled.
+    /// </summary>
+    public int Reserved { get; init; }
 }

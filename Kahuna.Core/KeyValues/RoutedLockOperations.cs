@@ -58,8 +58,8 @@ internal sealed class RoutedLockOperations
         registrar.AbandonRegisteredOperation(coordinatorKey, transactionId, operationId);
 
     private ValueTask<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy)> LocateAndBeginOperation(
-        string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken) =>
-        registrar.LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken);
+        string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken, int itemCount = 0) =>
+        registrar.LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken, itemCount);
 
     private ValueTask<(KeyValueResponseType outcome, string? anchor)> LocateAndCompleteOperation(
         string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload, CancellationToken cancellationToken) =>
@@ -108,7 +108,7 @@ internal sealed class RoutedLockOperations
         int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, _, _, _, TransactionConflictPolicy sessionPolicy) =
-            await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.PointLock, OperationDigest.ForPointLockAcquire(key, expiresMs, durability), cancellationToken);
+            await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.PointLock, OperationDigest.ForPointLockAcquire(key, expiresMs, durability), cancellationToken, 1);
 
         switch (outcome)
         {
@@ -127,6 +127,8 @@ internal sealed class RoutedLockOperations
                 return (KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero, PointLockBase.None);
             case OperationRegistrationOutcome.RejectedSessionBudget:
                 return (KeyValueResponseType.Aborted, key, durability, HLCTimestamp.Zero, PointLockBase.None);
+            case OperationRegistrationOutcome.RejectedMutationLimit:
+                return (KeyValueResponseType.TransactionMutationLimitReached, key, durability, HLCTimestamp.Zero, PointLockBase.None);
             case OperationRegistrationOutcome.RejectedSessionClosed:
                 return (KeyValueResponseType.Aborted, key, durability, HLCTimestamp.Zero, PointLockBase.None);
             case OperationRegistrationOutcome.RejectedDuplicate:
@@ -214,7 +216,7 @@ internal sealed class RoutedLockOperations
         int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, _, _, _, TransactionConflictPolicy sessionPolicy) =
-            await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.PrefixLock, OperationDigest.ForPrefixLockAcquire(prefixKey, expiresMs, durability), cancellationToken);
+            await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.PrefixLock, OperationDigest.ForPrefixLockAcquire(prefixKey, expiresMs, durability), cancellationToken, 1);
 
         switch (outcome)
         {
@@ -230,6 +232,8 @@ internal sealed class RoutedLockOperations
                 return KeyValueResponseType.MustRetry;
             case OperationRegistrationOutcome.RejectedSessionBudget:
                 return KeyValueResponseType.Aborted;
+            case OperationRegistrationOutcome.RejectedMutationLimit:
+                return KeyValueResponseType.TransactionMutationLimitReached;
             case OperationRegistrationOutcome.RejectedSessionClosed:
                 return KeyValueResponseType.Aborted;
             case OperationRegistrationOutcome.RejectedDuplicate:
@@ -312,7 +316,7 @@ internal sealed class RoutedLockOperations
         List<(string key, int expiresMs, KeyValueDurability durability)> keys, CancellationToken cancellationToken)
     {
         (OperationRegistrationOutcome outcome, _, _, _, _, TransactionConflictPolicy sessionPolicy) =
-            await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.ManyPointLock, OperationDigest.ForManyPointLockAcquire(keys), cancellationToken);
+            await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.ManyPointLock, OperationDigest.ForManyPointLockAcquire(keys), cancellationToken, keys.Count);
 
         switch (outcome)
         {
@@ -324,6 +328,8 @@ internal sealed class RoutedLockOperations
                 return keys.Select(k => (KeyValueResponseType.MustRetry, k.key, k.durability, HLCTimestamp.Zero, PointLockBase.None)).ToList();
             case OperationRegistrationOutcome.RejectedSessionBudget:
                 return keys.Select(k => (KeyValueResponseType.Aborted, k.key, k.durability, HLCTimestamp.Zero, PointLockBase.None)).ToList();
+            case OperationRegistrationOutcome.RejectedMutationLimit:
+                return keys.Select(k => (KeyValueResponseType.TransactionMutationLimitReached, k.key, k.durability, HLCTimestamp.Zero, PointLockBase.None)).ToList();
             case OperationRegistrationOutcome.RejectedSessionClosed:
                 return keys.Select(k => (KeyValueResponseType.Aborted, k.key, k.durability, HLCTimestamp.Zero, PointLockBase.None)).ToList();
             case OperationRegistrationOutcome.RejectedDuplicate:
@@ -436,6 +442,8 @@ internal sealed class RoutedLockOperations
                 return (KeyValueResponseType.MustRetry, key);
             case OperationRegistrationOutcome.RejectedSessionBudget:
                 return (KeyValueResponseType.Aborted, key);
+            case OperationRegistrationOutcome.RejectedMutationLimit:
+                return (KeyValueResponseType.TransactionMutationLimitReached, key);
             case OperationRegistrationOutcome.RejectedSessionClosed:
                 return (KeyValueResponseType.Aborted, key);
             case OperationRegistrationOutcome.RejectedDuplicate:
@@ -524,6 +532,8 @@ internal sealed class RoutedLockOperations
                 return KeyValueResponseType.MustRetry;
             case OperationRegistrationOutcome.RejectedSessionBudget:
                 return KeyValueResponseType.Aborted;
+            case OperationRegistrationOutcome.RejectedMutationLimit:
+                return KeyValueResponseType.TransactionMutationLimitReached;
             case OperationRegistrationOutcome.RejectedSessionClosed:
                 return KeyValueResponseType.Aborted;
             case OperationRegistrationOutcome.RejectedDuplicate:
@@ -592,7 +602,7 @@ internal sealed class RoutedLockOperations
     {
         (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, _, _, _, TransactionConflictPolicy sessionPolicy) =
             await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.RangeLock,
-                OperationDigest.ForRangeLockAcquire(prefix, startKey, startInclusive, endKey, endInclusive, mode, expiresMs, durability), cancellationToken);
+                OperationDigest.ForRangeLockAcquire(prefix, startKey, startInclusive, endKey, endInclusive, mode, expiresMs, durability), cancellationToken, 1);
 
         switch (outcome)
         {
@@ -609,6 +619,8 @@ internal sealed class RoutedLockOperations
                 return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero);
             case OperationRegistrationOutcome.RejectedSessionBudget:
                 return (KeyValueResponseType.Aborted, HLCTimestamp.Zero);
+            case OperationRegistrationOutcome.RejectedMutationLimit:
+                return (KeyValueResponseType.TransactionMutationLimitReached, HLCTimestamp.Zero);
             case OperationRegistrationOutcome.RejectedSessionClosed:
                 return (KeyValueResponseType.Aborted, HLCTimestamp.Zero);
             case OperationRegistrationOutcome.RejectedDuplicate:
@@ -739,6 +751,8 @@ internal sealed class RoutedLockOperations
                 return KeyValueResponseType.MustRetry;
             case OperationRegistrationOutcome.RejectedSessionBudget:
                 return KeyValueResponseType.Aborted;
+            case OperationRegistrationOutcome.RejectedMutationLimit:
+                return KeyValueResponseType.TransactionMutationLimitReached;
             case OperationRegistrationOutcome.RejectedSessionClosed:
                 return KeyValueResponseType.Aborted;
             case OperationRegistrationOutcome.RejectedDuplicate:

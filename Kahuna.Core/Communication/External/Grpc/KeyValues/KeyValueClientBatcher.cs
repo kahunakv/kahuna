@@ -396,7 +396,9 @@ internal sealed class KeyValueClientBatcher
     {
         try
         {
-            GrpcTrySetKeyValueResponse trySetResponse = await service.TrySetKeyValueInternal(request.TrySetKeyValue, context);
+            GrpcTrySetKeyValueResponse trySetResponse =
+                service.RejectOversizedSet(request.TrySetKeyValue)
+                ?? await service.TrySetKeyValueInternal(request.TrySetKeyValue, context);
 
             responses.TryWrite(new GrpcBatchClientKeyValueResponse
             {
@@ -429,6 +431,7 @@ internal sealed class KeyValueClientBatcher
             // its already-routed fan-out legitimately carries transactional items without identity).
             GrpcTrySetManyKeyValueResponse trySetResponse =
                 KeyValuesService.RejectUnregisteredTransactionalSetMany(request.TrySetManyKeyValue)
+                ?? service.RejectOversizedSetMany(request.TrySetManyKeyValue)
                 ?? await service.TrySetManyKeyValueInternal(request.TrySetManyKeyValue, context);
 
             responses.TryWrite(new GrpcBatchClientKeyValueResponse
@@ -460,6 +463,7 @@ internal sealed class KeyValueClientBatcher
             // Client-facing entry: reject an unregistered transactional batch exactly as the unary endpoint does.
             GrpcTryDeleteManyKeyValueResponse tryDeleteManyResponse =
                 KeyValuesService.RejectUnregisteredTransactionalDeleteMany(request.TryDeleteManyKeyValue)
+                ?? service.RejectOversizedDeleteMany(request.TryDeleteManyKeyValue)
                 ?? await service.TryDeleteManyKeyValueInternal(request.TryDeleteManyKeyValue, context);
 
             responses.TryWrite(new GrpcBatchClientKeyValueResponse
@@ -600,7 +604,9 @@ internal sealed class KeyValueClientBatcher
     {
         try
         {
-            GrpcTryAcquireExclusiveLockResponse tryAcquireExclusiveLockResponse = await service.TryAcquireExclusiveLockInternal(request.TryAcquireExclusiveLock, context);
+            GrpcTryAcquireExclusiveLockResponse tryAcquireExclusiveLockResponse =
+                service.RejectClientLock(request.TryAcquireExclusiveLock)
+                ?? await service.TryAcquireExclusiveLockInternal(request.TryAcquireExclusiveLock, context);
 
             responses.TryWrite(new GrpcBatchClientKeyValueResponse
             {
@@ -712,6 +718,7 @@ internal sealed class KeyValueClientBatcher
     {
         try
         {
+            service.StampClientSession(request.StartTransaction);
             GrpcStartTransactionResponse startTransactionResponse = await service.StartTransactionInternal(request.StartTransaction, context);
 
             responses.TryWrite(new GrpcBatchClientKeyValueResponse

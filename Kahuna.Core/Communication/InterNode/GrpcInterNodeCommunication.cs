@@ -1740,6 +1740,8 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         if (options.CoordinatorPartitionId is { } coordinatorPartitionId)
             request.CoordinatorPartitionId = coordinatorPartitionId;
 
+        request.MutationLimit = options.MutationLimit;
+
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request), "StartTransaction", node).ConfigureAwait(false);
         if (!response.IsAnswered)
         {
@@ -1834,7 +1836,7 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         return (KeyValueResponseType)remoteResponse.Type;
     }
     
-    public async Task<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy)> BeginOperation(string node, string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken)
+    public async Task<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy)> BeginOperation(string node, string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken, int itemCount = 0)
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);
 
@@ -1846,7 +1848,8 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             TransactionIdCounter = transactionId.C,
             OperationIdHigh = operationId.High,
             OperationIdLow = operationId.Low,
-            Kind = (GrpcOperationKind)kind
+            Kind = (GrpcOperationKind)kind,
+            ItemCount = itemCount
         };
 
         if (payloadDigest is not null)

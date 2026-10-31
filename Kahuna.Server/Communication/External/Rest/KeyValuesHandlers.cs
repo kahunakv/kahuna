@@ -1,5 +1,7 @@
 
+using Kahuna.Server.Configuration;
 using Kahuna.Server.KeyValues;
+using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Routing;
 using Kahuna.Shared.Routing;
@@ -24,13 +26,17 @@ public static class KeyValuesHandlers
 {
     public static void MapKeyValueRoutes(WebApplication app)
     {
+        // Key and value sizes a client write or lock acquire must meet; see KeyValueInputLimits.
+        KeyValueInputLimits limits = KeyValueInputLimits.From(app.Services.GetService<KahunaConfiguration>() ?? new KahunaConfiguration());
+
         app.MapPost("/v1/kv/try-set", async (KahunaSetKeyValueRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
         {
             // A null value is a payload the caller left absent, not a malformed request: it sets the key
             // to no value, which the store keeps apart from a key that holds zero bytes. The gRPC service
             // accepts the same call through the presence flag of its optional field, so rejecting it here
             // would make one transport unable to write a value the other one writes and reads back.
-            if (string.IsNullOrEmpty(request.Key) || request.ExpiresMs < 0)
+            if (string.IsNullOrEmpty(request.Key) || request.ExpiresMs < 0
+                || !limits.KeyFits(request.Key) || !limits.ValueFits(request.Value) || !limits.ValueFits(request.CompareValue))
                 return new() { Type = KeyValueResponseType.InvalidInput };
 
             using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
@@ -189,7 +195,8 @@ public static class KeyValuesHandlers
 
         app.MapPost("/v1/kv/try-set-many", async (KahunaSetManyKeyValueRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
         {
-            if (request.Items is null)
+            // An oversized batch takes the same envelope refusal as a missing one, without echoing its items.
+            if (request.Items is null || !limits.BatchFits(request.Items.Count))
             {
                 return new KahunaSetManyKeyValueResponse
                 {
@@ -207,8 +214,10 @@ public static class KeyValuesHandlers
 
             // The set-many wire carries no registration identity, so a transactional item cannot register
             // with the coordinator and its write would be silently invisible to commit. Reject it rather
-            // than accept an operation that can never commit.
-            if (request.Items.Any(static i => i.TransactionId != HLCTimestamp.Zero))
+            // than accept an operation that can never commit. A batch with an item past the size bounds is
+            // refused whole, so none of its items is written.
+            if (request.Items.Any(i => i.TransactionId != HLCTimestamp.Zero
+                    || !limits.KeyFits(i.Key) || !limits.ValueFits(i.Value) || !limits.ValueFits(i.CompareValue)))
             {
                 return new KahunaSetManyKeyValueResponse
                 {
@@ -248,7 +257,8 @@ public static class KeyValuesHandlers
 
         app.MapPost("/v1/kv/try-delete-many", async (KahunaDeleteManyKeyValueRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
         {
-            if (request.Items is null)
+            // An oversized batch takes the same envelope refusal as a missing one, without echoing its items.
+            if (request.Items is null || !limits.BatchFits(request.Items.Count))
             {
                 return new KahunaDeleteManyKeyValueResponse
                 {
@@ -310,7 +320,7 @@ public static class KeyValuesHandlers
 
         app.MapPost("/v1/kv/try-get", async (KahunaGetKeyValueRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
         {
-            if (string.IsNullOrEmpty(request.Key) || string.IsNullOrEmpty(request.Key))
+            if (string.IsNullOrEmpty(request.Key))
                 return new()
                 {
                     Type = KeyValueResponseType.InvalidInput
@@ -359,7 +369,7 @@ public static class KeyValuesHandlers
         
         app.MapPost("/v1/kv/try-exists", async (KahunaExistsKeyValueRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
         {
-            if (string.IsNullOrEmpty(request.Key) || string.IsNullOrEmpty(request.Key))
+            if (string.IsNullOrEmpty(request.Key))
                 return new()
                 {
                     Type = KeyValueResponseType.InvalidInput
@@ -410,7 +420,7 @@ public static class KeyValuesHandlers
                     Type = KeyValueResponseType.InvalidInput
                 };
             
-            KeyValueTransactionResult result = await keyValues.TryExecuteTransactionScript(request.Script, request.Hash, request.Parameters, request.Priority);
+            KeyValueTransactionResult result = await keyValues.TryExecuteTransactionScript(request.Script, request.Hash, request.Parameters, request.Priority, limits.MaxTransactionMutations);
 
             // Carry the per-value results (key, value, revision, timestamps) with the same fidelity
             // as the gRPC script wire; the legacy scalar fields carry the first value for older clients.
@@ -444,7 +454,7 @@ public static class KeyValuesHandlers
 
         app.MapPost("/v1/kv/try-get-many", async (KahunaManyKeyValuesRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
         {
-            if (request.Items is null)
+            if (request.Items is null || !limits.BatchFits(request.Items.Count))
                 return new KahunaManyKeyValuesResponse { Type = KeyValueResponseType.InvalidInput, Items = [], TimeElapsedMs = 0 };
 
             // No registration identity on this wire: a transactional batch read would skip read-set
@@ -476,7 +486,7 @@ public static class KeyValuesHandlers
 
         app.MapPost("/v1/kv/try-exists-many", async (KahunaManyKeyValuesRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
         {
-            if (request.Items is null)
+            if (request.Items is null || !limits.BatchFits(request.Items.Count))
                 return new KahunaManyKeyValuesResponse { Type = KeyValueResponseType.InvalidInput, Items = [], TimeElapsedMs = 0 };
 
             // Same rejection as try-get-many: no identity on this wire means a transactional batch
@@ -512,7 +522,7 @@ public static class KeyValuesHandlers
 
         app.MapPost("/v1/kv/get-by-range", async (KahunaGetByRangeRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
         {
-            if (string.IsNullOrEmpty(request.Prefix))
+            if (string.IsNullOrEmpty(request.Prefix) || !KeyValueScanLimits.TryBoundRangePageLimit(request.Limit, out int limit))
                 return new KahunaGetByRangeResponse { Type = KeyValueResponseType.InvalidInput };
 
             string? startKey = request.StartKey;
@@ -540,7 +550,7 @@ public static class KeyValuesHandlers
                 startInclusive,
                 request.EndKey,
                 request.EndKey is not null && request.EndInclusive,
-                request.Limit,
+                limit,
                 readTimestamp,
                 request.Durability,
                 cancellationToken,
@@ -601,7 +611,8 @@ public static class KeyValuesHandlers
 
         app.MapPost("/v1/kv/try-acquire-exclusive-lock", async (KahunaAcquireKeyValueLockRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
         {
-            if (string.IsNullOrEmpty(request.Key))
+            if (string.IsNullOrEmpty(request.Key) || !limits.KeyFits(request.Key)
+                || !ClientLockIdentity.IsRegistered(request.CoordinatorKey, request.OperationIdHigh, request.OperationIdLow))
                 return new KahunaKeyValueLockResponse { Type = KeyValueResponseType.InvalidInput };
 
             (KeyValueResponseType type, string _, KeyValueDurability _, HLCTimestamp holder) = await keyValues.LocateAndTryAcquireExclusiveLock(
@@ -619,7 +630,8 @@ public static class KeyValuesHandlers
 
         app.MapPost("/v1/kv/try-acquire-prefix-lock", async (KahunaAcquireKeyValueLockRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
         {
-            if (string.IsNullOrEmpty(request.Key))
+            if (string.IsNullOrEmpty(request.Key) || !limits.KeyFits(request.Key)
+                || !ClientLockIdentity.IsRegistered(request.CoordinatorKey, request.OperationIdHigh, request.OperationIdLow))
                 return new KahunaKeyValueLockResponse { Type = KeyValueResponseType.InvalidInput };
 
             KeyValueResponseType type = await keyValues.LocateAndTryAcquireExclusivePrefixLock(
@@ -652,7 +664,8 @@ public static class KeyValuesHandlers
 
         app.MapPost("/v1/kv/try-acquire-range-lock", async (KahunaAcquireRangeLockRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
         {
-            if (string.IsNullOrEmpty(request.Prefix))
+            if (string.IsNullOrEmpty(request.Prefix) || !limits.KeyFits(request.Prefix) || !limits.KeyFits(request.StartKey) || !limits.KeyFits(request.EndKey)
+                || !ClientLockIdentity.IsRegistered(request.CoordinatorKey, request.OperationIdHigh, request.OperationIdLow))
                 return new KahunaKeyValueLockResponse { Type = KeyValueResponseType.InvalidInput };
 
             (KeyValueResponseType type, HLCTimestamp holder) = await keyValues.LocateAndTryAcquireRangeLock(
@@ -711,7 +724,8 @@ public static class KeyValuesHandlers
                 ReadTimestamp = request.ReadTimestamp,
                 AdmissionWaitMs = request.AdmissionWaitMs,
                 ConflictPolicy = TransactionConflictPolicyWire.Normalize(request.ConflictPolicy),
-                Origin = request.Origin
+                Origin = request.Origin,
+                MutationLimit = limits.MaxTransactionMutations
             }, cancellationToken);
 
             return new KahunaStartTransactionResponse

@@ -49,7 +49,7 @@ internal sealed class KeyValueTransactionHandler
     /// <param name="request">The transaction script request containing the script, hash, and parameters.</param>
     /// <param name="context">The server call context for the request.</param>
     /// <returns>A task that represents the asynchronous operation. The task result contains the response detailing the execution outcome, elapsed time, and any additional information.</returns>
-    internal async Task<GrpcTryExecuteTransactionScriptResponse> TryExecuteTransactionScriptCore(GrpcTryExecuteTransactionScriptRequest request, ServerCallContext context)
+    internal async Task<GrpcTryExecuteTransactionScriptResponse> TryExecuteTransactionScriptCore(GrpcTryExecuteTransactionScriptRequest request, ServerCallContext context, int mutationLimit)
     {
         if (request.Script is null)
             return new()
@@ -65,7 +65,8 @@ internal sealed class KeyValueTransactionHandler
             request.Script.Memory,
             request.Hash,
             GetParameters(request.Parameters),
-            TransactionPriorityWire.FromGrpc(request.Priority)
+            TransactionPriorityWire.FromGrpc(request.Priority),
+            mutationLimit
         );
 
         GrpcTryExecuteTransactionScriptResponse response = new()
@@ -141,6 +142,7 @@ internal sealed class KeyValueTransactionHandler
             AdmissionWaitMs = request.AdmissionWaitMs,
             ConflictPolicy = TransactionConflictPolicyWire.FromGrpc(request.ConflictPolicy),
             Origin = request.HasOrigin ? request.Origin : null,
+            MutationLimit = request.MutationLimit,
         }, context.CancellationToken);
 
         GrpcStartTransactionResponse response = new()
@@ -245,7 +247,7 @@ internal sealed class KeyValueTransactionHandler
         byte[]? digest = request.HasPayloadDigest ? request.PayloadDigest.ToByteArray() : null;
 
         (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy) =
-            await keyValues.LocateAndBeginOperation(request.CoordinatorKey, transactionId, operationId, (OperationKind)request.Kind, digest, context.CancellationToken);
+            await keyValues.LocateAndBeginOperation(request.CoordinatorKey, transactionId, operationId, (OperationKind)request.Kind, digest, request.ItemCount, context.CancellationToken);
 
         GrpcBeginOperationResponse response = new()
         {

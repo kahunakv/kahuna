@@ -151,9 +151,9 @@ internal sealed class TransactionSessionFacade
     /// <param name="hash"></param>
     /// <param name="parameters"></param>
     /// <returns></returns>
-    public Task<KeyValueTransactionResult> TryExecuteTx(ReadOnlyMemory<byte> script, string? hash, List<KeyValueParameter>? parameters, TransactionPriority priority = TransactionPriority.Normal)
+    public Task<KeyValueTransactionResult> TryExecuteTx(ReadOnlyMemory<byte> script, string? hash, List<KeyValueParameter>? parameters, TransactionPriority priority = TransactionPriority.Normal, int mutationLimit = 0)
     {
-        return scriptExecutor.TryExecuteTx(script, hash, parameters, priority);
+        return scriptExecutor.TryExecuteTx(script, hash, parameters, priority, mutationLimit);
     }
 
 

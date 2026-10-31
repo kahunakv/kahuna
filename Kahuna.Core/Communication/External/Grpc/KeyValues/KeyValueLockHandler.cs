@@ -134,7 +134,9 @@ internal sealed class KeyValueLockHandler
         List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp, long)> responses = await keyValues.LocateAndTryAcquireManyExclusiveLocksObserved(
             new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
             GetRequestLocksItems(request.Items),
-            context.CancellationToken
+            context.CancellationToken,
+            request.CoordinatorKey,
+            new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow)
         );
 
         GrpcTryAcquireManyExclusiveLocksResponse response = new();

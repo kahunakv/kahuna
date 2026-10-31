@@ -124,7 +124,7 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
                 }
                 // X → S downgrade or same-mode re-entry: refresh the expiry from *now* so the
                 // caller can extend the lock beyond its original TTL (heartbeat / lease-renewal).
-                RangeLockChecks.StartLease(existing, currentTime, message.ExpiresMs);
+                RangeLockChecks.StartLease(existing, currentTime, message.ExpiresMs, context.SessionOwnedIntentCeilingMs);
                 return KeyValueStaticResponses.LockedResponse;
             }
 
@@ -192,7 +192,7 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
             Mode           = message.RangeLockMode,
         };
 
-        RangeLockChecks.StartLease(rangeLock, currentTime, message.ExpiresMs);
+        RangeLockChecks.StartLease(rangeLock, currentTime, message.ExpiresMs, context.SessionOwnedIntentCeilingMs);
 
         if (!context.LocksByRange.TryGetValue(keySpace, out List<KeyValueRangeLock>? locks))
         {
@@ -247,7 +247,7 @@ internal sealed class TryAcquireExclusiveRangeLockHandler : BaseHandler
 
     private KeyValueResponse PlaceWriteIntents(HLCTimestamp currentTime, KeyValueRequest message, string keySpace)
     {
-        HLCTimestamp requestedExpiry = KeyValueWriteIntentLease.FromRequest(currentTime, message.ExpiresMs);
+        HLCTimestamp requestedExpiry = KeyValueWriteIntentLease.FromRequest(currentTime, message.ExpiresMs, context.SessionOwnedIntentCeilingMs);
 
         // Stamp per-key write intents atomically: a mid-loop conflict rolls back every intent written this
         // call, so a failed acquire/promotion never strands intents on the range's keys. The LocksByRange

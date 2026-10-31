@@ -94,6 +94,64 @@ public sealed class TestPredicateLockLifecycle : RaftTrackingTest
         Assert.Equal(KeyValueResponseType.AlreadyLocked, rangeDenied.Type);
     }
 
+    /// <summary>
+    /// No session can own a lock past the session-owned ceiling, so a longer explicit deadline only lets a caller
+    /// pin a key for as long as an int of milliseconds allows. Point, prefix and range acquisition must all cut
+    /// such a deadline to the ceiling, and a re-acquire by the same owner (the renewal path) must cut it again.
+    /// </summary>
+    [Fact]
+    public async Task FarFutureLocks_AreCutToTheSessionOwnedCeiling()
+    {
+        (KeyValueContext context, RaftManager raft) = CreateContext(CreateConfiguration());
+        int ceilingMs = context.SessionOwnedIntentCeilingMs;
+        Assert.True(ceilingMs > 0);
+
+        HLCTimestamp owner = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+        void AssertCut(HLCTimestamp expires)
+        {
+            double leftMs = (expires - now).TotalMilliseconds;
+            Assert.InRange(leftMs, 1, ceilingMs + 1_000);
+        }
+
+        InsertEntry(context, "point/key", owner);
+        TryAcquireExclusiveLockHandler point = new(context);
+        Assert.Equal(KeyValueResponseType.Locked, (await point.Execute(BuildRequest(
+            KeyValueRequestType.TryAcquireExclusiveLock, owner, "point/key", int.MaxValue))).Type);
+        AssertCut(context.Store.Get("point/key")!.WriteIntent!.Expires);
+
+        Assert.Equal(KeyValueResponseType.Locked, (await point.Execute(BuildRequest(
+            KeyValueRequestType.TryAcquireExclusiveLock, owner, "point/key", int.MaxValue))).Type);
+        AssertCut(context.Store.Get("point/key")!.WriteIntent!.Expires);
+
+        InsertEntry(context, "prefix/a", owner);
+        TryAcquireExclusivePrefixLockHandler prefix = new(context);
+        Assert.Equal(KeyValueResponseType.Locked, prefix.Execute(BuildRequest(
+            KeyValueRequestType.TryAcquireExclusivePrefixLock, owner, "prefix", int.MaxValue)).Type);
+        AssertCut(context.LocksByPrefix["prefix"].Expires);
+        AssertCut(context.Store.Get("prefix/a")!.WriteIntent!.Expires);
+
+        Assert.Equal(KeyValueResponseType.Locked, prefix.Execute(BuildRequest(
+            KeyValueRequestType.TryAcquireExclusivePrefixLock, owner, "prefix", int.MaxValue)).Type);
+        AssertCut(context.LocksByPrefix["prefix"].Expires);
+
+        InsertEntry(context, "range/a", owner);
+        TryAcquireExclusiveRangeLockHandler range = new(context);
+        long tickBefore = Environment.TickCount64;
+        Assert.Equal(KeyValueResponseType.Locked, range.Execute(BuildRangeRequest(
+            owner, "range", "range/a", "range/z", int.MaxValue)).Type);
+
+        KeyValueRangeLock rangeLock = context.LocksByRange["range"].Single();
+        AssertCut(rangeLock.Expires);
+        AssertCut(context.Store.Get("range/a")!.WriteIntent!.Expires);
+        Assert.InRange(rangeLock.LeaseEndsAtTick, tickBefore + 1, Environment.TickCount64 + ceilingMs);
+
+        Assert.Equal(KeyValueResponseType.Locked, range.Execute(BuildRangeRequest(
+            owner, "range", "range/a", "range/z", int.MaxValue)).Type);
+        AssertCut(context.LocksByRange["range"].Single().Expires);
+    }
+
     [Fact]
     public async Task PrefixLockAcquire_FailsMidLoop_StrandsNoIntents()
     {

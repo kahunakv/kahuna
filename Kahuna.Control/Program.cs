@@ -55,7 +55,19 @@ if (args.Any(a => a is "--backup-incremental" or "--backup-chain") &&
     return;
 }
 
-KahunaClient connection = await GetConnection(opts);
+string? adminKey;
+try
+{
+    adminKey = ReadAdminKey(opts.AdminKeyFile);
+}
+catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
+{
+    AnsiConsole.MarkupLine("[red]--admin-key-file: {0}[/]", Markup.Escape(ex.Message));
+    Environment.ExitCode = 1;
+    return;
+}
+
+KahunaClient connection = await GetConnection(opts, adminKey);
 
 if (IsSingleCommand(opts))
 {
@@ -336,15 +348,32 @@ return;
 /// <summary>
 /// Starts a connection to the Kahuna cluster or load balancer
 /// </summary>
-static Task<KahunaClient> GetConnection(KahunaControlOptions opts)
+static Task<KahunaClient> GetConnection(KahunaControlOptions opts, string? adminKey)
 {
     string[] connectionPool = ResolveConnectionPool(opts);
 
     bool insecure = opts.Insecure || connectionPool.All(IsLocalhost);
 
-    KahunaOptions kahunaOptions = new() { AllowInsecureCertificateValidation = insecure };
+    KahunaOptions kahunaOptions = new() { AllowInsecureCertificateValidation = insecure, AdminApiKey = adminKey };
 
     return Task.FromResult(new KahunaClient(connectionPool, null, null, kahunaOptions));
+}
+
+// The admin key from --admin-key-file: the first line that is not blank and is not a # comment, the same
+// format as the server's key file, so an operator can point both at one file. Null when no file is given.
+static string? ReadAdminKey(string? path)
+{
+    if (string.IsNullOrEmpty(path))
+        return null;
+
+    foreach (string raw in File.ReadLines(path))
+    {
+        string line = raw.Trim();
+        if (line.Length > 0 && line[0] != '#')
+            return line;
+    }
+
+    throw new InvalidDataException($"'{path}' holds no key.");
 }
 
 // Every endpoint the connection actually talks to, including the built-in pool used when no

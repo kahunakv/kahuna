@@ -33,4 +33,30 @@ public static class KeyValueScanLimits
     /// truncation is consistent with their contract; it is logged rather than silent.
     /// </summary>
     public const int MaxScanInspectionSlack = 8192;
+
+    /// <summary>
+    /// Largest page a client may ask of the paginated range read (get-by-range and its stream). A page holds
+    /// its whole item list in memory and in one response, so a client-chosen limit of <see cref="int.MaxValue"/>
+    /// would make one request materialize an entire range. A page cut to this size reports
+    /// <c>HasMore</c> with a cursor, which a caller must already follow: the inspection budget ends pages early
+    /// the same way.
+    /// </summary>
+    public const int MaxRangePageSize = MaxPrefixScanResults;
+
+    /// <summary>
+    /// Resolves the page size a client asked of the paginated range read. Zero asks for the server's page size,
+    /// and a larger request is cut to <see cref="MaxRangePageSize"/>. Returns false for a negative limit, which
+    /// names no page size.
+    /// </summary>
+    public static bool TryBoundRangePageLimit(int requested, out int limit)
+    {
+        if (requested < 0)
+        {
+            limit = 0;
+            return false;
+        }
+
+        limit = requested == 0 || requested > MaxRangePageSize ? MaxRangePageSize : requested;
+        return true;
+    }
 }

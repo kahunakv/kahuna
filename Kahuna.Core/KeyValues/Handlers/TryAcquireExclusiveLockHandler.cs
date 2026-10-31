@@ -68,7 +68,7 @@ internal sealed class TryAcquireExclusiveLockHandler : BaseHandler
             // if the transactionId is the same owner no need to acquire the lock
             if (entry.WriteIntent.TransactionId == message.TransactionId)
             {
-                entry.WriteIntent.Expires = KeyValueWriteIntentLease.FromRequest(currentTime, message.ExpiresMs);
+                entry.WriteIntent.Expires = KeyValueWriteIntentLease.FromRequest(currentTime, message.ExpiresMs, context.SessionOwnedIntentCeilingMs);
 
                 // The intent may have been planted by this transaction's own range lock, which stamps every
                 // covered key without materializing a decided-but-unsettled predecessor's committed value.
@@ -128,7 +128,7 @@ internal sealed class TryAcquireExclusiveLockHandler : BaseHandler
         entry.WriteIntent = new()
         {
             TransactionId = message.TransactionId,
-            Expires = KeyValueWriteIntentLease.FromRequest(currentTime, message.ExpiresMs),
+            Expires = KeyValueWriteIntentLease.FromRequest(currentTime, message.ExpiresMs, context.SessionOwnedIntentCeilingMs),
             AcquiredAt = currentTime,
             Yielding = message.ConflictPolicy == TransactionConflictPolicy.Yield,
         };

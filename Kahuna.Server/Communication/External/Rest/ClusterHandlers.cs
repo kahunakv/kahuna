@@ -33,7 +33,7 @@ public static class ClusterHandlers
                     ClusterLeave.ToResponse(result), KahunaJsonContext.Default.KahunaClusterLeaveResponse),
                 "application/json",
                 statusCode: ClusterLeave.ToStatusCode(result.Outcome));
-        });
+        }).RequireAdminKey();
 
         // Readiness probe: a node opens its port and answers membership queries roughly a second
         // after launch, but refuses every key/value request until cluster initialization completes
@@ -87,7 +87,7 @@ public static class ClusterHandlers
                 JsonSerializer.Serialize(response, KahunaJsonContext.Default.KahunaSetReplicationFactorResponse),
                 "application/json",
                 statusCode: response.Success ? StatusCodes.Status200OK : StatusCodes.Status409Conflict);
-        });
+        }).RequireAdminKey();
     }
 
     /// <summary>

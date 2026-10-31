@@ -138,4 +138,11 @@ public class KahunaOptions
     /// <see langword="true"/>.
     /// </summary>
     public IReadOnlyList<string> TrustedServerCertificateThumbprints { get; set; } = [];
+
+    /// <summary>
+    /// The admin key sent with the admin calls (node removal, replication factor, range-map DDL, backups and
+    /// restore), and with no other call. Required against a node started with an admin key file; null or empty
+    /// sends none.
+    /// </summary>
+    public string? AdminApiKey { get; set; }
 }

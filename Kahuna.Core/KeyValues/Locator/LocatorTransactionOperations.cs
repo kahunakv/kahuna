@@ -311,7 +311,7 @@ internal sealed class LocatorTransactionOperations
     /// when this node is that leader and forwarding otherwise.
     /// </summary>
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
-    public async ValueTask<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy)> LocateAndBeginOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken)
+    public async ValueTask<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy)> LocateAndBeginOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken, int itemCount = 0)
     {
         if (string.IsNullOrEmpty(coordinatorKey))
             return (OperationRegistrationOutcome.RejectedSessionClosed, KeyValueResponseType.Errored, 0, HLCTimestamp.Zero, null, TransactionConflictPolicy.Normal);
@@ -322,7 +322,7 @@ internal sealed class LocatorTransactionOperations
         if (OwnsSession(transactionId) || !raft.Joined || await routing.AmILeaderIfHosted(partitionId, cancellationToken))
         {
             (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy) local =
-                manager.BeginOperation(transactionId, operationId, kind, payloadDigest);
+                manager.BeginOperation(transactionId, operationId, kind, payloadDigest, itemCount);
 
             sessionRegistration.Local(SessionRegistrationOp.Begin, IsRegistrationAccepted(local.outcome));
             return local;
@@ -340,7 +340,7 @@ internal sealed class LocatorTransactionOperations
         try
         {
             (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy) forwarded =
-                await interNodeCommunication.BeginOperation(leader, coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken);
+                await interNodeCommunication.BeginOperation(leader, coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken, itemCount);
 
             forward.Answered(IsRegistrationAccepted(forwarded.outcome));
             return forwarded;

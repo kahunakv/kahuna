@@ -100,6 +100,26 @@ public class TestKeyValueRangeCursor
         Assert.DoesNotContain("=", cursor);
     }
 
+    /// <summary>
+    /// The cursor is client input. A durability byte that names no durability is refused, so no caller of the
+    /// decoder can receive an undefined enum value.
+    /// </summary>
+    [Fact]
+    public void TestUnknownDurabilityByteIsRejected()
+    {
+        string cursor = KeyValueRangeCursor.Encode("k", KeyValueDurability.Persistent, "p", HLCTimestamp.Zero);
+        byte[] bytes = System.Buffers.Text.Base64Url.DecodeFromChars(cursor);
+
+        // Version, then a length-prefixed last key and prefix of one byte each: the durability byte follows.
+        const int durabilityOffset = 1 + 4 + 1 + 4 + 1;
+        Assert.Equal((byte)KeyValueDurability.Persistent, bytes[durabilityOffset]);
+
+        bytes[durabilityOffset] = 7;
+        string tampered = System.Buffers.Text.Base64Url.EncodeToString(bytes);
+
+        Assert.False(KeyValueRangeCursor.TryDecode(tampered, out _, out _, out _, out _));
+    }
+
     [Fact]
     public void TestEncodedStringMatchesLegacyBase64UrlFormat()
     {

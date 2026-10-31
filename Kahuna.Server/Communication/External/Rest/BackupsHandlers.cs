@@ -11,14 +11,14 @@ public static class BackupsHandlers
     public static void MapBackupsRoutes(WebApplication app)
     {
         app.MapPost("/v1/backups/full", (IKahuna kahuna, HttpResponse resp, CancellationToken ct) =>
-            Guard(kahuna, resp, async () => Results.Ok(await kahuna.TakeFullBackupAsync(ct))));
+            Guard(kahuna, resp, async () => Results.Ok(await kahuna.TakeFullBackupAsync(ct)))).RequireAdminKey();
 
         app.MapPost("/v1/backups/incremental", (
             [FromBody] KahunaBackupIncrementalRequest req, IKahuna kahuna, HttpResponse resp, CancellationToken ct) =>
-            Guard(kahuna, resp, async () => Results.Ok(await kahuna.TakeIncrementalBackupAsync(req.ParentBackupId, ct))));
+            Guard(kahuna, resp, async () => Results.Ok(await kahuna.TakeIncrementalBackupAsync(req.ParentBackupId, ct)))).RequireAdminKey();
 
         app.MapPost("/v1/backups/coordinated", (IKahuna kahuna, HttpResponse resp, CancellationToken ct) =>
-            Guard(kahuna, resp, async () => Results.Ok(await kahuna.TakeCoordinatedBackupAsync(ct))));
+            Guard(kahuna, resp, async () => Results.Ok(await kahuna.TakeCoordinatedBackupAsync(ct)))).RequireAdminKey();
 
         app.MapGet("/v1/backups", (IKahuna kahuna, HttpResponse resp, CancellationToken ct) =>
             Guard(kahuna, resp, async () => Results.Ok(await kahuna.ListBackupsAsync(ct))));
@@ -26,14 +26,14 @@ public static class BackupsHandlers
         // Reclaim backup disk: sweep orphaned/leftover artifacts and enforce retention. ?dryRun=true
         // returns the inventory of what would be reclaimed without deleting anything (default false).
         app.MapPost("/v1/backups/gc", ([FromQuery] bool dryRun, IKahuna kahuna, HttpResponse resp, CancellationToken ct) =>
-            Guard(kahuna, resp, async () => Results.Ok(await kahuna.RunBackupGarbageCollectionAsync(dryRun, ct))));
+            Guard(kahuna, resp, async () => Results.Ok(await kahuna.RunBackupGarbageCollectionAsync(dryRun, ct)))).RequireAdminKey();
 
         app.MapGet("/v1/backups/{id}/chain", (Guid id, IKahuna kahuna, HttpResponse resp, CancellationToken ct) =>
             Guard(kahuna, resp, async () => Results.Ok(await kahuna.GetBackupChainAsync(id, ct))));
 
         app.MapPost("/v1/backups/validate-chain", (
             [FromBody] KahunaBackupRestoreRequest req, IKahuna kahuna, HttpResponse resp, CancellationToken ct) =>
-            Guard(kahuna, resp, async () => Results.Ok(await kahuna.GetBackupChainAsync(req.LeafBackupId, ct))));
+            Guard(kahuna, resp, async () => Results.Ok(await kahuna.GetBackupChainAsync(req.LeafBackupId, ct)))).RequireAdminKey();
 
         app.MapPost("/v1/restore", (
             [FromBody] KahunaBackupRestoreRequest req, IKahuna kahuna, HttpResponse resp, CancellationToken ct) =>
@@ -53,7 +53,7 @@ public static class BackupsHandlers
                     return Results.Problem("targetDir is required.", statusCode: 400);
 
                 return Results.Ok(await kahuna.RestoreToAsync(req.LeafBackupId, req.TargetDir, req.TargetTimeMs, ct));
-            }));
+            })).RequireAdminKey();
     }
 
     /// <summary>

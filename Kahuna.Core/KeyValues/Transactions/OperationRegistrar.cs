@@ -233,9 +233,9 @@ internal sealed class OperationRegistrar
     }
 
     /// <summary>Routes an operation registration to the coordinator node identified by <paramref name="coordinatorKey"/>.</summary>
-    public ValueTask<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy)> LocateAndBeginOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken)
+    public ValueTask<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy)> LocateAndBeginOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken, int itemCount = 0)
     {
-        return locator.LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken);
+        return locator.LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken, itemCount);
     }
 
     /// <summary>
@@ -259,9 +259,9 @@ internal sealed class OperationRegistrar
     }
 
     /// <summary>Node-local registration: the session lives here (this node is the coordinator for the key).</summary>
-    public (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy) BeginOperation(HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest)
+    public (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy) BeginOperation(HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, int itemCount = 0)
     {
-        OperationRegistrationResult result = txCoordinator.BeginOperation(transactionId, operationId, kind, payloadDigest);
+        OperationRegistrationResult result = txCoordinator.BeginOperation(transactionId, operationId, kind, payloadDigest, itemCount);
 
         CachedOperationResponse cached = result.CachedResponse is CachedOperationResponse c
             ? c

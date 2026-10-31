@@ -284,9 +284,14 @@ KahunaConfiguration kahunaConfiguration = ServerConfigurationFactory.Create(opts
 Kahuna.Server.Routing.RouteCaptureScope.Enabled = kahunaConfiguration.RoutingHintsEnabled;
 
 ConfigurationValidator.ValidateSettleWindow(kahunaConfiguration, opts.RaftMinLeaderStabilityMs);
+ConfigurationValidator.ValidateValueBound(kahunaConfiguration, opts.RaftGrpcMaxMessageBytes);
 ConfigurationValidator.ValidateCollectionInterval(kahunaConfiguration);
 
 builder.Services.AddSingleton(kahunaConfiguration);
+
+// Read before the build, so a key file that cannot be read or holds a weak key stops the node before it serves.
+IReadOnlyList<string> adminKeys = AdminGate.LoadKeys(kahunaConfiguration.AdminApiKeyFile);
+builder.Services.AddAdminGate(adminKeys);
 
 // The base image of a PITR bootstrap must be in the storage path before the persistence backend opens, and
 // the backend opens when the host resolves the node's services. So this step runs here, before the build.
@@ -321,6 +326,11 @@ if (transportSecurity.NodeAuthenticationMode == RaftNodeAuthenticationMode.Mutua
 
 if (transportSecurity.NodeAuthenticationMode == RaftNodeAuthenticationMode.SharedSecret)
     app.Logger.LogWarning("SharedSecret authenticates Raft only; Kahuna's inter-node gRPC stays unauthenticated. Use MutualTls to cover both");
+
+if (adminKeys.Count == 0)
+    app.Logger.LogWarning("No --admin-api-key-file: node removal, replication factor, range-map DDL, backups and restore are open to any caller of the client port");
+else if (app.Logger.IsEnabled(LogLevel.Information))
+    app.Logger.LogInformation("Admin operations require one of {AdminKeyCount} admin key(s)", adminKeys.Count);
 
 if (opts.RaftAllowInsecureCertificateValidation)
     app.Logger.LogWarning("--raft-allow-insecure-certificate-validation is set: peer certificates are not validated on Raft or Kahuna inter-node connections. Other HTTP clients are unaffected. Development only");

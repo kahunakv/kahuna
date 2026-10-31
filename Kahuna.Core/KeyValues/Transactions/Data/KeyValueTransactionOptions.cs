@@ -93,4 +93,11 @@ public sealed class KeyValueTransactionOptions
     /// characters. Kept only on a cluster that enables the setting <c>TransactionOriginTags</c>.
     /// </summary>
     public string? Origin { get; set; }
+
+    /// <summary>
+    /// The most keys the session may write and the most locks it may take (see
+    /// <see cref="TransactionContext.MutationLimit"/>). Set by a client entry point from its configuration, never from
+    /// the client; zero (embedded callers, Kahuna's own transactions) means no limit.
+    /// </summary>
+    public int MutationLimit { get; set; }
 }

@@ -1053,6 +1053,38 @@ public sealed class EmbeddedKahunaOptions
     /// <see cref="Server.Configuration.KahunaConfiguration.HistoryHoldMaxTotal"/>.</summary>
     public int HistoryHoldMaxTotal { get; set; } = 65_536;
 
+    /// <summary>The longest lease a snapshot hold may ask for, in milliseconds; zero means no bound. See
+    /// <see cref="Server.Configuration.KahunaConfiguration.SnapshotHoldMaxLeaseMs"/>.</summary>
+    public int SnapshotHoldMaxLeaseMs { get; set; } = 86_400_000;
+
+    /// <summary>The most snapshot holds one holder may register; zero means no bound. See
+    /// <see cref="Server.Configuration.KahunaConfiguration.SnapshotHoldMaxPerHolder"/>.</summary>
+    public int SnapshotHoldMaxPerHolder { get; set; } = 4_096;
+
+    /// <summary>The most snapshot holds the registry may hold; zero means no bound. See
+    /// <see cref="Server.Configuration.KahunaConfiguration.SnapshotHoldMaxTotal"/>.</summary>
+    public int SnapshotHoldMaxTotal { get; set; } = 65_536;
+
+    /// <summary>The largest key, in UTF-8 bytes, a client entry point accepts on a write or a lock; zero means no
+    /// bound. See <see cref="Server.Configuration.KahunaConfiguration.MaxKeyBytes"/>.</summary>
+    public int MaxKeyBytes { get; set; } = 16 * 1024;
+
+    /// <summary>The largest value, in bytes, a client entry point accepts on a write; zero means no bound. See
+    /// <see cref="Server.Configuration.KahunaConfiguration.MaxValueBytes"/>.</summary>
+    public int MaxValueBytes { get; set; } = 4 * 1024 * 1024;
+
+    /// <summary>The most items one client batch call may carry; zero means no bound. See
+    /// <see cref="Server.Configuration.KahunaConfiguration.MaxBatchItems"/>.</summary>
+    public int MaxBatchItems { get; set; } = 20_000;
+
+    /// <summary>The most keys one client transaction may write, and the most locks it may take; zero means no limit. See
+    /// <see cref="Server.Configuration.KahunaConfiguration.MaxTransactionMutations"/>.</summary>
+    public int MaxTransactionMutations { get; set; } = 20_000;
+
+    /// <summary>Path to the file of admin keys, one per line; empty leaves the admin operations open. See
+    /// <see cref="Server.Configuration.KahunaConfiguration.AdminApiKeyFile"/>.</summary>
+    public string AdminApiKeyFile { get; set; } = "";
+
     /// <summary>The largest frame capacity a watch may ask for. See
     /// <see cref="Server.Configuration.KahunaConfiguration.WatchMaxCapacity"/>.</summary>
     public int WatchMaxCapacity { get; set; } = 65_536;

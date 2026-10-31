@@ -64,6 +64,11 @@ A client protects history by acquiring a **hold**:
 - Holds are **leased**: a hold must be renewed before its lease expires, so a client that crashes and
   never releases is eventually removed by the reaper. Lease expiry is measured on the **cluster HLC**, never a
   node's wall clock, so a leader change can't mis-expire a hold.
+- Holds are **bounded**. `SnapshotHoldMaxLeaseMs` (default one day) is the longest lease an acquire or a renew
+  may ask for; a longer one is refused as `InvalidInput`. `SnapshotHoldMaxPerHolder` (4096) and
+  `SnapshotHoldMaxTotal` (65536) bound how many holds one holder and the whole cluster may register; a new hold
+  past either bound is refused as `SnapshotHoldLimitReached`, and nothing is registered. A repeat of a registered
+  hold is never refused by a count bound. Zero turns a bound off.
 
 The reported **effective floor** is the **minimum timestamp among all currently live holds**,
 or "no floor" when none are live. It is distinct from the protective floor:

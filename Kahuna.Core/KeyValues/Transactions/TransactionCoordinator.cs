@@ -205,6 +205,7 @@ internal sealed partial class TransactionCoordinator : IDisposable
                     Origin             = configuration.TransactionOriginTags && !string.IsNullOrEmpty(options.Origin) ? options.Origin : null,
                     Action             = KeyValueTransactionAction.Commit,
                     AsyncRelease       = options.AsyncRelease,
+                    MutationLimit      = Math.Max(0, options.MutationLimit),
                     Timeout            = timeout,
                     // The slot travels with the session and is returned by whichever path finalizes it.
                     AdmissionLease     = lease

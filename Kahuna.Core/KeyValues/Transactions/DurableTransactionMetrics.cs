@@ -1178,6 +1178,16 @@ internal static class DurableTransactionMetrics
             description: "Effect-bearing operation completions discarded because their registration was absent or not pending.");
 
     /// <summary>
+    /// Counts registrations refused because the session already writes its maximum number of keys, or holds its maximum
+    /// number of locks, tagged with the count that was full (writes, locks). A client transaction past the limit is the
+    /// expected cause; a steady rate from one application means it should split its transactions.
+    /// </summary>
+    internal static readonly Counter<long> MutationLimitRefusals =
+        Meter.CreateCounter<long>(
+            "kahuna.kv.transaction_mutation_limit_refusals_total",
+            description: "Transaction operations refused because the session reached its mutation limit, by count (writes, locks).");
+
+    /// <summary>
     /// Transactions committed through the one-phase fast path: a single durable batch carrying
     /// [record init + anchor prepare + commit decision], taken when the participant set collapses to the
     /// locally-led anchor partition, no foreign durable intent holds any written key, and read-set

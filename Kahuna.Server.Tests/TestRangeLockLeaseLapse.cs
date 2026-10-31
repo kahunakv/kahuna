@@ -235,7 +235,7 @@ public sealed class TestRangeLockLeaseLapse : BaseCluster
             Mode = RangeLockMode.Shared
         };
 
-        RangeLockChecks.StartLease(held, grantedAt, LockExpiresMs);
+        RangeLockChecks.StartLease(held, grantedAt, LockExpiresMs, maxLeaseMs: 0);
 
         HLCTimestamp leapt = grantedAt + ClockLeapMs;
         Assert.True(leapt - held.Expires > TimeSpan.Zero, "the leap must pass the deadline recorded at the grant");
@@ -256,7 +256,7 @@ public sealed class TestRangeLockLeaseLapse : BaseCluster
         Assert.True(RangeLockChecks.IsLive(carried, leapt + (2 * LockExpiresMs), sessionOwnedCeilingMs: 0));
 
         // A session-owned lock has no deadline in either form.
-        RangeLockChecks.StartLease(held, leapt, expiresMs: 0);
+        RangeLockChecks.StartLease(held, leapt, expiresMs: 0, maxLeaseMs: 0);
         Assert.Equal(HLCTimestamp.Zero, held.Expires);
         Assert.Equal(0, held.LeaseEndsAtTick);
     }

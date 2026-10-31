@@ -58,8 +58,8 @@ internal sealed class RoutedReadOperations
         registrar.AbandonRegisteredOperation(coordinatorKey, transactionId, operationId);
 
     private ValueTask<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy)> LocateAndBeginOperation(
-        string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken) =>
-        registrar.LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken);
+        string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken, int itemCount = 0) =>
+        registrar.LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken, itemCount);
 
     /// <summary>
     /// Locates the leader node for the given key and executes the TryGetValue request.
@@ -154,6 +154,8 @@ internal sealed class RoutedReadOperations
                 return (KeyValueResponseType.MustRetry, null);
             case OperationRegistrationOutcome.RejectedSessionBudget:
                 return (KeyValueResponseType.Aborted, null);
+            case OperationRegistrationOutcome.RejectedMutationLimit:
+                return (KeyValueResponseType.TransactionMutationLimitReached, null);
             case OperationRegistrationOutcome.RejectedSessionClosed:
                 return (KeyValueResponseType.Aborted, null);
             case OperationRegistrationOutcome.RejectedDuplicate:
@@ -395,7 +397,7 @@ internal sealed class RoutedReadOperations
         byte[] digest = OperationDigest.ForProbeMany(keys, readTimestamp, lockMode, expiresMs, durability, readMode);
 
         (OperationRegistrationOutcome outcome, _, _, _, _, TransactionConflictPolicy sessionPolicy) =
-            await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.ProbeMany, digest, cancellationToken);
+            await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.ProbeMany, digest, cancellationToken, lockMode != KeyValueProbeLock.None ? keys.Count : 0);
 
         if (outcome == OperationRegistrationOutcome.AlreadyPending)
         {
@@ -411,6 +413,8 @@ internal sealed class RoutedReadOperations
                 return BuildProbeRejection(keys.Count, KeyValueResponseType.MustRetry);
             case OperationRegistrationOutcome.RejectedSessionBudget:
                 return BuildProbeRejection(keys.Count, KeyValueResponseType.Aborted);
+            case OperationRegistrationOutcome.RejectedMutationLimit:
+                return BuildProbeRejection(keys.Count, KeyValueResponseType.TransactionMutationLimitReached);
             case OperationRegistrationOutcome.RejectedSessionClosed:
                 return BuildProbeRejection(keys.Count, KeyValueResponseType.Aborted);
             case OperationRegistrationOutcome.RejectedDuplicate:
@@ -557,6 +561,8 @@ internal sealed class RoutedReadOperations
                 return BuildManyReadRejection(keys, KeyValueResponseType.MustRetry);
             case OperationRegistrationOutcome.RejectedSessionBudget:
                 return BuildManyReadRejection(keys, KeyValueResponseType.Aborted);
+            case OperationRegistrationOutcome.RejectedMutationLimit:
+                return BuildManyReadRejection(keys, KeyValueResponseType.TransactionMutationLimitReached);
             case OperationRegistrationOutcome.RejectedSessionClosed:
                 return BuildManyReadRejection(keys, KeyValueResponseType.Aborted);
             case OperationRegistrationOutcome.RejectedDuplicate:

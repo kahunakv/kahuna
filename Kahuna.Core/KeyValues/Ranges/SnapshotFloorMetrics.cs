@@ -61,4 +61,13 @@ internal static class SnapshotFloorMetrics
         Meter.CreateCounter<long>(
             "kahuna.snapshot_floor.prune_skipped_unconfirmed_total",
             description: "Revision-prune cycles skipped because meta-partition catch-up could not be confirmed.");
+
+    /// <summary>
+    /// Increments when a snapshot hold acquire is refused because a registry bound was reached, tagged with the
+    /// bound (holder, total). A sustained rate means a holder leaks holds or the bounds are too small.
+    /// </summary>
+    internal static readonly Counter<long> HoldsRefusedByLimit =
+        Meter.CreateCounter<long>(
+            "kahuna.snapshot_floor.holds_refused_total",
+            description: "Snapshot hold acquires refused because a registry bound was reached, by bound (holder, total).");
 }

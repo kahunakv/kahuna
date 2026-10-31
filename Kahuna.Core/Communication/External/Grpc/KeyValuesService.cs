@@ -69,6 +69,9 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     // The most watches one Watch call may hold open; zero for no limit.
     private readonly int maxWatchesPerCall;
 
+    // The key and value sizes the client entry points accept; the inter-node batcher is not bound by them.
+    private readonly KeyValueInputLimits inputLimits;
+
     private static readonly KahunaConfiguration DefaultConfiguration = new();
 
     /// <summary>
@@ -84,6 +87,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         this.gate = gate;
         this.logger = logger;
         maxWatchesPerCall = (configuration ?? DefaultConfiguration).WatchMaxPerCall;
+        inputLimits = KeyValueInputLimits.From(configuration ?? DefaultConfiguration);
 
         writes = new(keyValues);
         reads = new(keyValues);
@@ -107,6 +111,9 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <returns>A task representing the asynchronous operation, with a response indicating the result of the set operation.</returns>
     public override Task<GrpcTrySetKeyValueResponse> TrySetKeyValue(GrpcTrySetKeyValueRequest request, ServerCallContext context)
     {
+        if (RejectOversizedSet(request) is { } rejected)
+            return Task.FromResult(rejected);
+
         return TrySetKeyValueInternal(request, context).AsTask();
     }
 
@@ -118,7 +125,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <returns>A task representing the asynchronous operation, with a response indicating the result of the set operation.</returns>
     public override async Task<GrpcTrySetManyKeyValueResponse> TrySetManyKeyValue(GrpcTrySetManyKeyValueRequest request, ServerCallContext context)
     {
-        if (RejectUnregisteredTransactionalSetMany(request) is { } rejected)
+        if ((RejectUnregisteredTransactionalSetMany(request) ?? RejectOversizedSetMany(request)) is { } rejected)
             return rejected;
 
         return await TrySetManyKeyValueInternal(request, context);
@@ -126,7 +133,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
 
     public override async Task<GrpcTryDeleteManyKeyValueResponse> TryDeleteManyKeyValue(GrpcTryDeleteManyKeyValueRequest request, ServerCallContext context)
     {
-        if (RejectUnregisteredTransactionalDeleteMany(request) is { } rejected)
+        if ((RejectUnregisteredTransactionalDeleteMany(request) ?? RejectOversizedDeleteMany(request)) is { } rejected)
             return rejected;
 
         return await TryDeleteManyKeyValueInternal(request, context);
@@ -153,13 +160,112 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
             }
         }
 
-        if (!transactional)
-            return null;
+        return transactional ? InvalidSetMany(request) : null;
+    }
 
+    private static GrpcTrySetManyKeyValueResponse InvalidSetMany(GrpcTrySetManyKeyValueRequest request)
+    {
         GrpcTrySetManyKeyValueResponse response = new();
         ReserveItemCapacity(response.Items, request.Items.Count);
         foreach (GrpcTrySetManyKeyValueRequestItem item in request.Items)
             response.Items.Add(new GrpcTrySetManyKeyValueResponseItem
+            {
+                Type = GrpcKeyValueResponseType.TypeInvalidInput,
+                Key = item.Key,
+                Durability = item.Durability
+            });
+        return response;
+    }
+
+    // Key and value sizes and batch item counts are checked at the client entry points only, for the same reason as
+    // the registration checks above: the inter-node batcher forwards requests a client entry point already admitted,
+    // and a node must not refuse a forwarded request a larger bound on another node let in. A refused batch runs none
+    // of its items. The gRPC batch responses carry no envelope outcome, so a refusal answers every item; that answer
+    // is no larger than the request, and costs no routing or actor work.
+
+    internal GrpcTrySetKeyValueResponse? RejectOversizedSet(GrpcTrySetKeyValueRequest request) =>
+        inputLimits.KeyFits(request.Key) && inputLimits.ValueFits(request.Value.Length) && inputLimits.ValueFits(request.CompareValue.Length)
+            ? null
+            : new() { Type = GrpcKeyValueResponseType.TypeInvalidInput };
+
+    internal GrpcTrySetManyKeyValueResponse? RejectOversizedSetMany(GrpcTrySetManyKeyValueRequest request)
+    {
+        if (!inputLimits.BatchFits(request.Items.Count))
+            return InvalidSetMany(request);
+
+        foreach (GrpcTrySetManyKeyValueRequestItem item in request.Items)
+        {
+            if (!inputLimits.KeyFits(item.Key) || !inputLimits.ValueFits(item.Value.Length) || !inputLimits.ValueFits(item.CompareValue.Length))
+                return InvalidSetMany(request);
+        }
+
+        return null;
+    }
+
+    internal GrpcTryAcquireExclusiveLockResponse? RejectClientLock(GrpcTryAcquireExclusiveLockRequest request) =>
+        inputLimits.KeyFits(request.Key) && ClientLockIdentity.IsRegistered(request.CoordinatorKey, request.OperationIdHigh, request.OperationIdLow)
+            ? null
+            : new() { Type = GrpcKeyValueResponseType.TypeInvalidInput };
+
+    internal GrpcTryDeleteManyKeyValueResponse? RejectOversizedDeleteMany(GrpcTryDeleteManyKeyValueRequest request)
+    {
+        if (inputLimits.BatchFits(request.Items.Count))
+            return null;
+
+        GrpcTryDeleteManyKeyValueResponse response = new();
+        ReserveItemCapacity(response.Items, request.Items.Count);
+        foreach (GrpcTryDeleteManyKeyValueRequestItem item in request.Items)
+            response.Items.Add(new GrpcTryDeleteManyKeyValueResponseItem
+            {
+                Type = GrpcKeyValueResponseType.TypeInvalidInput,
+                Key = item.Key,
+                Durability = item.Durability
+            });
+        return response;
+    }
+
+    private static GrpcTryGetManyValuesResponse InvalidGetMany(GrpcTryGetManyValuesRequest request)
+    {
+        GrpcTryGetManyValuesResponse response = new();
+        ReserveItemCapacity(response.Items, request.Items.Count);
+        foreach (GrpcTryManyValuesRequestItem item in request.Items)
+            response.Items.Add(new GrpcTryGetManyValuesResponseItem
+            {
+                Type = GrpcKeyValueResponseType.TypeInvalidInput,
+                Key = item.Key,
+                Durability = item.Durability
+            });
+        return response;
+    }
+
+    private static GrpcTryExistsManyValuesResponse InvalidExistsMany(GrpcTryExistsManyValuesRequest request)
+    {
+        GrpcTryExistsManyValuesResponse response = new();
+        ReserveItemCapacity(response.Items, request.Items.Count);
+        foreach (GrpcTryManyValuesRequestItem item in request.Items)
+            response.Items.Add(new GrpcTryExistsManyValuesResponseItem
+            {
+                Type = GrpcKeyValueResponseType.TypeInvalidInput,
+                Key = item.Key,
+                Durability = item.Durability
+            });
+        return response;
+    }
+
+    private GrpcTryAcquireManyExclusiveLocksResponse? RejectClientManyLocks(GrpcTryAcquireManyExclusiveLocksRequest request)
+    {
+        bool fits = inputLimits.BatchFits(request.Items.Count)
+            && ClientLockIdentity.IsRegistered(request.CoordinatorKey, request.OperationIdHigh, request.OperationIdLow);
+        for (int i = 0; fits && i < request.Items.Count; i++)
+            fits = inputLimits.KeyFits(request.Items[i].Key);
+
+        if (fits)
+            return null;
+
+        GrpcTryAcquireManyExclusiveLocksResponse response = new();
+        ReserveItemCapacity(response.Items, request.Items.Count);
+        foreach (GrpcTryAcquireManyExclusiveLocksRequestItem item in request.Items)
+            response.Items.Add(new GrpcTryAcquireManyExclusiveLocksResponseItem
             {
                 Type = GrpcKeyValueResponseType.TypeInvalidInput,
                 Key = item.Key,
@@ -233,7 +339,12 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     }
 
     public override Task<GrpcTryGetManyValuesResponse> TryGetManyValues(GrpcTryGetManyValuesRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.reads.TryGetManyValuesRoutedCore(r, c), static r => KeyValueMustRetry.TryGetManyValues(r));
+    {
+        if (!inputLimits.BatchFits(request.Items.Count))
+            return Task.FromResult(InvalidGetMany(request));
+
+        return Guard(request, context, static (s, r, c) => s.reads.TryGetManyValuesRoutedCore(r, c), static r => KeyValueMustRetry.TryGetManyValues(r));
+    }
 
     /// <summary>
     /// Handles the gRPC request to check if a specific key exists in the key-value store.
@@ -247,7 +358,12 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     }
 
     public override Task<GrpcTryExistsManyValuesResponse> TryExistsManyValues(GrpcTryExistsManyValuesRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.reads.TryExistsManyValuesRoutedCore(r, c), static r => KeyValueMustRetry.TryExistsManyValues(r));
+    {
+        if (!inputLimits.BatchFits(request.Items.Count))
+            return Task.FromResult(InvalidExistsMany(request));
+
+        return Guard(request, context, static (s, r, c) => s.reads.TryExistsManyValuesRoutedCore(r, c), static r => KeyValueMustRetry.TryExistsManyValues(r));
+    }
 
     /// <summary>
     /// Attempts to acquire an exclusive lock on a key-value resource.
@@ -257,6 +373,9 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <returns>A response indicating the result of the lock acquisition attempt.</returns>
     public override async Task<GrpcTryAcquireExclusiveLockResponse> TryAcquireExclusiveLock(GrpcTryAcquireExclusiveLockRequest request, ServerCallContext context)
     {
+        if (RejectClientLock(request) is { } rejected)
+            return rejected;
+
         return await TryAcquireExclusiveLockInternal(request, context);
     }
 
@@ -271,6 +390,9 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         ServerCallContext context
     )
     {
+        if (!inputLimits.KeyFits(request.PrefixKey) || !ClientLockIdentity.IsRegistered(request.CoordinatorKey, request.OperationIdHigh, request.OperationIdLow))
+            return new() { Type = GrpcKeyValueResponseType.TypeInvalidInput };
+
         return await TryAcquireExclusivePrefixLockInternal(request, context);
     }
 
@@ -282,6 +404,9 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <returns>A response indicating the result of the attempt to acquire the exclusive locks.</returns>
     public override async Task<GrpcTryAcquireManyExclusiveLocksResponse> TryAcquireManyExclusiveLocks(GrpcTryAcquireManyExclusiveLocksRequest request, ServerCallContext context)
     {
+        if (RejectClientManyLocks(request) is { } rejected)
+            return rejected;
+
         return await TryAcquireManyExclusiveLocksInternal(request, context);
     }
 
@@ -315,6 +440,12 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         ServerCallContext context
     )
     {
+        if (!inputLimits.KeyFits(request.Prefix)
+            || (request.HasStartKey && !inputLimits.KeyFits(request.StartKey))
+            || (request.HasEndKey && !inputLimits.KeyFits(request.EndKey))
+            || !ClientLockIdentity.IsRegistered(request.CoordinatorKey, request.OperationIdHigh, request.OperationIdLow))
+            return new() { Type = GrpcKeyValueResponseType.TypeInvalidInput };
+
         return await TryAcquireExclusiveRangeLockInternal(request, context);
     }
 
@@ -331,6 +462,13 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         ServerCallContext context
     )
     {
+        // The client's page size is bounded here and not in GetByRangeInternal: the inter-node batcher shares
+        // that path, and it forwards pages whose size the forwarding node already resolved.
+        if (!KeyValueScanLimits.TryBoundRangePageLimit(request.Limit, out int limit))
+            return new() { Type = GrpcKeyValueResponseType.TypeInvalidInput };
+
+        request.Limit = limit;
+
         return await GetByRangeInternal(request, context);
     }
 
@@ -461,7 +599,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         IServerStreamWriter<GrpcGetByRangePageResponse> responseStream,
         ServerCallContext context)
     {
-        if (string.IsNullOrEmpty(request.Prefix))
+        if (string.IsNullOrEmpty(request.Prefix) || !KeyValueScanLimits.TryBoundRangePageLimit(request.Limit, out int limit))
             return;
 
         string? startKey    = request.HasStartKey ? request.StartKey : null;
@@ -478,7 +616,7 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
                 startInclusive,
                 endKey,
                 endKey is not null && request.EndInclusive,
-                request.Limit,
+                limit,
                 readTimestamp,
                 (KeyValueDurability)request.Durability,
                 context.CancellationToken,
@@ -546,8 +684,17 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
     /// <returns>A task that represents the asynchronous operation, containing the transaction response.</returns>
     public override async Task<GrpcStartTransactionResponse> StartTransaction(GrpcStartTransactionRequest request, ServerCallContext context)
     {
+        StampClientSession(request);
         return await StartTransactionInternal(request, context);
     }
+
+    /// <summary>
+    /// Sets the mutation limit of a session a client starts from this node's configuration, overwriting whatever the
+    /// client sent: the field exists so a forwarded start carries the entry node's limit, and a client must not choose
+    /// its own. Not called on the inter-node path, which carries the limit the entry node set.
+    /// </summary>
+    internal void StampClientSession(GrpcStartTransactionRequest request) =>
+        request.MutationLimit = inputLimits.MaxTransactionMutations;
 
     /// <summary>
     /// Commits a transaction in the key-value store.
@@ -902,7 +1049,8 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
         => Guard(request, context, static (s, r, c) => s.mutations.TryRollbackManyMutationsCore(r, c), static r => KeyValueMustRetry.TryRollbackManyMutations(r));
 
     internal Task<GrpcTryExecuteTransactionScriptResponse> TryExecuteTransactionScriptInternal(GrpcTryExecuteTransactionScriptRequest request, ServerCallContext context)
-        => Guard(request, context, static (s, r, c) => s.transactions.TryExecuteTransactionScriptCore(r, c), static _ => KeyValueMustRetry.TryExecuteTransactionScript());
+        // Every path here is a client's: no node forwards a script to another, so each run takes the client limit.
+        => Guard(request, context, static (s, r, c) => s.transactions.TryExecuteTransactionScriptCore(r, c, s.inputLimits.MaxTransactionMutations), static _ => KeyValueMustRetry.TryExecuteTransactionScript());
 
     internal Task<GrpcGetByBucketResponse> GetByBucketInternal(GrpcGetByBucketRequest request, ServerCallContext context)
         => Guard(request, context, static (s, r, c) => s.scans.GetByBucketCore(r, c), static _ => KeyValueMustRetry.GetByBucket());

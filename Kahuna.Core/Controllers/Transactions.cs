@@ -164,6 +164,11 @@ public sealed partial class KahunaManager
         return keyValues.LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken).AsTask();
     }
 
+    public Task<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy)> LocateAndBeginOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, int itemCount, CancellationToken cancellationToken)
+    {
+        return keyValues.LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken, itemCount).AsTask();
+    }
+
     public Task<(KeyValueResponseType outcome, string? anchor)> LocateAndCompleteOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload, CancellationToken cancellationToken)
     {
         return keyValues.LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, payload, cancellationToken).AsTask();
@@ -172,6 +177,11 @@ public sealed partial class KahunaManager
     public (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy) BeginOperation(HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest)
     {
         return keyValues.BeginOperation(transactionId, operationId, kind, payloadDigest);
+    }
+
+    public (OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy) BeginOperation(HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, int itemCount)
+    {
+        return keyValues.BeginOperation(transactionId, operationId, kind, payloadDigest, itemCount);
     }
 
     public string? CompleteOperation(HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload)
@@ -262,6 +272,11 @@ public sealed partial class KahunaManager
     public Task<KeyValueTransactionResult> TryExecuteTransactionScript(ReadOnlyMemory<byte> script, string? hash, List<KeyValueParameter>? parameters, TransactionPriority priority = TransactionPriority.Normal)
     {
         return keyValues.TryExecuteTx(script, hash, parameters, priority);
+    }
+
+    public Task<KeyValueTransactionResult> TryExecuteTransactionScript(ReadOnlyMemory<byte> script, string? hash, List<KeyValueParameter>? parameters, TransactionPriority priority, int mutationLimit)
+    {
+        return keyValues.TryExecuteTx(script, hash, parameters, priority, mutationLimit);
     }
 
     /// <summary>

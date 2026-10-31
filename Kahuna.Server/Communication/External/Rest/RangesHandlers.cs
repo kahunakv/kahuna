@@ -49,7 +49,7 @@ public static class RangesHandlers
                 JsonSerializer.Serialize(response, KahunaJsonContext.Default.KahunaRegisterKeyRangeResponse),
                 "application/json",
                 statusCode: ToStatusCode(response.Success, response.Status));
-        });
+        }).RequireAdminKey();
 
         // Teardown: drops the space's descriptors from the replicated map, clearing the routing mode
         // on every node through the normal replication path. Same forwarding contract as register.
@@ -64,7 +64,7 @@ public static class RangesHandlers
                 JsonSerializer.Serialize(response, KahunaJsonContext.Default.KahunaRemoveKeyRangeResponse),
                 "application/json",
                 statusCode: ToStatusCode(response.Success, response.Status));
-        });
+        }).RequireAdminKey();
 
         // Splits the range covering splitKey at exactly that key. Unlike register, this IS
         // leader-only — the range map and the partition lifecycle are both owned by one partition,
@@ -85,7 +85,7 @@ public static class RangesHandlers
                 JsonSerializer.Serialize(response, KahunaJsonContext.Default.KahunaSplitRangeResponse),
                 "application/json",
                 statusCode: ToStatusCode(response.Success, response.Status));
-        });
+        }).RequireAdminKey();
 
         // Runs the merge pass on demand: the same work the periodic checker does, without waiting
         // for its cadence. Leader-only for the same reason as split, and refusing rather than
@@ -105,7 +105,7 @@ public static class RangesHandlers
                 JsonSerializer.Serialize(response, KahunaJsonContext.Default.KahunaMergeRangesResponse),
                 "application/json",
                 statusCode: ToStatusCode(response.Success, response.Status));
-        });
+        }).RequireAdminKey();
     }
 
     /// <summary>

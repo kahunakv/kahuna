@@ -86,8 +86,8 @@ internal sealed class RoutedScanOperations
         registrar.AbandonRegisteredOperation(coordinatorKey, transactionId, operationId);
 
     private ValueTask<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy)> LocateAndBeginOperation(
-        string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken) =>
-        registrar.LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken);
+        string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken, int itemCount = 0) =>
+        registrar.LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken, itemCount);
 
     /// <summary>
     /// Locates the leader node for the given keys and executes the TryReleaseManyExclusiveLocks requests
@@ -266,6 +266,8 @@ internal sealed class RoutedScanOperations
                 return new KeyValueGetByBucketResult(KeyValueResponseType.MustRetry, []);
             case OperationRegistrationOutcome.RejectedSessionBudget:
                 return new KeyValueGetByBucketResult(KeyValueResponseType.Aborted, []);
+            case OperationRegistrationOutcome.RejectedMutationLimit:
+                return new KeyValueGetByBucketResult(KeyValueResponseType.TransactionMutationLimitReached, []);
             case OperationRegistrationOutcome.RejectedSessionClosed:
                 return new KeyValueGetByBucketResult(KeyValueResponseType.Aborted, []);
             case OperationRegistrationOutcome.RejectedDuplicate:
@@ -380,6 +382,8 @@ internal sealed class RoutedScanOperations
                 return new KeyValueGetByRangeResult(KeyValueResponseType.MustRetry, [], null, false);
             case OperationRegistrationOutcome.RejectedSessionBudget:
                 return new KeyValueGetByRangeResult(KeyValueResponseType.Aborted, [], null, false);
+            case OperationRegistrationOutcome.RejectedMutationLimit:
+                return new KeyValueGetByRangeResult(KeyValueResponseType.TransactionMutationLimitReached, [], null, false);
             case OperationRegistrationOutcome.RejectedSessionClosed:
                 return new KeyValueGetByRangeResult(KeyValueResponseType.Aborted, [], null, false);
             case OperationRegistrationOutcome.RejectedDuplicate:
@@ -494,7 +498,7 @@ internal sealed class RoutedScanOperations
         byte[] digest = OperationDigest.ForProbeManyRanges(prefix, seeks, readTimestamp, lockMode, expiresMs, durability, readMode);
 
         (OperationRegistrationOutcome outcome, _, _, _, _, TransactionConflictPolicy sessionPolicy) =
-            await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.ProbeManyRanges, digest, cancellationToken);
+            await LocateAndBeginOperation(coordinatorKey, transactionId, operationId, OperationKind.ProbeManyRanges, digest, cancellationToken, lockMode != KeyValueProbeLock.None ? seeks.Count : 0);
 
         if (outcome == OperationRegistrationOutcome.AlreadyPending)
         {
@@ -510,6 +514,8 @@ internal sealed class RoutedScanOperations
                 return BuildProbeRangesRejection(seeks.Count, KeyValueResponseType.MustRetry);
             case OperationRegistrationOutcome.RejectedSessionBudget:
                 return BuildProbeRangesRejection(seeks.Count, KeyValueResponseType.Aborted);
+            case OperationRegistrationOutcome.RejectedMutationLimit:
+                return BuildProbeRangesRejection(seeks.Count, KeyValueResponseType.TransactionMutationLimitReached);
             case OperationRegistrationOutcome.RejectedSessionClosed:
                 return BuildProbeRangesRejection(seeks.Count, KeyValueResponseType.Aborted);
             case OperationRegistrationOutcome.RejectedDuplicate:

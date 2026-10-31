@@ -135,7 +135,9 @@ public static class KeyValueRangeCursor
             pos += prefixByteCount;
 
             if (pos >= buf.Length) return false;
-            durability = (KeyValueDurability)buf[pos++];
+            byte durabilityByte = buf[pos++];
+            if (durabilityByte > (byte)KeyValueDurability.Persistent) return false;
+            durability = (KeyValueDurability)durabilityByte;
 
             if (pos + 4 > buf.Length) return false;
             int tsN = BinaryPrimitives.ReadInt32LittleEndian(buf[pos..]);

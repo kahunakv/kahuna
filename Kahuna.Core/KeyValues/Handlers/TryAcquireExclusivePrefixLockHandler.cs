@@ -44,7 +44,7 @@ internal sealed class TryAcquireExclusivePrefixLockHandler : BaseHandler
         {
             if (writeIntent.TransactionId == message.TransactionId)
             {
-                HLCTimestamp renewedExpiry = KeyValueWriteIntentLease.FromRequest(currentTime, message.ExpiresMs);
+                HLCTimestamp renewedExpiry = KeyValueWriteIntentLease.FromRequest(currentTime, message.ExpiresMs, context.SessionOwnedIntentCeilingMs);
                 writeIntent.Expires = renewedExpiry;
                 foreach ((string _, KeyValueEntry entry) in context.Store.GetByBucket(message.Key))
                 {
@@ -117,7 +117,7 @@ internal sealed class TryAcquireExclusivePrefixLockHandler : BaseHandler
             entry.WriteIntent = new()
             {
                 TransactionId = message.TransactionId,
-                Expires = KeyValueWriteIntentLease.FromRequest(currentTime, message.ExpiresMs),
+                Expires = KeyValueWriteIntentLease.FromRequest(currentTime, message.ExpiresMs, context.SessionOwnedIntentCeilingMs),
                 AcquiredAt = currentTime,
             };
 
@@ -127,7 +127,7 @@ internal sealed class TryAcquireExclusivePrefixLockHandler : BaseHandler
         context.LocksByPrefix.Add(keySpace, new()
         {
             TransactionId = message.TransactionId,
-            Expires = KeyValueWriteIntentLease.FromRequest(currentTime, message.ExpiresMs),
+            Expires = KeyValueWriteIntentLease.FromRequest(currentTime, message.ExpiresMs, context.SessionOwnedIntentCeilingMs),
             AcquiredAt = currentTime
         });
 

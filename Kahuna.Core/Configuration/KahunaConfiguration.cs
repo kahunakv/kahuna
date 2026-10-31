@@ -1029,6 +1029,65 @@ public sealed class KahunaConfiguration
     /// <summary>The most history holds the cluster's registry may hold. Zero means no bound. Defaults to 65536.</summary>
     public int HistoryHoldMaxTotal { get; set; } = 65_536;
 
+    /// <summary>
+    /// The longest lease, in milliseconds, a snapshot hold may ask for, on acquire and on renew. A registered hold
+    /// keeps MVCC reclamation from passing its timestamp until it is released or its lease lapses and the reaper
+    /// purges it, so this bounds how long a holder that vanished can pin history. A request above it is refused as
+    /// invalid. Zero means no bound. Defaults to one day.
+    /// </summary>
+    public int SnapshotHoldMaxLeaseMs { get; set; } = 86_400_000;
+
+    /// <summary>The most snapshot holds one holder may register. Zero means no bound. Defaults to 4096.</summary>
+    public int SnapshotHoldMaxPerHolder { get; set; } = 4_096;
+
+    /// <summary>The most snapshot holds the cluster's registry may hold. Zero means no bound. Defaults to 65536.</summary>
+    public int SnapshotHoldMaxTotal { get; set; } = 65_536;
+
+    /// <summary>
+    /// The largest key, in UTF-8 bytes, a client may write or lock. Checked at the client entry points (REST, unary
+    /// gRPC and the client batch stream) on set, set-many and the lock acquires; a larger key is refused as
+    /// invalid. Delete and extend are not checked, so a key written before the bound existed stays removable, and an
+    /// embedded host writing through <c>IKahuna</c> is not bound. Zero means no bound. Defaults to 16 KiB.
+    /// </summary>
+    public int MaxKeyBytes { get; set; } = 16 * 1024;
+
+    /// <summary>
+    /// The largest value, and compare value, in bytes a client may write. Checked where <see cref="MaxKeyBytes"/> is.
+    /// Every replica stores the value, and one Raft entry carries it to each of them, so it must stay well below the
+    /// Raft message limit (<c>RaftGrpcMaxMessageBytes</c>, 16 MiB by default): a larger entry cannot replicate. Zero
+    /// means no bound. Defaults to 4 MiB, the default gRPC message limit.
+    /// </summary>
+    public int MaxValueBytes { get; set; } = 4 * 1024 * 1024;
+
+    /// <summary>
+    /// The most items one client batch call may carry: set-many, delete-many, get-many, exists-many and the many-locks
+    /// acquire. Each item costs a routing decision, a request and an actor message, so the request size alone does not
+    /// bound the work of a batch of tiny items. A larger batch is refused whole as invalid; nothing in it runs.
+    /// Checked at the client entry points only, like <see cref="MaxKeyBytes"/>. The default equals CamusDB's default
+    /// per-transaction mutation limit, so a batch of the shape CamusDB sends for one statement always fits. Zero means
+    /// no bound. Defaults to 20000.
+    /// </summary>
+    public int MaxBatchItems { get; set; } = 20_000;
+
+    /// <summary>
+    /// The most keys one client transaction may write, and separately the most locks it may take. Applies to a session
+    /// a client entry point started (REST, gRPC, the client batch stream) and to a script transaction a client sent;
+    /// an embedded session is not limited. An operation that would pass it is refused with
+    /// <c>TransactionMutationLimitReached</c>, and nothing of it is applied; the session can still commit what it holds.
+    /// A key both locked and written counts once in each count, so a transaction that locks and writes N keys needs a
+    /// limit of N. The default equals CamusDB's default per-transaction mutation limit. Zero means no limit. Defaults to
+    /// 20000.
+    /// </summary>
+    public int MaxTransactionMutations { get; set; } = 20_000;
+
+    /// <summary>
+    /// Path to a file that holds the admin keys, one per line (blank lines and lines starting with <c>#</c> are
+    /// ignored). When set, the admin operations — node removal, replication factor, range-map DDL, backups and
+    /// restore — refuse a caller that does not present one of the keys. Two keys at once allow a rotation. Empty
+    /// leaves the admin operations open to any caller of the client port. See <c>AdminGate</c>.
+    /// </summary>
+    public string AdminApiKeyFile { get; set; } = "";
+
     /// <summary>The largest frame capacity a key-value watch may ask for. A request above it is refused as invalid,
     /// so a caller cannot make the node buffer without bound. Defaults to 65536.</summary>
     public int WatchMaxCapacity { get; set; } = 65_536;

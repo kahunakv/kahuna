@@ -29,12 +29,13 @@ internal sealed partial class TransactionCoordinator
         HLCTimestamp transactionId,
         TransactionOperationId operationId,
         OperationKind kind,
-        byte[]? payloadDigest)
+        byte[]? payloadDigest,
+        int itemCount = 0)
     {
         if (!sessions.TryGetValue(transactionId, out TransactionContext? context))
             return new(OperationRegistrationOutcome.RejectedSessionClosed);
 
-        return context.BeginOperation(operationId, kind, payloadDigest);
+        return context.BeginOperation(operationId, kind, payloadDigest, itemCount);
     }
 
     /// <summary>

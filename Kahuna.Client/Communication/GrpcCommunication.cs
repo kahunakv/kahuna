@@ -17,6 +17,7 @@ using Grpc.Core;
 using Grpc.Net.Client;
 using Grpc.Net.Client.Configuration;
 using Kahuna.Client.Routing;
+using Kahuna.Shared.Communication;
 using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Routing;
@@ -136,6 +137,10 @@ public class GrpcCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
         this.options = options;
         this.logger = logger;
     }
+
+    /// <summary>The admin key as call metadata, for the admin calls only; null when none is configured.</summary>
+    private Metadata? AdminHeaders() =>
+        string.IsNullOrEmpty(options?.AdminApiKey) ? null : new() { { KahunaAdminCredential.MetadataName, options.AdminApiKey } };
 
     private IKahunaRouteSink? routeSink;
 
@@ -2572,7 +2577,7 @@ public class GrpcCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
         GrpcRegisterKeyRangeResponse response = await client.RegisterKeyRangeAsync(new()
         {
             KeySpace = keySpace
-        }, cancellationToken: cancellationToken).ConfigureAwait(false);
+        }, headers: AdminHeaders(), cancellationToken: cancellationToken).ConfigureAwait(false);
 
         return new KahunaRegisterKeyRangeResponse
         {
@@ -2593,7 +2598,7 @@ public class GrpcCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
         GrpcRemoveKeyRangeResponse response = await client.RemoveKeyRangeAsync(new()
         {
             KeySpace = keySpace
-        }, cancellationToken: cancellationToken).ConfigureAwait(false);
+        }, headers: AdminHeaders(), cancellationToken: cancellationToken).ConfigureAwait(false);
 
         return new KahunaRemoveKeyRangeResponse
         {
@@ -2653,7 +2658,7 @@ public class GrpcCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
 
         GrpcSplitRangeResponse response = await client.SplitRangeAsync(
             new GrpcSplitRangeRequest { KeySpace = keySpace, SplitKey = splitKey },
-            cancellationToken: cancellationToken).ConfigureAwait(false);
+            headers: AdminHeaders(), cancellationToken: cancellationToken).ConfigureAwait(false);
 
         return new KahunaSplitRangeResponse
         {
@@ -2674,7 +2679,7 @@ public class GrpcCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
 
         GrpcMergeRangesResponse response = await client.MergeRangesAsync(
             new GrpcMergeRangesRequest(),
-            cancellationToken: cancellationToken).ConfigureAwait(false);
+            headers: AdminHeaders(), cancellationToken: cancellationToken).ConfigureAwait(false);
 
         return new KahunaMergeRangesResponse
         {
@@ -2767,7 +2772,7 @@ public class GrpcCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
 
         GrpcSetReplicationFactorResponse response = await client.SetReplicationFactorAsync(
             new GrpcSetReplicationFactorRequest { PartitionId = partitionId, ReplicationFactor = replicationFactor },
-            cancellationToken: cancellationToken).ConfigureAwait(false);
+            headers: AdminHeaders(), cancellationToken: cancellationToken).ConfigureAwait(false);
 
         return new KahunaSetReplicationFactorResponse
         {
@@ -2793,7 +2798,7 @@ public class GrpcCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
 
         GrpcClusterLeaveResponse response = await client.LeaveAsync(
             new GrpcClusterLeaveRequest(),
-            cancellationToken: cancellationToken).ConfigureAwait(false);
+            headers: AdminHeaders(), cancellationToken: cancellationToken).ConfigureAwait(false);
 
         return new KahunaClusterLeaveResponse
         {
@@ -2837,7 +2842,7 @@ public class GrpcCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
             Backups.BackupsClient client = GetBackupsClient(channel);
             GrpcBackupInfoResponse r = await client.TakeFullBackupAsync(
-                new GrpcTakeFullBackupRequest(), cancellationToken: cancellationToken).ConfigureAwait(false);
+                new GrpcTakeFullBackupRequest(), headers: AdminHeaders(), cancellationToken: cancellationToken).ConfigureAwait(false);
             return FromGrpc(r);
         });
 
@@ -2848,7 +2853,7 @@ public class GrpcCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             Backups.BackupsClient client = GetBackupsClient(channel);
             GrpcBackupInfoResponse r = await client.TakeIncrementalBackupAsync(
                 new GrpcTakeIncrementalBackupRequest { ParentBackupId = parentBackupId.ToString() },
-                cancellationToken: cancellationToken).ConfigureAwait(false);
+                headers: AdminHeaders(), cancellationToken: cancellationToken).ConfigureAwait(false);
             return FromGrpc(r);
         });
 
@@ -2858,7 +2863,7 @@ public class GrpcCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
             Backups.BackupsClient client = GetBackupsClient(channel);
             GrpcBackupInfoResponse r = await client.TakeCoordinatedBackupAsync(
-                new GrpcTakeCoordinatedBackupRequest(), cancellationToken: cancellationToken).ConfigureAwait(false);
+                new GrpcTakeCoordinatedBackupRequest(), headers: AdminHeaders(), cancellationToken: cancellationToken).ConfigureAwait(false);
             return FromGrpc(r);
         });
 
@@ -2890,7 +2895,7 @@ public class GrpcCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             Backups.BackupsClient client = GetBackupsClient(channel);
             GrpcRestoreResponse r = await client.RestoreAsync(
                 new GrpcRestoreRequest { LeafBackupId = leafBackupId.ToString(), TargetDir = targetDir, TargetTimeMs = targetTimeMs },
-                cancellationToken: cancellationToken).ConfigureAwait(false);
+                headers: AdminHeaders(), cancellationToken: cancellationToken).ConfigureAwait(false);
             return new KahunaRestoreResponse
             {
                 TargetDir = r.TargetDir,
@@ -2910,7 +2915,7 @@ public class GrpcCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             GrpcChannel channel = GrpcBatcher.GetSharedChannel(url, options);
             Backups.BackupsClient client = GetBackupsClient(channel);
             GrpcBackupGcResponse r = await client.RunBackupGarbageCollectionAsync(
-                new GrpcBackupGcRequest { DryRun = dryRun }, cancellationToken: cancellationToken).ConfigureAwait(false);
+                new GrpcBackupGcRequest { DryRun = dryRun }, headers: AdminHeaders(), cancellationToken: cancellationToken).ConfigureAwait(false);
             return new KahunaBackupGcResult
             {
                 Applied = r.Applied,

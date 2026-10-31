@@ -410,8 +410,8 @@ internal sealed partial class KeyValuesManager
     public Task<KeyValueResponseType> LocateAndRollbackTransaction(TransactionHandle handle, CancellationToken cancellationToken) =>
         transactionSessions.LocateAndRollbackTransaction(handle, cancellationToken);
 
-    public Task<KeyValueTransactionResult> TryExecuteTx(ReadOnlyMemory<byte> script, string? hash, List<KeyValueParameter>? parameters, TransactionPriority priority = TransactionPriority.Normal) =>
-        transactionSessions.TryExecuteTx(script, hash, parameters, priority);
+    public Task<KeyValueTransactionResult> TryExecuteTx(ReadOnlyMemory<byte> script, string? hash, List<KeyValueParameter>? parameters, TransactionPriority priority = TransactionPriority.Normal, int mutationLimit = 0) =>
+        transactionSessions.TryExecuteTx(script, hash, parameters, priority, mutationLimit);
 
     public Task<(KeyValueResponseType, TransactionHandle)> StartTransaction(KeyValueTransactionOptions options) =>
         transactionSessions.StartTransaction(options);

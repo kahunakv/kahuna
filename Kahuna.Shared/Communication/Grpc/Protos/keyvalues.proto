@@ -642,6 +642,11 @@ message GrpcTryAcquireManyExclusiveLocksRequest {
   repeated GrpcTryAcquireManyExclusiveLocksRequestItem Items = 4;
   // One policy for the whole batch: every item belongs to the same transaction.
   GrpcTransactionConflictPolicy ConflictPolicy = 5;
+  // Registration identity of the session the locks belong to. A client must send both; the coordinator then tracks
+  // the locks and releases them at commit or rollback.
+  string CoordinatorKey = 6;
+  uint64 OperationIdHigh = 7;
+  uint64 OperationIdLow = 8;
 }
 
 message GrpcTryAcquireManyExclusiveLocksResponse {
@@ -1037,6 +1042,10 @@ message GrpcStartTransactionRequest
   optional string Origin = 14;
   // The data partition whose leader hosts the session. Absent keeps the hash rule on CoordinatorKey.
   optional int32 CoordinatorPartitionId = 15;
+  // The most keys the session may write, and the most locks it may take, set by the node whose client entry point
+  // started it and carried when the start is forwarded. A client entry point overwrites whatever a client sends
+  // here. Zero means no limit.
+  int32 MutationLimit = 16;
 }
 
 message GrpcStartTransactionResponse
@@ -1158,6 +1167,9 @@ enum GrpcOperationRegistrationOutcome {
   GRPC_OP_OUTCOME_REJECTED_SESSION_CLOSED = 3;
   GRPC_OP_OUTCOME_REJECTED_DUPLICATE = 4;
   GRPC_OP_OUTCOME_REJECTED_CAPACITY = 5;
+  GRPC_OP_OUTCOME_REJECTED_SESSION_BUDGET = 6;
+  // The session already holds its maximum number of written keys or of locks.
+  GRPC_OP_OUTCOME_REJECTED_MUTATION_LIMIT = 7;
 }
 
 message GrpcTransactionRangeLock
@@ -1192,6 +1204,9 @@ message GrpcBeginOperationRequest
   uint64 OperationIdLow = 6;
   GrpcOperationKind Kind = 7;
   optional bytes PayloadDigest = 8;
+  // How many keys or locks the operation may add to the session's working set; zero for a read. An older sender
+  // leaves it zero.
+  int32 ItemCount = 9;
 }
 
 message GrpcBeginOperationResponse
@@ -1967,6 +1982,11 @@ enum GrpcKeyValueResponseType {
   TYPE_HISTORY_HOLD_LIMIT_REACHED = 110;
   // A watch was refused because the node, or the gRPC call, already holds its maximum number of open watches.
   TYPE_WATCH_LIMIT_REACHED = 111;
+  // A snapshot hold was refused because the holder, or the cluster, already holds its maximum number of holds.
+  TYPE_SNAPSHOT_HOLD_LIMIT_REACHED = 112;
+  // A transaction operation was refused because the session already writes its maximum number of keys or holds its
+  // maximum number of locks. Not retryable: split the work into smaller transactions.
+  TYPE_TRANSACTION_MUTATION_LIMIT_REACHED = 113;
 }
 
 enum GrpcKeyValueDurability {

@@ -97,7 +97,7 @@ internal sealed class ScriptTransactionExecutor
     /// Note that parsing necessarily happens before admission, since the script is what says whether a
     /// transaction is being opened at all.
     /// </param>
-    public async Task<KeyValueTransactionResult> TryExecuteTx(ReadOnlyMemory<byte> script, string? hash, List<KeyValueParameter>? parameters, TransactionPriority priority = TransactionPriority.Normal)
+    public async Task<KeyValueTransactionResult> TryExecuteTx(ReadOnlyMemory<byte> script, string? hash, List<KeyValueParameter>? parameters, TransactionPriority priority = TransactionPriority.Normal, int mutationLimit = 0)
     {
         // A priority can arrive here as a raw number from a REST payload or as a cast enum from the embedded
         // API, neither of which is validated by the gRPC wire conversion. Normalize before it can influence
@@ -164,7 +164,7 @@ internal sealed class ScriptTransactionExecutor
                     return await ScanByPrefixCommand.Execute(manager, GetTempTransactionContext(parameters), ast, KeyValueDurability.Ephemeral, CancellationToken.None);
 
                 case NodeType.Begin:
-                    return await ExecuteTransaction(ast.leftAst!, ast.rightAst, parameters, false, priority);
+                    return await ExecuteTransaction(ast.leftAst!, ast.rightAst, parameters, false, priority, mutationLimit);
 
                 case NodeType.StmtList:
                 case NodeType.Let:
@@ -207,7 +207,7 @@ internal sealed class ScriptTransactionExecutor
                 case NodeType.Placeholder:
                 case NodeType.BeginOptionList:
                 case NodeType.BeginOption:
-                    return await ExecuteTransaction(ast, null, parameters, true, priority);
+                    return await ExecuteTransaction(ast, null, parameters, true, priority, mutationLimit);
 
                 case NodeType.Rollback:
                 case NodeType.Commit:
@@ -350,7 +350,7 @@ internal sealed class ScriptTransactionExecutor
     /// Executes a script transaction using the two-phase commit protocol.
     /// The autoCommit flag selects automatic commit on success vs. explicit commit/rollback.
     /// </summary>
-    private async Task<KeyValueTransactionResult> ExecuteTransaction(NodeAst ast, NodeAst? optionsAst, List<KeyValueParameter>? parameters, bool autoCommit, TransactionPriority priority)
+    private async Task<KeyValueTransactionResult> ExecuteTransaction(NodeAst ast, NodeAst? optionsAst, List<KeyValueParameter>? parameters, bool autoCommit, TransactionPriority priority, int mutationLimit)
     {
         bool asyncRelease = false;
         int timeout = configuration.DefaultTransactionTimeout;
@@ -564,6 +564,7 @@ internal sealed class ScriptTransactionExecutor
             DecisionDurability = decisionDurability,
             Action = autoCommit ? KeyValueTransactionAction.Commit : KeyValueTransactionAction.Abort,
             AsyncRelease = asyncRelease,
+            MutationLimit = Math.Max(0, mutationLimit),
             Result = new() { Type = KeyValueResponseType.Aborted },
             Parameters = parameters,
             FunctionTable = functionTable,
@@ -705,6 +706,10 @@ internal sealed class ScriptTransactionExecutor
             }
 
             return UncommittedResult(context);
+        }
+        catch (TransactionMutationLimitException ex)
+        {
+            return new() { Type = KeyValueResponseType.TransactionMutationLimitReached, Reason = ex.Message };
         }
         catch (KahunaScriptException ex)
         {
@@ -1171,6 +1176,8 @@ internal sealed class ScriptTransactionExecutor
                     ? await SetManyCommand.Execute(manager, context, boundary, cancellationToken)
                     : await DeleteManyCommand.Execute(manager, context, boundary, cancellationToken);
 
+                EnforceMutationLimit(context);
+
                 next = IndexAfterBatch(statements, boundary);
             }
         }
@@ -1367,8 +1374,25 @@ internal sealed class ScriptTransactionExecutor
                     throw new KahunaScriptException("Invalid statement: " + ast.nodeType, ast.yyline);
             }
 
+            // After every statement, so a loop or a batch that passes the limit stops before the next statement and
+            // before the commit.
+            EnforceMutationLimit(context);
+
             if (statements is null)
                 break;
+        }
+    }
+
+    /// <summary>
+    /// Stops a script transaction that writes more keys, or holds more locks, than <see cref="TransactionContext.MutationLimit"/>
+    /// allows. The exception ends the run before the commit, and the executor releases what the script holds.
+    /// </summary>
+    private static void EnforceMutationLimit(ScriptTransactionContext context)
+    {
+        if (!context.WithinMutationLimit())
+        {
+            DurableTransactionMetrics.MutationLimitRefusals.Add(1, new KeyValuePair<string, object?>("count", "script"));
+            throw new TransactionMutationLimitException(context.MutationLimit);
         }
     }
 

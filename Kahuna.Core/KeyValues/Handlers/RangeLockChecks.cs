@@ -125,11 +125,13 @@ internal static class RangeLockChecks
     /// <summary>
     /// Starts the lease of a lock an actor holds, or starts it over on a renewal: <paramref name="expiresMs"/>
     /// from now on the node's monotonic clock, with the same deadline kept in hybrid-logical-clock form for
-    /// when the lock leaves the actor. Zero makes the lock session-owned, with no deadline in either form.
+    /// when the lock leaves the actor. Zero makes the lock session-owned, with no deadline in either form. A
+    /// longer duration than <paramref name="maxLeaseMs"/> is cut to it in both forms.
     /// </summary>
-    internal static void StartLease(KeyValueRangeLock rangeLock, HLCTimestamp currentTime, int expiresMs)
+    internal static void StartLease(KeyValueRangeLock rangeLock, HLCTimestamp currentTime, int expiresMs, int maxLeaseMs)
     {
-        rangeLock.Expires = KeyValueWriteIntentLease.FromRequest(currentTime, expiresMs);
+        expiresMs = KeyValueWriteIntentLease.Bound(expiresMs, maxLeaseMs);
+        rangeLock.Expires = KeyValueWriteIntentLease.FromRequest(currentTime, expiresMs, maxLeaseMs);
         rangeLock.LeaseEndsAtTick = expiresMs == 0 ? 0 : Environment.TickCount64 + expiresMs;
     }
 
@@ -161,7 +163,7 @@ internal static class RangeLockChecks
             if (!IsLive(context, held, currentTime))
                 return false;
 
-            StartLease(held, currentTime, expiresMs);
+            StartLease(held, currentTime, expiresMs, context.SessionOwnedIntentCeilingMs);
             return true;
         }
 
