@@ -208,6 +208,9 @@ internal sealed class KeyValueLocator
     internal SessionRegistrationForward BeginInboundCompletionRedirect() =>
         transactions.BeginInboundCompletionRedirect();
 
+    internal Task<(KeyValueResponseType outcome, string? anchor)?> ProbePeersForCompletionAsync(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload, CancellationToken cancellationToken) =>
+        transactions.ProbePeersForCompletionAsync(coordinatorKey, transactionId, operationId, payload, cancellationToken);
+
     public ValueTask<(KeyValueResponseType outcome, string? anchor)> LocateAndCompleteOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload, CancellationToken cancellationToken) =>
         transactions.LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, payload, cancellationToken);
 

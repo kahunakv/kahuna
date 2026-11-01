@@ -336,10 +336,20 @@ leader is. Before this rule, a leader that stepped down routed every commit for 
 successor, which had no such session, and each spun as `MustRetry` until the client's deadline (~100
 indeterminate commits per leader pause under a paused disk).
 
-A leader that receives a commit or rollback for a session it does not hold (the client learned the new
-leader) offers it to its peers once, in turn; the owner serves it and every other peer answers unknown. The
-probe runs only for a request that arrived directly from a caller and only on that rare path — the membership
-roster does not carry peers' node ids, so the transaction id cannot name the owner directly.
+A leader that receives a commit, rollback, close, working-set query, operation registration or completion for
+a session it does not hold (the session began on the previous leader) offers it to its peers once, in turn;
+the owner serves it and every other peer answers unknown. The probe runs for a request that reached the leader
+directly from a caller and for one that a non-leader forwarded to it once, which is how a client's commit
+arrives when the client talks to the data leader rather than to the coordinator leader. The forwarding node
+never probes, so a request costs one round of probes whichever node the caller reached; a request at a deeper
+hop is itself a probe, or a forward of a forward, and is answered locally, which bounds the probing. Before the
+forwarded hop was admitted, a commit the data leader forwarded to the new coordinator leader was answered as an
+unknown transaction, and the session's range locks stayed on the data leaders until their lease ran out. The
+membership roster does not carry peers' node ids, so the transaction id cannot name the owner directly.
+
+The inbound completion landing point follows the same ownership rule: a node that holds the session folds the
+completion whatever the current leader is, so the owner a leader found among its peers does not redirect the
+completion back to that leader.
 
 ### 6.7 Record-less intents past the retention horizon
 

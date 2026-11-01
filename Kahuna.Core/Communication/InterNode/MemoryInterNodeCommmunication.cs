@@ -1745,6 +1745,10 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             if (CompleteOperationRedirectFault is not null && CompleteOperationRedirectFault(transactionId, operationId))
                 return (KeyValueResponseType.MustRetry, null);
 
+            // The completion arrives forwarded, as the gRPC transport marks it: the receiver's owner probe runs
+            // only within the forward budget, so a probe's own sends cannot start another probe round.
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
             return await kahunaNode.CompleteOperationInbound(coordinatorKey, transactionId, operationId, payload);
         }
 

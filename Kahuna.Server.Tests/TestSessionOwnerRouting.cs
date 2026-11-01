@@ -66,20 +66,101 @@ public sealed class TestSessionOwnerRouting : BaseCluster
         await WaitUntilAsync(async () => !await rafts[from].AmILeaderIfHosted(partition, ct), timeoutMs: 30_000);
     }
 
-    private static async Task<TransactionHandle> StartTransaction(KahunaManager session, string coordinatorKey, CancellationToken ct)
+    private static async Task<TransactionHandle> StartTransaction(KahunaManager session, string coordinatorKey, CancellationToken ct, bool pessimistic = false)
     {
-        (KeyValueResponseType startType, TransactionHandle handle) = await session.LocateAndStartTransaction(
-            new KeyValueTransactionOptions
+        KeyValueTransactionOptions options = pessimistic
+            ? new()
+            {
+                CoordinatorKey = coordinatorKey,
+                Locking = KeyValueTransactionLocking.Pessimistic,
+                AsyncRelease = false,
+                Timeout = 60_000
+            }
+            : new()
             {
                 CoordinatorKey = coordinatorKey,
                 Locking = KeyValueTransactionLocking.Optimistic,
                 ReadValidation = ReadValidation.TrackAndValidate,
                 AsyncRelease = true,
                 Timeout = 60_000
-            }, ct);
+            };
+
+        (KeyValueResponseType startType, TransactionHandle handle) = await session.LocateAndStartTransaction(options, ct);
 
         Assert.Equal(KeyValueResponseType.Set, startType);
         return handle;
+    }
+
+    private static string BucketOf(string key) => key[..key.LastIndexOf('/')];
+
+    /// <summary>Acquires a Shared range lock over the single key, registered with the session's coordinator.</summary>
+    private static async Task<KeyValueResponseType> TryPointRangeLock(KahunaManager session, TransactionHandle handle, string key, CancellationToken ct)
+    {
+        (KeyValueResponseType lockType, _) = await RetryOnMustRetryAsync(
+            () => session.LocateAndTryAcquireRangeLock(
+                handle.TransactionId, BucketOf(key), key, true, key, true, 60_000, KeyValueDurability.Persistent, RangeLockMode.Shared, ct,
+                coordinatorKey: handle.CoordinatorKey, operationId: TransactionOperationId.NewRandom()),
+            r => r.Item1);
+
+        return lockType;
+    }
+
+    private static async Task<bool> HoldsRangeLock(KahunaManager node, string key, HLCTimestamp transactionId)
+    {
+        List<KeyValueRangeLock> held = await node.KeyValues.GetRangeLocksAsync(BucketOf(key));
+        return held.Any(l => l.TransactionId == transactionId);
+    }
+
+    /// <summary>
+    /// A pessimistic session on its coordinator with a Shared range lock on a data key off the coordinator
+    /// partition: the lock lives on the data key's leader, the session on the coordinator leader. Returns the
+    /// node a third party would use, which is neither the owner nor <paramref name="successor"/>.
+    /// </summary>
+    private static async Task<(TransactionHandle Handle, int Partition, int Owner, string DataKey, int DataLeader, int Third)> BeginLockedSession(
+        IRaft[] rafts, KahunaManager[] managers, string key, string dataPrefix, int successorOffset, CancellationToken ct)
+    {
+        // Begin routes to the leader of the hash-routed coordinator partition (the same router a hash-space key
+        // takes); the owner is the node whose coordinator holds the session.
+        int partition = managers[0].LocateRange(key).PartitionId;
+
+        TransactionHandle handle = await StartTransaction(managers[0], key, ct, pessimistic: true);
+
+        int owner = -1;
+        for (int i = 0; i < managers.Length; i++)
+        {
+            if (managers[i].TransactionCoordinator.HasSession(handle.TransactionId))
+                owner = i;
+        }
+
+        Assert.True(owner >= 0, "some node must hold the session");
+        Assert.Equal(await LeaderIndexOf(partition, rafts, ct), owner);
+
+        // A range lock on a bucket lives on the leader of the partition the bucket routes to; keep that partition
+        // off the coordinator partition, so moving the coordinator's leadership leaves the lock where it is.
+        string runId = Guid.NewGuid().ToString("N")[..8];
+        string? dataKey = null;
+        int lockPartition = -1;
+
+        for (int i = 0; i < 256 && dataKey is null; i++)
+        {
+            string candidate = $"{dataPrefix}-{runId}-{i}/k";
+            int candidatePartition = managers[owner].LocateRange(BucketOf(candidate) + "/").PartitionId;
+
+            if (candidatePartition != partition)
+                (dataKey, lockPartition) = (candidate, candidatePartition);
+        }
+
+        Assert.NotNull(dataKey);
+
+        int dataLeader = await LeaderIndexOf(lockPartition, rafts, ct);
+
+        Assert.Equal(KeyValueResponseType.Locked, await TryPointRangeLock(managers[owner], handle, dataKey, ct));
+        Assert.True(await HoldsRangeLock(managers[dataLeader], dataKey, handle.TransactionId));
+
+        int successor = (owner + successorOffset) % Nodes;
+        int third = Enumerable.Range(0, Nodes).Single(i => i != owner && i != successor);
+
+        return (handle, partition, owner, dataKey, dataLeader, third);
     }
 
     private static async Task Write(KahunaManager session, TransactionHandle handle, string key, string value, CancellationToken ct)
@@ -294,6 +375,166 @@ public sealed class TestSessionOwnerRouting : BaseCluster
             (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await managers[successor].LocateAndTryGetValue(
                 HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
             Assert.True(type == KeyValueResponseType.DoesNotExist || entry?.Value is null);
+        }
+        finally
+        {
+            await LeaveCluster(rafts[0], rafts[1], rafts[2]);
+        }
+    }
+
+    /// <summary>
+    /// The commit reaches a node that neither owns the session nor leads the coordinator partition (the data
+    /// leader a consumer loop runs on): it forwards the commit to the new leader, which has no such session and
+    /// must still offer it to the owner. Before this, a forwarded commit was answered from the leader's empty
+    /// table as an unknown transaction, and the session's range lock stayed on the data leader until its lease.
+    /// </summary>
+    [Fact]
+    public async Task ACommitForwardedToTheNewLeader_ReachesTheSessionOwner_AndReleasesTheLock()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft[] rafts, IKahuna[] kahunas) = await AssembleCluster(Nodes, "memory", Partitions, raftLogger, kahunaLogger);
+        KahunaManager[] managers = [.. kahunas.Cast<KahunaManager>()];
+
+        try
+        {
+            string key = "owner-fwd-commit/" + Guid.NewGuid().ToString("N")[..8];
+            (TransactionHandle handle, int partition, int owner, string dataKey, int dataLeader, int third) =
+                await BeginLockedSession(rafts, managers, key, "owner-fwd-commit-data", successorOffset: 1, ct);
+
+            await MoveLeadership(rafts, partition, owner, (owner + 1) % Nodes, ct);
+
+            (KeyValueResponseType commitType, string? _) = await RetryOnMustRetryAsync(
+                () => managers[third].LocateAndCommitTransaction(handle, ct), r => r.Type);
+
+            Assert.Equal(KeyValueResponseType.Committed, commitType);
+            Assert.False(managers[owner].TransactionCoordinator.HasSession(handle.TransactionId));
+            Assert.False(await HoldsRangeLock(managers[dataLeader], dataKey, handle.TransactionId), "the committed session's range lock must be gone from the data leader");
+        }
+        finally
+        {
+            await LeaveCluster(rafts[0], rafts[1], rafts[2]);
+        }
+    }
+
+    /// <summary>The same route for a rollback: forwarded to the new leader, offered to the owner, and the lock is released.</summary>
+    [Fact]
+    public async Task ARollbackForwardedToTheNewLeader_ReachesTheSessionOwner_AndReleasesTheLock()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft[] rafts, IKahuna[] kahunas) = await AssembleCluster(Nodes, "memory", Partitions, raftLogger, kahunaLogger);
+        KahunaManager[] managers = [.. kahunas.Cast<KahunaManager>()];
+
+        try
+        {
+            string key = "owner-fwd-rb/" + Guid.NewGuid().ToString("N")[..8];
+            (TransactionHandle handle, int partition, int owner, string dataKey, int dataLeader, int third) =
+                await BeginLockedSession(rafts, managers, key, "owner-fwd-rb-data", successorOffset: 1, ct);
+
+            await MoveLeadership(rafts, partition, owner, (owner + 1) % Nodes, ct);
+
+            KeyValueResponseType rollbackType = await RetryOnMustRetryAsync(
+                () => managers[third].LocateAndRollbackTransaction(handle, ct), r => r);
+
+            Assert.Equal(KeyValueResponseType.RolledBack, rollbackType);
+            Assert.False(managers[owner].TransactionCoordinator.HasSession(handle.TransactionId));
+            Assert.False(await HoldsRangeLock(managers[dataLeader], dataKey, handle.TransactionId), "the rolled-back session's range lock must be gone from the data leader");
+        }
+        finally
+        {
+            await LeaveCluster(rafts[0], rafts[1], rafts[2]);
+        }
+    }
+
+    /// <summary>
+    /// A lock acquired through a third node after the coordinator partition changed leader: the acquire registers
+    /// its operation with the session's coordinator, which routes to the new leader. The leader does not hold the
+    /// session and must offer the registration, and then the completion, to the owner, so the lock joins the
+    /// owner's working set and the owner's commit releases it. Before this, the registration was refused as a
+    /// closed session, or the completion was lost after the lock was granted.
+    /// </summary>
+    [Fact]
+    public async Task ALockRegisteredThroughTheNewLeader_JoinsTheSessionOwnersWorkingSet()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft[] rafts, IKahuna[] kahunas) = await AssembleCluster(Nodes, "memory", Partitions, raftLogger, kahunaLogger);
+        KahunaManager[] managers = [.. kahunas.Cast<KahunaManager>()];
+
+        try
+        {
+            string key = "owner-fwd-lock/" + Guid.NewGuid().ToString("N")[..8];
+            (TransactionHandle handle, int partition, int owner, string dataKey, int dataLeader, int third) =
+                await BeginLockedSession(rafts, managers, key, "owner-fwd-lock-data", successorOffset: 1, ct);
+
+            await MoveLeadership(rafts, partition, owner, (owner + 1) % Nodes, ct);
+
+            // A second range on the same bucket, registered from the third node after the move.
+            string secondKey = BucketOf(dataKey) + "/second";
+            Assert.Equal(KeyValueResponseType.Locked, await TryPointRangeLock(managers[third], handle, secondKey, ct));
+            Assert.True(await HoldsRangeLock(managers[dataLeader], secondKey, handle.TransactionId));
+
+            // The new leader has no session of its own: a working-set query that reaches it directly is offered
+            // to the owner and answers both locks.
+            TransactionWorkingSet? workingSet = await managers[(owner + 1) % Nodes].LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+            Assert.NotNull(workingSet);
+            Assert.Equal(2, workingSet.AcquiredRangeLocks.Count);
+
+            (KeyValueResponseType commitType, string? _) = await RetryOnMustRetryAsync(
+                () => managers[owner].LocateAndCommitTransaction(handle, ct), r => r.Type);
+
+            Assert.Equal(KeyValueResponseType.Committed, commitType);
+            Assert.False(await HoldsRangeLock(managers[dataLeader], dataKey, handle.TransactionId));
+            Assert.False(await HoldsRangeLock(managers[dataLeader], secondKey, handle.TransactionId), "a lock registered through the new leader must be released by the owner's commit");
+        }
+        finally
+        {
+            await LeaveCluster(rafts[0], rafts[1], rafts[2]);
+        }
+    }
+
+    /// <summary>
+    /// A close sent to the new leader after the move (a client that learned the partition's leader): the leader
+    /// has no session and offers the close to the owner, which answers the frozen working set; the owner's own
+    /// close answers the same snapshot, and a rollback through a third node still reaches the owner.
+    /// </summary>
+    [Fact]
+    public async Task ACloseSentToTheNewLeader_ReachesTheSessionOwner()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft[] rafts, IKahuna[] kahunas) = await AssembleCluster(Nodes, "memory", Partitions, raftLogger, kahunaLogger);
+        KahunaManager[] managers = [.. kahunas.Cast<KahunaManager>()];
+
+        try
+        {
+            string key = "owner-fwd-close/" + Guid.NewGuid().ToString("N")[..8];
+            (TransactionHandle handle, int partition, int owner, string dataKey, int dataLeader, int third) =
+                await BeginLockedSession(rafts, managers, key, "owner-fwd-close-data", successorOffset: 1, ct);
+
+            int successor = (owner + 1) % Nodes;
+            await MoveLeadership(rafts, partition, owner, successor, ct);
+
+            (KeyValueResponseType closeType, TransactionWorkingSet? snapshot) = await RetryOnMustRetryAsync(
+                () => managers[successor].LocateAndCloseTransaction(handle.CoordinatorKey, handle.TransactionId, ct), r => r.Item1);
+
+            Assert.Equal(KeyValueResponseType.Set, closeType);
+            Assert.NotNull(snapshot);
+            Assert.Single(snapshot.AcquiredRangeLocks);
+
+            (KeyValueResponseType ownerCloseType, TransactionWorkingSet? ownerSnapshot) =
+                await managers[owner].LocateAndCloseTransaction(handle.CoordinatorKey, handle.TransactionId, ct);
+
+            Assert.Equal(KeyValueResponseType.Set, ownerCloseType);
+            Assert.NotNull(ownerSnapshot);
+            Assert.Single(ownerSnapshot.AcquiredRangeLocks);
+
+            KeyValueResponseType rollbackType = await RetryOnMustRetryAsync(
+                () => managers[third].LocateAndRollbackTransaction(handle, ct), r => r);
+
+            Assert.Equal(KeyValueResponseType.RolledBack, rollbackType);
+            Assert.False(await HoldsRangeLock(managers[dataLeader], dataKey, handle.TransactionId));
         }
         finally
         {

@@ -291,17 +291,30 @@ internal sealed class OperationRegistrar
     }
 
     /// <summary>
-    /// Inbound landing point for a remote completion: re-checks local leadership before folding, so a
-    /// node that lost the coordinator partition between the caller's route decision and the RPC landing
-    /// does not silently swallow the completion as a false acknowledgement. Returns <c>Set</c>+anchor
-    /// when this node is still the leader and the fold succeeded; <c>MustRetry</c> when leadership was
-    /// lost. Does not re-forward — the caller's retry re-routes through a fresh
+    /// Inbound landing point for a remote completion. The session's owner folds it whatever the current
+    /// leader is: sessions live on the node that began them and do not move with the coordinator partition's
+    /// leadership. Any other node re-checks local leadership before folding, so a node that lost the
+    /// coordinator partition between the caller's route decision and the RPC landing does not silently
+    /// swallow the completion as a false acknowledgement. Returns <c>Set</c>+anchor when the fold succeeded
+    /// here or on the owner a leader without the session found among its peers; <c>MustRetry</c> when
+    /// leadership was lost and no leader could be resolved. A non-leader that resolves the leader redirects
+    /// the completion once; otherwise the caller's retry re-routes through a fresh
     /// <see cref="LocateAndCompleteOperation"/>.
     /// </summary>
     public async Task<(KeyValueResponseType outcome, string? anchor)> CompleteOperationInbound(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload)
     {
         if (string.IsNullOrEmpty(coordinatorKey))
             return (KeyValueResponseType.MustRetry, null);
+
+        // The owner serves its own session even after the partition's leadership moved away from it: a leader
+        // without the session offers the completion to its peers (below), and the owner is the one that folds it.
+        if (txCoordinator.HasSession(transactionId))
+        {
+            string? ownedAnchor = CompleteOperation(transactionId, operationId, payload);
+
+            locator.CountInboundCompletionServedLocally();
+            return (KeyValueResponseType.Set, ownedAnchor);
+        }
 
         int partitionId = locator.LocatePartition(coordinatorKey);
 
@@ -345,6 +358,18 @@ internal sealed class OperationRegistrar
             return (KeyValueResponseType.MustRetry, null);
         }
 
+        // This node leads the coordinator partition but did not begin the session: leadership moved after the
+        // session began. Offer the completion to the peers, one of which owns it; the fold below would find no
+        // session and refuse a completion the participant already applied, which leaves the granted lock in the
+        // participant's memory with no working set to release it from.
+        (KeyValueResponseType outcome, string? anchor)? served =
+            await locator.ProbePeersForCompletionAsync(coordinatorKey, transactionId, operationId, payload, CancellationToken.None).ConfigureAwait(false);
+
+        if (served is { } answer)
+            return answer;
+
+        // No peer owns it either: the fold throws for the missing session, and the participant keeps its result
+        // for a same-id retry.
         string? anchor = CompleteOperation(transactionId, operationId, payload);
 
         locator.CountInboundCompletionServedLocally();
