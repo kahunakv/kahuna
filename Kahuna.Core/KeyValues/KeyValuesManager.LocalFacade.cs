@@ -36,8 +36,8 @@ internal sealed partial class KeyValuesManager
     ) =>
         localKeyValues.TrySetKeyValue(transactionId, key, value, compareValue, compareRevision, flags, expiresMs, durability, routedGeneration);
 
-    public Task<List<KahunaSetKeyValueResponseItem>> SetManyNodeKeyValue(List<KahunaSetKeyValueRequestItem> items) =>
-        localKeyValues.SetManyNodeKeyValue(items);
+    public Task<List<KahunaSetKeyValueResponseItem>> SetManyNodeKeyValue(List<KahunaSetKeyValueRequestItem> items, bool checkOnly = false) =>
+        localKeyValues.SetManyNodeKeyValue(items, checkOnly);
 
     public Task<List<KahunaDeleteKeyValueResponseItem>> DeleteManyNodeKeyValue(List<KahunaDeleteKeyValueRequestItem> items) =>
         localKeyValues.DeleteManyNodeKeyValue(items);

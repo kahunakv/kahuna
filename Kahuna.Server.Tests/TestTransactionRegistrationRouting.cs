@@ -1327,20 +1327,19 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
     }
 
     /// <summary>
-    /// Only genuinely confirmed writes fold into the coordinator record: a conditional set that fails
-    /// (a <c>SetIfNotExists</c> on an already-present key returns <c>NotSet</c>) contributes no modified key
-    /// and never anchors, yet the batch still completes — the failed item does not cancel the registration.
-    /// The anchor is therefore the first <em>confirmed</em> key in request order, skipping the earlier item
-    /// whose conditional set was rejected.
+    /// A transactional batch stages every item or none. A conditional set that fails (a <c>SetIfNotExists</c> on an
+    /// already-present key returns <c>NotSet</c>) refuses the whole batch: its siblings answer <c>NotApplied</c>, no
+    /// modified key folds and nothing anchors. The batch without the refused item then folds every item, and the
+    /// anchor is the first confirmed key in request order, not the sorted-first key.
     /// </summary>
     [Fact]
-    public async Task BatchSet_FoldsOnlyConfirmedWrites_SkipsNotSet_AndAnchorsFirstConfirmedInRequestOrder()
+    public async Task BatchSet_RefusedItem_FoldsNothing_ThenResendAnchorsFirstConfirmedInRequestOrder()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         Node[] nodes = await Assemble();
         try
         {
-            // Seed one committed persistent key so a SetIfNotExists on it later fails while the others succeed.
+            // Seed one committed persistent key so a SetIfNotExists on it later fails.
             (_, TransactionHandle seed) =
                 await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
             Assert.Equal(KeyValueResponseType.Set,
@@ -1350,15 +1349,27 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
             (_, TransactionHandle handle) =
                 await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
 
-            // Request order puts the pre-existing (will-fail) key first, then two fresh keys in non-sorted
-            // order, so the anchor must be the first CONFIRMED key ("mixset/znew"), not the sorted-first
-            // ("mixset/anew") and not the earlier rejected item.
-            List<KahunaSetKeyValueResponseItem> responses = await SetManyWithRetry(
+            List<KahunaSetKeyValueResponseItem> refused = await SetManyWithRetry(
                 nodes[2], handle, TransactionOperationId.NewRandom(),
                 SetItems(handle, KeyValueFlags.SetIfNotExists, KeyValueDurability.Persistent, "mixset/exists", "mixset/znew", "mixset/anew"), ct);
 
+            Dictionary<string, KeyValueResponseType> refusedByKey = refused.ToDictionary(r => r.Key!, r => r.Type, StringComparer.Ordinal);
+            Assert.Equal(KeyValueResponseType.NotSet, refusedByKey["mixset/exists"]);
+            Assert.Equal(KeyValueResponseType.NotApplied, refusedByKey["mixset/znew"]);
+            Assert.Equal(KeyValueResponseType.NotApplied, refusedByKey["mixset/anew"]);
+
+            TransactionWorkingSet? empty = await WorkingSetWithRetry(nodes[1], handle, ct);
+            Assert.NotNull(empty);
+            Assert.Null(empty!.RecordAnchorKey);
+            Assert.Empty(empty.ModifiedKeys);
+
+            // Request order puts two fresh keys in non-sorted order, so the anchor must be the first confirmed
+            // key in request order ("mixset/znew"), not the sorted-first ("mixset/anew").
+            List<KahunaSetKeyValueResponseItem> responses = await SetManyWithRetry(
+                nodes[2], handle, TransactionOperationId.NewRandom(),
+                SetItems(handle, KeyValueFlags.SetIfNotExists, KeyValueDurability.Persistent, "mixset/znew", "mixset/anew"), ct);
+
             Dictionary<string, KeyValueResponseType> byKey = responses.ToDictionary(r => r.Key!, r => r.Type, StringComparer.Ordinal);
-            Assert.Equal(KeyValueResponseType.NotSet, byKey["mixset/exists"]);
             Assert.Equal(KeyValueResponseType.Set, byKey["mixset/znew"]);
             Assert.Equal(KeyValueResponseType.Set, byKey["mixset/anew"]);
 

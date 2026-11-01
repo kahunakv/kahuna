@@ -496,6 +496,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     public async Task TrySetManyNodeKeyValue(
         string node, 
         List<KahunaSetKeyValueRequestItem> items, 
+        bool checkOnly,
         Lock lockSync, 
         List<KahunaSetKeyValueResponseItem> responses, 
         CancellationToken cancellationToken
@@ -504,6 +505,9 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         if (TryGetNode(node, out IKahuna? kahunaNode))
         {
             using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            // The check round travels as an ambient marker, as it travels in the wire request on the gRPC hop.
+            using SetManyCheckRoundScope.Scope checkScope = SetManyCheckRoundScope.Enter(checkOnly);
 
             // Hand the receiver the whole batch, as the gRPC transport does: the receiver's batched path
             // keeps every per-item field the single-key tuple cannot carry (the conflict holder, the item's

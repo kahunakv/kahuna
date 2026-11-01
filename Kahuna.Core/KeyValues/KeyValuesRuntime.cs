@@ -11,6 +11,8 @@ using Kahuna.Server.KeyValues.Watch;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 
+using Kommander.Time;
+
 namespace Kahuna.Server.KeyValues;
 
 /// <summary>
@@ -121,6 +123,13 @@ internal sealed class KeyValuesRuntime
     /// <summary>Routes a request to the Raft leader for the key's partition. Assigned in the second wiring
     /// pass because the locator itself takes the manager.</summary>
     internal KeyValueLocator Locator { get; set; } = null!;
+
+    /// <summary>
+    /// Test seam: awaited between the check round and the stage round of a transactional set-many that spans several
+    /// actors or several partition leaders, with the batch's transaction id, so a test can land a foreign write in
+    /// the window the two rounds leave open. Null in production.
+    /// </summary>
+    internal Func<HLCTimestamp, Task>? BeforeSetManyStageRoundForTesting { get; set; }
 
     /// <summary>The ephemeral/persistent actor rings. Assigned immediately after construction.</summary>
     internal KeyValueActorRouters Routers { get; set; } = null!;

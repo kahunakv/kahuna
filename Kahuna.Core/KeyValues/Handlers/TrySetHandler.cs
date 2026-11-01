@@ -66,12 +66,7 @@ internal sealed class TrySetHandler : BaseHandler
         HLCTimestamp newExpires = message.ExpiresMs > 0 ? (currentTime + message.ExpiresMs) : HLCTimestamp.Zero;
 
         // Check if the value must not be changed according to flags
-        if (
-            (message.Flags & KeyValueFlags.SetIfExists) != 0 && !exists ||
-            (message.Flags & KeyValueFlags.SetIfNotExists) != 0 && exists ||
-            (message.Flags & KeyValueFlags.SetIfEqualToValue) != 0 && !((ReadOnlySpan<byte>)entry.Value).SequenceEqual(message.CompareValue) ||
-            (message.Flags & KeyValueFlags.SetIfEqualToRevision) != 0 && entry.Revision != message.CompareRevision
-        )
+        if (FailsCondition(message, exists, entry.Value, entry.Revision))
             return (new(KeyValueResponseType.NotSet, entry.Revision, entry.LastModified), null, null, currentTime);
 
         // Operation type is always TrySet here (this handler only serves sets). Use the literal rather than
@@ -99,8 +94,19 @@ internal sealed class TrySetHandler : BaseHandler
     /// foreign exclusive/prefix/range lock (MustRetry). Returns a terminal response when the caller must not
     /// proceed; otherwise fills the entry and whether it currently exists.
     /// </summary>
+    /// <param name="preloadedHeads">
+    /// Rows a batch already read from the backend for keys that were not resident, keyed by key (a null row is a
+    /// key the backend does not have). A miss on one of these keys takes its row from here instead of awaiting the
+    /// read scheduler inside the turn. Null when nothing was preloaded.
+    /// </param>
+    /// <param name="takeOverYielding">
+    /// Whether a stealable yielding intent of another transaction is taken over here. A check that stages nothing
+    /// passes false: the intent stays in place and counts as no conflict, and the stage pass that follows in the
+    /// same actor turn takes it over. Otherwise a batch refused after the check would have cost its owner the key
+    /// for nothing.
+    /// </param>
     private async ValueTask<(KeyValueResponse? Terminal, KeyValueEntry Entry, bool Exists)> LoadAndValidateEntry(
-        KeyValueRequest message, HLCTimestamp currentTime)
+        KeyValueRequest message, HLCTimestamp currentTime, Dictionary<string, ReadOnlyKeyValueEntry?>? preloadedHeads = null, bool takeOverYielding = true)
     {
         bool exists = true;
 
@@ -112,7 +118,11 @@ internal sealed class TrySetHandler : BaseHandler
             /// Try to retrieve KeyValue context from persistence
             if (message.Durability == KeyValueDurability.Persistent)
             {
-                newEntry = KeyValueEntry.FromRow(await context.BackendReadScheduler.EnqueueBatchableTask(message.PartitionId, message.Key, context.PointReadExecutor));
+                ReadOnlyKeyValueEntry? row = preloadedHeads is not null && preloadedHeads.TryGetValue(message.Key, out ReadOnlyKeyValueEntry? preloadedRow)
+                    ? preloadedRow
+                    : await context.BackendReadScheduler.EnqueueBatchableTask(message.PartitionId, message.Key, context.PointReadExecutor);
+
+                newEntry = KeyValueEntry.FromRow(row);
                 if (newEntry is not null)
                 {
                     newEntry.FlushedRevision = newEntry.Revision; // already persisted
@@ -222,10 +232,11 @@ internal sealed class TrySetHandler : BaseHandler
                             return (KeyValueStaticResponses.WaitingForReplicationResponse, entry, exists);
                         }
 
-                        if (IsStealableYieldingIntent(message.Key, entry.WriteIntent))
-                            TakeOverYieldingIntent(message, message.Key, entry, currentTime);
-                        else
+                        if (!IsStealableYieldingIntent(message.Key, entry.WriteIntent))
                             return (KeyValueResponse.Denied(KeyValueResponseType.MustRetry, entry.WriteIntent.TransactionId), entry, exists);
+
+                        if (takeOverYielding)
+                            TakeOverYieldingIntent(message, message.Key, entry, currentTime);
                     }
                     else
                     {
@@ -272,10 +283,92 @@ internal sealed class TrySetHandler : BaseHandler
     }
 
     /// <summary>
-    /// Transactional set (an MVCC-staged write under an open transaction). Preserved verbatim from the
-    /// original handler; shares only the entry load + lock/intent validation with the non-transactional path.
+    /// Transactional set (an MVCC-staged write under an open transaction): stamps the write from this node's
+    /// clock and stages it.
     /// </summary>
-    private async ValueTask<KeyValueResponse> ExecuteTransactional(KeyValueRequest message)
+    private ValueTask<KeyValueResponse> ExecuteTransactional(KeyValueRequest message)
+    {
+        HLCTimestamp currentTime = context.Raft.HybridLogicalClock.ReceiveEvent(context.Raft.GetLocalNodeId(), message.TransactionId);
+
+        return ExecuteTransactional(message, currentTime, null);
+    }
+
+    /// <summary>
+    /// Whether <paramref name="message"/>'s condition flags refuse the write over a key that <paramref name="exists"/>
+    /// with <paramref name="value"/> and <paramref name="revision"/> in the writer's view.
+    /// </summary>
+    private static bool FailsCondition(KeyValueRequest message, bool exists, byte[]? value, long revision) =>
+        (message.Flags & KeyValueFlags.SetIfExists) != 0 && !exists ||
+        (message.Flags & KeyValueFlags.SetIfNotExists) != 0 && exists ||
+        (message.Flags & KeyValueFlags.SetIfEqualToValue) != 0 && !((ReadOnlySpan<byte>)value).SequenceEqual(message.CompareValue) ||
+        (message.Flags & KeyValueFlags.SetIfEqualToRevision) != 0 && revision != message.CompareRevision;
+
+    /// <summary>
+    /// Evaluates a transactional set without staging it: every refusal the staged write would meet (a key this
+    /// yielding transaction already lost, a live replication intent, a foreign lock or intent, a committed head past
+    /// the transaction's copy, a failed condition) is answered exactly as <see cref="ExecuteTransactional(KeyValueRequest, HLCTimestamp, Dictionary{string, ReadOnlyKeyValueEntry?}?)"/>
+    /// answers it, and null means the write would be staged. Touches no MVCC entry and no write intent, so a batch
+    /// can check every item before it stages any; a stealable yielding intent counts as no conflict and is taken
+    /// over by the stage that follows in the same turn.
+    /// </summary>
+    internal async ValueTask<KeyValueResponse?> CheckTransactional(KeyValueRequest message, HLCTimestamp currentTime, Dictionary<string, ReadOnlyKeyValueEntry?>? preloadedHeads)
+    {
+        if (context.HasYieldedIntent(message.Key, message.TransactionId))
+        {
+            Transactions.DurableTransactionMetrics.RecordYieldAbortAtFollowUp();
+            return KeyValueStaticResponses.AbortedResponse;
+        }
+
+        (KeyValueResponse? terminal, KeyValueEntry entry, _) = await LoadAndValidateEntry(message, currentTime, preloadedHeads, takeOverYielding: false);
+        if (terminal is not null)
+            return terminal;
+
+        // The transaction's own view of the key: its staged copy when it has one, else the committed head. The
+        // staged write would copy the head into a new MVCC entry, so the two views evaluate the same way.
+        byte[]? value;
+        long revision;
+        HLCTimestamp expires;
+        HLCTimestamp lastModified;
+        KeyValueState state;
+
+        if (entry.MvccEntries is not null && entry.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? mvccEntry))
+        {
+            if (entry.Revision > mvccEntry.Revision) // early conflict detection
+                return KeyValueStaticResponses.AbortedResponse;
+
+            value = mvccEntry.Value;
+            revision = mvccEntry.Revision;
+            expires = mvccEntry.Expires;
+            lastModified = mvccEntry.LastModified;
+            state = mvccEntry.State;
+        }
+        else
+        {
+            value = entry.Value;
+            revision = entry.Revision;
+            expires = entry.Expires;
+            lastModified = entry.LastModified;
+            state = entry.State;
+        }
+
+        bool exists = state is not (KeyValueState.Deleted or KeyValueState.Undefined)
+            && !(expires != HLCTimestamp.Zero && expires - currentTime < TimeSpan.Zero);
+
+        if (!exists)
+            value = null;
+
+        if (FailsCondition(message, exists, value, revision))
+            return new(KeyValueResponseType.NotSet, revision, lastModified);
+
+        return null;
+    }
+
+    /// <summary>
+    /// Stages a transactional set stamped from <paramref name="currentTime"/>: shares only the entry load + lock/intent
+    /// validation with the non-transactional path. A batch passes one stamp for every item it stages in its turn, so
+    /// each item is evaluated at the time its check ran.
+    /// </summary>
+    internal async ValueTask<KeyValueResponse> ExecuteTransactional(KeyValueRequest message, HLCTimestamp currentTime, Dictionary<string, ReadOnlyKeyValueEntry?>? preloadedHeads)
     {
         // A yielding transaction that already lost this key learns of it here instead of at the finalize pin,
         // and never re-stages a value or recreates the intent for a key it can no longer commit.
@@ -285,9 +378,7 @@ internal sealed class TrySetHandler : BaseHandler
             return KeyValueStaticResponses.AbortedResponse;
         }
 
-        HLCTimestamp currentTime = context.Raft.HybridLogicalClock.ReceiveEvent(context.Raft.GetLocalNodeId(), message.TransactionId);
-
-        (KeyValueResponse? terminal, KeyValueEntry entry, bool exists) = await LoadAndValidateEntry(message, currentTime);
+        (KeyValueResponse? terminal, KeyValueEntry entry, bool exists) = await LoadAndValidateEntry(message, currentTime, preloadedHeads);
         if (terminal is not null)
             return terminal;
 
@@ -337,12 +428,7 @@ internal sealed class TrySetHandler : BaseHandler
         }
 
         // Check if the value must not be changed according to flags
-        if (
-            (message.Flags & KeyValueFlags.SetIfExists) != 0 && !exists ||
-            (message.Flags & KeyValueFlags.SetIfNotExists) != 0 && exists ||
-            (message.Flags & KeyValueFlags.SetIfEqualToValue) != 0 && !((ReadOnlySpan<byte>)mvccEntry.Value).SequenceEqual(message.CompareValue) ||
-            (message.Flags & KeyValueFlags.SetIfEqualToRevision) != 0 && mvccEntry.Revision != message.CompareRevision
-        )
+        if (FailsCondition(message, exists, mvccEntry.Value, mvccEntry.Revision))
             return new(KeyValueResponseType.NotSet, mvccEntry.Revision, mvccEntry.LastModified);
 
         mvccEntry.Value = message.Value;

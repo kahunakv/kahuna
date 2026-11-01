@@ -265,6 +265,16 @@ internal sealed partial class KeyValuesManager : IDisposable
     /// and answers what this node reports in its place, so a fixture can make one replica report a
     /// diverged committed-head count without corrupting a real apply stream. Never wired in production paths.
     /// </summary>
+    /// <summary>
+    /// Test seam: awaited between the check round and the stage round of a transactional set-many that spans several
+    /// actors or several partition leaders (see <see cref="KeyValuesRuntime.BeforeSetManyStageRoundForTesting"/>).
+    /// </summary>
+    internal Func<HLCTimestamp, Task>? BeforeSetManyStageRoundForTesting
+    {
+        get => runtime.BeforeSetManyStageRoundForTesting;
+        set => runtime.BeforeSetManyStageRoundForTesting = value;
+    }
+
     internal Func<int, KeyValueApplyFingerprint?, KeyValueApplyFingerprint?>? ApplyFingerprintOverrideForTesting
     {
         get => replicationDispatcher.ApplyFingerprintOverrideForTesting;

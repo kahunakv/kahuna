@@ -115,4 +115,11 @@ public enum KeyValueRequestType
     /// replicated.
     /// </summary>
     TryProbeManyRanges = 35,
+
+    /// <summary>
+    /// Stages the items of one transactional set-many that one actor owns, in one actor turn: every item's condition
+    /// and conflicts are checked first, and the items are staged only when every one of them passed. Local to a node;
+    /// never replicated.
+    /// </summary>
+    TrySetMany = 36,
 }

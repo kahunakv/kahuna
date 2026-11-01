@@ -295,12 +295,13 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
     public async Task TrySetManyNodeKeyValue(
         string node, 
         List<KahunaSetKeyValueRequestItem> items, 
+        bool checkOnly,
         Lock lockSync, 
         List<KahunaSetKeyValueResponseItem> responses, 
         CancellationToken cancellationToken
     )
     {
-        GrpcTrySetManyKeyValueRequest request = new();
+        GrpcTrySetManyKeyValueRequest request = new() { CheckOnly = checkOnly };
 
         AddSetManyRequestItems(request.Items, items);
         

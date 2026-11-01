@@ -160,23 +160,45 @@ internal sealed class LocatorWriteOperations
     }
 
     /// <summary>
+    /// Routes a set-many batch to the leaders of its keys' partitions and runs it there.
     ///
+    /// <para>A non-transactional batch is independent writes: each leader's group runs once, and a key in a range
+    /// being moved answers <see cref="KeyValueResponseType.MustRetry"/> alone while the rest of the batch proceeds.</para>
+    ///
+    /// <para>A transactional batch stages every item or none. A batch that resolves to one leader runs there once,
+    /// and that node stages it all or none. A batch that resolves to several leaders runs in two rounds: every leader
+    /// first checks its items and stages nothing, and only when every item everywhere passed does every leader stage
+    /// its items. A refused check answers the refused items their refusal and every other item
+    /// <see cref="KeyValueResponseType.NotApplied"/>. A key in a range being moved refuses the whole batch the same
+    /// way, before anything is sent. Under optimistic locking a foreign write that lands between the two rounds can
+    /// refuse one leader's items after another leader staged its own; the answers then show the staged items as
+    /// <see cref="KeyValueResponseType.Set"/>, so the caller can see that the batch is partially staged and roll the
+    /// transaction back. Under pessimistic locking the caller holds exclusive locks on every key since its lock
+    /// round, so the stage round sees what the check round saw.</para>
     /// </summary>
-    /// <param name="setManyItems"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>    
+    /// <param name="checkOnly">
+    /// Run only the check round and stage nothing anywhere: the forwarded check of a batch another node coordinates.
+    /// </param>
     public async Task<List<KahunaSetKeyValueResponseItem>> LocateAndTrySetManyKeyValue(
         List<KahunaSetKeyValueRequestItem> setManyItems, 
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        bool checkOnly = false
     )
     {                
         string localNode = raft.GetLocalEndpoint();
+
+        bool transactional = LocatorRouting.AnyTransactional(setManyItems);
+
+        // A non-transactional batch stages nothing, so there is nothing to check.
+        if (checkOnly && !transactional)
+            return [.. setManyItems.Select(static i => new KahunaSetKeyValueResponseItem { Key = i.Key, Type = KeyValueResponseType.InvalidInput, Durability = i.Durability })];
         
         Dictionary<string, List<KahunaSetKeyValueRequestItem>> acquisitionPlan = [];
 
         Dictionary<int, string> leaderByPartition = [];
 
-        List<KahunaSetKeyValueResponseItem>? quiesced = null;
+        // Items whose range is being moved, by reference: an item is one object of the batch.
+        HashSet<KahunaSetKeyValueRequestItem>? quiesced = null;
         
         foreach (KahunaSetKeyValueRequestItem key in setManyItems)
         {
@@ -190,16 +212,14 @@ internal sealed class LocatorWriteOperations
             if (isKeyRange && key.RoutedGeneration == 0)
                 key.RoutedGeneration = freshGeneration;
 
-            // One key in a range being moved bounces only that key: the rest of the batch may sit in
-            // ranges that are perfectly writable, and failing them all would turn one split into a
-            // batch-wide retry.
+            // A key in a range being moved cannot be written until the move lands. In an independent batch it
+            // bounces alone: the rest of the batch may sit in ranges that are perfectly writable, and failing them
+            // all would turn one split into a batch-wide retry. In a transactional batch it refuses the whole batch
+            // before anything is sent, so nothing is staged for the caller to resend around.
             if (isKeyRange && routing.IsRangeQuiesced(descriptor, key.Key))
             {
-                quiesced ??= [];
-                quiesced.Add(new KahunaSetKeyValueResponseItem
-                {
-                    Key = key.Key, Type = KeyValueResponseType.MustRetry, Durability = key.Durability
-                });
+                quiesced ??= new HashSet<KahunaSetKeyValueRequestItem>(ReferenceEqualityComparer.Instance);
+                quiesced.Add(key);
                 continue;
             }
 
@@ -214,19 +234,68 @@ internal sealed class LocatorWriteOperations
             else
                 acquisitionPlan[leader] = [key];
         }
-        
+
+        if (transactional && quiesced is not null)
+        {
+            List<KahunaSetKeyValueResponseItem> refused = new(setManyItems.Count);
+
+            foreach (KahunaSetKeyValueRequestItem item in setManyItems)
+                refused.Add(new()
+                {
+                    Key = item.Key,
+                    Type = quiesced.Contains(item) ? KeyValueResponseType.MustRetry : KeyValueResponseType.NotApplied,
+                    Durability = item.Durability
+                });
+
+            return refused;
+        }
+
+        if (!transactional || checkOnly || acquisitionPlan.Count <= 1)
+        {
+            List<KahunaSetKeyValueResponseItem> responses = await RunSetManyRound(acquisitionPlan, localNode, leaderByPartition, setManyItems.Count, checkOnly, cancellationToken);
+
+            if (quiesced is not null)
+            {
+                foreach (KahunaSetKeyValueRequestItem item in quiesced)
+                    responses.Add(new() { Key = item.Key, Type = KeyValueResponseType.MustRetry, Durability = item.Durability });
+            }
+
+            return responses;
+        }
+
+        // Several leaders: check everywhere, then stage everywhere.
+        List<KahunaSetKeyValueResponseItem> checkRound = await RunSetManyRound(acquisitionPlan, localNode, leaderByPartition, setManyItems.Count, true, cancellationToken);
+
+        foreach (KahunaSetKeyValueResponseItem response in checkRound)
+        {
+            if (response.Type != KeyValueResponseType.NotApplied)
+                return checkRound;
+        }
+
+        if (manager.BeforeSetManyStageRoundForTesting is { } beforeStageRound)
+            await beforeStageRound(setManyItems[0].TransactionId);
+
+        return await RunSetManyRound(acquisitionPlan, localNode, leaderByPartition, setManyItems.Count, false, cancellationToken);
+    }
+
+    /// <summary>Sends every leader its group of the batch, in parallel, and collects the answers.</summary>
+    private async Task<List<KahunaSetKeyValueResponseItem>> RunSetManyRound(
+        Dictionary<string, List<KahunaSetKeyValueRequestItem>> acquisitionPlan,
+        string localNode,
+        Dictionary<int, string> leaderByPartition,
+        int itemCount,
+        bool checkOnly,
+        CancellationToken cancellationToken)
+    {
         Lock lockSync = new();
         List<Task> tasks = new(acquisitionPlan.Count);
-        List<KahunaSetKeyValueResponseItem> responses = new(setManyItems.Count);
-        
+        List<KahunaSetKeyValueResponseItem> responses = new(itemCount);
+
         // Requests to nodes are sent in parallel
         foreach ((string leader, List<KahunaSetKeyValueRequestItem> items) in acquisitionPlan)
-            tasks.Add(TrySetManyNodeKeyValue(leader, localNode, leaderByPartition, items, lockSync, responses, cancellationToken));
-        
-        await Task.WhenAll(tasks);
+            tasks.Add(TrySetManyNodeKeyValue(leader, localNode, leaderByPartition, items, checkOnly, lockSync, responses, cancellationToken));
 
-        if (quiesced is not null)
-            responses.AddRange(quiesced);
+        await Task.WhenAll(tasks);
 
         return responses;
     }
@@ -236,6 +305,7 @@ internal sealed class LocatorWriteOperations
         string localNode, 
         Dictionary<int, string> leaderByPartition,
         List<KahunaSetKeyValueRequestItem> items, 
+        bool checkOnly,
         Lock lockSync, 
         List<KahunaSetKeyValueResponseItem> responses, 
         CancellationToken cancellationToken
@@ -245,8 +315,9 @@ internal sealed class LocatorWriteOperations
         
         if (leader == localNode)
         {
-            // A transactional item stages in the actor without a proposal: the whole local group
-            // then needs the quorum-confirmed gate (see the single-key set path).
+            // A transactional item stages in the actor without a proposal: the whole local group then needs the
+            // quorum-confirmed gate (see the single-key set path). The check round takes the gate too, so a node
+            // whose leadership no quorum confirmed refuses the batch before any other leader stages its items.
             if (LocatorRouting.AnyTransactional(items) && !await routing.ConfirmLeadershipForGroupMutation(leader, leaderByPartition, cancellationToken))
             {
                 lock (lockSync)
@@ -258,7 +329,7 @@ internal sealed class LocatorWriteOperations
                 return;
             }
 
-            List<KahunaSetKeyValueResponseItem> acquireResponses = await manager.SetManyNodeKeyValue(items);
+            List<KahunaSetKeyValueResponseItem> acquireResponses = await manager.SetManyNodeKeyValue(items, checkOnly);
 
             lock (lockSync)            
                 responses.AddRange(acquireResponses);            
@@ -266,7 +337,7 @@ internal sealed class LocatorWriteOperations
             return;
         }
             
-        await interNodeCommunication.TrySetManyNodeKeyValue(leader, items, lockSync, responses, cancellationToken);
+        await interNodeCommunication.TrySetManyNodeKeyValue(leader, items, checkOnly, lockSync, responses, cancellationToken);
     }
 
     public async Task<List<KahunaDeleteKeyValueResponseItem>> LocateAndTryDeleteManyKeyValue(

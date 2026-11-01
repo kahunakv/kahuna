@@ -50,6 +50,14 @@ internal sealed class KeyValueActorRing
         publishedHeads[((int)HashUtils.InversePrefixedStaticHash(key, '/') & int.MaxValue) % publishedHeads.Length];
 
     /// <summary>
+    /// The index of the actor a point request on <paramref name="key"/> routes to: the same bucket
+    /// <see cref="KeyValueRequest.GetHash"/> hashes a point key to, so items grouped by this index are owned by one
+    /// actor and a request keyed by any of them reaches that actor.
+    /// </summary>
+    internal int ActorIndexOf(string key) =>
+        ((int)HashUtils.InversePrefixedStaticHash(key, '/') & int.MaxValue) % instances.Length;
+
+    /// <summary>
     /// Records a committed head that the caller is about to send to the key's actor as an
     /// <c>InvalidateOrApply</c>, so a published read of the key defers to the actor until that apply landed.
     /// Must be called before the send and before the applied frontier advances.

@@ -215,35 +215,13 @@ internal sealed class TryProbeManyHandler : BaseHandler
     /// here instead of one scheduler round trip per key. The actor holds its turn across the read, as a single
     /// transactional read does across its own, so no state of these keys changes before they use the rows.
     /// </summary>
-    private async ValueTask<Dictionary<string, ReadOnlyKeyValueEntry?>?> PreloadMissingHeads(KeyValueRequest message, string[] keys)
+    private ValueTask<Dictionary<string, ReadOnlyKeyValueEntry?>?> PreloadMissingHeads(KeyValueRequest message, string[] keys)
     {
         if (message.TransactionId == HLCTimestamp.Zero || !message.ReadTimestamp.IsNull()
             || message.Durability != KeyValueDurability.Persistent)
-            return null;
+            return new((Dictionary<string, ReadOnlyKeyValueEntry?>?)null);
 
-        List<string>? missing = null;
-        foreach (string key in keys)
-        {
-            if (!context.Store.TryGetValue(key, out _))
-                (missing ??= []).Add(key);
-        }
-
-        if (missing is null)
-            return null;
-
-        string[] missingKeys = [.. missing];
-        ReadOnlyKeyValueEntry?[] rows = context.BackendReadScheduler is null
-            ? context.PointReadExecutor.ExecuteBatch(missingKeys)
-            : await context.BackendReadScheduler.EnqueueTask(
-                ResolvePartition(missingKeys[0]),
-                (context.PointReadExecutor, missingKeys),
-                static state => state.PointReadExecutor.ExecuteBatch(state.missingKeys));
-
-        Dictionary<string, ReadOnlyKeyValueEntry?> preloaded = new(rows.Length, StringComparer.Ordinal);
-        for (int i = 0; i < rows.Length; i++)
-            preloaded[missingKeys[i]] = rows[i];
-
-        return preloaded;
+        return LoadMissingPersistentHeads(keys);
     }
 
     /// <summary>

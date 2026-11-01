@@ -224,4 +224,15 @@ public sealed class KeyValueResponse
     /// <summary>The answer of a batched range probe that reached its seeks: one result per seek, in request order.</summary>
     public static KeyValueResponse ForProbeRanges(KeyValueProbeRangeResult[] results) =>
         new(KeyValueResponseType.Get) { ProbeRangeResults = results };
+
+    /// <summary>
+    /// The per-item answers of a <see cref="KeyValueRequestType.TrySetMany"/> request, in request order. Null on every
+    /// other response, and on a batch that was answered as a whole (malformed, or refused before it reached its items):
+    /// <see cref="Type"/> is then the answer for every item.
+    /// </summary>
+    public KeyValueSetManyResult[]? SetManyResults { get; private set; }
+
+    /// <summary>The answer of a batched transactional set that reached its items: one result per item, in request order.</summary>
+    public static KeyValueResponse ForSetMany(KeyValueSetManyResult[] results) =>
+        new(KeyValueResponseType.Set) { SetManyResults = results };
 }

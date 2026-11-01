@@ -176,6 +176,21 @@ public sealed class KeyValueRequest : IConsistentHashable
     internal KeyValueProbeRange[]? ProbeRanges { get; set; }
 
     /// <summary>
+    /// The items of a <see cref="KeyValueRequestType.TrySetMany"/> request, all owned by one actor, answered in this
+    /// order. <see cref="Key"/> carries the first item's key so the request hashes to that actor, and
+    /// <see cref="TransactionId"/> is the transaction every item belongs to. Null on every other type.
+    /// </summary>
+    internal KahunaSetKeyValueRequestItem[]? SetManyItems { get; set; }
+
+    /// <summary>
+    /// A <see cref="KeyValueRequestType.TrySetMany"/> request that only checks its items: every item's condition and
+    /// conflicts are evaluated and nothing is staged. An item that would stage answers
+    /// <see cref="KeyValueResponseType.NotApplied"/>. The check round of a batch that spans several actors or
+    /// several partition leaders. False on every other type.
+    /// </summary>
+    internal bool CheckOnly { get; set; }
+
+    /// <summary>
     ///
     /// </summary>
     public KeyValueReplyRef Promise { get; private set; }
@@ -345,6 +360,8 @@ public sealed class KeyValueRequest : IConsistentHashable
         ProbeHints = null;
         ProbeLock = KeyValueProbeLock.None;
         ProbeRanges = null;
+        SetManyItems = null;
+        CheckOnly = false;
         ReturnToPoolOnReceive = false;
         ReleaseOnlyIfHeld = false;
     }

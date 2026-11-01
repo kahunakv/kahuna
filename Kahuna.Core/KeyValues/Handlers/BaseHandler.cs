@@ -238,6 +238,40 @@ internal abstract class BaseHandler
     }
 
     /// <summary>
+    /// Reads, with one batched backend read, the committed head of every persistent key in <paramref name="keys"/>
+    /// that is not resident, keyed by key; a null row is a key the backend does not have. Null when every key is
+    /// resident. A batch that loads its missing heads here before it touches its keys pays one scheduler hand-off
+    /// for the whole batch instead of one awaited read per key inside the actor turn. The actor holds its turn
+    /// across the read, so no state of these keys changes before the batch uses the rows.
+    /// </summary>
+    protected async ValueTask<Dictionary<string, ReadOnlyKeyValueEntry?>?> LoadMissingPersistentHeads(IReadOnlyList<string> keys)
+    {
+        List<string>? missing = null;
+        for (int i = 0; i < keys.Count; i++)
+        {
+            if (!context.Store.TryGetValue(keys[i], out _))
+                (missing ??= []).Add(keys[i]);
+        }
+
+        if (missing is null)
+            return null;
+
+        string[] missingKeys = [.. missing];
+        ReadOnlyKeyValueEntry?[] rows = context.BackendReadScheduler is null
+            ? context.PointReadExecutor.ExecuteBatch(missingKeys)
+            : await context.BackendReadScheduler.EnqueueTask(
+                ResolvePartition(missingKeys[0]),
+                (context.PointReadExecutor, missingKeys),
+                static state => state.PointReadExecutor.ExecuteBatch(state.missingKeys));
+
+        Dictionary<string, ReadOnlyKeyValueEntry?> preloaded = new(rows.Length, StringComparer.Ordinal);
+        for (int i = 0; i < rows.Length; i++)
+            preloaded[missingKeys[i]] = rows[i];
+
+        return preloaded;
+    }
+
+    /// <summary>
     /// Resolves <paramref name="key"/> to its owning partition id. Key-range spaces look up the
     /// live descriptor; hash spaces use <see cref="DataPartitionRouter"/> over the user partitions
     /// <c>[1, HashPoolSize]</c>. Both routing call sites (locator and handlers) must call

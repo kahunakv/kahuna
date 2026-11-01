@@ -116,6 +116,10 @@ internal sealed class KeyValueWriteHandler
    
         using RouteCaptureScope.Scope routeScope = RouteCaptureScope.Begin(out RouteCapture? capture);
 
+        // The check round of a batch that spans several leaders arrives on the forwarded hop with this bit; the
+        // routed operation reads the marker on its unregistered path and runs its locator in check mode.
+        using SetManyCheckRoundScope.Scope checkScope = SetManyCheckRoundScope.Enter(request.CheckOnly);
+
         List<KahunaSetKeyValueResponseItem> responses = await keyValues.LocateAndTrySetManyKeyValue(
             GetRequestSetManyItems(request.Items),
             context.CancellationToken

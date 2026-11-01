@@ -922,6 +922,16 @@ internal static class DurableTransactionMetrics
             description: "Same-id resends of a completed many-key batch refused instead of re-executed.");
 
     /// <summary>
+    /// Items of a batched transactional set that passed the batch's check pass and then refused to stage in the
+    /// stage pass of the same actor turn. Both passes evaluate the same state at the same stamp, so a firing marks
+    /// a batch the actor left partially staged, which its caller must roll back.
+    /// </summary>
+    internal static readonly Counter<long> SetManyStageDisagreements =
+        Meter.CreateCounter<long>(
+            "kahuna.kv.set_many_stage_disagreements",
+            description: "Items of a batched transactional set that passed the check pass and refused in the stage pass of the same turn.");
+
+    /// <summary>
     /// Times the coordinator saw a transaction lose a staging it had confirmed: a key restaged at a revision
     /// that does not continue the earlier staging, or a point read of a staged key that answered the
     /// committed state instead of the staging. Staged writes live only in the partition leader's memory, so a

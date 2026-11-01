@@ -267,6 +267,12 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
     private readonly TryProbeManyRangesHandler tryProbeManyRangesHandler;
 
     /// <summary>
+    /// Handles batched transactional sets: the items of one batch that this actor owns, checked and then staged all
+    /// or none in one turn.
+    /// </summary>
+    private readonly TrySetManyHandler trySetManyHandler;
+
+    /// <summary>
     /// A high-resolution timer used to measure the time elapsed during the handling of requests within the actor.
     /// The stopwatch is utilized to record and log the duration of operations, aiding in performance monitoring
     /// and diagnostics for the KeyValueActor.
@@ -434,6 +440,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
         recordReadPinHandler = new(context);
         tryProbeManyHandler = new(context, tryGetHandler, tryAcquireExclusiveRangeLockHandler);
         tryProbeManyRangesHandler = new(context, tryGetByRangeHandler, tryAcquireExclusiveRangeLockHandler);
+        trySetManyHandler = new(context, trySetHandler);
     }
 
     /// <summary>
@@ -458,6 +465,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
     return message.Type switch
         {
             KeyValueRequestType.TrySet => await TrySet(message),
+            KeyValueRequestType.TrySetMany => await trySetManyHandler.Execute(message),
             KeyValueRequestType.TryExtend => await TryExtend(message),
             KeyValueRequestType.TryDelete => await TryDelete(message),
             KeyValueRequestType.TryGet => await TryGet(message),

@@ -40,7 +40,12 @@ public interface IInterNodeCommunication
 
     public Task<(KeyValueResponseType, long, HLCTimestamp)> TrySetKeyValue(string node, HLCTimestamp transactionId, string key, byte[]? value, byte[]? compareValue, long compareRevision, KeyValueFlags flags, int expiresMs, KeyValueDurability durability, long routedGeneration, CancellationToken cancellationToken);
     
-    public Task TrySetManyNodeKeyValue(string node, List<KahunaSetKeyValueRequestItem> items, Lock lockSync, List<KahunaSetKeyValueResponseItem> responses, CancellationToken cancellationToken);
+    /// <summary>
+    /// Forwards a group of set-many items to the node that leads their partitions. <paramref name="checkOnly"/> marks
+    /// the check round of a transactional batch that spans several leaders: the receiver evaluates every item and
+    /// stages nothing, and an item that would stage answers <see cref="KeyValueResponseType.NotApplied"/>.
+    /// </summary>
+    public Task TrySetManyNodeKeyValue(string node, List<KahunaSetKeyValueRequestItem> items, bool checkOnly, Lock lockSync, List<KahunaSetKeyValueResponseItem> responses, CancellationToken cancellationToken);
 
     public Task TryDeleteManyNodeKeyValue(string node, List<KahunaDeleteKeyValueRequestItem> items, Lock lockSync, List<KahunaDeleteKeyValueResponseItem> responses, CancellationToken cancellationToken);
 

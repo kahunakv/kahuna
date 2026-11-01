@@ -149,6 +149,10 @@ public sealed class KeyValuesService : KeyValuer.KeyValuerBase
 
     internal static GrpcTrySetManyKeyValueResponse? RejectUnregisteredTransactionalSetMany(GrpcTrySetManyKeyValueRequest request)
     {
+        // The check round of a batch is an inter-node request: a client never sends one.
+        if (request.CheckOnly)
+            return InvalidSetMany(request);
+
         // The set-many wire carries no registration identity, so any transactional item is unregistered.
         bool transactional = false;
         foreach (GrpcTrySetManyKeyValueRequestItem item in request.Items)

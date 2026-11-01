@@ -145,7 +145,7 @@ public sealed class TestInterNodeTransportMustRetry
         List<KahunaSetKeyValueResponseItem> responses = [];
 
         await BuildTransport().TrySetManyNodeKeyValue(
-            UnreachableNode, items, new Lock(), responses, TestContext.Current.CancellationToken);
+            UnreachableNode, items, false, new Lock(), responses, TestContext.Current.CancellationToken);
 
         Assert.Equal(items.Count, responses.Count);
 

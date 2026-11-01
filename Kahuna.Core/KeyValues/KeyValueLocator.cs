@@ -73,8 +73,8 @@ internal sealed class KeyValueLocator
     public ValueTask<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTrySetKeyValue(HLCTimestamp transactionId, string key, byte[]? value, byte[]? compareValue, long compareRevision, KeyValueFlags flags, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, long routedGeneration = 0) =>
         writes.LocateAndTrySetKeyValue(transactionId, key, value, compareValue, compareRevision, flags, expiresMs, durability, cancellationToken, routedGeneration);
 
-    public Task<List<KahunaSetKeyValueResponseItem>> LocateAndTrySetManyKeyValue(List<KahunaSetKeyValueRequestItem> setManyItems, CancellationToken cancellationToken) =>
-        writes.LocateAndTrySetManyKeyValue(setManyItems, cancellationToken);
+    public Task<List<KahunaSetKeyValueResponseItem>> LocateAndTrySetManyKeyValue(List<KahunaSetKeyValueRequestItem> setManyItems, CancellationToken cancellationToken, bool checkOnly = false) =>
+        writes.LocateAndTrySetManyKeyValue(setManyItems, cancellationToken, checkOnly);
 
     public Task<List<KahunaDeleteKeyValueResponseItem>> LocateAndTryDeleteManyKeyValue(List<KahunaDeleteKeyValueRequestItem> deleteManyItems, CancellationToken cancellationToken) =>
         writes.LocateAndTryDeleteManyKeyValue(deleteManyItems, cancellationToken);

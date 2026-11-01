@@ -112,8 +112,8 @@ public sealed class TestBatchedSetConflictHolder : BaseCluster
 
     /// <summary>
     /// The write intent an exclusive lock leaves on a key is the conflict an optimistic writer meets first.
-    /// The blocked item names the lock's transaction; an item that met no conflict names nobody, whether it
-    /// is transactional or not.
+    /// The blocked item names the lock's transaction. The transactional batch stages every item or none, so the
+    /// item that met no conflict is not staged and names nobody; a plain write of its own batch is unaffected.
     /// </summary>
     [Fact]
     public async Task BatchedSet_OverLiveForeignWriteIntent_NamesTheHolder()
@@ -129,21 +129,23 @@ public sealed class TestBatchedSetConflictHolder : BaseCluster
         List<KahunaSetKeyValueResponseItem> responses = await SetManyUntilSettled(node.Kahuna,
         [
             SetItem("holder/intent/blocked", WriterTransaction),
-            SetItem("holder/intent/clean", WriterTransaction),
-            SetItem("holder/intent/plain", HLCTimestamp.Zero)
+            SetItem("holder/intent/clean", WriterTransaction)
         ], ct);
 
-        Assert.Equal(3, responses.Count);
+        Assert.Equal(2, responses.Count);
 
         KahunaSetKeyValueResponseItem blocked = ItemFor(responses, "holder/intent/blocked");
         Assert.Equal(KeyValueResponseType.MustRetry, blocked.Type);
         Assert.Equal(HolderTransaction, blocked.HolderTransactionId);
 
         KahunaSetKeyValueResponseItem clean = ItemFor(responses, "holder/intent/clean");
-        Assert.Equal(KeyValueResponseType.Set, clean.Type);
+        Assert.Equal(KeyValueResponseType.NotApplied, clean.Type);
         Assert.Equal(HLCTimestamp.Zero, clean.HolderTransactionId);
 
-        KahunaSetKeyValueResponseItem plain = ItemFor(responses, "holder/intent/plain");
+        List<KahunaSetKeyValueResponseItem> plainResponses = await SetManyUntilSettled(node.Kahuna,
+            [SetItem("holder/intent/plain", HLCTimestamp.Zero)], ct);
+
+        KahunaSetKeyValueResponseItem plain = Assert.Single(plainResponses);
         Assert.Equal(KeyValueResponseType.Set, plain.Type);
         Assert.Equal(HLCTimestamp.Zero, plain.HolderTransactionId);
     }
@@ -350,7 +352,7 @@ public sealed class TestBatchedSetConflictHolder : BaseCluster
             await transport.TrySetManyNodeKeyValue(
                 $"localhost:{port}",
                 [SetItem("blocked", HLCTimestamp.Zero), SetItem("clean", HLCTimestamp.Zero)],
-                lockSync, responses, ct);
+                false, lockSync, responses, ct);
 
             Assert.Equal(2, responses.Count);
 

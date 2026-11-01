@@ -169,15 +169,207 @@ internal sealed class LocalKeyValueOperations
 
     /// <summary>
     /// Attempts to set multiple key-value pairs on the node.
+    ///
+    /// <para>A non-transactional batch is independent committed writes: every item goes through the ordinary
+    /// <c>TrySet</c> path, launched together, and answers for itself. A transactional batch stages every item or
+    /// none: the items each actor owns go to that actor as one <see cref="KeyValueRequestType.TrySetMany"/> message,
+    /// which checks them all and stages them in one turn only when every one passed. A batch that spans several
+    /// actors runs a check round on every actor first and a stage round only when every item passed, so a refused
+    /// item on one actor stages nothing on another. The window between the two rounds is the one place a foreign
+    /// write can refuse one actor's items after another actor staged its own; under pessimistic locking the caller
+    /// holds exclusive locks on every key, so it cannot happen there.</para>
     /// </summary>
     /// <param name="items">A list of key-value set requests to be processed.</param>
-    /// <returns>A task that represents the asynchronous operation. The task result contains a list of responses for each set request, indicating the outcome of the operation.</returns>
-    public async Task<List<KahunaSetKeyValueResponseItem>> SetManyNodeKeyValue(List<KahunaSetKeyValueRequestItem> items)
+    /// <param name="checkOnly">
+    /// Check every item and stage nothing: the check round of a transactional batch that spans several partition
+    /// leaders. An item that would stage answers <see cref="KeyValueResponseType.NotApplied"/>. Refused with
+    /// <see cref="KeyValueResponseType.InvalidInput"/> for a non-transactional batch, which stages nothing to check.
+    /// </param>
+    /// <returns>A task that represents the asynchronous operation. The task result contains a list of responses for each set request, in request order.</returns>
+    public Task<List<KahunaSetKeyValueResponseItem>> SetManyNodeKeyValue(List<KahunaSetKeyValueRequestItem> items, bool checkOnly = false)
+    {
+        HLCTimestamp transactionId = items.Count > 0 ? items[0].TransactionId : HLCTimestamp.Zero;
+
+        if (transactionId == HLCTimestamp.Zero)
+        {
+            if (checkOnly)
+                return Task.FromResult(AllItems(items, KeyValueResponseType.InvalidInput));
+
+            return SetManyIndependentNodeKeyValue(items);
+        }
+
+        return SetManyTransactionalNodeKeyValue(items, transactionId, checkOnly);
+    }
+
+    private static List<KahunaSetKeyValueResponseItem> AllItems(List<KahunaSetKeyValueRequestItem> items, KeyValueResponseType type)
+    {
+        List<KahunaSetKeyValueResponseItem> responses = new(items.Count);
+
+        foreach (KahunaSetKeyValueRequestItem item in items)
+            responses.Add(new() { Key = item.Key ?? "", Type = type, Durability = item.Durability });
+
+        return responses;
+    }
+
+    /// <summary>
+    /// Stages a transactional batch all or none across the actors that own its items (see <see cref="SetManyNodeKeyValue"/>).
+    /// </summary>
+    private async Task<List<KahunaSetKeyValueResponseItem>> SetManyTransactionalNodeKeyValue(List<KahunaSetKeyValueRequestItem> items, HLCTimestamp transactionId, bool checkOnly)
+    {
+        // Group the items by the actor that owns them, in request order inside each group. The ring hashes a key
+        // by its key space, so one group is one key space (or several that share an actor); the actor serves the
+        // group in one turn.
+        Dictionary<(KeyValueDurability Durability, int Actor), List<int>> groups = [];
+
+        for (int i = 0; i < items.Count; i++)
+        {
+            KahunaSetKeyValueRequestItem item = items[i];
+            KeyValueActorRing ring = item.Durability == KeyValueDurability.Ephemeral ? ephemeralKeyValuesRouter : persistentKeyValuesRouter;
+            (KeyValueDurability, int) owner = (item.Durability, ring.ActorIndexOf(item.Key ?? ""));
+
+            if (groups.TryGetValue(owner, out List<int>? indices))
+                indices.Add(i);
+            else
+                groups[owner] = [i];
+        }
+
+        KahunaSetKeyValueResponseItem[] responses = new KahunaSetKeyValueResponseItem[items.Count];
+
+        if (groups.Count == 1)
+        {
+            foreach (List<int> indices in groups.Values)
+                await SetManyGroupNodeKeyValue(items, indices, transactionId, checkOnly, responses);
+
+            return [.. responses];
+        }
+
+        // Several actors: check everywhere, then stage everywhere. Each actor's turn is atomic for its own items;
+        // the check round is what keeps a refusal on one actor from leaving another actor's items staged.
+        await RunRound(checkOnly: true);
+
+        if (checkOnly)
+            return [.. responses];
+
+        foreach (KahunaSetKeyValueResponseItem response in responses)
+        {
+            if (response.Type != KeyValueResponseType.NotApplied)
+                return [.. responses];
+        }
+
+        if (runtime.BeforeSetManyStageRoundForTesting is { } beforeStageRound)
+            await beforeStageRound(transactionId);
+
+        await RunRound(checkOnly: false);
+
+        return [.. responses];
+
+        Task RunRound(bool checkOnly)
+        {
+            Task[] tasks = new Task[groups.Count];
+            int g = 0;
+
+            foreach (List<int> indices in groups.Values)
+                tasks[g++] = SetManyGroupNodeKeyValue(items, indices, transactionId, checkOnly, responses);
+
+            return Task.WhenAll(tasks);
+        }
+    }
+
+    /// <summary>
+    /// Sends the items at <paramref name="indices"/>, all owned by one actor, as one batch message and writes each
+    /// item's answer at its position in <paramref name="responses"/>. A batch the actor answered as a whole (refused,
+    /// or not admitted) gives every item that answer.
+    /// </summary>
+    private async Task SetManyGroupNodeKeyValue(
+        List<KahunaSetKeyValueRequestItem> items,
+        List<int> indices,
+        HLCTimestamp transactionId,
+        bool checkOnly,
+        KahunaSetKeyValueResponseItem[] responses)
+    {
+        KahunaSetKeyValueRequestItem[] groupItems = new KahunaSetKeyValueRequestItem[indices.Count];
+        for (int j = 0; j < indices.Count; j++)
+            groupItems[j] = items[indices[j]];
+
+        KahunaSetKeyValueRequestItem first = groupItems[0];
+
+        KeyValueRequest request = KeyValueRequestPool.Rent(
+            KeyValueRequestType.TrySetMany,
+            transactionId,
+            HLCTimestamp.Zero,
+            first.Key ?? "",
+            null,
+            null,
+            -1,
+            KeyValueFlags.None,
+            0,
+            HLCTimestamp.Zero,
+            first.Durability,
+            0,
+            0,
+            default
+        );
+
+        request.SetManyItems = groupItems;
+        request.CheckOnly = checkOnly;
+
+        try
+        {
+            KeyValueResponse? response = first.Durability == KeyValueDurability.Ephemeral
+                ? await AskKeyValueActor(ephemeralKeyValuesRouter, request)
+                : await AskKeyValueActor(persistentKeyValuesRouter, request);
+
+            for (int j = 0; j < indices.Count; j++)
+            {
+                KahunaSetKeyValueRequestItem item = groupItems[j];
+
+                if (response is null)
+                {
+                    responses[indices[j]] = new() { Key = item.Key ?? "", Type = KeyValueResponseType.Errored, Durability = item.Durability };
+                    continue;
+                }
+
+                if (response.SetManyResults is { } results)
+                {
+                    KeyValueSetManyResult result = results[j];
+                    responses[indices[j]] = new()
+                    {
+                        Key = item.Key ?? "",
+                        Type = result.Type,
+                        Revision = result.Revision,
+                        LastModified = result.LastModified,
+                        Durability = item.Durability,
+                        HolderTransactionId = result.HolderTransactionId
+                    };
+                    continue;
+                }
+
+                responses[indices[j]] = new()
+                {
+                    Key = item.Key ?? "",
+                    Type = response.Type,
+                    Revision = response.Revision,
+                    LastModified = response.Ticket,
+                    Durability = item.Durability,
+                    HolderTransactionId = response.HolderTransactionId
+                };
+            }
+        }
+        finally
+        {
+            KeyValueRequestPool.Return(request);
+        }
+    }
+
+    /// <summary>
+    /// Sets the items of a non-transactional batch as independent committed writes.
+    /// </summary>
+    private async Task<List<KahunaSetKeyValueResponseItem>> SetManyIndependentNodeKeyValue(List<KahunaSetKeyValueRequestItem> items)
     {
         // Fan every item out through the ordinary TrySet path, launched together. Persistent items meet in the
         // shared partition write aggregator — coalescing across this call, other concurrent many-key calls, and
-        // single writes to the same partition — while ephemeral and transactional items keep their existing
-        // per-key behavior. tasks[i] corresponds to items[i], so response order matches input order.
+        // single writes to the same partition — while ephemeral items keep their existing per-key behavior.
+        // tasks[i] corresponds to items[i], so response order matches input order.
         Task<KahunaSetKeyValueResponseItem>[] tasks = new Task<KahunaSetKeyValueResponseItem>[items.Count];
         for (int i = 0; i < items.Count; i++)
             tasks[i] = SetOneNodeKeyValue(items[i]);

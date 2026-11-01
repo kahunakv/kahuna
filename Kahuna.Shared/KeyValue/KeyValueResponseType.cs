@@ -131,4 +131,13 @@ public enum KeyValueResponseType
     /// it can still commit what it holds, or roll back. Not retryable; split the work into smaller transactions.
     /// </summary>
     TransactionMutationLimitReached = 113,
+
+    /// <summary>
+    /// An item of a transactional set-many passed its own condition but was not staged, because the batch stages
+    /// every item or none and another item of the batch was refused (<see cref="NotSet"/>) or answered a transient
+    /// type (<see cref="MustRetry"/>, <see cref="WaitingForReplication"/>, <see cref="Aborted"/>). Nothing of the
+    /// batch is staged. A caller that resends after a transient answer resends the whole batch, never only the
+    /// transient items. Never returned for a non-transactional batch, whose items are independent writes.
+    /// </summary>
+    NotApplied = 114,
 }

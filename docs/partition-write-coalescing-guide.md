@@ -91,9 +91,22 @@ installs the `ReplicationIntent`, stores the proposal in the actor's proposal di
 `TryEnqueue`. On synchronous rejection it unwinds the intent and proposal on the same mailbox and
 returns `MustRetry`; on acceptance it bypasses the reply and lets completion resolve the caller later.
 
-`SetMany`/`DeleteMany` do not have a private batching path. They fan their items out through the
-ordinary `TrySet`/`TryDelete` entry points launched together; the persistent items then meet in the
-aggregator exactly like independent single-key writes.
+A non-transactional `SetMany`, and every `DeleteMany`, has no private batching path. They fan their
+items out through the ordinary `TrySet`/`TryDelete` entry points launched together; the persistent
+items then meet in the aggregator exactly like independent single-key writes.
+
+A transactional `SetMany` stages every item or none, so it does not fan out per item. The items each
+actor owns travel as one `TrySetMany` message, and the actor checks every item (its condition, a
+foreign lock or intent, a committed head past the transaction's copy) before it stages any of them in
+the same turn. A batch that spans several actors, or several partition leaders, runs a check round
+everywhere first and a stage round only when every item passed. A refused item answers `NotSet`, a
+conflicting item its transient type with the holder, and every item that passed answers
+`NotApplied`; nothing is staged, and the caller resends the whole batch. Under optimistic locking a
+foreign write that lands between the two rounds can refuse one actor's items after another actor
+staged its own; the answers then show the staged items as `Set`, and the caller must roll back.
+Under pessimistic locking the caller holds exclusive locks on every key, so the stage round sees what
+the check round saw. Staged items reach the aggregator only at commit, through the durable-intent
+path, as before.
 
 ---
 

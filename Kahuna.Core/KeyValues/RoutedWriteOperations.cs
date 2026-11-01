@@ -185,6 +185,14 @@ internal sealed class RoutedWriteOperations
 
     /// <summary>
     /// Attempts to locate and set multiple key-value pairs in the system.
+    ///
+    /// <para>Every item of a batch belongs to the same transaction, or none does. A transactional batch stages every
+    /// item or none: an item whose condition fails answers <see cref="KeyValueResponseType.NotSet"/>, an item that
+    /// met a conflict answers its transient type, and every item that passed answers
+    /// <see cref="KeyValueResponseType.NotApplied"/>; nothing is staged, and a caller that resends after a transient
+    /// answer resends the whole batch. A transactional batch that names one key twice (for one durability) is
+    /// refused with <see cref="KeyValueResponseType.InvalidInput"/>. A non-transactional batch is independent writes
+    /// that each answer for themselves.</para>
     /// </summary>
     /// <param name="setManyItems">A collection of key-value set requests to be processed.</param>
     /// <param name="cancellationToken">Token to signal cancellation of the operation.</param>
@@ -205,13 +213,44 @@ internal sealed class RoutedWriteOperations
         // unregistered fan-out when the caller supplied no operation identity (non-transactional path).
         HLCTimestamp transactionId = setManyItems.Count > 0 ? setManyItems[0].TransactionId : HLCTimestamp.Zero;
 
+        if (!IsWellFormedBatch(setManyItems, transactionId))
+            return Task.FromResult(AllSetItemsResponse(setManyItems, KeyValueResponseType.InvalidInput));
+
         RegistrationRouting routing = ClassifyRegistration(transactionId, coordinatorKey, operationId);
         if (routing is RegistrationRouting.Legacy)
-            return locator.LocateAndTrySetManyKeyValue(setManyItems, cancellationToken);
+        {
+            // A forwarded check round of a batch another node coordinates arrives on this path, marked by the
+            // transport; a registered batch is never a check round.
+            return locator.LocateAndTrySetManyKeyValue(setManyItems, cancellationToken, SetManyCheckRoundScope.IsActive);
+        }
         if (routing is RegistrationRouting.Malformed)
             return Task.FromResult(AllSetItemsResponse(setManyItems, KeyValueResponseType.InvalidInput));
 
         return RegisterAndTrySetManyKeyValue(transactionId, coordinatorKey, operationId, setManyItems, cancellationToken);
+    }
+
+    /// <summary>
+    /// Whether every item of a batch carries <paramref name="transactionId"/>, and a transactional batch names no key
+    /// twice for one durability. The batch stages all or none under one transaction, so an item of another
+    /// transaction has no place in it; and the check pass evaluates each item against the state before the batch, so
+    /// it cannot model one item's effect on a twin of the same key.
+    /// </summary>
+    private static bool IsWellFormedBatch(List<KahunaSetKeyValueRequestItem> setManyItems, HLCTimestamp transactionId)
+    {
+        foreach (KahunaSetKeyValueRequestItem item in setManyItems)
+            if (item.TransactionId != transactionId)
+                return false;
+
+        if (transactionId == HLCTimestamp.Zero || setManyItems.Count < 2)
+            return true;
+
+        HashSet<(string, KeyValueDurability)> seen = new(setManyItems.Count);
+
+        foreach (KahunaSetKeyValueRequestItem item in setManyItems)
+            if (!seen.Add((item.Key ?? "", item.Durability)))
+                return false;
+
+        return true;
     }
 
     private async Task<List<KahunaSetKeyValueResponseItem>> RegisterAndTrySetManyKeyValue(
@@ -278,14 +317,17 @@ internal sealed class RoutedWriteOperations
 
         // Fold the confirmed writes in canonical request order (fan-out returns them unordered), so the first
         // persistent key deterministically anchors the transaction record. Only a genuine Set is a confirmed
-        // write; a failed SetIfNotExists (NotSet) or a transient (MustRetry) item folds nothing.
+        // write; a failed SetIfNotExists (NotSet), a transient (MustRetry) item and an item the batch did not
+        // stage because of a sibling (NotApplied) fold nothing.
         //
-        // Unlike delete-many, this does NOT cancel the registration when some items come back transient. The
-        // caller (a mass writer) resends only the transient keys on retry — never the already-written ones,
-        // whose intents now exist — so a "cancel then re-drive the whole batch under the same id" contract
-        // would re-issue a SetIfNotExists for an already-set unique key and get a false NotSet. Instead the
-        // confirmed keys fold now, the operation completes, and the caller retries the transient keys as a
-        // fresh operation. A confirmed write is idempotent under participant-cache replay of the same id.
+        // A transactional batch stages every item or none, so a batch with a refused or transient item has no
+        // confirmed write: it folds nothing and completes transient below, which cancels the registration, and
+        // the caller resends the whole batch under the same id or a fresh one. The one exception is a batch that
+        // spans several partition leaders under optimistic locking, where a foreign write between the check
+        // round and the stage round can refuse one leader's items after another leader staged its own: the
+        // staged items fold, exactly as they are held, so the working set stays an accurate account of what the
+        // participants hold while the caller rolls the transaction back. A confirmed write is idempotent under
+        // participant-cache replay of the same id.
         Dictionary<string, (KeyValueResponseType Type, long Revision, HLCTimestamp LastModified)> byKey = new(responses.Count, StringComparer.Ordinal);
         foreach (KahunaSetKeyValueResponseItem response in responses)
             byKey[response.Key ?? ""] = (response.Type, response.Revision, response.LastModified);

@@ -85,6 +85,10 @@ message GrpcTrySetKeyValueResponse {
 
 message GrpcTrySetManyKeyValueRequest {
   repeated GrpcTrySetManyKeyValueRequestItem Items = 1;
+  // Inter-node only: the check round of a transactional batch that spans several partition leaders. The
+  // receiver evaluates every item's condition and conflicts and stages nothing; an item that would stage
+  // answers TYPE_NOT_APPLIED. A client-facing request with this bit set is refused with TYPE_INVALID_INPUT.
+  bool CheckOnly = 2;
 }
 
 message GrpcTrySetManyKeyValueRequestItem {
@@ -1987,6 +1991,10 @@ enum GrpcKeyValueResponseType {
   // A transaction operation was refused because the session already writes its maximum number of keys or holds its
   // maximum number of locks. Not retryable: split the work into smaller transactions.
   TYPE_TRANSACTION_MUTATION_LIMIT_REACHED = 113;
+  // An item of a transactional set-many passed its own condition but was not staged, because another item of
+  // the batch was refused or answered a transient type: a transactional batch stages every item or none.
+  // Resend the whole batch after a transient answer.
+  TYPE_NOT_APPLIED = 114;
 }
 
 enum GrpcKeyValueDurability {
