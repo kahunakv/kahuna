@@ -514,6 +514,42 @@ public sealed class TestUserFunctionEvaluation
         Assert.Equal("true", TextOf(await RunAsync(node, "RETURN is_null(acme_null())")));
     }
 
+    /// <summary>
+    /// A script value is always finite, so a function cannot bring a NaN or an infinity into a script,
+    /// at the top level or nested in an array. Without this check the value would reach a stored key.
+    /// </summary>
+    [Fact]
+    public async Task TestNonFiniteReturnIsErroredAndNothingIsStored()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        await using EmbeddedKahunaNode node = await StartNodeAsync(o =>
+        {
+            o.Functions.Register("acme_nan", static (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> _) => KahunaValue.From(double.NaN));
+            o.Functions.Register("acme_inf", static (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> _) => KahunaValue.From(double.NegativeInfinity));
+            o.Functions.Register("acme_nested_inf", static (in KahunaFunctionContext _, ReadOnlySpan<KahunaValue> _) =>
+                KahunaValue.FromArray([KahunaValue.From(1L), KahunaValue.FromArray([KahunaValue.From(double.PositiveInfinity)])]));
+        }, ct);
+
+        foreach (string name in new[] { "acme_nan", "acme_inf", "acme_nested_inf" })
+        {
+            KeyValueTransactionResult result = await RunAsync(node, $"RETURN {name}()");
+
+            Assert.Equal(KeyValueResponseType.Errored, result.Type);
+            Assert.Contains(name, result.Reason ?? "", StringComparison.Ordinal);
+            Assert.Contains("not a finite number", result.Reason ?? "", StringComparison.Ordinal);
+        }
+
+        string key = RandomKey();
+
+        await node.WaitForLeaderForKeyAsync(key, ct);
+
+        KeyValueTransactionResult set = await RunAsync(node, $"SET `{key}` acme_nan()");
+
+        Assert.Equal(KeyValueResponseType.Errored, set.Type);
+        Assert.Equal(KeyValueResponseType.DoesNotExist, (await RunAsync(node, $"GET `{key}`")).Type);
+    }
+
     [Fact]
     public async Task TestArrayArgumentAndArrayResult()
     {

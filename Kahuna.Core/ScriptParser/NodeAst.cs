@@ -52,14 +52,14 @@ public sealed class NodeAst
     internal KeyValueExpressionResult? literalMemo;
 
     /// <summary>
-    /// The value of this node read as a revision number, once something has asked for it.
+    /// The value of this node read as the integer of a statement option (a revision or an EXTEND
+    /// duration), once something has asked for it.
     ///
-    /// <para>Separate from <see cref="literalMemo"/> because the two are read by different rules: a
-    /// revision is a plain decimal integer, while an expression literal also accepts the hexadecimal form
-    /// the scanner allows. One field serving both would make a node's meaning depend on which consumer
-    /// reached it first.</para>
+    /// <para>Separate from <see cref="literalMemo"/> because the two are read by different rules: an
+    /// option refuses a negative value, which an expression literal may hold. One field serving both
+    /// would make a node's meaning depend on which consumer reached it first.</para>
     /// </summary>
-    internal KeyValueExpressionResult? revisionMemo;
+    internal KeyValueExpressionResult? optionMemo;
 
     /// <summary>
     /// The children of a left-leaning list in source order, once an execution has asked for them: the

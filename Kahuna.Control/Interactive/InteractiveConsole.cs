@@ -149,6 +149,10 @@ public static class InteractiveConsole
                 "floor",
                 "abs",
                 "pow",
+                "max_int",
+                "min_int",
+                "max_double",
+                "min_double",
                 "current_time",
             ];
 

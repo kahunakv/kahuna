@@ -1,8 +1,8 @@
 # Script expression semantics guide
 
 Kahuna script is the language a transaction script is written in. This guide covers the parts of it whose
-behavior a script author must know exactly: what counts as a condition, how numbers compare, when an
-operand is evaluated, how `SWITCH` picks a branch, how a range is bounded, which statement the
+behavior a script author must know exactly: what counts as a condition, how numbers compare, what
+happens when a number leaves its range, when an operand is evaluated, how `SWITCH` picks a branch, how a range is bounded, which statement the
 `NOT FOUND`, `NOT SET`, `NOT DELETED` and `NOT EXTENDED` guards ask about, and which statements a
 transaction refuses. It is not a full language reference.
 
@@ -46,6 +46,85 @@ work avoided and the errors not raised.
 neither leaks a runtime exception to the caller. A zero divisor written as a numeric string, such as
 `1 / '0'`, is the same error.
 
+## Integer overflow is an error
+
+Two integers add, subtract, multiply and divide as 64-bit integers. A result outside the range
+`-9223372036854775808` to `9223372036854775807` is a script error that names the line. It never wraps
+around, and it never turns into a double:
+
+```
+RETURN 9223372036854775807 + 1          -- error: Integer overflow: 9223372036854775807 + 1
+RETURN 9223372036854775806 + 1          -- 9223372036854775807
+RETURN (-9223372036854775807 - 1) / -1  -- error: the one quotient outside the range
+RETURN abs(-9223372036854775807 - 1)    -- error: the smallest integer has no positive counterpart
+RETURN -(-9223372036854775807 - 1)      -- error: Cannot negate -9223372036854775808
+```
+
+A numeric string operand follows the same rule, so `'9223372036854775807' + 1` is the same error.
+
+An earlier version wrapped silently. A counter at the top of the range went to the bottom of it on the
+next increment, and the wrapped value was stored. A promotion to a double would be no better: a double
+holds every integer only up to 2^53, so a counter or a revision would lose its low digits without notice.
+A refused statement writes nothing, so the key keeps its last correct value.
+
+## Numeric limits: `max_int()`, `min_int()`, `max_double()` and `min_double()`
+
+Four functions with no arguments return the limits of the two numeric types:
+
+| Function | Type | Value |
+|---|---|---|
+| `max_int()` | integer | `9223372036854775807` |
+| `min_int()` | integer | `-9223372036854775808` |
+| `max_double()` | double | `1.7976931348623157E+308` |
+| `min_double()` | double | `-1.7976931348623157E+308` |
+
+`min_double()` is the most negative double, as `double.MinValue` is in .NET. It is not the smallest
+positive double, which is what the same name means in C and Java.
+
+Two of these values have no practical literal. `min_int()` has none at all, because its magnitude is one
+above the largest integer. `max_double()` needs all 309 digits, because a float literal has no exponent
+form.
+
+Because an overflow stops the script, a script that wants another outcome checks the headroom before the
+operation, and then chooses what to do:
+
+```
+LET v = GET counter
+IF to_int(v) > max_int() - @n THEN
+  SET counter max_int()      -- cap the counter, or THROW, or reset it
+  RETURN 'capped'
+END
+SET counter (v + @n)
+```
+
+The limits are also a start value for a search: `LET lowest = max_double()` before a loop that keeps the
+smallest value it sees.
+
+The four names are built-in names, so a user-defined function cannot be registered under any of them.
+
+## Every number is finite
+
+A double in a script is always a finite number. NaN, `Infinity` and `-Infinity` are never script values,
+and every operation that would produce one is a script error that names the line:
+
+- a float literal too large for a double, or a non-zero float literal so small that it reads as zero;
+- `+`, `-`, `*` and `/` on doubles, when the result overflows;
+- `pow()`, for example `pow(10, 400)`, `pow(0, -1)` or `pow(-1, 0.5)`;
+- a value returned by a user-defined function, at the top level or inside an array.
+
+A string that spells `NaN`, `Infinity` or a number too large for a double is not a numeric string. An
+operator refuses it as an invalid operand, and `to_double` refuses to convert it.
+
+A double result that is too small to represent becomes zero, as in any floating-point arithmetic. That is
+a loss of precision, not a different value, so it is not an error.
+
+Because no script value is NaN, every comparison has a definite answer. With NaN, `x < 1` and `x >= 1`
+would both be false, and `x == x` would be false too.
+
+A key that already holds the text `NaN`, `Infinity` or `-Infinity` (written by a client, or by a script
+before this rule) stays readable with `GET`. A script can return or compare that text as a string, but
+it cannot use it in arithmetic or convert it with `to_double`.
+
 ## Numeric equality is exact
 
 `==` and `!=` compare numbers exactly.
@@ -58,6 +137,21 @@ RETURN 1 == 1.0           -- true
 An earlier version compared doubles within a fixed tolerance of 0.001, so two clearly different values
 read as equal and a script had no way to ask for an exact answer. That is a trap for counters, revisions,
 and any quantity that must match precisely.
+
+An integer and a double also compare by their exact values, in `==`, `!=`, `<`, `<=`, `>`, `>=` and in a
+`SWITCH` case. The integer is not converted to a double first, because that conversion loses the low
+digits of an integer above 2^53:
+
+```
+RETURN 9007199254740993 == 9007199254740992.0   -- false (2^53 + 1 against 2^53)
+RETURN 9007199254740993 > 9007199254740992.0    -- true
+RETURN 9223372036854775807 < 9223372036854775808.0  -- true (the double is 2^63)
+RETURN 0 == -0.0                                -- true
+```
+
+`min(a, b)` and `max(a, b)` choose by the same exact comparison, and return the chosen argument with its
+own type: `max(3, 2.5)` is the integer `3`, and `min(3, 2.5)` is the double `2.5`. When the two are equal,
+the first argument is returned.
 
 A script that wants a tolerance states its own:
 
@@ -100,7 +194,49 @@ RETURN -x         -- negates the variable
 RETURN -2 * 3     -- -6, because unary minus binds tighter than multiplication
 ```
 
-A literal that is too large for its type is a script error naming the line, not an overflow exception.
+A literal outside the range of its type is a script error naming the line, not an overflow exception.
+This covers an integer literal above `9223372036854775807`, a float literal too large for a double, and
+a non-zero float literal so small that it would read as zero. The smallest integer,
+`-9223372036854775808`, has no literal form, because its magnitude is one above the largest integer;
+use `min_int()`.
+
+Numbers in strings, in `to_int`, `to_double` and the operators, are always read with the invariant
+culture: the decimal separator is `.` and there is no thousands separator, whatever the culture of the
+server.
+
+## Converting numbers: `to_int` and `to_double`
+
+`to_int` (and its aliases `to_integer`, `to_long` and `to_number`) converts a double by truncation toward
+zero. A double outside the 64-bit integer range is a script error, not the nearest integer:
+
+```
+RETURN to_int(2.5)           -- 2
+RETURN to_int(-1.5)          -- -1
+RETURN to_int(round(2.7, 0)) -- 3, when rounding is what you want
+RETURN to_int(pow(2, 63))    -- error: out of range
+```
+
+`to_int` of a string reads a whole number, and `to_double` of a string reads any finite number. An empty
+string converts to `0` in both. A string that is not a number, or that spells `NaN`, `Infinity` or a
+value too large for the type, is a script error.
+
+`round(x, digits)` accepts 0 to 15 digits. Any other count is a script error. A value exactly halfway
+rounds to the even neighbor, so `round(2.5, 0)` is `2` and `round(3.5, 0)` is `4`.
+
+## Numeric statement options
+
+The integers that statements take as options are checked the same way, so a value outside the range a
+statement accepts is a script error that names the line. It is never cut down to fit:
+
+- `SET … EX ms` takes an integer from 0 to 2147483647 milliseconds. `0` means no expiry.
+- `EXTEND key ms` takes an integer literal from 0 to 2147483647 milliseconds.
+- `GET key AT revision` and `EXISTS key AT revision` take a non-negative integer literal.
+- `GET … AS OF ms` takes a whole number of milliseconds above zero, and `SET … CMPREV revision` takes a
+  whole number. Each accepts an integer, a double that holds a whole number, or a string that holds one.
+  A fraction, a value outside the 64-bit range or a string that is not a whole number is an error.
+
+The integer literal of `EXTEND` and `AT` reads like any other integer literal, so the hexadecimal form
+works: `EXTEND key 0xEA60` extends by 60,000 milliseconds.
 
 ## Every character must be recognized
 
@@ -250,8 +386,7 @@ contents each time they appear. Reusing an array twice counts both copies in the
 Exceeding either limit produces a script error. Build large collections in bounded batches.
 
 `to_json` writes array values as JSON, including nested arrays: `to_json([1, [2, 3]])` returns the
-string `[1,[2,3]]`. Non-finite doubles inside an array encode as the strings `"NaN"`, `"Infinity"`, or
-`"-Infinity"`; lone UTF-16 surrogates encode as U+FFFD. When an array is returned directly, a nested
+string `[1,[2,3]]`. Lone UTF-16 surrogates encode as U+FFFD. When an array is returned directly, a nested
 array travels as JSON text in its result slot: `RETURN [[1], [2]]` produces slots containing `[1]` and
 `[2]`. Use `RETURN to_json(...)` when a consumer needs one JSON string for the whole array.
 
@@ -486,8 +621,8 @@ Three rules apply to every call site.
    identifier, a quoted string or a placeholder, which is what lets a transaction plan its locks
    before it runs any expression.
 
-A function that fails — it throws, or it receives the wrong number of arguments — rolls its
-transaction back and returns `Errored` with the function named. Nothing is written and no lock is
+A function that fails — it throws, it receives the wrong number of arguments, or it returns a double
+that is not finite — rolls its transaction back and returns `Errored` with the function named. Nothing is written and no lock is
 held afterwards.
 
 See the user-defined functions guide for how to write and install one.

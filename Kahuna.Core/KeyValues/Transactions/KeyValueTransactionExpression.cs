@@ -192,22 +192,32 @@ internal static class KeyValueTransactionExpression
     }
 
     /// <summary>
-    /// The value of a node read as a revision number, kept on the node the same way a literal is.
+    /// The value of the integer literal of a statement option (the revision of <c>GET … AT</c> and
+    /// <c>EXISTS … AT</c>, and the duration of <c>EXTEND</c>), kept on the node the same way a literal is.
     ///
-    /// <para>A revision option is a plain decimal integer, which is a narrower rule than the one a
-    /// literal expression follows, so it has its own memo. Reading it here keeps the parse out of the
-    /// statement path, where it ran on every execution of the statement.</para>
+    /// <para>The literal reads by the rule of every other integer literal, so a hexadecimal one works and
+    /// one outside the long range is a script error. No option is negative, and a hexadecimal literal with
+    /// the top bit set reads as a negative bit pattern, so a negative value is refused here. The option has
+    /// its own memo because the node is never evaluated as an expression. Reading it here keeps the parse
+    /// out of the statement path, where it ran on every execution of the statement.</para>
     /// </summary>
-    internal static long RevisionOption(NodeAst ast)
+    /// <param name="ast">The literal node.</param>
+    /// <param name="name">What the option is, for the error message: "Revision" or "EXTEND duration".</param>
+    internal static long IntegerOption(NodeAst ast, string name)
     {
-        KeyValueExpressionResult? memo = Volatile.Read(ref ast.revisionMemo);
+        KeyValueExpressionResult? memo = Volatile.Read(ref ast.optionMemo);
 
         if (memo is not null)
             return memo.LongValue;
 
-        KeyValueExpressionResult value = new((long)int.Parse(ast.yytext!, CultureInfo.InvariantCulture));
+        long parsed = ParseIntegerLiteral(ast);
 
-        Volatile.Write(ref ast.revisionMemo, value);
+        if (parsed < 0)
+            throw new KahunaScriptException(name + " must not be negative: " + ast.yytext, ast.yyline);
+
+        KeyValueExpressionResult value = new(parsed);
+
+        Volatile.Write(ref ast.optionMemo, value);
 
         return value.LongValue;
     }
@@ -239,14 +249,33 @@ internal static class KeyValueTransactionExpression
     }
 
     /// <summary>
-    /// Converts a floating point literal to its value. A literal too large for a double is a script error
-    /// rather than a framework exception, so the caller still sees the line it came from.
+    /// Converts a floating point literal to its value. A literal outside the range of a double is a script
+    /// error that names the line. The parse itself does not refuse one: it returns an infinity for a
+    /// literal that is too large, and zero for a non-zero literal that is too small. Both would change the
+    /// value the author wrote without notice, so both are refused here.
     /// </summary>
     private static double ParseFloatLiteral(NodeAst ast)
     {
-        if (double.TryParse(ast.yytext, NumberStyles.Float, CultureInfo.InvariantCulture, out double value))
+        if (double.TryParse(ast.yytext, NumberStyles.Float, CultureInfo.InvariantCulture, out double value)
+            && double.IsFinite(value)
+            && (value != 0 || IsZeroLiteral(ast.yytext)))
             return value;
 
         throw new KahunaScriptException("Float out of range: " + ast.yytext, ast.yyline);
+    }
+
+    /// <summary>
+    /// True when a float literal has no digit other than zero. The scanner accepts only digits and one
+    /// decimal point in a float literal, so any other character is the point.
+    /// </summary>
+    private static bool IsZeroLiteral(ReadOnlySpan<char> text)
+    {
+        for (int i = 0; i < text.Length; i++)
+        {
+            if (text[i] is >= '1' and <= '9')
+                return false;
+        }
+
+        return true;
     }
 }

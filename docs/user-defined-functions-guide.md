@@ -53,13 +53,16 @@ An `As*` accessor throws `KahunaFunctionException` when the kind does not match.
 returns `false` instead. Check `Kind` first, or use `TryGet*`, wherever the script could pass more
 than one kind.
 
-Two details are worth knowing:
+Three details are worth knowing:
 
 - A value read from a key arrives as the kind the script sees. Text stored in a key arrives as
   `String`, not as `Bytes`. `Bytes` is the kind of a buffer a function itself produced.
 - A revision and an expiry are not carried. A value a function returns is a plain value, exactly like
   the result of `concat` or `upper`. To read a key's revision or expiry, apply the built-in `rev()`
   or `expires()` in the script and pass the result in as an argument.
+- A `Double` must be finite. A script value is never NaN or an infinity, so a function that returns
+  one, at the top level or inside an array, fails the call with `Errored`. A `Double` argument is
+  always finite for the same reason.
 
 ### The context
 

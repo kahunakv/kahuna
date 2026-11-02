@@ -1,6 +1,9 @@
 
+using System.Globalization;
 using System.Text;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kahuna.Server.KeyValues.Transactions.Functions;
+using Kahuna.Server.ScriptParser;
 using Kahuna.Shared.KeyValue;
 using Kommander;
 using Microsoft.Extensions.Logging;
@@ -52,9 +55,34 @@ public class TestKeyValueScriptSemantics : BaseCluster
         Assert.DoesNotContain("FormatException", resp.Reason, StringComparison.Ordinal);
         Assert.DoesNotContain("DivideByZeroException", resp.Reason, StringComparison.Ordinal);
         Assert.DoesNotContain("ArgumentException", resp.Reason, StringComparison.Ordinal);
+        Assert.DoesNotContain("ArgumentOutOfRangeException", resp.Reason, StringComparison.Ordinal);
+        Assert.DoesNotContain("OverflowException", resp.Reason, StringComparison.Ordinal);
 
         return resp.Reason!;
     }
+
+    /// <summary>
+    /// Asserts that the script failed with a script error: one that names a line and carries the given text.
+    /// A framework exception message such as "Value was either too large or too small for an Int32." names
+    /// no exception type, so the line is the only sign that the failure went through the script error path.
+    /// </summary>
+    private static async Task AssertScriptError(IKahuna kahuna, string script, string expected)
+    {
+        string reason = await AssertErrored(kahuna, script);
+
+        Assert.Contains(" at line ", reason, StringComparison.Ordinal);
+        Assert.Contains(expected, reason, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A double literal with the given number of integer digits: a one followed by zeros.
+    /// </summary>
+    private static string LargeFloatLiteral(int digits) => "1" + new string('0', digits - 1) + ".0";
+
+    /// <summary>
+    /// The largest finite double written out in full, so that the scanner reads it as a float literal.
+    /// </summary>
+    private static readonly string MaxDoubleLiteral = "17976931348623157" + new string('0', 292) + ".0";
 
     /// <summary>
     /// The range operator passed its right operand to a count-taking helper, so "10..15" produced fifteen
@@ -570,6 +598,469 @@ public class TestKeyValueScriptSemantics : BaseCluster
             KeyValueTransactionResult delete = await Run(kahuna1, $"BEGIN DELETE '{key}' COMMIT END");
 
             Assert.Null(delete.Value);
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
+    }
+
+    /// <summary>
+    /// Long arithmetic wrapped around: long.MaxValue + 1 gave long.MinValue, and a counter at the top of the
+    /// range was stored as that value. Two other overflows reached the caller as a raw framework exception.
+    /// </summary>
+    [Theory, CombinatorialData]
+    public async Task TestIntegerOverflowIsAScriptError([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna _, IKahuna _) =
+            await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+
+        try
+        {
+            string[] overflows =
+            [
+                "9223372036854775807 + 1",
+                "9223372036854775807 - -1",
+                "-9223372036854775807 - 2",
+                "9223372036854775807 * 2",
+                "-3037000500 * 3037000500",
+                "(-9223372036854775807 - 1) / -1",
+                "abs(-9223372036854775807 - 1)",
+                // A numeric string operand follows the same rule as a long one.
+                "'9223372036854775807' + 1",
+                "9223372036854775807 + '1'",
+                "'-9223372036854775807' - 2",
+                "4611686018427387904 * '2'",
+                "'-9223372036854775808' / -1",
+                "(-9223372036854775807 - 1) / '-1'"
+            ];
+
+            foreach (string overflow in overflows)
+                await AssertScriptError(kahuna1, $"RETURN {overflow}", "Integer overflow");
+
+            await AssertScriptError(kahuna1, "RETURN -'-9223372036854775808'", "Cannot negate -9223372036854775808");
+
+            // The values at the edge of the range are not overflows.
+            await AssertReturns(kahuna1, "RETURN 9223372036854775806 + 1", "9223372036854775807");
+            await AssertReturns(kahuna1, "RETURN -9223372036854775807 - 1", "-9223372036854775808");
+            await AssertReturns(kahuna1, "RETURN 4611686018427387903 * 2", "9223372036854775806");
+            await AssertReturns(kahuna1, "RETURN -3037000499 * 3037000499", "-9223372030926249001");
+            await AssertReturns(kahuna1, "RETURN (-9223372036854775807 - 1) / 1", "-9223372036854775808");
+            await AssertReturns(kahuna1, "RETURN abs(-9223372036854775807)", "9223372036854775807");
+            await AssertReturns(kahuna1, "RETURN -'-9223372036854775807'", "9223372036854775807");
+            await AssertReturns(kahuna1, "RETURN '9223372036854775806' + 1", "9223372036854775807");
+
+            // A counter at the top of the range: the update fails, and the stored value does not change. The
+            // same update runs once as a single-key script and once inside an explicit transaction.
+            string key = GetRandomKey();
+
+            Assert.Equal(KeyValueResponseType.Set, (await Run(kahuna1, $"SET `{key}` 9223372036854775807")).Type);
+
+            await AssertScriptError(kahuna1, $"LET v = GET `{key}`\nSET `{key}` (v + 1)", "Integer overflow");
+            await AssertScriptError(kahuna1, $"BEGIN LET v = GET `{key}`\nSET `{key}` (v + 1) COMMIT END", "Integer overflow");
+            await AssertReturns(kahuna1, $"GET `{key}`", "9223372036854775807");
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
+    }
+
+    /// <summary>
+    /// A double that is not finite reached a stored key: a float literal that overflowed, an operator result,
+    /// and pow() all gave an infinity or NaN with no error. A NaN then made every comparison false.
+    /// </summary>
+    [Theory, CombinatorialData]
+    public async Task TestNonFiniteDoublesAreRefused([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna _, IKahuna _) =
+            await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+
+        try
+        {
+            string big = LargeFloatLiteral(310);
+            string tiny = "0." + new string('0', 400) + "1";
+
+            await AssertScriptError(kahuna1, $"RETURN {big}", "Float out of range");
+            await AssertScriptError(kahuna1, $"RETURN -{big}", "Float out of range");
+            await AssertScriptError(kahuna1, $"RETURN {tiny}", "Float out of range");
+
+            string[] operators =
+            [
+                $"{MaxDoubleLiteral} * 2",
+                $"{MaxDoubleLiteral} + {MaxDoubleLiteral}",
+                $"-{MaxDoubleLiteral} - {MaxDoubleLiteral}",
+                $"{MaxDoubleLiteral} / 0.5",
+                $"{MaxDoubleLiteral} * '2'",
+                $"9223372036854775807 * {MaxDoubleLiteral}"
+            ];
+
+            foreach (string op in operators)
+                await AssertScriptError(kahuna1, $"RETURN {op}", "is not a finite number");
+
+            await AssertScriptError(kahuna1, "RETURN pow(10, 400)", "is not a finite number");
+            await AssertScriptError(kahuna1, "RETURN pow(-1, 0.5)", "is not a finite number");
+            await AssertScriptError(kahuna1, "RETURN pow(0, -1)", "is not a finite number");
+
+            // A string that spells a value that is not finite is not a numeric string.
+            await AssertScriptError(kahuna1, "RETURN 'Infinity' + 1.0", "Invalid operands");
+            await AssertScriptError(kahuna1, "RETURN 'NaN' * 1", "Invalid operands");
+            await AssertScriptError(kahuna1, "RETURN 1 + '1e400'", "Invalid operands");
+            await AssertScriptError(kahuna1, "RETURN -'NaN'", "Invalid operand to negate");
+            await AssertScriptError(kahuna1, "RETURN 'NaN' > 1", "Invalid operands");
+
+            // A refused value is never stored, and the key keeps its earlier value.
+            string key = GetRandomKey();
+
+            Assert.Equal(KeyValueResponseType.Set, (await Run(kahuna1, $"SET `{key}` 1.5")).Type);
+
+            await AssertScriptError(kahuna1, $"SET `{key}` pow(10, 400)", "is not a finite number");
+            await AssertScriptError(kahuna1, $"BEGIN SET `{key}` {MaxDoubleLiteral} * 10 COMMIT END", "is not a finite number");
+            await AssertReturns(kahuna1, $"GET `{key}`", "1.5");
+
+            // Finite values at the edge of the range still work, and an operator result that underflows is
+            // an ordinary zero rather than an error.
+            await AssertReturns(kahuna1, $"RETURN {MaxDoubleLiteral}", double.MaxValue.ToString(CultureInfo.InvariantCulture));
+            await AssertReturns(kahuna1, $"RETURN -{MaxDoubleLiteral}", double.MinValue.ToString(CultureInfo.InvariantCulture));
+            await AssertReturns(kahuna1, "RETURN pow(2, 1023)", Math.Pow(2, 1023).ToString(CultureInfo.InvariantCulture));
+            await AssertReturns(kahuna1, "RETURN 0.000001", 0.000001.ToString(CultureInfo.InvariantCulture));
+            await AssertReturns(kahuna1, "RETURN 0.0", "0");
+            await AssertReturns(kahuna1, "RETURN 0.000", "0");
+
+            string small = "0." + new string('0', 199) + "1";
+
+            await AssertReturns(kahuna1, $"RETURN {small} * {small}", "0");
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
+    }
+
+    /// <summary>
+    /// to_int saturated a double outside the long range to long.MaxValue, and to_double accepted 'NaN' and
+    /// '1e400' while it refused 'Infinity'.
+    /// </summary>
+    [Theory, CombinatorialData]
+    public async Task TestNumericCastsRefuseNonFiniteAndOutOfRange([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna _, IKahuna _) =
+            await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+
+        try
+        {
+            // A finite double truncates toward zero.
+            await AssertReturns(kahuna1, "RETURN to_int(2.5)", "2");
+            await AssertReturns(kahuna1, "RETURN to_int(-1.5)", "-1");
+            await AssertReturns(kahuna1, "RETURN to_int(-9223372036854775808.0)", "-9223372036854775808");
+            await AssertReturns(kahuna1, "RETURN to_int(pow(2, 62))", "4611686018427387904");
+            await AssertReturns(kahuna1, "RETURN to_int(round(2.7, 0))", "3");
+
+            // 2^63 is one above long.MaxValue, so it is out of range, although a cast to long saturates it.
+            await AssertScriptError(kahuna1, "RETURN to_int(pow(2, 63))", "out of range");
+            await AssertScriptError(kahuna1, "RETURN to_int(9223372036854775808.0)", "out of range");
+            await AssertScriptError(kahuna1, "RETURN to_int(-pow(10, 300))", "out of range");
+
+            await AssertScriptError(kahuna1, "RETURN to_double('NaN')", "Cannot cast string value 'NaN' to double");
+            await AssertScriptError(kahuna1, "RETURN to_double('Infinity')", "Cannot cast string value 'Infinity' to double");
+            await AssertScriptError(kahuna1, "RETURN to_double('-Infinity')", "Cannot cast string value '-Infinity' to double");
+            await AssertScriptError(kahuna1, "RETURN to_double('1e400')", "Cannot cast string value '1e400' to double");
+
+            await AssertReturns(kahuna1, "RETURN to_double('1.5')", "1.5");
+            await AssertReturns(kahuna1, "RETURN to_double('-2.5e3')", "-2500");
+            await AssertReturns(kahuna1, "RETURN to_int('-42')", "-42");
+
+            // A stored NaN stays readable as text, but a script cannot turn it into a number.
+            string key = GetRandomKey();
+
+            Assert.Equal(KeyValueResponseType.Set, (await Run(kahuna1, $"SET `{key}` 'NaN'")).Type);
+
+            await AssertReturns(kahuna1, $"GET `{key}`", "NaN");
+            await AssertScriptError(kahuna1, $"LET v = GET `{key}`\nRETURN to_int(to_double(v))", "Cannot cast string value 'NaN' to double");
+            await AssertScriptError(kahuna1, $"LET v = GET `{key}`\nRETURN v + 1", "Invalid operands");
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
+    }
+
+    /// <summary>
+    /// to_double parsed with the culture of the server, so on a server whose culture uses a comma for decimals
+    /// '1.5' read as fifteen. The function is called directly here because the culture belongs to the calling
+    /// thread, and the script path runs on actor threads that the test cannot set.
+    /// </summary>
+    [Fact]
+    public void TestNumericCastsIgnoreTheServerCulture()
+    {
+        CultureInfo saved = CultureInfo.CurrentCulture;
+
+        try
+        {
+            CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo("de-DE");
+
+            NodeAst ast = new(NodeType.FuncCall, null, null, null, null, null, null, "to_double", 1);
+
+            KeyValueExpressionResult asDouble = CastToDoubleFunction.Execute(ast, [new KeyValueExpressionResult("1.5")]);
+
+            Assert.Equal(KeyValueExpressionType.DoubleType, asDouble.Type);
+            Assert.Equal(1.5, asDouble.DoubleValue);
+
+            KeyValueExpressionResult asLong = CastToLongFunction.Execute(ast, [new KeyValueExpressionResult("-42")]);
+
+            Assert.Equal(KeyValueExpressionType.LongType, asLong.Type);
+            Assert.Equal(-42, asLong.LongValue);
+
+            // The thousands separator of the culture is not accepted either.
+            Assert.Throws<KahunaScriptException>(() => CastToLongFunction.Execute(ast, [new KeyValueExpressionResult("1.000")]));
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = saved;
+        }
+    }
+
+    /// <summary>
+    /// A long converted to a double before the comparison, so 2^53 + 1 compared equal to 2^53, and
+    /// long.MaxValue compared equal to 2^63.
+    /// </summary>
+    [Theory, CombinatorialData]
+    public async Task TestLongAndDoubleCompareExactly([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna _, IKahuna _) =
+            await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+
+        try
+        {
+            (string Expression, string Expected)[] cases =
+            [
+                ("9007199254740993 == 9007199254740992.0", "false"),
+                ("9007199254740993 != 9007199254740992.0", "true"),
+                ("9007199254740993 > 9007199254740992.0", "true"),
+                ("9007199254740993 >= 9007199254740992.0", "true"),
+                ("9007199254740993 < 9007199254740992.0", "false"),
+                ("9007199254740993 <= 9007199254740992.0", "false"),
+                ("9007199254740992.0 < 9007199254740993", "true"),
+                ("9007199254740992.0 == 9007199254740993", "false"),
+                ("9223372036854775807 == 9223372036854775808.0", "false"),
+                ("9223372036854775807 < 9223372036854775808.0", "true"),
+                ("(-9223372036854775807 - 1) == -9223372036854775808.0", "true"),
+                ("(-9223372036854775807 - 1) > -9223372036854775808.0", "false"),
+                ("-9223372036854775807 > -9223372036854775808.0", "true"),
+                ("'9007199254740993' == 9007199254740992.0", "false"),
+                ("9007199254740993 == '9007199254740992.0'", "false"),
+                ("'9007199254740993' > 9007199254740992.0", "true"),
+                ("1 == 1.0", "true"),
+                ("1 == 1.0009", "false"),
+                ("2 > 1.5", "true"),
+                ("1 < 1.5", "true"),
+                ("-1 < -0.5", "true"),
+                ("-1 > -1.5", "true"),
+                ("0 == -0.0", "true")
+            ];
+
+            foreach ((string expression, string expected) in cases)
+                await AssertReturns(kahuna1, $"RETURN {expression}", expected);
+
+            // A CASE matches by the rule of ==.
+            string switchScript = """
+            SWITCH 9007199254740993
+              CASE 9007199254740992.0 THEN RETURN 'rounded'
+              CASE 9007199254740993.0 THEN RETURN 'rounded too'
+            ELSE
+              RETURN 'exact'
+            END
+            """;
+
+            await AssertReturns(kahuna1, switchScript, "exact");
+
+            // min and max choose by the exact value and return the chosen argument with its own type.
+            await AssertReturns(kahuna1, "RETURN max(9007199254740993, 9007199254740992.0)", "9007199254740993");
+            await AssertReturns(kahuna1, "RETURN is_long(max(9007199254740993, 9007199254740992.0))", "true");
+            await AssertReturns(kahuna1, "RETURN is_double(min(9007199254740993, 9007199254740992.0))", "true");
+            await AssertReturns(kahuna1, "RETURN is_long(max(3, 2.5))", "true");
+            await AssertReturns(kahuna1, "RETURN is_double(min(3, 2.5))", "true");
+            await AssertReturns(kahuna1, "RETURN max(1, 2.5)", "2.5");
+            await AssertReturns(kahuna1, "RETURN is_long(max(2, 2.0))", "true");
+            await AssertReturns(kahuna1, "RETURN is_double(max(2.0, 2))", "true");
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
+    }
+
+    /// <summary>
+    /// Several statement options narrowed a script value with no check: SET EX cast a long to an int, so a
+    /// large expiry became one millisecond; AS OF and CMPREV truncated a fraction and saturated a large
+    /// double; the integer literal of EXTEND and AT went through int.Parse, which refused a hexadecimal literal
+    /// and a large one with a framework message. round() passed its digits to Math.Round unchecked.
+    /// </summary>
+    [Theory, CombinatorialData]
+    public async Task TestStatementOptionsRefuseNarrowedValues([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna _, IKahuna _) =
+            await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+
+        try
+        {
+            // SET EX: an expiry outside the int range is refused, and nothing is stored.
+            foreach (string ex in new[] { "4294967297", "2147483648", "-1" })
+            {
+                string expiring = GetRandomKey();
+
+                await AssertScriptError(kahuna1, $"SET `{expiring}` 'v' EX {ex}", "SET EX");
+                Assert.Equal(KeyValueResponseType.DoesNotExist, (await Run(kahuna1, $"GET `{expiring}`")).Type);
+            }
+
+            string kept = GetRandomKey();
+
+            Assert.Equal(KeyValueResponseType.Set, (await Run(kahuna1, $"SET `{kept}` 'v' EX 2147483647")).Type);
+            await AssertReturns(kahuna1, $"GET `{kept}`", "v");
+
+            // Zero means no expiry.
+            string noExpiry = GetRandomKey();
+
+            Assert.Equal(KeyValueResponseType.Set, (await Run(kahuna1, $"SET `{noExpiry}` 'v' EX 0")).Type);
+            await Task.Delay(50, TestContext.Current.CancellationToken);
+            await AssertReturns(kahuna1, $"GET `{noExpiry}`", "v");
+
+            // round() accepts the digits Math.Round accepts, and refuses the others with a script error.
+            await AssertReturns(kahuna1, "RETURN round(1.25, 15)", "1.25");
+            await AssertReturns(kahuna1, "RETURN round(1.5, 0)", "2");
+
+            // A value exactly halfway rounds to the even neighbor.
+            await AssertReturns(kahuna1, "RETURN round(2.5, 0)", "2");
+            await AssertReturns(kahuna1, "RETURN round(3.5, 0)", "4");
+
+            foreach (string digits in new[] { "16", "20", "-1" })
+                await AssertScriptError(kahuna1, $"RETURN round(1.5, {digits})", "digits");
+
+            string key = GetRandomKey();
+
+            Assert.Equal(KeyValueResponseType.Set, (await Run(kahuna1, $"SET `{key}` 'v'")).Type);
+
+            // AS OF and CMPREV take a whole number in the long range.
+            string huge = LargeFloatLiteral(31);
+
+            foreach (string value in new[] { "1.5", "'abc'", "'99999999999999999999'", huge })
+            {
+                await AssertScriptError(kahuna1, $"GET `{key}` AS OF {value}", "AS OF");
+                await AssertScriptError(kahuna1, $"SET `{key}` 'w' CMPREV {value}", "CMPREV");
+            }
+
+            await AssertScriptError(kahuna1, $"GET `{key}` AS OF -1", "AS OF");
+            await AssertReturns(kahuna1, $"GET `{key}`", "v");
+
+            // The integer literal of EXTEND and AT reads like every other integer literal: a hexadecimal one
+            // works, and one outside the accepted range is a script error.
+            await AssertScriptError(kahuna1, $"EXTEND `{key}` 99999999999", "EXTEND");
+            await AssertScriptError(kahuna1, $"EXTEND `{key}` 2147483648", "EXTEND");
+            Assert.Equal(KeyValueResponseType.Extended, (await Run(kahuna1, $"EXTEND `{key}` 0xEA60")).Type);
+
+            await AssertScriptError(kahuna1, $"GET `{key}` AT 99999999999999999999", "out of range");
+            await AssertScriptError(kahuna1, $"EXISTS `{key}` AT 99999999999999999999", "out of range");
+            Assert.NotEqual(KeyValueResponseType.Errored, (await Run(kahuna1, $"GET `{key}` AT 99999999999")).Type);
+            Assert.NotEqual(KeyValueResponseType.Errored, (await Run(kahuna1, $"EXISTS `{key}` AT 0x0")).Type);
+
+            // An index of 2^63 names the value the author wrote, not the saturated one.
+            await AssertScriptError(kahuna1, "RETURN substring('abc', 9223372036854775808.0)", "out of range");
+            await AssertScriptError(kahuna1, "RETURN [1, 2][9223372036854775808.0]", "out of range");
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
+    }
+
+    /// <summary>
+    /// Boundary rules that already held when overflow became a script error. They are kept here so that a
+    /// change to the numeric code cannot break them without a failure.
+    /// </summary>
+    [Theory, CombinatorialData]
+    public async Task TestNumericBoundariesThatAlreadyHeld([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna _, IKahuna _) =
+            await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+
+        try
+        {
+            await AssertScriptError(kahuna1, "RETURN 9223372036854775808", "Integer out of range");
+            await AssertScriptError(kahuna1, "RETURN -(-9223372036854775807 - 1)", "Cannot negate -9223372036854775808");
+            await AssertScriptError(kahuna1, "RETURN to_int('9223372036854775808')", "Cannot cast string value '9223372036854775808' to int");
+            await AssertScriptError(kahuna1, "RETURN 1 / '0.0'", "Division by zero");
+
+            await AssertReturns(kahuna1, "RETURN 0.0 == -0.0", "true");
+            await AssertReturns(kahuna1, "RETURN 0x8000000000000000", "-9223372036854775808");
+            await AssertReturns(kahuna1, "RETURN 0x7FFFFFFFFFFFFFFF", "9223372036854775807");
+        }
+        finally
+        {
+            await LeaveCluster(node1, node2, node3);
+        }
+    }
+
+    /// <summary>
+    /// The numeric limits are functions because two of them have no practical literal: the smallest
+    /// integer has none at all, and the largest double needs all 309 digits. A script needs them to check a
+    /// value before an operation that would overflow.
+    /// </summary>
+    [Theory, CombinatorialData]
+    public async Task TestNumericLimitFunctions([CombinatorialValues("memory")] string storage, [CombinatorialValues(1)] int partitions)
+    {
+        (IRaft node1, IRaft node2, IRaft node3, IKahuna kahuna1, IKahuna _, IKahuna _) =
+            await AssembleThreNodeCluster(storage, partitions, raftLogger, kahunaLogger);
+
+        try
+        {
+            await AssertReturns(kahuna1, "RETURN max_int()", "9223372036854775807");
+            await AssertReturns(kahuna1, "RETURN min_int()", "-9223372036854775808");
+            await AssertReturns(kahuna1, "RETURN max_double()", double.MaxValue.ToString(CultureInfo.InvariantCulture));
+            await AssertReturns(kahuna1, "RETURN min_double()", double.MinValue.ToString(CultureInfo.InvariantCulture));
+
+            await AssertReturns(kahuna1, "RETURN is_long(max_int()) && is_long(min_int())", "true");
+            await AssertReturns(kahuna1, "RETURN is_double(max_double()) && is_double(min_double())", "true");
+            await AssertReturns(kahuna1, "RETURN min_int() == -9223372036854775807 - 1", "true");
+            await AssertReturns(kahuna1, $"RETURN max_double() == {MaxDoubleLiteral}", "true");
+            await AssertReturns(kahuna1, "RETURN min_double() == -max_double()", "true");
+
+            // The limits are the edge of the range, not past it.
+            await AssertScriptError(kahuna1, "RETURN max_int() + 1", "Integer overflow");
+            await AssertScriptError(kahuna1, "RETURN min_int() - 1", "Integer overflow");
+            await AssertScriptError(kahuna1, "RETURN max_double() * 2", "is not a finite number");
+
+            foreach (string name in new[] { "max_int", "min_int", "max_double", "min_double" })
+                await AssertScriptError(kahuna1, $"RETURN {name}(1)", $"Invalid number of arguments for '{name}' function");
+
+            // The guard idiom: check the headroom before the add, and choose the outcome.
+            string key = GetRandomKey();
+
+            Assert.Equal(KeyValueResponseType.Set, (await Run(kahuna1, $"SET `{key}` 9223372036854775800")).Type);
+
+            string capped =
+                $"LET v = GET `{key}`\n" +
+                "LET n = 10\n" +
+                "IF to_int(v) > max_int() - n THEN\n" +
+                $"  SET `{key}` max_int()\n" +
+                "  RETURN 'capped'\n" +
+                "END\n" +
+                $"SET `{key}` (v + n)\n" +
+                "RETURN 'added'";
+
+            await AssertReturns(kahuna1, capped, "capped");
+            await AssertReturns(kahuna1, $"GET `{key}`", "9223372036854775807");
+
+            // A start value for a minimum search: any finite value replaces it.
+            string minimum =
+                "LET lowest = max_double()\n" +
+                "FOR x IN [3.5, -2, 7] DO\n" +
+                "  IF x < lowest THEN\n" +
+                "    LET lowest = x\n" +
+                "  END\n" +
+                "END\n" +
+                "RETURN lowest";
+
+            await AssertReturns(kahuna1, minimum, "-2");
         }
         finally
         {

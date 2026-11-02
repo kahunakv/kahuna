@@ -82,6 +82,10 @@ public class TestUserFunctionRegistry
     [InlineData("revision")]
     [InlineData("len")]
     [InlineData("length")]
+    [InlineData("max_int")]
+    [InlineData("min_int")]
+    [InlineData("max_double")]
+    [InlineData("min_double")]
     public void TestBuiltInNameIsReserved(string name)
     {
         KahunaFunctionRegistry registry = new();

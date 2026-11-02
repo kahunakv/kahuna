@@ -23,22 +23,13 @@ internal static class PowFunction
         if (arg2.Type != KeyValueExpressionType.LongType && arg2.Type != KeyValueExpressionType.DoubleType)
             throw new KahunaScriptException($"Cannot use 'pow' function with argument {arg2.Type}", ast.yyline);
                        
-        return arg1.Type switch
-        {
-            KeyValueExpressionType.LongType when arg2.Type == KeyValueExpressionType.LongType => 
-                new(Math.Pow(arg1.LongValue, arg2.LongValue)),
-            
-            KeyValueExpressionType.LongType when arg2.Type == KeyValueExpressionType.DoubleType => 
-                new(Math.Pow(arg1.LongValue, arg2.DoubleValue)),
-            
-            KeyValueExpressionType.DoubleType when arg2.Type == KeyValueExpressionType.LongType => 
-                new(Math.Pow(arg1.DoubleValue, arg2.LongValue)),
-            
-            KeyValueExpressionType.DoubleType when arg2.Type == KeyValueExpressionType.DoubleType => 
-                new(Math.Pow(arg1.DoubleValue, arg2.DoubleValue)),          
-            
-            _ => 
-                throw new KahunaScriptException($"Cannot use 'pow' function with argument {arg1.Type}", ast.yyline)
-        };
+        // Two finite arguments can still give a value that is not finite: pow(10, 400) overflows, pow(0, -1)
+        // divides by zero, and pow(-1, 0.5) has no real result. None of them is a script value.
+        double result = Math.Pow(ToDouble(arg1), ToDouble(arg2));
+
+        return new(ScriptNumeric.RequireFiniteResult(result, "pow", ast));
     }
+
+    private static double ToDouble(KeyValueExpressionResult argument) =>
+        argument.Type == KeyValueExpressionType.LongType ? argument.LongValue : argument.DoubleValue;
 }

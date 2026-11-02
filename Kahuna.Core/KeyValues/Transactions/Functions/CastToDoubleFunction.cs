@@ -13,7 +13,9 @@ namespace Kahuna.Server.KeyValues.Transactions.Functions;
 /// If the argument is of type Boolean, the result is 1.0 for true and 0.0 for false.
 /// If the argument is already of type Double, it is returned as is.
 /// Long type arguments are cast to equivalent double values.
-/// String arguments are parsed and converted to double.
+/// String arguments are parsed with the invariant culture, so the result does not depend on the culture of
+/// the server. A string that spells NaN or an infinity, or a number too large for a double, is refused: a
+/// script value is always finite.
 /// </remarks>
 /// <exception cref="KahunaScriptException">
 /// Thrown when the number of arguments is not exactly one,
@@ -43,7 +45,7 @@ internal static class CastToDoubleFunction
         if (string.IsNullOrEmpty(argument.StrValue))
             return 0;
         
-        if (double.TryParse(argument.StrValue, out double converted))
+        if (ScriptNumeric.TryParseFiniteDouble(argument.StrValue, out double converted))
             return converted;
 
         throw new KahunaScriptException($"Cannot cast string value '{argument.StrValue}' to double", ast.yyline);

@@ -30,16 +30,23 @@ internal abstract class BaseCommand
     /// <summary>
     /// Resolves the effective snapshot timestamp for a read statement.
     /// Per-statement AS OF (ast.extendedTwo) overrides the transaction-level context.ReadTimestamp.
-    /// AS OF 0 is rejected. When neither is present, returns Zero (latest).
+    /// The timestamp is a whole number of milliseconds; AS OF 0, a negative value, a fraction or a value
+    /// outside the long range is rejected. When neither is present, returns Zero (latest).
     /// </summary>
     internal static HLCTimestamp ResolveReadTimestamp(ScriptTransactionContext context, NodeAst ast)
     {
         if (ast.extendedTwo is null)
             return context.ReadTimestamp;
 
-        long ms = KeyValueTransactionExpression.Eval(context, ast.extendedTwo).ToLong();
-        if (ms == 0)
-            throw new KahunaScriptException("AS OF 0 is not a valid snapshot timestamp", ast.extendedTwo.yyline);
+        long ms = ScriptIntegerArgument.Require(
+            ast.extendedTwo,
+            KeyValueTransactionExpression.Eval(context, ast.extendedTwo),
+            "AS OF timestamp"
+        );
+
+        // The timestamp is the physical part of an HLC timestamp, in milliseconds, so it is positive.
+        if (ms <= 0)
+            throw new KahunaScriptException($"AS OF {ms} is not a valid snapshot timestamp", ast.extendedTwo.yyline);
 
         return new HLCTimestamp(0, ms, uint.MaxValue);
     }
@@ -101,6 +108,11 @@ internal abstract class BaseCommand
                     if (ex.Type != KeyValueExpressionType.LongType)
                         throw new KahunaScriptException("Invalid SET EX expression", ast.yyline);
 
+                    // The store keeps an expiry as an int of milliseconds, and zero means no expiry. A cast
+                    // would wrap a larger value: 4294967297 became one millisecond.
+                    if (ex.LongValue is < 0 or > int.MaxValue)
+                        throw new KahunaScriptException($"SET EX must be between 0 and {int.MaxValue} milliseconds. Found: {ex.LongValue}", ast.yyline);
+
                     options.ExpiresMs = (int)ex.LongValue;
                     break;
                 }
@@ -129,7 +141,13 @@ internal abstract class BaseCommand
                         throw new KahunaScriptException("Invalid SET CMPREV expression", ast.yyline);
 
                     options.Flags |= KeyValueFlags.SetIfEqualToRevision;
-                    options.CompareRevision = KeyValueTransactionExpression.Eval(context, ast.leftAst).ToLong();
+                    // A fraction, a value outside the long range or a string that is not a whole number is a
+                    // script error, not a truncated, saturated or unparsed revision.
+                    options.CompareRevision = ScriptIntegerArgument.Require(
+                        ast.leftAst,
+                        KeyValueTransactionExpression.Eval(context, ast.leftAst),
+                        "CMPREV revision"
+                    );
                     break;
                 }
 

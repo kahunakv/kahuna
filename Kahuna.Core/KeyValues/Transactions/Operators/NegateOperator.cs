@@ -1,4 +1,3 @@
-using System.Globalization;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.ScriptParser;
 
@@ -18,34 +17,18 @@ internal static class NegateOperator
 
         KeyValueExpressionResult operand = KeyValueTransactionExpression.Eval(context, ast.leftAst);
 
-        switch (operand.Type)
-        {
-            case KeyValueExpressionType.LongType:
-                // long.MinValue has no positive counterpart, so negating it overflows. The literal cannot
-                // reach here (the scanner would have to accept a magnitude one above long.MaxValue), but a
-                // computed value can, and silently wrapping to itself would be worse than a script error.
-                if (operand.LongValue == long.MinValue)
-                    throw new KahunaScriptException("Cannot negate " + long.MinValue, ast.yyline);
+        // The arithmetic operators all coerce a numeric string, so unary minus does the same, and by the same
+        // rule: a string that spells NaN or an infinity is not a number.
+        if (operand.Type is not (KeyValueExpressionType.LongType or KeyValueExpressionType.DoubleType or KeyValueExpressionType.StringType)
+            || !ScriptNumeric.TryRead(operand, out ScriptNumber number))
+            throw new KahunaScriptException("Invalid operand to negate: " + operand.Type, ast.yyline);
 
-                return new(-operand.LongValue);
+        // long.MinValue has no positive counterpart. The literal cannot reach here (the scanner would have to
+        // accept a magnitude one above long.MaxValue), but a computed value or a numeric string can, and
+        // silently wrapping to itself would be worse than a script error.
+        if (number.IsLong)
+            return new(ScriptNumeric.Negate(number.Long, ast));
 
-            case KeyValueExpressionType.DoubleType:
-                return new(-operand.DoubleValue);
-
-            case KeyValueExpressionType.StringType:
-            {
-                // The arithmetic operators all coerce a numeric string, so unary minus does the same.
-                if (long.TryParse(operand.StrValue, NumberStyles.Integer, CultureInfo.InvariantCulture, out long asLong))
-                    return new(-asLong);
-
-                if (double.TryParse(operand.StrValue, NumberStyles.Float, CultureInfo.InvariantCulture, out double asDouble))
-                    return new(-asDouble);
-
-                throw new KahunaScriptException("Invalid operand to negate: " + operand.Type, ast.yyline);
-            }
-
-            default:
-                throw new KahunaScriptException("Invalid operand to negate: " + operand.Type, ast.yyline);
-        }
+        return new(-number.Double);
     }
 }

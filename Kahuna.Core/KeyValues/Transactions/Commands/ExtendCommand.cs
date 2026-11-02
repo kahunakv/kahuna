@@ -36,7 +36,15 @@ internal sealed class ExtendCommand : BaseCommand
         int expiresMs = 0;
         
         if (ast.rightAst is not null)
-            expiresMs = int.Parse(ast.rightAst.yytext!);
+        {
+            long duration = KeyValueTransactionExpression.IntegerOption(ast.rightAst, "EXTEND duration");
+
+            // The store keeps an expiry as an int of milliseconds.
+            if (duration > int.MaxValue)
+                throw new KahunaScriptException($"EXTEND duration must be between 0 and {int.MaxValue} milliseconds. Found: {duration}", ast.yyline);
+
+            expiresMs = (int)duration;
+        }
         
         // Inside an actor turn the request is served by the actor that is already running the script.
         (KeyValueResponseType type, long revision, HLCTimestamp lastModified) = context.ActorTurn is { } turn

@@ -1,7 +1,6 @@
 
 using System.Buffers;
 using System.Text;
-using System.Globalization;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.ScriptParser;
 
@@ -13,7 +12,8 @@ namespace Kahuna.Server.KeyValues.Transactions.Operators;
 /// Numeric comparison is exact. An earlier version compared doubles within a fixed tolerance of 0.001,
 /// which made "1 == 1.0009" true and left a script no way to ask for an exact answer — a trap for counters,
 /// revisions and any other value that must match precisely. A script that wants a tolerance calls the
-/// 'nearly_equals' function and states its own.
+/// 'nearly_equals' function and states its own. A long and a double also compare exactly: the long is not
+/// converted to a double first, because that conversion makes 2^53 + 1 equal to 2^53.
 /// </summary>
 internal static class EqualsOperator
 {
@@ -40,6 +40,16 @@ internal static class EqualsOperator
     /// </summary>
     public static bool AreEqual(KeyValueExpressionResult left, KeyValueExpressionResult right, NodeAst ast, string operatorType)
     {
+        // A number against a number, or against a string that spells one, compares by exact value. Two
+        // strings stay a string comparison, so '1' == '1.0' is false.
+        if (IsNumericComparison(left.Type, right.Type))
+        {
+            if (!ScriptNumeric.TryReadOperands(left, right, out ScriptNumber a, out ScriptNumber b))
+                throw new KahunaScriptException($"Invalid operands: {left.Type} {operatorType} {right.Type}", ast.yyline);
+
+            return ScriptNumeric.Compare(a, b) == 0;
+        }
+
         switch (left.Type)
         {
             case KeyValueExpressionType.NullType when right.Type == KeyValueExpressionType.NullType:
@@ -53,18 +63,6 @@ internal static class EqualsOperator
             
             case KeyValueExpressionType.StringType when right.Type == KeyValueExpressionType.StringType:
                 return string.Compare(left.StrValue, right.StrValue, StringComparison.Ordinal) == 0;
-            
-            case KeyValueExpressionType.LongType when right.Type == KeyValueExpressionType.LongType:
-                return left.LongValue == right.LongValue;
-            
-            case KeyValueExpressionType.DoubleType when right.Type == KeyValueExpressionType.DoubleType:
-                return left.DoubleValue == right.DoubleValue;
-            
-            case KeyValueExpressionType.LongType when right.Type == KeyValueExpressionType.DoubleType:
-                return left.LongValue == right.DoubleValue;
-            
-            case KeyValueExpressionType.DoubleType when right.Type == KeyValueExpressionType.LongType:
-                return left.DoubleValue == right.LongValue;
             
             case KeyValueExpressionType.BytesType when right.Type == KeyValueExpressionType.StringType:
             {
@@ -103,58 +101,6 @@ internal static class EqualsOperator
             case KeyValueExpressionType.BytesType when right.Type == KeyValueExpressionType.BytesType:
                 return ((ReadOnlySpan<byte>)left.BytesValue).SequenceEqual(right.BytesValue);
             
-            case KeyValueExpressionType.StringType when right.Type == KeyValueExpressionType.DoubleType:
-            {
-                if (!long.TryParse(left.StrValue, out long leftLong))
-                {
-                    if (!double.TryParse(left.StrValue, NumberStyles.Float, CultureInfo.InvariantCulture, out double leftDouble))                    
-                        throw new KahunaScriptException("Invalid operands: " + left.Type + " == " + right.Type, ast.yyline);
-                
-                    return leftDouble == right.DoubleValue;
-                }
-
-                return leftLong == right.DoubleValue;
-            }
-
-            case KeyValueExpressionType.StringType when right.Type == KeyValueExpressionType.LongType:
-            {
-                if (!long.TryParse(left.StrValue, out long leftLong))
-                {
-                    if (!double.TryParse(left.StrValue, NumberStyles.Float, CultureInfo.InvariantCulture, out double leftDouble))                    
-                        throw new KahunaScriptException("Invalid operands: " + left.Type + " == " + right.Type, ast.yyline);
-                
-                    return leftDouble == right.LongValue;
-                }
-
-                return leftLong == right.LongValue;
-            }
-
-            case KeyValueExpressionType.LongType when right.Type == KeyValueExpressionType.StringType:
-            {
-                if (!long.TryParse(right.StrValue, out long rightLong))
-                {
-                    if (!double.TryParse(right.StrValue, NumberStyles.Float, CultureInfo.InvariantCulture, out double rightDouble))                    
-                        throw new KahunaScriptException("Invalid operands: " + left.Type + " == " + right.Type, ast.yyline);
-                    
-                    return left.LongValue == rightDouble;
-                }
-
-                return left.LongValue == rightLong;
-            }
-            
-            case KeyValueExpressionType.DoubleType when right.Type == KeyValueExpressionType.StringType:
-            {
-                if (!long.TryParse(right.StrValue, out long rightLong))
-                {
-                    if (!double.TryParse(right.StrValue, NumberStyles.Float, CultureInfo.InvariantCulture, out double rightDouble))                    
-                        throw new KahunaScriptException($"Invalid operands: {left.Type} {operatorType} {right.Type}", ast.yyline);
-                    
-                    return left.DoubleValue == rightDouble;
-                }
-
-                return left.DoubleValue == rightLong;
-            }
-
             default:
                 
                 if (right.Type == KeyValueExpressionType.NullType && left.Type != KeyValueExpressionType.NullType)
@@ -163,4 +109,15 @@ internal static class EqualsOperator
                 throw new KahunaScriptException($"Invalid operands: {left.Type} {operatorType} {right.Type}", ast.yyline);
         }
     }
+
+    private static bool IsNumericComparison(KeyValueExpressionType left, KeyValueExpressionType right)
+    {
+        if (!ScriptNumeric.IsNumericType(left) && !ScriptNumeric.IsNumericType(right))
+            return false;
+
+        return IsNumberOrString(left) && IsNumberOrString(right);
+    }
+
+    private static bool IsNumberOrString(KeyValueExpressionType type) =>
+        type is KeyValueExpressionType.LongType or KeyValueExpressionType.DoubleType or KeyValueExpressionType.StringType;
 }

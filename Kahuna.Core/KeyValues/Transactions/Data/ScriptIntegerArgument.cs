@@ -1,3 +1,4 @@
+using System.Globalization;
 using Kahuna.Server.ScriptParser;
 
 namespace Kahuna.Server.KeyValues.Transactions.Data;
@@ -5,14 +6,14 @@ namespace Kahuna.Server.KeyValues.Transactions.Data;
 /// <summary>
 /// Converts an evaluated expression into the whole number a position or a length has to be.
 ///
-/// <para>Array indexing and the string functions accept the same three shapes: a long, a double that
-/// holds a whole number, and a string that holds one. Accepting all three is what lets a subscript or
-/// a start position be computed by arithmetic, or read out of a stored value, without the author
-/// converting it first.</para>
+/// <para>Array indexing, the string functions, and the AS OF and CMPREV statement options accept the same
+/// three shapes: a long, a double that holds a whole number, and a string that holds one. Accepting all
+/// three is what lets a subscript or a start position be computed by arithmetic, or read out of a stored
+/// value, without the author converting it first.</para>
 ///
-/// <para>The conversion lives in one place so that the two callers cannot drift. A second copy would
-/// be the natural home of a rule that holds on one side only, and the caller reading the other copy
-/// would have no way to see it.</para>
+/// <para>The conversion lives in one place so that the callers cannot drift. A second copy would be the
+/// natural home of a rule that holds on one side only, and the caller reading the other copy would have
+/// no way to see it.</para>
 /// </summary>
 internal static class ScriptIntegerArgument
 {
@@ -38,17 +39,19 @@ internal static class ScriptIntegerArgument
                 double value = argument.DoubleValue;
 
                 if (double.IsNaN(value) || double.IsInfinity(value) || Math.Floor(value) != value)
-                    throw new KahunaScriptException(name + " must be a whole number. Found: " + value, ast.yyline);
+                    throw new KahunaScriptException(name + " must be a whole number. Found: " + value.ToString(CultureInfo.InvariantCulture), ast.yyline);
 
-                if (value < long.MinValue || value > long.MaxValue)
-                    throw new KahunaScriptException(name + " is out of range: " + value, ast.yyline);
+                // (double)long.MaxValue rounds up to 2^63, so a comparison with it would let 2^63 through, and
+                // the cast would then saturate it to long.MaxValue.
+                if (!ScriptNumeric.TryTruncateToLong(value, out long whole))
+                    throw new KahunaScriptException(name + " is out of range: " + value.ToString(CultureInfo.InvariantCulture), ast.yyline);
 
-                return (long)value;
+                return whole;
 
             case KeyValueExpressionType.StringType:
                 // An empty string is refused rather than read as zero. It is far more likely to be an unset
                 // variable than a deliberate request for the first character.
-                if (long.TryParse(argument.StrValue, out long converted))
+                if (long.TryParse(argument.StrValue, NumberStyles.Integer, CultureInfo.InvariantCulture, out long converted))
                     return converted;
 
                 throw new KahunaScriptException(name + " must be an integer: " + argument.Type + " '" + argument.StrValue + "'", ast.yyline);

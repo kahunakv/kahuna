@@ -9,6 +9,8 @@ namespace Kahuna.Server.KeyValues.Transactions.Functions;
 /// </summary>
 internal static class RoundFunction
 {
+    private const int MaxDigits = 15;
+
     internal static KeyValueExpressionResult Execute(NodeAst ast, List<KeyValueExpressionResult> arguments)
     {
         if (arguments.Count != 2)
@@ -23,8 +25,9 @@ internal static class RoundFunction
         if (arg2.Type != KeyValueExpressionType.LongType)
             throw new KahunaScriptException($"Cannot use 'round' function with argument {arg2.Type}", ast.yyline);
         
-        if (arg2.LongValue >= int.MaxValue)
-            throw new KahunaScriptException($"Invalid value for digits {arg2.LongValue} in 'round' function", ast.yyline);
+        // Math.Round accepts 0 to 15 fractional digits and throws for any other count.
+        if (arg2.LongValue is < 0 or > MaxDigits)
+            throw new KahunaScriptException($"Invalid value for digits {arg2.LongValue} in 'round' function. Digits must be between 0 and {MaxDigits}", ast.yyline);
                        
         return arg1.Type switch
         {

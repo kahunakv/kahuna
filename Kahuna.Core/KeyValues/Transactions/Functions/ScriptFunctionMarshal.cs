@@ -1,6 +1,7 @@
 
 using Kahuna.Extensibility;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kahuna.Server.ScriptParser;
 
 namespace Kahuna.Server.KeyValues.Transactions.Functions;
 
@@ -75,8 +76,14 @@ internal static class ScriptFunctionMarshal
     /// <c>concat</c> or <c>upper</c>. A byte buffer is copied: the array that comes back can enter a
     /// transaction's write set and travel to the persistence backend, so it must not alias memory a
     /// function reuses between calls.</para>
+    ///
+    /// <para>A double that is not finite is refused, at the top level and inside an array. A script value
+    /// is always finite, so a function cannot be the way a NaN or an infinity reaches a stored key.</para>
     /// </summary>
-    public static KeyValueExpressionResult ToExpressionResult(KahunaValue value)
+    /// <param name="value">The value the function returned.</param>
+    /// <param name="name">The function name, for the error message.</param>
+    /// <param name="ast">The call node, for the line of the error.</param>
+    public static KeyValueExpressionResult ToExpressionResult(KahunaValue value, string name, NodeAst ast)
     {
         switch (value.Kind)
         {
@@ -90,7 +97,14 @@ internal static class ScriptFunctionMarshal
                 return new(value.AsLong());
 
             case KahunaValueKind.Double:
-                return new(value.AsDouble());
+            {
+                double result = value.AsDouble();
+
+                if (!double.IsFinite(result))
+                    throw new KahunaScriptException($"Function '{name}' returned a value that is not a finite number", ast.yyline);
+
+                return new(result);
+            }
 
             case KahunaValueKind.String:
                 return new(value.AsString());
@@ -105,7 +119,7 @@ internal static class ScriptFunctionMarshal
                 List<KeyValueExpressionResult> converted = new(values.Count);
 
                 for (int i = 0; i < values.Count; i++)
-                    converted.Add(ToExpressionResult(values[i]));
+                    converted.Add(ToExpressionResult(values[i], name, ast));
 
                 return new(converted);
             }

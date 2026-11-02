@@ -27,6 +27,10 @@ internal static class CallFunction
         { "min", MinFunction.Execute },
         { "max", MaxFunction.Execute },
         { "nearly_equals", NearlyEqualsFunction.Execute },
+        { "max_int", NumericLimitFunctions.ExecuteMaxInt },
+        { "min_int", NumericLimitFunctions.ExecuteMinInt },
+        { "max_double", NumericLimitFunctions.ExecuteMaxDouble },
+        { "min_double", NumericLimitFunctions.ExecuteMinDouble },
         { "to_int", CastToLongFunction.Execute },
         { "to_integer", CastToLongFunction.Execute },
         { "to_long", CastToLongFunction.Execute },
@@ -263,7 +267,7 @@ internal static class CallFunction
                 entry.Stats?.RecordCallOnly();
             }
 
-            return ScriptFunctionMarshal.ToExpressionResult(result);
+            return ScriptFunctionMarshal.ToExpressionResult(result, name, ast);
         }
         finally
         {

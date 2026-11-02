@@ -19,7 +19,8 @@ internal static class AbsFunction
 
         return arg.Type switch
         {
-            KeyValueExpressionType.LongType => new(Math.Abs(arg.LongValue)),
+            // long.MinValue has no positive counterpart, so its absolute value is an overflow.
+            KeyValueExpressionType.LongType => new(ScriptNumeric.Abs(arg.LongValue, ast)),
             KeyValueExpressionType.DoubleType => new(Math.Abs(arg.DoubleValue)),
             _ => throw new KahunaScriptException($"Cannot use 'abs' function with argument {arg.Type}", ast.yyline)
         };

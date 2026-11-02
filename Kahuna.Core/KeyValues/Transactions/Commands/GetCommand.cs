@@ -39,7 +39,7 @@ internal sealed class GetCommand : BaseCommand
         long compareRevision = -1;
 
         if (ast.extendedOne is not null)
-            compareRevision = KeyValueTransactionExpression.RevisionOption(ast.extendedOne);
+            compareRevision = KeyValueTransactionExpression.IntegerOption(ast.extendedOne, "Revision");
 
         HLCTimestamp readTimestamp = ResolveReadTimestamp(context, ast);
 

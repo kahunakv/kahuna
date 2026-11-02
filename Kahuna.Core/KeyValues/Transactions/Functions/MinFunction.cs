@@ -33,22 +33,15 @@ internal static class MinFunction
         if (arg2.Type != KeyValueExpressionType.LongType && arg2.Type != KeyValueExpressionType.DoubleType)
             throw new KahunaScriptException($"Cannot use 'min' function with argument {arg2.Type}", ast.yyline);
                        
-        return arg1.Type switch
-        {
-            KeyValueExpressionType.LongType when arg2.Type == KeyValueExpressionType.LongType => 
-                new(Math.Min(arg1.LongValue, arg2.LongValue)),
-            
-            KeyValueExpressionType.LongType when arg2.Type == KeyValueExpressionType.DoubleType => 
-                new(Math.Min(arg1.LongValue, arg2.DoubleValue)),
-            
-            KeyValueExpressionType.DoubleType when arg2.Type == KeyValueExpressionType.LongType => 
-                new(Math.Min(arg1.DoubleValue, arg2.LongValue)),
-            
-            KeyValueExpressionType.DoubleType when arg2.Type == KeyValueExpressionType.DoubleType => 
-                new(Math.Min(arg1.DoubleValue, arg2.DoubleValue)),          
-            
-            _ => 
-                throw new KahunaScriptException($"Cannot use 'min' function with argument {arg1.Type}", ast.yyline)
-        };
+        // The arguments compare by their exact values, and the chosen argument keeps its own type: Math.Min
+        // of a long and a double converted the long to a double, which lost the low bits of a long above
+        // 2^53. When the two are equal, the first argument is returned.
+        ScriptNumber first = ToNumber(arg1);
+        ScriptNumber second = ToNumber(arg2);
+
+        return ScriptNumeric.Compare(first, second) <= 0 ? first.ToResult() : second.ToResult();
     }
+
+    private static ScriptNumber ToNumber(KeyValueExpressionResult argument) =>
+        argument.Type == KeyValueExpressionType.LongType ? new(argument.LongValue) : new(argument.DoubleValue);
 }
