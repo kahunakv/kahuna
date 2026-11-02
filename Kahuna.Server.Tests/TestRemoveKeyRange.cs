@@ -302,8 +302,12 @@ public sealed class TestRemoveKeyRange : RaftTrackingTest
         Assert.Equal(RoutingMode.KeyRange, registry.GetMode("t:i:5"));
         Assert.Equal(RoutingMode.KeyRange, registry.GetMode("t:i:6"));
 
-        // Reconcile to only {t:r, t:i:5} — t:i:6 must be removed.
-        registry.ReconcileTo(new HashSet<string>(StringComparer.Ordinal) { "t:r", "t:i:5" });
+        // Reconcile to a map that covers only {t:r, t:i:5} — t:i:6 must be removed.
+        registry.ReconcileTo(new RangeMap(
+        [
+            new RangeDescriptor { KeySpace = "t:r", PartitionId = 1, Generation = 1 },
+            new RangeDescriptor { KeySpace = "t:i:5", PartitionId = 2, Generation = 1 }
+        ]));
 
         Assert.Equal(RoutingMode.KeyRange, registry.GetMode("t:r"));
         Assert.Equal(RoutingMode.KeyRange, registry.GetMode("t:i:5"));

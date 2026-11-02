@@ -3,10 +3,13 @@ using System.Collections.Concurrent;
 namespace Kahuna.Server.KeyValues.Ranges;
 
 /// <summary>
-/// The per-node registry of which key spaces route by key-range vs hash (per-key-space opt-in). 
-/// Default is <see cref="RoutingMode.Hash"/>; a key space becomes
-/// <see cref="RoutingMode.KeyRange"/> only by explicit registration (opt-in registers
-/// <c>{tableId}:r</c> / <c>{tableId}:i:{indexId}</c>; <c>{db}/meta</c> is never registered).
+/// The per-node registry of which key spaces route by key-range vs hash (per-key-space opt-in).
+/// Default is <see cref="RoutingMode.Hash"/>; a key space becomes <see cref="RoutingMode.KeyRange"/>
+/// when the installed range map holds a descriptor for it (opt-in seeds <c>{tableId}:r</c> /
+/// <c>{tableId}:i:{indexId}</c>; <c>{db}/meta</c> is never registered). The registry is the
+/// routing-mode projection of that map: <see cref="RangeMapStore"/> reconciles it through
+/// <see cref="ReconcileTo"/> on every map it installs, so an explicit <see cref="RegisterKeyRange"/>
+/// only brings a space forward until the next install.
 ///
 /// <para>
 /// A <b>key space</b> is the prefix of a key up to (and excluding) its last <c>'/'</c> — the same
@@ -54,23 +57,32 @@ internal sealed class KeySpaceRegistry
     }
 
     /// <summary>
-    /// Reconciles the registry to exactly the set of key spaces in <paramref name="live"/>.
-    /// Spaces in <paramref name="live"/> are registered (idempotent); spaces currently registered
-    /// that are absent from <paramref name="live"/> are removed. This keeps the registry as a
-    /// projection of the replicated range map: <c>registry == {range-map key spaces}</c>.
+    /// Reconciles the registry to exactly the key spaces that hold a descriptor in <paramref name="map"/>.
+    /// Spaces of the map are registered (idempotent); spaces registered here that the map does not cover
+    /// are removed. This keeps the registry a projection of the installed range map:
+    /// <c>registry == {range-map key spaces}</c>.
+    /// <para>
+    /// <see cref="RangeMapStore"/> calls this under its install lock, <b>before</b> it publishes the map.
+    /// A route reads the mode and then the map, so a reader that finds a space's descriptor in
+    /// <see cref="RangeMapStore.Current"/> must already find the space key-range routed: read the other
+    /// way round, the reader hash-routes a key of a seeded space to a partition the rest of the cluster
+    /// does not use for it, and the write lands where no range read will find it. The reverse window,
+    /// mode flipped and map not yet swapped, refuses the route retryably (no descriptor covers the key)
+    /// and lasts only until the swap.
+    /// </para>
     /// </summary>
-    public void ReconcileTo(IReadOnlySet<string> live)
+    public void ReconcileTo(RangeMap map)
     {
-        foreach (string ks in live)
+        foreach (string keySpace in map.KeySpaces)
         {
-            if (!string.IsNullOrEmpty(ks))
-                modes[ks] = RoutingMode.KeyRange;
+            if (!string.IsNullOrEmpty(keySpace))
+                modes[keySpace] = RoutingMode.KeyRange;
         }
 
-        foreach (string ks in modes.Keys)
+        foreach (string keySpace in modes.Keys)
         {
-            if (!live.Contains(ks))
-                modes.TryRemove(ks, out _);
+            if (!map.ContainsKeySpace(keySpace))
+                modes.TryRemove(keySpace, out _);
         }
     }
 

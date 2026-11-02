@@ -185,6 +185,9 @@ internal sealed class RangeMap
             ? ranges
             : Array.Empty<RangeDescriptor>();
 
+    /// <summary>True when <paramref name="keySpace"/> holds at least one descriptor in this map.</summary>
+    public bool ContainsKeySpace(string keySpace) => bySpace.ContainsKey(keySpace);
+
     /// <summary>
     /// Returns descriptors for <paramref name="keySpace"/> whose half-open interval
     /// <c>[StartKey, EndKey)</c> intersects <c>[<paramref name="startKey"/>,

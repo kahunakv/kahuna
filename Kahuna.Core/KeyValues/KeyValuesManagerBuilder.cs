@@ -143,8 +143,11 @@ internal sealed class KeyValuesManagerBuilder
         scriptParserEvicter = actorSystem.Spawn<ScriptParserEvicterActor, ScriptParserEvicterRequest>("script-parser-evicter", logger);
 
         // Construct the range-descriptor map before the proposal router — the proposal actors carry it
-        // for the generation fence.
-        rangeMapStore = new(raft, configuration.StoragePath, configuration.StorageRevision, logger);
+        // for the generation fence. The key-space registry is the map's routing-mode projection: the
+        // store flips a space to key-range routing as it installs the map that seeds it (the durable
+        // snapshot loaded here included), so routing and the map can never disagree about a space the
+        // map covers.
+        rangeMapStore = new(raft, configuration.StoragePath, configuration.StorageRevision, logger, routingModes: keySpaceRegistry);
 
         // The hash pool every classification of a hash-routed key below shares: its size is the bootstrap
         // partition count of the committed map, so a restart with another configured InitialPartitions
@@ -175,13 +178,6 @@ internal sealed class KeyValuesManagerBuilder
         // snapshots the receipts this manager records), otherwise owned locally. The durable overload
         // reloads any persisted receipts so a re-commit after a cold restart still answers Committed.
         completionReceiptStore = externalReceiptStore ?? new CompletionReceiptStore(configuration.StoragePath, configuration.StorageRevision, logger);
-
-        // Sync the per-node key-space registry with any descriptors loaded from the durable snapshot.
-        // RangeMapStore.LoadFromDisk (called above) restores the range map but does not touch the
-        // registry — they are separate objects. Without this call, a node that restarts with a
-        // non-empty snapshot treats all key spaces as hash-routed (the default) until the first
-        // live RegisterKeyRangeAsync call, causing routing mismatches in the 2PC prepare path.
-        KeyValueReplicationDispatcher.SyncKeySpaceRegistryFromRangeMap(rangeMapStore, keySpaceRegistry);
 
         // Durable-intent 2PC stores share the same per-partition snapshot lifecycle; their key/anchor → partition
         // resolvers are attached below once the locator exists. Shared with the BackgroundWriterActor when provided

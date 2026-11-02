@@ -230,6 +230,15 @@ as the prefix before the last `/` (matching how Kommander computes its hash boun
 returns `Hash` or `KeyRange`. Default is `Hash`. A space registered as `KeyRange` resolves via
 the descriptor map; everything else hashes.
 
+The registry is the routing-mode projection of the installed range map, and `RangeMapStore`
+keeps it: every map the store installs (a committed entry, the leader's own entry, the durable
+snapshot at startup, a P0 state transfer) reconciles the registry to that map's key spaces under
+the store's install lock, **before** the map is published. A route reads the mode first and the
+map second, so a reader that sees a space's descriptor in the map always sees the space in
+`KeyRange` mode; the other order would hash-route a key of a freshly seeded space to a partition
+the rest of the cluster does not use for it. The reverse window (mode flipped, map not yet
+swapped) is refused retryably and lasts only until the swap.
+
 ### DataPartitionRouter (the hash path)
 
 `DataPartitionRouter.cs` is Kahuna's *own* hash assignment. Crucially, Kahuna owns this — it no
@@ -294,13 +303,14 @@ Three consequences to keep in mind:
   concurrently, or under different meta leaders, still start together. Existing descriptors never
   change and no data moves. After the seed, only a split or a manual range move changes where a
   range lives; the leader balancer moves partition *leadership* between nodes and never moves a
-  range between partitions. The seed is committed **before** the space flips to key-range routing
-  on the registering node (the range-map apply flips it on every node as the descriptor lands), so
-  a writer racing the registration is routed by hash until the descriptor is visible and never
-  meets a key-range space with no descriptor. Should that state ever be observed (a space
-  registered with the mode-only `RegisterKeyRange`, or a removal whose registry prune is still
-  pending), the lookup refuses with `RangeDescriptorMissingException`, a `KahunaServerException`
-  carrying `MustRetry` that every public surface answers as a retryable refusal.
+  range between partitions. The space flips to key-range routing on each node inside the install
+  of the map that carries its descriptor, before that map is visible there, so a writer racing
+  the registration is routed by hash until the descriptor is visible, never meets a key-range
+  space with no descriptor, and never hash-routes a key whose descriptor it can already see.
+  Should the first state ever be observed (a space registered with the mode-only
+  `RegisterKeyRange`, or a route that read the mode an instant before the map swap), the lookup
+  refuses with `RangeDescriptorMissingException`, a `KahunaServerException` carrying `MustRetry`
+  that every public surface answers as a retryable refusal.
 * **Clients see the rule.** The routing metadata (`GET /v1/cluster/routing`) publishes the hash
   identifier `kahuna.placement-group-jump-xxh32-v1` together with `prefixSeparator` (`/`) and
   `groupSeparator` (`|`); a client that does not implement exactly that stays on learned routes
@@ -644,9 +654,10 @@ P0. The descriptor's partition is the one hash routing gives the space's placeme
 partition of a sibling space of that group that is already seeded (see *Placement groups* in
 section 4), so a space starts on the same partition in both routing modes. A nonleader forwards the
 seed request to the meta leader and waits for the descriptor to become locally visible. The routing
-registry is in memory, but it is **reconciled from the committed range map** at startup, restore,
-live range-map apply and P0 snapshot install. Nodes learn committed registrations through that map;
-operators need not manually recreate the registry after restart.
+registry is in memory, but it is **reconciled from the committed range map** by the range-map store
+itself, before it publishes each map it installs: at startup, restore, live range-map apply and P0
+snapshot install. Nodes learn committed registrations through that map; operators need not manually
+recreate the registry after restart.
 
 The CLI still fans registration out to all configured endpoints and fails if any refuses. `--node`
 targets one endpoint. Fan-out verifies visibility on those endpoints; it is not the replication

@@ -63,8 +63,6 @@ internal sealed class KeySpaceAdminService
 
     private RangeMapStore rangeMapStore => runtime.RangeMapStore;
 
-    private KeySpaceRegistry keySpaceRegistry => runtime.KeySpaceRegistry;
-
     private KeyWriteFrequencyRegistry writeFrequencyRegistry => runtime.WriteFrequencyRegistry;
 
     private KeyValueLocator locator => runtime.Locator;
@@ -81,26 +79,25 @@ internal sealed class KeySpaceAdminService
 
     /// <summary>
     /// Seeds <paramref name="keySpace"/>'s initial whole-space descriptor (<c>[-inf, +inf)</c>) on the
-    /// meta-partition leader if none exists yet, and then flips the space to key-range routing on this node.
+    /// meta-partition leader if none exists yet, and waits for it to be visible on this node.
     /// <para>
-    /// <see cref="KeySpaceRegistry.RegisterKeyRange"/> alone only changes the routing <i>mode</i>; until
-    /// a covering descriptor exists, routing a key is refused retryably ("no range descriptor covers key").
-    /// The seed therefore comes first: a writer that routes a key of the space while the seed is in flight
-    /// still routes it by hash, and the mode flips only once the descriptor is visible on this node — the
-    /// range-map apply registers the space the moment the descriptor lands (so does the explicit flip
-    /// below), and no writer ever meets a key-range space without a descriptor on the registration path.
-    /// This makes registration self-sufficient: callers no longer reach into the internal
-    /// <see cref="RangeMapStore"/> to bootstrap the first range. The seed is the trivial whole-space range
-    /// — no key-distribution or PK-type knowledge is needed; real boundaries are discovered later by the
-    /// auto-splitter from live data.
+    /// The routing mode follows the map: <see cref="RangeMapStore"/> flips a space to key-range routing on
+    /// a node as it installs the map that carries the space's descriptor, never before and never later. So
+    /// a writer that routes a key of the space while the seed is in flight still routes it by hash, and no
+    /// writer ever meets a key-range space without a descriptor, nor a seeded space it still hash-routes,
+    /// on the registration path. This makes registration self-sufficient: callers no longer reach into the
+    /// internal <see cref="RangeMapStore"/> to bootstrap the first range. The seed is the trivial
+    /// whole-space range — no key-distribution or PK-type knowledge is needed; real boundaries are
+    /// discovered later by the auto-splitter from live data.
     /// </para>
     /// <para>
-    /// The mode flip is node-local (every node must call this). The seed is a single replicated meta-log
-    /// write that only the meta-partition (<see cref="RangeMapStore.MetaPartitionId"/>) leader can commit;
-    /// on any other node the seed step is a no-op and the descriptor arrives by replication. Idempotent:
-    /// safe to call repeatedly and from every node. <b>Multi-node note:</b> if no node that leads the meta
-    /// partition ever calls this for the space, it stays unseeded — same dual-leader coordination caveat
-    /// the auto-splitter carries. For single-node / colocated-leader deployments it just works.
+    /// The seed is a single replicated meta-log write that only the meta-partition
+    /// (<see cref="RangeMapStore.MetaPartitionId"/>) leader can commit; on any other node the seed is
+    /// forwarded to the leader and the call then waits for the descriptor to replicate here, so the caller's
+    /// next route on this node already sees it. Idempotent: safe to call repeatedly and from every node.
+    /// <b>Multi-node note:</b> if no node that leads the meta partition ever calls this for the space, it
+    /// stays unseeded — same dual-leader coordination caveat the auto-splitter carries. For single-node /
+    /// colocated-leader deployments it just works.
     /// </para>
     /// </summary>
     /// <returns><c>true</c> iff this call committed the seed descriptor.</returns>
@@ -118,19 +115,14 @@ internal sealed class KeySpaceAdminService
         // a seed must never be committed for a space the registry would then refuse to route.
         KeySpaceRegistry.EnsureRegistrable(keySpace);
 
-        bool seeded = await EnsureKeyRangeSeededAsync(keySpace, cancellationToken).ConfigureAwait(false);
-
-        // Flip the mode only now, with the descriptor committed and locally visible (the apply of the seed has
-        // already registered the space through the range-map sync; this re-assertion covers a node whose apply
-        // raced a ReconcileTo from an unrelated replication event). Flipping before the seed opened a window in
-        // which the space routed by key range with no descriptor to route through, and every writer in that
-        // window was refused. If the forwarded seed has not replicated here within its wait, the space stays
-        // hash-routed on this node until the descriptor arrives and the apply registers it — the writer-visible
-        // routing is always consistent with the local map.
-        if (rangeMapStore.Current.FindAll(keySpace).Count > 0)
-            keySpaceRegistry.RegisterKeyRange(keySpace);
-
-        return seeded;
+        // The routing mode is not flipped here: the range-map store flips it as it installs the map that carries
+        // the seed, on this node and on every other, so the space routes by key range from the moment its
+        // descriptor is visible and never before. Flipping it earlier opened a window in which the space routed
+        // by key range with no descriptor to route through, and every writer in that window was refused; flipping
+        // it after the install let a writer hash-route a key the rest of the cluster already routed by range. If
+        // the forwarded seed has not replicated here within its wait, the space stays hash-routed on this node
+        // until the descriptor arrives — the writer-visible routing is always consistent with the local map.
+        return await EnsureKeyRangeSeededAsync(keySpace, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<bool> EnsureKeyRangeSeededAsync(string keySpace, CancellationToken cancellationToken)

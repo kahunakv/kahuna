@@ -34,6 +34,17 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// carries the full descriptor set, so replaying the meta log on restore/failover converges on the
 /// latest map and re-applying the same entry is idempotent.
 /// </para>
+///
+/// <para>
+/// <b>Routing modes follow the map.</b> The node-local <see cref="KeySpaceRegistry"/> that says
+/// which key spaces route by key range is a projection of the installed map, and this store keeps
+/// it: every install — a committed entry, the durable snapshot at startup, a whole-partition state
+/// transfer — reconciles the registry to the new map's key spaces under <see cref="installLock"/>,
+/// before the map is published. A route reads the mode first and the map second, so a reader that
+/// sees a space's descriptor in <see cref="Current"/> always sees the space key-range routed; the
+/// reverse window (mode flipped, map not yet swapped) is refused retryably rather than hash-routed
+/// to a partition the rest of the cluster does not use for that key.
+/// </para>
 /// </summary>
 internal sealed class RangeMapStore : IDisposable
 {
@@ -87,6 +98,13 @@ internal sealed class RangeMapStore : IDisposable
     /// <summary>Mutated only under <see cref="mutateGate"/>.</summary>
     private int mutationsSinceCheckpoint;
 
+    /// <summary>
+    /// The routing-mode projection of <see cref="current"/>, reconciled on every install before the
+    /// swap (see the class remarks). Null for a store that owns no routing, as in unit tests of the
+    /// map itself.
+    /// </summary>
+    private readonly KeySpaceRegistry? routingModes;
+
     private volatile RangeMap current = RangeMap.Empty;
 
     // Bumped on every swap of <see cref="current"/>. Lets pull-based consumers (the durable-intent
@@ -128,18 +146,22 @@ internal sealed class RangeMapStore : IDisposable
     /// <param name="storageRevision">Per-node revision so each node's snapshot file is distinct and stable across restarts.</param>
     /// <param name="checkpointEveryMutations">Committed mutations between meta-partition checkpoints; ≤ 0 disables periodic checkpointing.</param>
     /// <param name="indeterminateOutcomeBudget">Settle wait after a proposal without a verdict; null selects <see cref="DefaultIndeterminateOutcomeBudget"/>.</param>
+    /// <param name="routingModes">The node's routing-mode registry, kept as the projection of every map this store installs
+    /// (the durable snapshot loaded here included); null when the store owns no routing.</param>
     public RangeMapStore(
         IRaft raft,
         string? storagePath,
         string? storageRevision,
         ILogger<IKahuna> logger,
         int checkpointEveryMutations = DefaultCheckpointEveryMutations,
-        TimeSpan? indeterminateOutcomeBudget = null)
+        TimeSpan? indeterminateOutcomeBudget = null,
+        KeySpaceRegistry? routingModes = null)
     {
         this.raft = raft;
         this.logger = logger;
         this.checkpointEveryMutations = checkpointEveryMutations;
         this.indeterminateOutcomeBudget = indeterminateOutcomeBudget ?? DefaultIndeterminateOutcomeBudget;
+        this.routingModes = routingModes;
 
         snapshotPath = string.IsNullOrEmpty(storagePath)
             ? null
@@ -639,6 +661,22 @@ internal sealed class RangeMapStore : IDisposable
     }
 
     /// <summary>
+    /// Publishes <paramref name="map"/> as <see cref="Current"/>. The caller holds <see cref="installLock"/>,
+    /// which orders the projection and the swap of one install against those of the next.
+    /// The routing modes are reconciled <b>before</b> the swap: a route reads the mode and then the map,
+    /// so a reader that finds a space's descriptor in the new map must already find the space key-range
+    /// routed, or it hash-routes the key to a partition the rest of the cluster does not use for it. The
+    /// other order of the same two reads — mode flipped, map not yet swapped — finds no covering
+    /// descriptor and is refused retryably, and it lasts only until the swap on the next line.
+    /// </summary>
+    private void Publish(RangeMap map)
+    {
+        routingModes?.ReconcileTo(map);
+        current = map;
+        Interlocked.Increment(ref mapVersion);
+    }
+
+    /// <summary>
     /// Installs the map committed at meta-log index <paramref name="logIndex"/> and persists it,
     /// unless a map from a higher (or the same) index is already installed. Returns whether the map
     /// was installed. See <see cref="installedLogIndex"/> for why the order matters.
@@ -651,10 +689,7 @@ internal sealed class RangeMapStore : IDisposable
             // echoes, so it is installed the way the pre-guard store did: unconditionally, and
             // without moving the index, so the entry's own echo still lands on top of it.
             lock (installLock)
-            {
-                current = map;
-                Interlocked.Increment(ref mapVersion);
-            }
+                Publish(map);
 
             PersistToDisk(map, logIndex: null);
             return true;
@@ -665,9 +700,8 @@ internal sealed class RangeMapStore : IDisposable
             if (logIndex <= installedLogIndex)
                 return false;
 
-            current = map;
+            Publish(map);
             installedLogIndex = logIndex;
-            Interlocked.Increment(ref mapVersion);
         }
 
         PersistToDisk(map, logIndex);
@@ -732,10 +766,7 @@ internal sealed class RangeMapStore : IDisposable
             }
 
             lock (installLock)
-            {
-                current = loaded;
-                Interlocked.Increment(ref mapVersion);
-            }
+                Publish(loaded);
 
             logger.LogRangeMapSnapshotLoaded(snapshotPath, loaded.Descriptors.Count);
         }
@@ -826,10 +857,7 @@ internal sealed class RangeMapStore : IDisposable
         // entry Kommander delivers after the transfer sits above the compaction floor, hence above
         // anything installed before it, and still applies.
         lock (installLock)
-        {
-            current = parsed;
-            Interlocked.Increment(ref mapVersion);
-        }
+            Publish(parsed);
 
         PersistToDisk(parsed, logIndex: null);
     }

@@ -224,8 +224,6 @@ internal sealed class KeyValueReplicationDispatcher
 
     private RangeMapStore rangeMapStore => runtime.RangeMapStore;
 
-    private KeySpaceRegistry keySpaceRegistry => runtime.KeySpaceRegistry;
-
     private SnapshotFloorStore snapshotFloorStore => runtime.SnapshotFloorStore;
 
     private CompletionReceiptStore completionReceiptStore => runtime.CompletionReceiptStore;
@@ -238,23 +236,6 @@ internal sealed class KeyValueReplicationDispatcher
 
     private PartitionDurabilityTracker? durabilityTracker => runtime.DurabilityTracker;
 
-    /// <summary>
-    /// Reconciles the per-node key-space registry with the key spaces the committed range map covers.
-    /// Static because the manager's constructor runs it before this dispatcher (which needs the restorer
-    /// and replicator) can exist.
-    /// </summary>
-    internal static void SyncKeySpaceRegistryFromRangeMap(RangeMapStore rangeMapStore, KeySpaceRegistry keySpaceRegistry)
-    {
-        HashSet<string> live = [];
-
-        foreach (RangeDescriptor descriptor in rangeMapStore.Current.Descriptors)
-        {
-            if (!string.IsNullOrEmpty(descriptor.KeySpace))
-                live.Add(descriptor.KeySpace);
-        }
-
-        keySpaceRegistry.ReconcileTo(live);
-    }
 
 
 
@@ -285,14 +266,11 @@ internal sealed class KeyValueReplicationDispatcher
         if (log.LogType == ReplicationTypes.RangeMap)
         {
             RegisterSynchronousApply(partitionId, log.Id);
+            // The store flips the routing mode of every key space the replayed entry seeds or drops as it
+            // installs the map, so routing on this node matches the restored map the moment the map is visible.
             bool result = rangeMapStore.Restore(partitionId, log);
-            // A replayed range-descriptor entry may introduce key spaces that are not yet in the
-            // per-node KeySpaceRegistry. Sync so that routing on this node matches the restored map.
             if (result)
-            {
-                SyncKeySpaceRegistryFromRangeMap(rangeMapStore, keySpaceRegistry);
                 durabilityTracker?.Resolve(partitionId, log.Id);
-            }
             return BoolTask(result);
         }
 
@@ -406,14 +384,13 @@ internal sealed class KeyValueReplicationDispatcher
         if (log.LogType == ReplicationTypes.RangeMap)
         {
             RegisterSynchronousApply(partitionId, log.Id);
+            // The store flips the routing mode of every key space the entry seeds or drops as it installs
+            // the map: a follower that receives a new descriptor routes the space by key range from the
+            // moment the descriptor is visible and never by hash in between, so a 2PC prepare of the space
+            // is not sent to the wrong partition.
             bool result = rangeMapStore.Replicate(partitionId, log);
-            // Keep the per-node KeySpaceRegistry in sync with every replicated range-descriptor
-            // update. Without this, follower nodes that receive a new key-range descriptor via Raft
-            // still route the corresponding key space via hash (the default), causing 2PC prepare
-            // to be sent to the wrong partition and the transaction to be aborted.
             if (result)
             {
-                SyncKeySpaceRegistryFromRangeMap(rangeMapStore, keySpaceRegistry);
                 durabilityTracker?.Resolve(partitionId, log.Id);
                 RangeMapApplied?.Invoke();
             }
