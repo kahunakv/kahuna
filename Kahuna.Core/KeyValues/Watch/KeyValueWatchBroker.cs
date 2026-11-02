@@ -18,6 +18,13 @@ namespace Kahuna.Server.KeyValues.Watch;
 /// <para><b>Cost on the apply path.</b> With no watch on the node, <see cref="HasSubscribers"/> is one volatile
 /// read. With watches, a publish reads the partition's subscription array without a lock (the array is replaced
 /// whole on every registration change), and allocates an event only after a scope matched.</para>
+///
+/// <para><b>Node buffer budget.</b> Each watch bounds its own buffer; the broker bounds their sum. Every frame a
+/// watch accepts is charged to the watch's share and to the node's aggregate until the reader takes it, a filter
+/// drops it, or the watch ends (see <see cref="KeyValueWatch.TryAddShare"/>). A charge that would pass the budget
+/// ends, with <see cref="KeyValueWatchLagReason.Overflow"/>, the watch that holds the largest share: the arriving
+/// watch when nothing else holds more. A watch whose reader keeps up holds little, so the budget ends the slow
+/// readers that hold the bytes, not it.</para>
 /// </summary>
 internal sealed class KeyValueWatchBroker
 {
@@ -39,13 +46,27 @@ internal sealed class KeyValueWatchBroker
 
     private readonly long maxBufferedBytes;
 
+    // Every open watch, each once: the candidates the node budget picks from.
+    private readonly ConcurrentDictionary<KeyValueWatch, byte> openSet = new();
+
+    // The sum of every open watch's share (see KeyValueWatch.NodeShare), against maxNodeBufferedBytes.
+    private long bufferedBytes;
+
+    private readonly long maxNodeBufferedBytes;
+
     /// <param name="maxWatches">The most watches open on the node at once; zero or less for no limit.</param>
     /// <param name="maxBufferedBytes">The byte budget of each watch's buffer; zero or less for the default.</param>
-    public KeyValueWatchBroker(int maxWatches = 0, long maxBufferedBytes = 0)
+    /// <param name="maxNodeBufferedBytes">The byte budget of every watch buffer on the node together; zero or less
+    /// for no limit.</param>
+    public KeyValueWatchBroker(int maxWatches = 0, long maxBufferedBytes = 0, long maxNodeBufferedBytes = 0)
     {
         this.maxWatches = maxWatches;
         this.maxBufferedBytes = maxBufferedBytes > 0 ? maxBufferedBytes : KeyValueWatch.DefaultMaxBufferedBytes;
+        this.maxNodeBufferedBytes = maxNodeBufferedBytes;
     }
+
+    /// <summary>The bytes every open watch on the node buffers together, as charged against the node budget.</summary>
+    public long BufferedBytes => Interlocked.Read(ref bufferedBytes);
 
     /// <summary>Whether transaction ends are published (see <see cref="PublishTransactionEnd"/>). On only while the
     /// commit admission window is on: the intent store counts a transaction's pending intents per partition only
@@ -101,6 +122,7 @@ internal sealed class KeyValueWatchBroker
 
         KeyValueWatch watch = new(this, scope, keysOnly, capacity, partitions, resolvedPartitions ?? partitions, replayPartitions, resumeCursors, maxBufferedBytes, TracksTransactionEnds);
         KeyValueWatchMetrics.ActiveWatches.Add(1);
+        openSet.TryAdd(watch, 0);
 
         lock (registrationLock)
         {
@@ -126,6 +148,7 @@ internal sealed class KeyValueWatchBroker
     internal void Unregister(KeyValueWatch watch)
     {
         Interlocked.Decrement(ref openWatches);
+        openSet.TryRemove(watch, out _);
 
         lock (registrationLock)
         {
@@ -303,20 +326,59 @@ internal sealed class KeyValueWatchBroker
     }
 
     /// <summary>A snapshot of every open watch on the node, each listed once.</summary>
-    public List<KeyValueWatch> OpenWatches()
-    {
-        HashSet<KeyValueWatch> seen = new(ReferenceEqualityComparer.Instance);
-        List<KeyValueWatch> open = [];
+    public List<KeyValueWatch> OpenWatches() => [.. openSet.Keys];
 
-        foreach (KeyValuePair<int, KeyValueWatch[]> entry in byPartition)
+    /// <summary>Mirrors a change of one watch's share in the node's aggregate. Called by the watch only.</summary>
+    internal void AddBufferedBytes(long delta) => Interlocked.Add(ref bufferedBytes, delta);
+
+    /// <summary>Whether <paramref name="size"/> more bytes would pass the node budget now.</summary>
+    internal bool WouldPassBudget(long size) =>
+        maxNodeBufferedBytes > 0 && Interlocked.Read(ref bufferedBytes) + size > maxNodeBufferedBytes;
+
+    /// <summary>
+    /// Charges a frame of <paramref name="size"/> bytes to <paramref name="watch"/>'s share. When the charge would
+    /// pass the node budget, ends the watch with the largest share and tries again, until the charge fits or the
+    /// watch itself is the one ended. Returns false when the watch ended (before or here) and holds no charge.
+    /// <para>The caller must hold no lock of any watch: ending another watch takes that watch's locks.</para>
+    /// </summary>
+    internal bool TryCharge(KeyValueWatch watch, long size)
+    {
+        while (watch.TryAddShare(size))
         {
-            foreach (KeyValueWatch watch in entry.Value)
+            if (maxNodeBufferedBytes <= 0 || Interlocked.Read(ref bufferedBytes) <= maxNodeBufferedBytes)
+                return true;
+
+            watch.TryAddShare(-size);
+
+            KeyValueWatch victim = LargestShare(watch, size);
+
+            if (victim.End(KeyValueWatchFrame.ForLagged(-1, KeyValueWatchLagReason.Overflow, HLCTimestamp.Zero)))
+                KeyValueWatchMetrics.NodeBudgetOverflows.Add(1);
+
+            if (ReferenceEquals(victim, watch))
+                return false;
+        }
+
+        return false;
+    }
+
+    // The open watch with the largest share, counting the frame the arriving watch is about to take. The arriving
+    // watch wins a tie, so a node whose watches all hold the same ends the newest buffer.
+    private KeyValueWatch LargestShare(KeyValueWatch arriving, long size)
+    {
+        KeyValueWatch largest = arriving;
+        long largestShare = arriving.NodeShare + size;
+
+        foreach (KeyValuePair<KeyValueWatch, byte> entry in openSet)
+        {
+            long share = entry.Key.NodeShare;
+            if (share > largestShare)
             {
-                if (seen.Add(watch))
-                    open.Add(watch);
+                largest = entry.Key;
+                largestShare = share;
             }
         }
 
-        return open;
+        return largest;
     }
 }

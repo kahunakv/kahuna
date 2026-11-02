@@ -222,6 +222,12 @@ builder.WebHost.ConfigureKestrel(options =>
 {
     options.AllowSynchronousIO = false;
 
+    // A connection holds a file descriptor and, for a watch stream, a watch for as long as the client keeps it
+    // open. The bound covers every listener: Kestrel has no per-listener limit, and with the default ports
+    // --raft-port is also a client port. Already-open peer connections are kept, so only a peer that reconnects
+    // while clients hold every slot is refused.
+    options.Limits.MaxConcurrentConnections = opts.MaxConcurrentConnections > 0 ? opts.MaxConcurrentConnections : null;
+
     // Cleartext listeners beside a configured certificate are an explicit opt-in.
     if (bindPlaintextListeners)
     {

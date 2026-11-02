@@ -19,7 +19,9 @@ namespace Kahuna.Server.KeyValues.Watch;
 ///
 /// <para><b>Bounded.</b> The watch buffers at most its capacity of frames, and at most its byte budget of keys and
 /// values, for a slow reader. A reader that falls further behind loses the whole backlog and receives one
-/// <see cref="KeyValueWatchFrameType.Lagged"/> frame instead; the producer never blocks. Every terminal frame
+/// <see cref="KeyValueWatchFrameType.Lagged"/> frame instead; the producer never blocks. Its buffer also counts
+/// against the node's budget (see <see cref="KeyValueWatchBroker"/>), which ends the watch that holds the most of
+/// it, with the same frame, when a new frame would pass it. Every terminal frame
 /// (<see cref="KeyValueWatchFrame.IsTerminal"/>) is the last one the watch delivers.</para>
 ///
 /// <para><b>Per-key order behind a pending intent.</b> A durable transaction's value is visible at commit, but its
@@ -64,6 +66,14 @@ public sealed class KeyValueWatch : IAsyncDisposable
     private int queued;
 
     private long queuedBytes;
+
+    // This watch's share of the node's buffered bytes (see KeyValueWatchBroker): every frame from the moment the
+    // watch accepts it until the reader takes it or a filter drops it, frames held back during a replay and frames
+    // held behind a key included. End swaps it for ReleasedShare and releases the whole share in that one exchange;
+    // a release after it is a no-op, so the reader and End can never both release a frame.
+    private long nodeShare;
+
+    private const long ReleasedShare = long.MinValue;
 
     // The frame that ended the watch; set once. The reader delivers it after anything it already took and
     // drops everything else still buffered.
@@ -187,8 +197,10 @@ public sealed class KeyValueWatch : IAsyncDisposable
                     break;
                 }
 
+                long size = SizeOf(frame);
                 Interlocked.Decrement(ref queued);
-                Interlocked.Add(ref queuedBytes, -SizeOf(frame));
+                Interlocked.Add(ref queuedBytes, -size);
+                ReleaseShare(size);
                 yield return frame;
             }
         }
@@ -207,17 +219,23 @@ public sealed class KeyValueWatch : IAsyncDisposable
 
     /// <summary>
     /// Buffers one live frame for the reader, from the entry at <paramref name="logIndex"/>, or ends the watch with an
-    /// overflow when the reader is too far behind. <paramref name="holdKey"/> names the key whose pending intent the
-    /// frame must wait behind, or is null. While the frame's partition is being replayed the frame is held back
-    /// instead, to be delivered after the replay if the replay did not cover its entry. Never blocks. Called from
-    /// apply threads.
+    /// overflow when the reader is too far behind, or when the node's buffer budget is spent and this watch holds the
+    /// most of it. <paramref name="holdKey"/> names the key whose pending intent the frame must wait behind, or is
+    /// null. While the frame's partition is being replayed the frame is held back instead, to be delivered after the
+    /// replay if the replay did not cover its entry. Never blocks on this watch's reader. Called from apply threads,
+    /// with no lock of any watch held: the node budget may end another watch from here.
     /// </summary>
     internal void Deliver(KeyValueWatchFrame frame, long logIndex, string? holdKey = null)
     {
-        if (replaying is not null && TryHoldBack(frame.PartitionId, new HeldBack(logIndex, frame, holdKey, SizeOf(frame))))
+        long size = SizeOf(frame);
+
+        if (!broker.TryCharge(this, size))
             return;
 
-        Route(frame, holdKey);
+        if (replaying is not null && TryHoldBack(frame.PartitionId, new HeldBack(logIndex, frame, holdKey, size)))
+            return;
+
+        Route(frame, holdKey, size);
     }
 
     /// <summary>
@@ -236,14 +254,17 @@ public sealed class KeyValueWatch : IAsyncDisposable
     /// <summary>
     /// Buffers one replayed frame for the reader, waiting while the reader is too far behind: a replay reads the log
     /// off the apply path and can wait, and an overflow would only make the consumer replay the same history again.
-    /// Returns false once the watch ended.
+    /// It also waits while the node's buffer budget is spent and this watch's reader still has frames to take; with
+    /// nothing left to take, the frame goes to the node budget, which ends the watch that holds the most. Returns
+    /// false once the watch ended.
     /// </summary>
     internal async ValueTask<bool> DeliverReplayedAsync(KeyValueWatchFrame frame, string? holdKey, CancellationToken cancellationToken)
     {
         long size = SizeOf(frame);
 
         while (Volatile.Read(ref queued) >= capacity
-               || (Volatile.Read(ref queued) > 0 && Interlocked.Read(ref queuedBytes) + size > maxBufferedBytes))
+               || (Volatile.Read(ref queued) > 0
+                   && (Interlocked.Read(ref queuedBytes) + size > maxBufferedBytes || broker.WouldPassBudget(size))))
         {
             if (Volatile.Read(ref terminal) is not null)
                 return false;
@@ -251,10 +272,10 @@ public sealed class KeyValueWatch : IAsyncDisposable
             await Task.Delay(2, cancellationToken).ConfigureAwait(false);
         }
 
-        if (Volatile.Read(ref terminal) is not null)
+        if (Volatile.Read(ref terminal) is not null || !broker.TryCharge(this, size))
             return false;
 
-        Route(frame, holdKey);
+        Route(frame, holdKey, size);
         return true;
     }
 
@@ -279,10 +300,13 @@ public sealed class KeyValueWatch : IAsyncDisposable
                 heldBackBytes -= item.Bytes;
 
                 if (item.LogIndex <= replayedThrough)
+                {
+                    ReleaseShare(item.Bytes);
                     continue;
+                }
 
                 if (item.Frame is { } frame)
-                    Route(frame, item.Key);
+                    Route(frame, item.Key, item.Bytes);
                 else if (item.Key is { } key)
                     ReleaseKey(key);
             }
@@ -321,22 +345,27 @@ public sealed class KeyValueWatch : IAsyncDisposable
     /// <summary>
     /// The last stage before the reader: drops what the resume cursor covers, delivers a transaction end only to a
     /// watch that delivered an event of the transaction, and keeps a key's frames behind its pending intent.
+    /// <paramref name="size"/> is the frame's charge against the node budget, released here when the frame is
+    /// dropped and by the reader otherwise.
     /// </summary>
-    private void Route(KeyValueWatchFrame frame, string? holdKey)
+    private void Route(KeyValueWatchFrame frame, string? holdKey, long size)
     {
         if (cursors is not null && cursors.TryGetValue(frame.PartitionId, out HLCTimestamp cursor))
         {
-            if (frame.Event is { } covered && covered.CommitTimestamp <= cursor)
+            if ((frame.Event is { } covered && covered.CommitTimestamp <= cursor)
+                || (frame.Type == KeyValueWatchFrameType.Progress && frame.Timestamp <= cursor))
+            {
+                ReleaseShare(size);
                 return;
-
-            if (frame.Type == KeyValueWatchFrameType.Progress && frame.Timestamp <= cursor)
-                return;
+            }
         }
 
         if (frame.Type == KeyValueWatchFrameType.TransactionEnd)
         {
             if (openTransactions.TryRemove((frame.PartitionId, frame.TransactionId), out _))
                 Buffer(frame, counted: false);
+            else
+                ReleaseShare(size);
 
             return;
         }
@@ -454,6 +483,45 @@ public sealed class KeyValueWatch : IAsyncDisposable
     private static long SizeOf(KeyValueWatchFrame frame) =>
         frame.Event is { } e ? FrameOverheadBytes + e.Key.Length * 2L + (e.Value?.LongLength ?? 0) : FrameOverheadBytes;
 
+    /// <summary>This watch's share of the node's buffered bytes; zero once the watch ended.</summary>
+    internal long NodeShare
+    {
+        get
+        {
+            long share = Volatile.Read(ref nodeShare);
+            return share == ReleasedShare ? 0 : share;
+        }
+    }
+
+    /// <summary>
+    /// Adds <paramref name="delta"/> to this watch's share of the node's buffered bytes and mirrors it in the
+    /// broker's aggregate. Returns false, and changes nothing, once the watch ended and released its share.
+    /// </summary>
+    internal bool TryAddShare(long delta)
+    {
+        long current = Volatile.Read(ref nodeShare);
+
+        while (current != ReleasedShare)
+        {
+            long seen = Interlocked.CompareExchange(ref nodeShare, current + delta, current);
+            if (seen == current)
+            {
+                broker.AddBufferedBytes(delta);
+                return true;
+            }
+
+            current = seen;
+        }
+
+        return false;
+    }
+
+    private void ReleaseShare(long size)
+    {
+        if (size != 0)
+            TryAddShare(-size);
+    }
+
     /// <summary>
     /// Ends the watch with <paramref name="frame"/> (null for a close the consumer asked for, which delivers no
     /// frame), unregisters it from the broker and drops the buffered backlog. Only the first call has an effect;
@@ -466,18 +534,21 @@ public sealed class KeyValueWatch : IAsyncDisposable
         if (Interlocked.CompareExchange(ref terminal, end, null) is not null)
             return false;
 
+        // Every frame charged before this exchange is released here, whether it is still buffered, held, or being
+        // read at this moment; every later charge or release of this watch is refused.
+        long share = Interlocked.Exchange(ref nodeShare, ReleasedShare);
+        if (share != 0)
+            broker.AddBufferedBytes(-share);
+
         broker.Unregister(this);
         channel.Writer.TryComplete();
         KeyValueWatchMetrics.ActiveWatches.Add(-1);
 
-        // The registrations on the token are the replays' waits, which do not throw; an end must never fail.
-        try
-        {
-            lifetime.Cancel();
-        }
-        catch (AggregateException)
-        {
-        }
+        // The token is marked cancelled before this returns, and its callbacks run on the thread pool. Run inline,
+        // a callback would resume a replay (which reads the log) on this thread: an apply thread, possibly under a
+        // lock of this watch, or the producer of another watch that ended this one for the node budget. The
+        // callbacks are the replays' waits, which do not throw, so the returned task needs no observer.
+        _ = lifetime.CancelAsync();
 
         // Drop the backlog now rather than when the reader gets to it; a reader that stopped reading would
         // otherwise keep it alive.

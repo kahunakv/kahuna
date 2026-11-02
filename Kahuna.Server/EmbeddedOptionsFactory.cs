@@ -173,6 +173,7 @@ public static class EmbeddedOptionsFactory
         AdminApiKeyFile = opts.AdminApiKeyFile,
         WatchMaxCapacity = opts.WatchMaxCapacity,
         WatchMaxBufferedBytes = opts.WatchMaxBufferedBytes,
+        WatchMaxBufferedBytesPerNode = opts.WatchMaxBufferedBytesPerNode,
         WatchMaxPerNode = opts.WatchMaxPerNode,
         WatchMaxPerCall = opts.WatchMaxPerCall,
         WatchMaxConcurrentReplays = opts.WatchMaxConcurrentReplays,

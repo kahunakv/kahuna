@@ -27,7 +27,11 @@ public static class KeyValuesHandlers
     public static void MapKeyValueRoutes(WebApplication app)
     {
         // Key and value sizes a client write or lock acquire must meet; see KeyValueInputLimits.
-        KeyValueInputLimits limits = KeyValueInputLimits.From(app.Services.GetService<KahunaConfiguration>() ?? new KahunaConfiguration());
+        KahunaConfiguration configuration = app.Services.GetService<KahunaConfiguration>() ?? new KahunaConfiguration();
+        KeyValueInputLimits limits = KeyValueInputLimits.From(configuration);
+
+        // How long a watch stream may go without a write; see KeyValueWatchSseHandler.
+        TimeSpan watchKeepAlive = configuration.WatchSseKeepAliveInterval;
 
         app.MapPost("/v1/kv/try-set", async (KahunaSetKeyValueRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
         {
@@ -517,8 +521,8 @@ public static class KeyValuesHandlers
         });
 
         // A server-sent-events stream of one watch; see KeyValueWatchSseHandler.
-        app.MapPost("/v1/kv/watch", static (KahunaWatchRequest request, IKahuna keyValues, HttpContext http) =>
-            KeyValueWatchSseHandler.Serve(request, keyValues, http));
+        app.MapPost("/v1/kv/watch", (KahunaWatchRequest request, IKahuna keyValues, HttpContext http) =>
+            KeyValueWatchSseHandler.Serve(request, keyValues, http, watchKeepAlive));
 
         app.MapPost("/v1/kv/get-by-range", async (KahunaGetByRangeRequest request, IKahuna keyValues, CancellationToken cancellationToken) =>
         {

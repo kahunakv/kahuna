@@ -26,6 +26,7 @@ public sealed class TestServerConfigurationSurface
         nameof(KahunaConfiguration.AdvertisedClientScheme),
         nameof(KahunaConfiguration.AdvertisePeerEndpoints),
         nameof(KahunaConfiguration.RoutingHintsEnabled),
+        nameof(KahunaConfiguration.WatchSseKeepAliveInterval),
     };
 
     /// <summary>Non-default values throughout, so a missed assignment cannot pass by coincidence.</summary>
@@ -65,7 +66,40 @@ public sealed class TestServerConfigurationSurface
         StorageMaxBackgroundCompactions = 3,
         StorageSharedMemtableBudgetMb = 48,
         StorageSharedCacheMb = 96,
+        WatchMaxBufferedBytesPerNode = 123_456_789,
+        WatchSseKeepAliveSeconds = 7,
+        MaxConcurrentConnections = 321,
     };
+
+    [Fact]
+    public void WatchBufferBudgetAndKeepAlive_ReachTheServerConfiguration_AndNegativesAreRefused()
+    {
+        KahunaCommandLineOptions opts = NonDefaultOptions();
+        KahunaConfiguration server = ServerConfigurationFactory.Create(opts);
+        KahunaConfiguration embedded = EmbeddedKahunaNode.CreateKahunaConfiguration(
+            EmbeddedOptionsFactory.CreateEmbeddedOptions(opts), singleProcessRaftGroup: false);
+
+        Assert.Equal(123_456_789, server.WatchMaxBufferedBytesPerNode);
+        Assert.Equal(123_456_789, embedded.WatchMaxBufferedBytesPerNode);
+        Assert.Equal(TimeSpan.FromSeconds(7), server.WatchSseKeepAliveInterval);
+
+        KahunaCommandLineOptions parsed = CommandLine.Parser.Default
+            .ParseArguments<KahunaCommandLineOptions>(["--storage-revision", "v1"]).Value;
+        Assert.Equal(1024L * 1024 * 1024, ServerConfigurationFactory.Create(parsed).WatchMaxBufferedBytesPerNode);
+        Assert.Equal(TimeSpan.FromSeconds(15), ServerConfigurationFactory.Create(parsed).WatchSseKeepAliveInterval);
+        Assert.Equal(16_384, parsed.MaxConcurrentConnections);
+
+        opts.WatchMaxBufferedBytesPerNode = -1;
+        Assert.Contains("WatchMaxBufferedBytesPerNode", Assert.Throws<KahunaServerException>(() => ServerConfigurationFactory.Create(opts)).Message);
+
+        opts = NonDefaultOptions();
+        opts.WatchSseKeepAliveSeconds = -1;
+        Assert.Contains("--watch-sse-keepalive-seconds", Assert.Throws<KahunaServerException>(() => ServerConfigurationFactory.Create(opts)).Message);
+
+        opts = NonDefaultOptions();
+        opts.MaxConcurrentConnections = -1;
+        Assert.Contains("--max-concurrent-connections", Assert.Throws<KahunaServerException>(() => ServerConfigurationFactory.Create(opts)).Message);
+    }
 
     [Fact]
     public void FlagsTheClusterUsedToIgnore_ReachTheServerConfiguration()

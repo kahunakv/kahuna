@@ -52,6 +52,13 @@ internal static class KeyValueWatchMetrics
             "kahuna.kv.watch.streams_lagged_total",
             description: "Watch streams ended with Lagged, by reason.");
 
+    /// <summary>Watches ended with Overflow because the node's watch buffers together reached their byte budget. Each
+    /// is also counted in <see cref="StreamsLagged"/>. A sustained rate means slow readers hold the node's budget.</summary>
+    internal static readonly Counter<long> NodeBudgetOverflows =
+        Meter.CreateCounter<long>(
+            "kahuna.kv.watch.node_budget_overflows_total",
+            description: "Watch streams ended with Overflow because the node-wide watch buffer budget was reached.");
+
     /// <summary>Empty progress-tick entries this node proposed on idle partitions it leads, so their watch
     /// watermark keeps moving.</summary>
     internal static readonly Counter<long> ProgressTicks =

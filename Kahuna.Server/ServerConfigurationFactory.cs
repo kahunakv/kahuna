@@ -28,6 +28,14 @@ public static class ServerConfigurationFactory
             throw new KahunaServerException(
                 $"--revisions-to-cache must be at least 1, got {opts.RevisionsToKeepCached}.");
 
+        if (opts.WatchSseKeepAliveSeconds < 0)
+            throw new KahunaServerException(
+                $"--watch-sse-keepalive-seconds must not be negative (0 writes none), got {opts.WatchSseKeepAliveSeconds}.");
+
+        if (opts.MaxConcurrentConnections < 0)
+            throw new KahunaServerException(
+                $"--max-concurrent-connections must not be negative (0 means no bound), got {opts.MaxConcurrentConnections}.");
+
         KahunaConfiguration configuration = EmbeddedKahunaNode.BuildKahunaConfiguration(
             EmbeddedOptionsFactory.CreateEmbeddedOptions(opts, transportSecurity: null, functions, storageProviders),
             singleProcessRaftGroup: false);
@@ -41,6 +49,7 @@ public static class ServerConfigurationFactory
         configuration.AdvertisedClientScheme = opts.AdvertisedClientScheme;
         configuration.AdvertisePeerEndpoints = !opts.DisablePeerEndpointAdvertisement;
         configuration.RoutingHintsEnabled = !opts.DisableRoutingHints;
+        configuration.WatchSseKeepAliveInterval = TimeSpan.FromSeconds(opts.WatchSseKeepAliveSeconds);
 
         return ConfigurationValidator.Validate(configuration, opts.WalPath);
     }

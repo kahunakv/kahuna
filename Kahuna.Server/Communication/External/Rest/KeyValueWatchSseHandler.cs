@@ -19,12 +19,16 @@ namespace Kahuna.Communication.External.Rest;
 /// <para>The watch is opened before the response starts. A retryable failure while it opens therefore reaches the
 /// retryable-exception middleware, which answers with the plain JSON MustRetry body, not a stream; a client reads
 /// the content type before it reads frames.</para>
+///
+/// <para>When no frame was written for the keep-alive interval, the handler writes an SSE comment line, which a client
+/// skips. A watch with no events otherwise never writes, so a connection whose peer is gone would hold its watch
+/// until the node restarts; the write makes such a connection fail, which closes the request and the watch.</para>
 /// </summary>
 internal static class KeyValueWatchSseHandler
 {
     private static readonly KeyValuePair<string, object?> Transport = new("transport", "rest");
 
-    public static async Task Serve(KahunaWatchRequest request, IKahuna keyValues, HttpContext http)
+    public static async Task Serve(KahunaWatchRequest request, IKahuna keyValues, HttpContext http, TimeSpan keepAlive)
     {
         CancellationToken token = http.RequestAborted;
         KeyValueWatchScope? scope = KeyValueWatchWire.ScopeFromRest(request);
@@ -56,9 +60,7 @@ internal static class KeyValueWatchSseHandler
             await using (watch)
             {
                 await WriteFrame(writer, KeyValueWatchFrame.ForOpened(watch.Partitions), token);
-
-                await foreach (KeyValueWatchFrame frame in watch.ReadAllAsync(token))
-                    await WriteFrame(writer, frame, token);
+                await StreamFrames(watch, writer, keepAlive, token);
             }
         }
         catch (Exception ex) when (ex is OperationCanceledException or IOException)
@@ -69,6 +71,78 @@ internal static class KeyValueWatchSseHandler
         {
             KeyValueWatchMetrics.RemoteStreams.Add(-1, Transport);
         }
+    }
+
+    private static async Task StreamFrames(KeyValueWatch watch, PipeWriter writer, TimeSpan keepAlive, CancellationToken token)
+    {
+        IAsyncEnumerator<KeyValueWatchFrame> frames = watch.ReadAllAsync(token).GetAsyncEnumerator(token);
+
+        // A read still in flight when a keep-alive write fails. The enumerator cannot be disposed under it.
+        Task<bool>? pending = null;
+
+        try
+        {
+            while (true)
+            {
+                ValueTask<bool> next = frames.MoveNextAsync();
+                bool more;
+
+                if (next.IsCompleted || keepAlive <= TimeSpan.Zero)
+                {
+                    more = await next;
+                }
+                else
+                {
+                    pending = next.AsTask();
+
+                    while (true)
+                    {
+                        try
+                        {
+                            // No token here: the read observes it, so a cancelled request ends the read itself.
+                            more = await pending.WaitAsync(keepAlive);
+                            break;
+                        }
+                        catch (TimeoutException)
+                        {
+                            await WriteKeepAlive(writer, token);
+                        }
+                    }
+
+                    pending = null;
+                }
+
+                if (!more)
+                    return;
+
+                await WriteFrame(writer, frames.Current, token);
+            }
+        }
+        finally
+        {
+            if (pending is not null)
+            {
+                // Closing the watch completes its channel, so the read in flight returns. Its outcome is of no use
+                // once the stream failed: the failure that brought us here is the one the caller sees.
+                await watch.DisposeAsync();
+
+                try
+                {
+                    await pending;
+                }
+                catch (Exception ex) when (ex is OperationCanceledException or IOException)
+                {
+                }
+            }
+
+            await frames.DisposeAsync();
+        }
+    }
+
+    private static async ValueTask WriteKeepAlive(PipeWriter writer, CancellationToken token)
+    {
+        writer.Write(":\n\n"u8);
+        await writer.FlushAsync(token);
     }
 
     private static void StartStream(HttpContext http)

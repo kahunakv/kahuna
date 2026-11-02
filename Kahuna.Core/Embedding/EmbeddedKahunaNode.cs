@@ -686,6 +686,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             AdminApiKeyFile = options.AdminApiKeyFile,
             WatchMaxCapacity = options.WatchMaxCapacity,
             WatchMaxBufferedBytes = options.WatchMaxBufferedBytes,
+            WatchMaxBufferedBytesPerNode = options.WatchMaxBufferedBytesPerNode,
             WatchMaxPerNode = options.WatchMaxPerNode,
             WatchMaxPerCall = options.WatchMaxPerCall,
             WatchMaxConcurrentReplays = options.WatchMaxConcurrentReplays,

@@ -172,7 +172,7 @@ covered as possibly changed.
 
 | Terminal frame | Reason | Cause |
 |---|---|---|
-| `Lagged` | `Overflow` | The consumer fell a full capacity behind, or past the watch's byte budget. The node dropped the buffered frames instead of buffering without limit. |
+| `Lagged` | `Overflow` | The consumer fell a full capacity behind, or past the watch's byte budget, or the node's watch buffers together reached the node budget and this watch held the most. The node dropped the buffered frames instead of buffering without limit. |
 | `Lagged` | `PartitionStateReplaced` | The serving replica installed a snapshot of the partition, or stopped hosting it. A snapshot carries no per-key events. |
 | `Lagged` | `ApplyDiscontinuity` | The serving replica failed to apply a committed entry, so it cannot prove that it reported every mutation. |
 | `Lagged` | `RangeMapChanged` | A split, a merge, or a key-range registration changed the partitions the scope covers. |
@@ -191,11 +191,28 @@ the node default of 4096 frames.
 |---|---|---|
 | `WatchMaxCapacity` (`--watch-max-capacity`) | 65536 | A request that asks for more is refused `InvalidInput`. |
 | `WatchMaxBufferedBytes` (`--watch-max-buffered-bytes`) | 64 MiB | Keys and values one watch buffers; past it the watch ends with `Lagged(Overflow)`. |
+| `WatchMaxBufferedBytesPerNode` (`--watch-max-buffered-bytes-per-node`) | 1 GiB | Keys and values every watch on the node buffers together; a frame that would pass it ends the watch that buffers the most with `Lagged(Overflow)`. 0 means no bound. |
 | `WatchMaxPerNode` (`--watch-max-per-node`) | 65536 | Open watches on the node; an open is refused `WatchLimitReached`. |
 | `WatchMaxPerCall` (`--watch-max-per-call`) | 1024 | Watches one gRPC call holds; an open is refused `WatchLimitReached`. |
 | `WatchMaxConcurrentReplays` (`--watch-max-concurrent-replays`) | 64 | Replays running at once (one per resumed partition); a resume is refused `MustRetry`. |
 
 A replay stops as soon as its watch ends.
+
+The node budget ends the watch that buffers the most, not the one whose frame arrived. A consumer that keeps up
+buffers almost nothing, so slow consumers lose their streams first and a fast one keeps its stream. Each watch
+counts its frames from the moment it accepts them until its reader takes them, frames held back during a replay
+and frames held behind a pending intent included. Keep the node budget above `--max-value-bytes`.
+
+Two server limits apply to the client listeners:
+
+| Setting (CLI) | Default | Past it |
+|---|---|---|
+| `--max-concurrent-connections` | 16384 | Connections open on the node; a new connection is closed at once. 0 means no bound. |
+| `--watch-sse-keepalive-seconds` | 15 | Seconds a REST watch stream may go without a write before the node writes a keep-alive comment. 0 writes none. |
+
+The connection limit covers every listener. With the default ports, `--raft-port` is also a client port, so peer
+connections count too: a peer that reconnects while clients hold every connection is refused. Give the Raft port
+a listener of its own, or keep the limit well above the client count.
 
 A watch on ephemeral keys is refused with `WatchUnsupportedOnEphemeral` on every surface. An ephemeral write never
 reaches Raft, so there is no replicated event to report. The refusal is permanent; a retry gets the same answer.
@@ -319,6 +336,10 @@ data: {"frame":0,"type":3,"partitionId":2,"key":"orders/7","kind":0,"value":"djE
 (`Get`) on an opened watch and on its frames, the refusal code on a refused one. The first frame is always opened or refused. The stream
 ends after a terminal frame. Closing the request closes and unregisters the watch.
 
+When the stream carries no frame for `--watch-sse-keepalive-seconds`, the node writes a comment line (`:`), which
+an SSE client skips. A watch with no events would otherwise never write, and a connection whose client is gone
+would hold its watch; the keep-alive write makes such a connection fail, and the node closes the watch.
+
 A request the node could not start at all (a retryable failure before the stream began) gets a plain JSON body
 `{"type":101}` (`MustRetry`) instead of a stream, so read the content type first.
 
@@ -357,6 +378,7 @@ kahuna-cli> watch orders/ keys-only
 | `kahuna.kv.watch.events_delivered_total` | Events handed to watches, one per matched watch. |
 | `kahuna.kv.watch.frames_dropped_total` | Buffered frames dropped when a watch ended with `Lagged`. |
 | `kahuna.kv.watch.streams_lagged_total` | Watches ended with `Lagged`, by `reason`. |
+| `kahuna.kv.watch.node_budget_overflows_total` | Watches ended with `Lagged(Overflow)` because the node's watch buffers reached the node budget (also counted in `streams_lagged_total`). |
 | `kahuna.kv.watch.refused_total` | Watch requests refused, by `type`. |
 | `kahuna.kv.watch.replays_total` | Resumes replayed per partition, by `outcome` (`replayed`, `history_unavailable`, `cancelled`). |
 | `kahuna.kv.watch.watermark_lag_ms` | The largest gap on the node between a partition's newest entry and its last watermark. |
@@ -369,7 +391,8 @@ kahuna-cli> watch orders/ keys-only
 | `kahuna.kv.history_holds.refused_total` | Acquires refused by a bound, by `bound` (`holder`, `total`). |
 | `kahuna.kv.history_holds.purged_total` | Holds the reaper purged, by `reason` (`expired`, `partition_gone`). |
 
-A steady `streams_lagged_total{reason="Overflow"}` means consumers read too slowly for their capacity. Any other
+A steady `streams_lagged_total{reason="Overflow"}` means consumers read too slowly for their capacity. When
+`node_budget_overflows_total` rises with it, slow consumers together hold the node budget. Any other
 reason follows a snapshot install, an apply failure, a range change or a shutdown.
 
 ## Change-feed consumers

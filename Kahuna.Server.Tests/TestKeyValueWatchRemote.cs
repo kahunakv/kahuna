@@ -139,6 +139,80 @@ public sealed class TestKeyValueWatchRemote : BaseCluster
     }
 
     [Fact]
+    public async Task RestWatchWithNoEvents_WritesKeepAliveComments_AndAClientClosesIt()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        await using HostedNode host = await HostedNode.StartAsync(
+            loggerFactory, ct, new KahunaConfiguration { WatchSseKeepAliveInterval = TimeSpan.FromMilliseconds(100) });
+
+        using HttpClient http = new();
+        using HttpRequestMessage request = new(HttpMethod.Post, host.RestUrl + "/v1/kv/watch")
+        {
+            Content = new StringContent(JsonSerializer.Serialize(new KahunaWatchRequest
+            {
+                ScopeKind = KeyValueWatchScopeKind.Prefix,
+                ScopeValue = "keepalive/",
+                Durability = KeyValueDurability.Persistent
+            }, KahunaJsonContext.Default.KahunaWatchRequest), Encoding.UTF8, "application/json")
+        };
+
+        using HttpResponseMessage response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+        Assert.Equal("text/event-stream", response.Content.Headers.ContentType?.MediaType);
+
+        await using (Stream body = await response.Content.ReadAsStreamAsync(ct))
+        {
+            using StreamReader reader = new(body);
+
+            string? opened = await reader.ReadLineAsync(ct);
+            Assert.StartsWith("data: ", opened);
+            Assert.Equal(1, host.OpenWatches);
+
+            // Nothing is written to the scope, so every line after the opened frame is a keep-alive comment until an
+            // event comes.
+            int comments = 0;
+            while (comments < 3)
+            {
+                string? line = await reader.ReadLineAsync(ct);
+                Assert.NotNull(line);
+
+                if (line.Length == 0)
+                    continue;
+
+                Assert.Equal(":", line);
+                comments++;
+            }
+
+            // An event between keep-alives still arrives, and the stream keeps going after it.
+            await host.Set("keepalive/a", [1], ct);
+
+            string? data;
+            do
+                data = await reader.ReadLineAsync(ct);
+            while (data is ":" or "");
+
+            Assert.NotNull(data);
+            KahunaWatchFrameResponse frame = JsonSerializer.Deserialize(data["data: ".Length..], KahunaJsonContext.Default.KahunaWatchFrameResponse)!;
+            Assert.Equal(KeyValueWatchFrameType.Event, frame.Frame);
+            Assert.Equal("keepalive/a", frame.Key);
+        }
+
+        // The client went away: the next keep-alive write fails and the node closes the watch.
+        response.Dispose();
+        await WaitUntil(() => host.OpenWatches == 0, ct);
+        Assert.Equal(0, host.Broker.BufferedBytes);
+    }
+
+    private static async Task WaitUntil(Func<bool> condition, CancellationToken ct)
+    {
+        using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(TimeSpan.FromSeconds(10));
+
+        while (!condition())
+            await Task.Delay(20, timeout.Token);
+    }
+
+    [Fact]
     public async Task EphemeralWatch_IsRefusedOnEverySurface_BeforeAnythingRegisters()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;

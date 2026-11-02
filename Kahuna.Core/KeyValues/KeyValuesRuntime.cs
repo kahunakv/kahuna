@@ -102,7 +102,7 @@ internal sealed class KeyValuesRuntime
     /// <summary>The node's open key-value watches. Published to by the replicator and the prepared-intent store
     /// on the apply path, and ended by the dispatcher and the state transfers when a partition loses
     /// continuity.</summary>
-    internal KeyValueWatchBroker WatchBroker => watchBroker ??= new(Configuration.WatchMaxPerNode, Configuration.WatchMaxBufferedBytes);
+    internal KeyValueWatchBroker WatchBroker => watchBroker ??= new(Configuration.WatchMaxPerNode, Configuration.WatchMaxBufferedBytes, Configuration.WatchMaxBufferedBytesPerNode);
 
     // Created on first use, which is the manager builder's single-threaded construction (it needs the configuration,
     // which an initializer cannot read).

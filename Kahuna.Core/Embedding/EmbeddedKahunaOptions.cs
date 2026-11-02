@@ -1118,6 +1118,10 @@ public sealed class EmbeddedKahunaOptions
     /// <see cref="Server.Configuration.KahunaConfiguration.WatchMaxBufferedBytes"/>.</summary>
     public long WatchMaxBufferedBytes { get; set; } = 64L * 1024 * 1024;
 
+    /// <summary>The bytes every watch on the node may buffer together; zero means no bound. See
+    /// <see cref="Server.Configuration.KahunaConfiguration.WatchMaxBufferedBytesPerNode"/>.</summary>
+    public long WatchMaxBufferedBytesPerNode { get; set; } = 1024L * 1024 * 1024;
+
     /// <summary>The most watches open on the node; zero means no bound. See
     /// <see cref="Server.Configuration.KahunaConfiguration.WatchMaxPerNode"/>.</summary>
     public int WatchMaxPerNode { get; set; } = 65_536;

@@ -55,6 +55,14 @@ public sealed class KahunaConfiguration
     public bool RoutingHintsEnabled { get; set; } = true;
 
     /// <summary>
+    /// How long a REST watch stream (server-sent events) may go without a write before the server writes a comment
+    /// line. A client skips it; a peer that is gone makes the write fail, which closes the request and its watch.
+    /// Without it, a watch with no events never notices a dead connection. Zero or less writes none. Server only.
+    /// Defaults to 15 seconds.
+    /// </summary>
+    public TimeSpan WatchSseKeepAliveInterval { get; set; } = TimeSpan.FromSeconds(15);
+
+    /// <summary>
     /// Serve a leader-local latest point get from the owning actor's published head record when nothing is in
     /// flight for the key, instead of a mailbox round trip. Off, every point get takes the actor path and the
     /// actors publish no records. See <see cref="KeyValues.PublishedHeadTable"/>.
@@ -1139,6 +1147,11 @@ public sealed class KahunaConfiguration
     /// held back during a replay, and frames held behind a pending intent). A watch over it ends with an overflow.
     /// Defaults to 64 MiB.</summary>
     public long WatchMaxBufferedBytes { get; set; } = 64L * 1024 * 1024;
+
+    /// <summary>The bytes every key-value watch on the node may buffer together. A frame that would pass it ends, with
+    /// an overflow, the watch that buffers the most (a watch whose reader keeps up buffers little). Keep it above
+    /// <see cref="MaxValueBytes"/>. Zero means no bound. Defaults to 1 GiB.</summary>
+    public long WatchMaxBufferedBytesPerNode { get; set; } = 1024L * 1024 * 1024;
 
     /// <summary>The most key-value watches open on the node at once, over every surface. Zero means no bound.
     /// Defaults to 65536.</summary>

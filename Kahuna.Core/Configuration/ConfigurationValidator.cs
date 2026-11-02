@@ -209,6 +209,10 @@ public static class ConfigurationValidator
             throw new KahunaServerException(
                 "WatchMaxCapacity and WatchMaxBufferedBytes must be greater than zero.");
 
+        if (configuration.WatchMaxBufferedBytesPerNode < 0)
+            throw new KahunaServerException(
+                $"WatchMaxBufferedBytesPerNode ({configuration.WatchMaxBufferedBytesPerNode}) must not be negative (0 means no bound).");
+
         if (configuration.WatchMaxPerNode < 0 || configuration.WatchMaxPerCall < 0 || configuration.WatchMaxConcurrentReplays < 0)
             throw new KahunaServerException(
                 "WatchMaxPerNode, WatchMaxPerCall and WatchMaxConcurrentReplays must not be negative (0 means no bound).");

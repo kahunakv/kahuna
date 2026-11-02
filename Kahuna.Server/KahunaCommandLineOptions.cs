@@ -826,6 +826,9 @@ public sealed class KahunaCommandLineOptions
     [Option("allow-plaintext-listener", Required = false, HelpText = "Bind the cleartext HTTP (--http-ports) and h2c (--grpc-cleartext-ports) listeners even when an HTTPs certificate is configured. Node-only surfaces still refuse cleartext callers in MutualTls mode")]
     public bool AllowPlaintextListener { get; set; }
 
+    [Option("max-concurrent-connections", Required = false, HelpText = "Most connections the node's listeners accept at once, over every listener: clients and, when --raft-port is one of the client ports, peers too. A connection past it is closed at once. Keep it below the process file-descriptor limit. 0 means no bound. Default 16384.", Default = 16_384L)]
+    public long MaxConcurrentConnections { get; set; } = 16_384;
+
     // ── Key-range split/merge policy ─────────────────────────────────────────────────────────
     // A 0 on the threshold knobs does not merely relax the policy: the corresponding background
     // checker is not spawned at all, so the feature never runs. That is why each help text says
@@ -888,6 +891,9 @@ public sealed class KahunaCommandLineOptions
     [Option("watch-max-buffered-bytes", Required = false, HelpText = "Bytes of keys and values one key-value watch may buffer for a slow reader before it ends with an overflow. Default 67108864 (64 MiB).", Default = 64L * 1024 * 1024)]
     public long WatchMaxBufferedBytes { get; set; } = 64L * 1024 * 1024;
 
+    [Option("watch-max-buffered-bytes-per-node", Required = false, HelpText = "Bytes of keys and values every key-value watch on the node may buffer together. A frame that would pass it ends, with an overflow, the watch that buffers the most. Keep it above --max-value-bytes. 0 means no bound. Default 1073741824 (1 GiB).", Default = 1024L * 1024 * 1024)]
+    public long WatchMaxBufferedBytesPerNode { get; set; } = 1024L * 1024 * 1024;
+
     [Option("watch-max-per-node", Required = false, HelpText = "Most key-value watches open on the node at once. 0 means no bound. Default 65536.", Default = 65_536)]
     public int WatchMaxPerNode { get; set; } = 65_536;
 
@@ -896,6 +902,9 @@ public sealed class KahunaCommandLineOptions
 
     [Option("watch-max-concurrent-replays", Required = false, HelpText = "Most watch replays (one per resumed partition) the node runs at once; a resume beyond it is refused with a retry. 0 means no bound. Default 64.", Default = 64)]
     public int WatchMaxConcurrentReplays { get; set; } = 64;
+
+    [Option("watch-sse-keepalive-seconds", Required = false, HelpText = "Seconds a REST watch stream (POST /v1/kv/watch) may go without a write before the node writes a comment line, so a connection whose peer is gone fails and closes its watch. 0 writes none. Default 15.", Default = 15)]
+    public int WatchSseKeepAliveSeconds { get; set; } = 15;
 
     [Option("transaction-origin-tags", Required = false, HelpText = "Keep the origin label a transaction names at start and write it into its prepared intents and watch events. Enable only when every node runs a version that reads it. Default off.")]
     public bool TransactionOriginTags { get; set; }
