@@ -23,8 +23,9 @@ internal sealed class TryExtendHandler : BaseHandler
 
     public async ValueTask<KeyValueResponse> Execute(KeyValueRequest message)
     {
-        // Minted before the entry load so a cache-miss disk read does not mint a second HLC event;
-        // the ReceiveEvent branch keeps the clock ahead of the transaction id exactly as before.
+        // Minted before the entry load: the load's expiry check and a staged intent's lease read this stamp, and
+        // the ReceiveEvent branch keeps the clock ahead of the transaction id. A direct write re-stamps after a
+        // backend read (see StampAfterBackendRead), so the read is not charged to the commit admission window.
         HLCTimestamp currentTime;
 
         if (message.TransactionId == HLCTimestamp.Zero)
@@ -39,7 +40,9 @@ internal sealed class TryExtendHandler : BaseHandler
             return KeyValueStaticResponses.AbortedResponse;
         }
 
-        KeyValueEntry? entry = await GetKeyValueEntry(message.Key, message.Durability, currentTime: currentTime);
+        bool readFromBackend = !context.Store.TryGetValue(message.Key, out KeyValueEntry? entry) && message.Durability == KeyValueDurability.Persistent;
+        if (entry is null)
+            entry = await HydrateKeyValueEntry(message.Key, message.Durability, currentTime: currentTime);
 
         // Deferred-settlement writer visibility: a foreign durable prepared intent covering this key may hold a
         // committed value not yet materialized locally, so an intent-only committed key is not really missing.
@@ -192,9 +195,10 @@ internal sealed class TryExtendHandler : BaseHandler
             return new(KeyValueResponseType.DoesNotExist, entry.Revision);
 
         // An extend keeps the revision, so only LastModified orders it after the head it replaces (followers
-        // reject a same-revision notification that is not strictly newer). The load can raise the head to a
-        // committed intent stamped on a faster clock: stamp after it.
-        currentTime = StampAfter(currentTime, entry.LastModified);
+        // reject a same-revision notification that is not strictly newer). A backend read is not charged to the
+        // commit admission window, and the load can raise the head to a committed intent stamped on a faster
+        // clock: stamp after both.
+        currentTime = StampAfter(StampAfterBackendRead(currentTime, readFromBackend), entry.LastModified);
 
         KeyValueProposal proposal = new(
             message.Type,

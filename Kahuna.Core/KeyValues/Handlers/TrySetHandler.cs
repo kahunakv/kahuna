@@ -56,12 +56,13 @@ internal sealed class TrySetHandler : BaseHandler
     {
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
 
-        (KeyValueResponse? terminal, KeyValueEntry entry, bool exists) = await LoadAndValidateEntry(message, currentTime);
+        (KeyValueResponse? terminal, KeyValueEntry entry, bool exists, bool readFromBackend) = await LoadAndValidateEntry(message, currentTime);
         if (terminal is not null)
             return (terminal, null, null, currentTime);
 
-        // The load can raise the head to a committed intent stamped on a faster clock: stamp after it.
-        currentTime = StampAfter(currentTime, entry.LastModified);
+        // A backend read is not charged to the commit admission window, and the load can raise the head to a
+        // committed intent stamped on a faster clock: stamp after both.
+        currentTime = StampAfter(StampAfterBackendRead(currentTime, readFromBackend), entry.LastModified);
 
         HLCTimestamp newExpires = message.ExpiresMs > 0 ? (currentTime + message.ExpiresMs) : HLCTimestamp.Zero;
 
@@ -105,10 +106,11 @@ internal sealed class TrySetHandler : BaseHandler
     /// same actor turn takes it over. Otherwise a batch refused after the check would have cost its owner the key
     /// for nothing.
     /// </param>
-    private async ValueTask<(KeyValueResponse? Terminal, KeyValueEntry Entry, bool Exists)> LoadAndValidateEntry(
+    private async ValueTask<(KeyValueResponse? Terminal, KeyValueEntry Entry, bool Exists, bool ReadFromBackend)> LoadAndValidateEntry(
         KeyValueRequest message, HLCTimestamp currentTime, Dictionary<string, ReadOnlyKeyValueEntry?>? preloadedHeads = null, bool takeOverYielding = true)
     {
         bool exists = true;
+        bool readFromBackend = false;
 
         if (!context.Store.TryGetValue(message.Key, out KeyValueEntry? entry))
         {
@@ -118,9 +120,15 @@ internal sealed class TrySetHandler : BaseHandler
             /// Try to retrieve KeyValue context from persistence
             if (message.Durability == KeyValueDurability.Persistent)
             {
-                ReadOnlyKeyValueEntry? row = preloadedHeads is not null && preloadedHeads.TryGetValue(message.Key, out ReadOnlyKeyValueEntry? preloadedRow)
-                    ? preloadedRow
-                    : await context.BackendReadScheduler.EnqueueBatchableTask(message.PartitionId, message.Key, context.PointReadExecutor);
+                ReadOnlyKeyValueEntry? row;
+
+                if (preloadedHeads is not null && preloadedHeads.TryGetValue(message.Key, out ReadOnlyKeyValueEntry? preloadedRow))
+                    row = preloadedRow;
+                else
+                {
+                    row = await context.BackendReadScheduler.EnqueueBatchableTask(message.PartitionId, message.Key, context.PointReadExecutor);
+                    readFromBackend = true;
+                }
 
                 newEntry = KeyValueEntry.FromRow(row);
                 if (newEntry is not null)
@@ -185,7 +193,7 @@ internal sealed class TrySetHandler : BaseHandler
                 context, message.Key, message.TransactionId, ref resolvedEntry, ApplyCommittedHead,
                 out HLCTimestamp blockingIntentOwner, message.ForeignDecisionHint)
             == ForeignIntentWriteDecision.MustRetry)
-            return (KeyValueResponse.Denied(KeyValueResponseType.WaitingForReplication, blockingIntentOwner, WriteDenialCause.DurableIntent), entry, exists);
+            return (KeyValueResponse.Denied(KeyValueResponseType.WaitingForReplication, blockingIntentOwner, WriteDenialCause.DurableIntent), entry, exists, readFromBackend);
 
         entry = resolvedEntry!;
         exists = entry.State is not (KeyValueState.Deleted or KeyValueState.Undefined);
@@ -205,7 +213,7 @@ internal sealed class TrySetHandler : BaseHandler
         if (entry.ReplicationIntent is not null)
         {
             if (entry.ReplicationIntent.Expires - currentTime > TimeSpan.Zero)
-                return (KeyValueStaticResponses.WaitingForReplicationResponse, entry, exists);
+                return (KeyValueStaticResponses.WaitingForReplicationResponse, entry, exists, readFromBackend);
 
             entry.ReplicationIntent = null;
         }
@@ -222,25 +230,25 @@ internal sealed class TrySetHandler : BaseHandler
                     // settlement its intent only survives until the resolution clears it, so the writer waits for
                     // that settlement instead of spending its deadlock budget against a lock nobody is holding.
                     if (IsAwaitingSettlement(message.Key, entry.WriteIntent.TransactionId, message.ForeignDecisionHint))
-                        return (KeyValueResponse.Denied(KeyValueResponseType.WaitingForReplication, entry.WriteIntent.TransactionId, WriteDenialCause.SettlingWriteIntent), entry, exists);
+                        return (KeyValueResponse.Denied(KeyValueResponseType.WaitingForReplication, entry.WriteIntent.TransactionId, WriteDenialCause.SettlingWriteIntent), entry, exists, readFromBackend);
 
                     if (RequesterMayTakeOverYieldingIntent(message) && entry.WriteIntent.Yielding)
                     {
                         if (entry.WriteIntent.Pinned)
                         {
                             Transactions.DurableTransactionMetrics.PinnedYieldingWaits.Add(1);
-                            return (KeyValueStaticResponses.WaitingForReplicationResponse, entry, exists);
+                            return (KeyValueStaticResponses.WaitingForReplicationResponse, entry, exists, readFromBackend);
                         }
 
                         if (!IsStealableYieldingIntent(message.Key, entry.WriteIntent))
-                            return (KeyValueResponse.Denied(KeyValueResponseType.MustRetry, entry.WriteIntent.TransactionId), entry, exists);
+                            return (KeyValueResponse.Denied(KeyValueResponseType.MustRetry, entry.WriteIntent.TransactionId), entry, exists, readFromBackend);
 
                         if (takeOverYielding)
                             TakeOverYieldingIntent(message, message.Key, entry, currentTime);
                     }
                     else
                     {
-                        return (KeyValueResponse.Denied(KeyValueResponseType.MustRetry, entry.WriteIntent.TransactionId), entry, exists);
+                        return (KeyValueResponse.Denied(KeyValueResponseType.MustRetry, entry.WriteIntent.TransactionId), entry, exists, readFromBackend);
                     }
                 }
                 else
@@ -257,7 +265,7 @@ internal sealed class TrySetHandler : BaseHandler
             if (intent.TransactionId != message.TransactionId)
             {
                 if (KeyValueWriteIntentLease.IsLive(context, entry.Bucket, intent, currentTime))
-                    return (KeyValueResponse.Denied(KeyValueResponseType.MustRetry, intent.TransactionId), entry, exists);
+                    return (KeyValueResponse.Denied(KeyValueResponseType.MustRetry, intent.TransactionId), entry, exists, readFromBackend);
 
                 context.LocksByPrefix.Remove(entry.Bucket);
             }
@@ -265,9 +273,9 @@ internal sealed class TrySetHandler : BaseHandler
 
         // Validate if the key falls within any active range lock from another transaction
         if (RangeLockChecks.KeyCoveredByForeignRangeLock(context, message.Key, entry.Bucket, message.TransactionId, currentTime, out HLCTimestamp rangeLockHolder))
-            return (KeyValueResponse.Denied(KeyValueResponseType.MustRetry, rangeLockHolder), entry, exists);
+            return (KeyValueResponse.Denied(KeyValueResponseType.MustRetry, rangeLockHolder), entry, exists, readFromBackend);
 
-        return (null, entry, exists);
+        return (null, entry, exists, readFromBackend);
     }
 
     /// <summary>
@@ -319,7 +327,7 @@ internal sealed class TrySetHandler : BaseHandler
             return KeyValueStaticResponses.AbortedResponse;
         }
 
-        (KeyValueResponse? terminal, KeyValueEntry entry, _) = await LoadAndValidateEntry(message, currentTime, preloadedHeads, takeOverYielding: false);
+        (KeyValueResponse? terminal, KeyValueEntry entry, _, _) = await LoadAndValidateEntry(message, currentTime, preloadedHeads, takeOverYielding: false);
         if (terminal is not null)
             return terminal;
 
@@ -378,7 +386,7 @@ internal sealed class TrySetHandler : BaseHandler
             return KeyValueStaticResponses.AbortedResponse;
         }
 
-        (KeyValueResponse? terminal, KeyValueEntry entry, bool exists) = await LoadAndValidateEntry(message, currentTime, preloadedHeads);
+        (KeyValueResponse? terminal, KeyValueEntry entry, bool exists, _) = await LoadAndValidateEntry(message, currentTime, preloadedHeads);
         if (terminal is not null)
             return terminal;
 

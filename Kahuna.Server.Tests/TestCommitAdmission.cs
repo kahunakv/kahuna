@@ -7,7 +7,11 @@ using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.KeyValues.Watch;
 using Kahuna.Server.KeyValues.Writes;
+using Kahuna.Server.Locks.Data;
+using Kahuna.Server.Persistence;
+using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Persistence.Pitr;
+using Kahuna.Server.Persistence.Providers;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
 using Kahuna.Shared.KeyValue;
@@ -430,7 +434,11 @@ public sealed class TestCommitAdmission : BaseCluster
                 await node.StartAsync(ct);
                 await node.WaitForLeaderForKeyAsync("restart/kept", ct);
 
-                Assert.Equal(KeyValueResponseType.Set, await TrySet(node.Kahuna, "restart/kept", "kept", ct));
+                // An undelayed write is admitted when its path from the actor's stamp to the leader's log entry fits
+                // in the lag. A loaded machine can stretch that path past 100 ms once, and the answer is then the
+                // retryable refusal the window promises, so the write retries until it lands instead of asserting
+                // a single attempt.
+                await SetValue(node.Kahuna, "restart/kept", "kept", ct);
 
                 delay = true;
                 Assert.Equal(KeyValueResponseType.MustRetry, await TrySet(node.Kahuna, "restart/refused", "refused", ct));
@@ -443,7 +451,7 @@ public sealed class TestCommitAdmission : BaseCluster
                 await node.StartAsync(ct);
                 await node.WaitForLeaderForKeyAsync("restart/kept", ct);
 
-                Assert.Equal(KeyValueResponseType.Set, await TrySet(node.Kahuna, "restart/after", "after", ct));
+                await SetValue(node.Kahuna, "restart/after", "after", ct);
 
                 (KeyValueResponseType kept, _) = await node.Kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, "restart/kept", -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
                 Assert.Equal(KeyValueResponseType.Get, kept);
@@ -459,6 +467,53 @@ public sealed class TestCommitAdmission : BaseCluster
         {
             TryDeleteDir(storagePath);
             TryDeleteDir(walPath);
+        }
+    }
+
+    [Fact]
+    public async Task DirectWrites_ToKeysReadFromTheBackend_AreStampedAfterTheRead_AndAdmitted()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        // Point reads take three times the lag. A write stamped before its read reaches the log more than the lag
+        // after its stamp and is refused; a write stamped after the read is admitted on its first attempt.
+        const int lagMs = 500;
+        SlowReadBackendProvider provider = new("slow-reads", readDelayMs: 3 * lagMs);
+        provider.Backend.StoreKeyValues([SeedRow("slow/delete"), SeedRow("slow/extend")]);
+
+        EmbeddedKahunaOptions options = new()
+        {
+            InitialPartitions = 1,
+            Storage = provider.StorageType,
+            CommitAdmissionLagMs = lagMs,
+            CollectionInterval = TimeSpan.FromMinutes(10)
+        };
+        options.StorageProviders.Register(provider);
+
+        await using EmbeddedKahunaNode node = new(options, loggerFactory);
+        await node.StartAsync(ct);
+        await node.WaitForLeaderForKeyAsync("slow/set", ct);
+        provider.Backend.Clock = () => node.Raft.HybridLogicalClock.TrySendOrLocalEvent(node.Raft.GetLocalNodeId());
+
+        (KeyValueResponseType set, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+            HLCTimestamp.Zero, "slow/set", "v"u8.ToArray(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.Set, set);
+
+        (KeyValueResponseType deleted, _, _) = await node.Kahuna.LocateAndTryDeleteKeyValue(HLCTimestamp.Zero, "slow/delete", KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.Deleted, deleted);
+
+        (KeyValueResponseType extended, _, _) = await node.Kahuna.LocateAndTryExtendKeyValue(HLCTimestamp.Zero, "slow/extend", 60_000, KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.Extended, extended);
+
+        // Each record's commit stamp follows the clock reading taken when its backend read returned.
+        foreach (string key in (string[])["slow/set", "slow/delete", "slow/extend"])
+        {
+            int partitionId = ((KahunaManager)node.Kahuna).KeyValues.LocateDurablePartition(key).PartitionId;
+            HLCTimestamp committed = CommitStampOf(key, node.Raft.WalAdapter.ReadLogsRange(partitionId, 1));
+            HLCTimestamp readReturnedAt = provider.Backend.ReadReturnedAt(key);
+
+            Assert.NotEqual(HLCTimestamp.Zero, readReturnedAt);
+            Assert.True(committed > readReturnedAt, $"{key} committed at {committed}, before its backend read returned at {readReturnedAt}");
         }
     }
 
@@ -481,6 +536,29 @@ public sealed class TestCommitAdmission : BaseCluster
 
         Assert.True(committed > 0, "no committed entry was read");
     }
+
+    /// <summary>The commit stamp of the last committed key-value record for <paramref name="key"/>.</summary>
+    private static HLCTimestamp CommitStampOf(string key, List<RaftLog> logs)
+    {
+        HLCTimestamp stamp = HLCTimestamp.Zero;
+
+        foreach (RaftLog log in logs.OrderBy(l => l.Id))
+        {
+            if (log.Type is not (RaftLogType.Committed or RaftLogType.CommittedCheckpoint) || log.LogType != ReplicationTypes.KeyValues || log.LogData is null || log.LogData.Length == 0)
+                continue;
+
+            KeyValueMessage record = ReplicationSerializer.UnserializeKeyValueMessage(log.LogData);
+            if (record.Key == key)
+                stamp = new(record.LastModifiedNode, record.LastModifiedPhysical, record.LastModifiedCounter);
+        }
+
+        Assert.NotEqual(HLCTimestamp.Zero, stamp);
+        return stamp;
+    }
+
+    /// <summary>A row the backend holds before the node starts, so the first write to its key reads it from the backend.</summary>
+    private static PersistenceRequestItem SeedRow(string key) =>
+        new(key, "seed"u8.ToArray(), revision: 1, 0, 0, 0, 0, 0, 0, lastModifiedNode: 1, lastModifiedPhysical: 1_000, lastModifiedCounter: 0, (int)KeyValueState.Set);
 
     private async Task WithCluster(long lagMs, int proposeDelayMs, Func<KahunaManager[], CancellationToken, Task> body)
     {
@@ -607,6 +685,79 @@ public sealed class TestCommitAdmission : BaseCluster
 
             return await inner.ReplicateAsync(partitionId, entries, cancellationToken);
         }
+    }
+
+    /// <summary>A memory engine registered under its own name whose point reads take a fixed delay, like a shard opened
+    /// on first use or a busy device, and that records the clock when each read returned.</summary>
+    private sealed class SlowReadBackendProvider(string storageType, int readDelayMs) : IPersistenceBackendProvider
+    {
+        public SlowReadBackend Backend { get; } = new(new MemoryPersistenceBackend(), readDelayMs);
+
+        public string StorageType => storageType;
+
+        public bool KeepsDataOnDisk => false;
+
+        public IPersistenceBackend Open(PersistenceBackendContext context) => Backend;
+
+        public IPersistenceBackend OpenAt(string directory, string revision, ILogger logger) => Backend;
+
+        public string DataDirectory(string storageRoot, string revision) => storageRoot;
+
+        public bool HasData(string storageRoot, string revision) => false;
+
+        public void MergeCheckpointInto(string targetDirectory, string targetRevision, string sourceDirectory, CancellationToken ct)
+        {
+        }
+    }
+
+    private sealed class SlowReadBackend(MemoryPersistenceBackend inner, int readDelayMs) : IPersistenceBackend
+    {
+        private readonly ConcurrentDictionary<string, HLCTimestamp> returnedAt = new();
+
+        /// <summary>Reads the node's clock; set once the node runs. Null records nothing.</summary>
+        public Func<HLCTimestamp>? Clock { get; set; }
+
+        /// <summary>The clock reading taken when the last point read of <paramref name="key"/> returned.</summary>
+        public HLCTimestamp ReadReturnedAt(string key) => returnedAt.TryGetValue(key, out HLCTimestamp at) ? at : HLCTimestamp.Zero;
+
+        // The read scheduler runs point reads on its own I/O threads, so a blocking delay stands in for a slow device.
+        public ReadOnlyKeyValueEntry? GetKeyValue(string keyName)
+        {
+            Thread.Sleep(readDelayMs);
+            ReadOnlyKeyValueEntry? row = inner.GetKeyValue(keyName);
+            MarkReturned(keyName);
+            return row;
+        }
+
+        public ReadOnlyKeyValueEntry?[] GetKeyValues(string[] keyNames)
+        {
+            Thread.Sleep(readDelayMs);
+            ReadOnlyKeyValueEntry?[] rows = ((IPersistenceBackend)inner).GetKeyValues(keyNames);
+            foreach (string keyName in keyNames)
+                MarkReturned(keyName);
+            return rows;
+        }
+
+        private void MarkReturned(string keyName)
+        {
+            if (Clock is not null)
+                returnedAt[keyName] = Clock();
+        }
+
+        public bool StoreKeyValues(List<PersistenceRequestItem> items) => inner.StoreKeyValues(items);
+        public bool StoreLocks(List<PersistenceRequestItem> items) => inner.StoreLocks(items);
+        public LockRow? GetLock(string resource) => inner.GetLock(resource);
+        public ReadOnlyKeyValueEntry? GetKeyValueRevision(string keyName, long revision) => inner.GetKeyValueRevision(keyName, revision);
+        public ReadOnlyKeyValueEntry? GetKeyValueRevisionAtOrBefore(string keyName, long maxRevision, HLCTimestamp readTimestamp) =>
+            inner.GetKeyValueRevisionAtOrBefore(keyName, maxRevision, readTimestamp);
+        public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName) => inner.GetKeyValueByPrefix(prefixKeyName);
+        public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(string prefix, string? startKey, int limit) =>
+            inner.GetKeyValueByRange(prefix, startKey, limit);
+        public bool PruneKeyValueRevisions(IReadOnlyCollection<string>? keys, int retentionCount, TimeSpan retentionAge,
+            int batchSize, HLCTimestamp floorTimestamp, out RevisionPruneResult result) =>
+            inner.PruneKeyValueRevisions(keys, retentionCount, retentionAge, batchSize, floorTimestamp, out result);
+        public CheckpointResult CreateCheckpoint(string destinationPath, long appliedIndex, HLCTimestamp appliedTime) =>
+            inner.CreateCheckpoint(destinationPath, appliedIndex, appliedTime);
     }
 
     /// <summary>Holds every deferred resolution the node's coordinator schedules while installed, so a commit's

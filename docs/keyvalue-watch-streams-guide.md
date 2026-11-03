@@ -85,8 +85,10 @@ A commit timestamp is minted before its entry reaches a partition's log, so with
 land after higher ones, and no watermark could hold. The commit admission window bounds it. With the setting
 `CommitAdmissionLagMs` (CLI `--commit-admission-lag-ms`) at L > 0, every replica admits a prepare, or a write
 made outside a transaction, only when its commit timestamp falls inside `(entry time − L, entry time + 5 s)`.
-The entry time is the leader's clock when it proposed the entry, the same on every replica. An entry outside the
-window installs nothing on any replica, and its writer gets a retryable answer:
+The entry time is the leader's clock when it proposed the entry, the same on every replica. A write made outside a
+transaction whose key had to be read from the storage backend takes its commit timestamp after that read, so the
+read's latency (a cold shard, a busy device) is not charged to the window. An entry outside the window installs
+nothing on any replica, and its writer gets a retryable answer:
 
 - a write outside a transaction answers `MustRetry`;
 - a transaction aborts with the refusal class `CommitTimestampOutsideWindow`. A script answers `MustRetry`; an

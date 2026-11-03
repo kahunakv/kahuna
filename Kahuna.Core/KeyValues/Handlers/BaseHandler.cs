@@ -393,41 +393,53 @@ internal abstract class BaseHandler
     /// each mint is an interlocked update on the single process-wide clock. Default (zero) mints
     /// one here for callers that have none.
     /// </param>
-    protected async ValueTask<KeyValueEntry?> GetKeyValueEntry(string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? readKeyValueEntry = null, bool populateCache = true, HLCTimestamp currentTime = default)
+    protected ValueTask<KeyValueEntry?> GetKeyValueEntry(string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? readKeyValueEntry = null, bool populateCache = true, HLCTimestamp currentTime = default)
     {
-        if (!context.Store.TryGetValue(key, out KeyValueEntry? entry))
-        {
-            if (durability == KeyValueDurability.Persistent)
-            {
-                if (readKeyValueEntry is null)
-                    entry = KeyValueEntry.FromRow(await context.BackendReadScheduler.EnqueueBatchableTask(ResolvePartition(key), key, context.PointReadExecutor));
-                else
-                    entry = new()
-                    {
-                        Bucket = GetBucket(key),
-                        Value = readKeyValueEntry.Value,
-                        Revision = readKeyValueEntry.Revision,
-                        FlushedRevision = readKeyValueEntry.Revision,
-                        Expires = readKeyValueEntry.Expires,
-                        LastUsed = readKeyValueEntry.LastUsed,
-                        LastModified = readKeyValueEntry.LastModified,
-                        State = readKeyValueEntry.State
-                    };
+        if (context.Store.TryGetValue(key, out KeyValueEntry? entry))
+            return new(entry);
 
-                if (entry is not null)
-                {
-                    entry.FlushedRevision = entry.Revision; // already on disk
-                    entry.LastUsed = currentTime != default
-                        ? currentTime
-                        : context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
-                    if (populateCache)
-                        context.InsertStoreEntry(key, entry);
-                    return entry;
-                }
-            }
+        return HydrateKeyValueEntry(key, durability, readKeyValueEntry, populateCache, currentTime);
+    }
 
+    /// <summary>
+    /// The miss half of <see cref="GetKeyValueEntry"/>: reads a persistent key's current row from the backend (or
+    /// takes the row a batch already read) and installs it as a resident entry. Null for an ephemeral key and for a
+    /// row the backend does not have. A direct write staged after this read stamps its commit after the read
+    /// (<see cref="StampAfterBackendRead"/>), so a caller that must know whether the read happened checks the store
+    /// itself and calls this only on a miss.
+    /// </summary>
+    protected async ValueTask<KeyValueEntry?> HydrateKeyValueEntry(string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? readKeyValueEntry = null, bool populateCache = true, HLCTimestamp currentTime = default)
+    {
+        if (durability != KeyValueDurability.Persistent)
             return null;
-        }
+
+        KeyValueEntry? entry;
+
+        if (readKeyValueEntry is null)
+            entry = KeyValueEntry.FromRow(await context.BackendReadScheduler.EnqueueBatchableTask(ResolvePartition(key), key, context.PointReadExecutor));
+        else
+            entry = new()
+            {
+                Bucket = GetBucket(key),
+                Value = readKeyValueEntry.Value,
+                Revision = readKeyValueEntry.Revision,
+                FlushedRevision = readKeyValueEntry.Revision,
+                Expires = readKeyValueEntry.Expires,
+                LastUsed = readKeyValueEntry.LastUsed,
+                LastModified = readKeyValueEntry.LastModified,
+                State = readKeyValueEntry.State
+            };
+
+        if (entry is null)
+            return null;
+
+        entry.FlushedRevision = entry.Revision; // already on disk
+        entry.LastUsed = currentTime != default
+            ? currentTime
+            : context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
+
+        if (populateCache)
+            context.InsertStoreEntry(key, entry);
 
         return entry;
     }
@@ -701,6 +713,21 @@ internal abstract class BaseHandler
 
         return context.Raft.HybridLogicalClock.ReceiveEvent(context.Raft.GetLocalNodeId(), baseLastModified);
     }
+
+    /// <summary>
+    /// The stamp a direct write commits under when its entry had to be read from the backend. The write arrived
+    /// with <paramref name="arrivalStamp"/>; the read that followed is storage time (a shard opened on first use, a
+    /// page miss, a busy device), not time the write spent on its way to the log. The commit admission window
+    /// (<see cref="CommitAdmission"/>) judges a write by the distance between its commit stamp and the time of the
+    /// log entry that carries it, so a stamp taken before the read charges the whole read to that bound: a cold
+    /// read of a few tens of milliseconds refused the first write to a fresh node under a 100 ms bound. Stamping
+    /// after the read leaves the bound to the staging and proposal path alone. A resident key keeps its arrival
+    /// stamp: the hot path mints no second clock event.
+    /// </summary>
+    protected HLCTimestamp StampAfterBackendRead(HLCTimestamp arrivalStamp, bool readFromBackend) =>
+        readFromBackend
+            ? context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId())
+            : arrivalStamp;
 
     /// <summary>
     /// The latest stamp a staged transactional write replaces: the transaction's own staged copy, or the

@@ -54,7 +54,7 @@ internal sealed class TryDeleteHandler : BaseHandler
     private async ValueTask<(KeyValueResponse? Terminal, KeyValueEntry? Entry, KeyValueProposal? Proposal, HLCTimestamp CurrentTime)>
         BuildNonTransactionalDelete(KeyValueRequest message)
     {
-        (KeyValueResponse? terminal, KeyValueEntry? entry, HLCTimestamp currentTime) = await LoadAndValidateEntry(message);
+        (KeyValueResponse? terminal, KeyValueEntry? entry, HLCTimestamp currentTime, bool readFromBackend) = await LoadAndValidateEntry(message);
         if (terminal is not null)
             return (terminal, null, null, currentTime);
 
@@ -63,8 +63,9 @@ internal sealed class TryDeleteHandler : BaseHandler
         if (entry!.State is KeyValueState.Deleted or KeyValueState.Undefined)
             return (new(KeyValueResponseType.DoesNotExist, entry.Revision), null, null, currentTime);
 
-        // The load can raise the head to a committed intent stamped on a faster clock: stamp after it.
-        currentTime = StampAfter(currentTime, entry.LastModified);
+        // A backend read is not charged to the commit admission window, and the load can raise the head to a
+        // committed intent stamped on a faster clock: stamp after both.
+        currentTime = StampAfter(StampAfterBackendRead(currentTime, readFromBackend), entry.LastModified);
 
         // Operation type is always TryDelete here. Use the literal rather than message.Type so the proposal the
         // aggregator carries records a TryDelete, which is what CompleteProposal and the replicated log record
@@ -95,14 +96,16 @@ internal sealed class TryDeleteHandler : BaseHandler
     /// replication intent (retry), a foreign exclusive/prefix/range lock (MustRetry). Returns a terminal
     /// response when the caller must not proceed; otherwise fills the entry and the resolved current time.
     /// </summary>
-    private async ValueTask<(KeyValueResponse? Terminal, KeyValueEntry? Entry, HLCTimestamp CurrentTime)> LoadAndValidateEntry(KeyValueRequest message)
+    private async ValueTask<(KeyValueResponse? Terminal, KeyValueEntry? Entry, HLCTimestamp CurrentTime, bool ReadFromBackend)> LoadAndValidateEntry(KeyValueRequest message)
     {
         // Make sure the current time is ahead of the transactionId
         HLCTimestamp currentTime = message.TransactionId == HLCTimestamp.Zero
             ? context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId())
             : context.Raft.HybridLogicalClock.ReceiveEvent(context.Raft.GetLocalNodeId(), message.TransactionId);
 
-        KeyValueEntry? entry = await GetKeyValueEntry(message.Key, message.Durability, currentTime: currentTime);
+        bool readFromBackend = !context.Store.TryGetValue(message.Key, out KeyValueEntry? entry) && message.Durability == KeyValueDurability.Persistent;
+        if (entry is null)
+            entry = await HydrateKeyValueEntry(message.Key, message.Durability, currentTime: currentTime);
 
         // Deferred-settlement writer visibility: a foreign durable prepared intent covering this key may hold a
         // committed value not yet materialized locally, so the key is not really missing. Resolve its canonical
@@ -115,10 +118,10 @@ internal sealed class TryDeleteHandler : BaseHandler
                 context, message.Key, message.TransactionId, ref entry, ApplyCommittedHead,
                 out HLCTimestamp blockingIntentOwner, message.ForeignDecisionHint)
             == ForeignIntentWriteDecision.MustRetry)
-            return (KeyValueResponse.Denied(KeyValueResponseType.WaitingForReplication, blockingIntentOwner, WriteDenialCause.DurableIntent), entry, currentTime);
+            return (KeyValueResponse.Denied(KeyValueResponseType.WaitingForReplication, blockingIntentOwner, WriteDenialCause.DurableIntent), entry, currentTime, readFromBackend);
 
         if (entry is null)
-            return (KeyValueStaticResponses.DoesNotExistResponse, null, currentTime);
+            return (KeyValueStaticResponses.DoesNotExistResponse, null, currentTime, readFromBackend);
 
         // Converge a head parked behind an in-flight operation before staging anything: a write
         // that assigns its revision from a stale resident head would collide with the committed
@@ -132,7 +135,7 @@ internal sealed class TryDeleteHandler : BaseHandler
         if (entry.ReplicationIntent is not null)
         {
             if (entry.ReplicationIntent.Expires - currentTime > TimeSpan.Zero)
-                return (KeyValueStaticResponses.WaitingForReplicationResponse, entry, currentTime);
+                return (KeyValueStaticResponses.WaitingForReplicationResponse, entry, currentTime, readFromBackend);
 
             entry.ReplicationIntent = null;
         }
@@ -148,24 +151,24 @@ internal sealed class TryDeleteHandler : BaseHandler
                     // A holder already durably decided only waits for its settlement to clear the intent (see
                     // TrySetHandler): a wait, not a lock conflict.
                     if (IsAwaitingSettlement(message.Key, entry.WriteIntent.TransactionId, message.ForeignDecisionHint))
-                        return (KeyValueResponse.Denied(KeyValueResponseType.WaitingForReplication, entry.WriteIntent.TransactionId, WriteDenialCause.SettlingWriteIntent), entry, currentTime);
+                        return (KeyValueResponse.Denied(KeyValueResponseType.WaitingForReplication, entry.WriteIntent.TransactionId, WriteDenialCause.SettlingWriteIntent), entry, currentTime, readFromBackend);
 
                     if (RequesterMayTakeOverYieldingIntent(message) && entry.WriteIntent.Yielding)
                     {
                         if (entry.WriteIntent.Pinned)
                         {
                             Transactions.DurableTransactionMetrics.PinnedYieldingWaits.Add(1);
-                            return (KeyValueStaticResponses.WaitingForReplicationResponse, entry, currentTime);
+                            return (KeyValueStaticResponses.WaitingForReplicationResponse, entry, currentTime, readFromBackend);
                         }
 
                         if (IsStealableYieldingIntent(message.Key, entry.WriteIntent))
                             TakeOverYieldingIntent(message, message.Key, entry, currentTime);
                         else
-                            return (KeyValueResponse.Denied(KeyValueResponseType.MustRetry, entry.WriteIntent.TransactionId), entry, currentTime);
+                            return (KeyValueResponse.Denied(KeyValueResponseType.MustRetry, entry.WriteIntent.TransactionId), entry, currentTime, readFromBackend);
                     }
                     else
                     {
-                        return (KeyValueResponse.Denied(KeyValueResponseType.MustRetry, entry.WriteIntent.TransactionId), entry, currentTime);
+                        return (KeyValueResponse.Denied(KeyValueResponseType.MustRetry, entry.WriteIntent.TransactionId), entry, currentTime, readFromBackend);
                     }
                 }
                 else
@@ -182,7 +185,7 @@ internal sealed class TryDeleteHandler : BaseHandler
             if (intent.TransactionId != message.TransactionId)
             {
                 if (KeyValueWriteIntentLease.IsLive(context, entry.Bucket, intent, currentTime))
-                    return (new(KeyValueResponseType.MustRetry, 0), entry, currentTime);
+                    return (new(KeyValueResponseType.MustRetry, 0), entry, currentTime, readFromBackend);
 
                 context.LocksByPrefix.Remove(entry.Bucket);
             }
@@ -190,9 +193,9 @@ internal sealed class TryDeleteHandler : BaseHandler
 
         // Validate if the key falls within any active range lock from another transaction
         if (RangeLockChecks.KeyCoveredByForeignRangeLock(context, message.Key, entry.Bucket, message.TransactionId, currentTime))
-            return (new(KeyValueResponseType.MustRetry, 0), entry, currentTime);
+            return (new(KeyValueResponseType.MustRetry, 0), entry, currentTime, readFromBackend);
 
-        return (null, entry, currentTime);
+        return (null, entry, currentTime, readFromBackend);
     }
 
     /// <summary>
@@ -220,7 +223,7 @@ internal sealed class TryDeleteHandler : BaseHandler
             return KeyValueStaticResponses.AbortedResponse;
         }
 
-        (KeyValueResponse? terminal, KeyValueEntry? entry, HLCTimestamp currentTime) = await LoadAndValidateEntry(message);
+        (KeyValueResponse? terminal, KeyValueEntry? entry, HLCTimestamp currentTime, _) = await LoadAndValidateEntry(message);
         if (terminal is not null)
             return terminal;
 
