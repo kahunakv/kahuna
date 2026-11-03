@@ -291,6 +291,18 @@ commit had already applied under the ordered log (`…{outcome=committed}`). A r
 that arrives with its deadline already behind the attempt clock is concluded the same way before any
 prepare is re-driven (`kahuna.durable_tx.retries_past_deadline`).
 
+A frozen input whose key range moved is the same dead end. Every prepare and every record transition is
+fenced with the partition and range generation each key was frozen against, and a split between the freeze
+and the dispatch releases it at the leader instead of appending it to a partition the key left. After the
+cutover nothing stamped with the frozen route can land anywhere, so a retry under the same handle is
+concluded through the record fence before any prepare is re-driven, exactly like a retry past the deadline.
+The fence itself follows the record: a split's hand-off carries the records anchored in the moving half to
+the child partition, so the abort is sent to the anchor key's current partition under its current
+generation. A rollback and the session reaper run the same fence, which is what releases the claimed write
+intents of an abandoned attempt on every key it touched, on the half that moved and on the half that did
+not; before this, such an attempt could not be concluded at all and its intents blocked writers and snapshot
+reads of those keys until the session liveness ceiling.
+
 **The deadline is a lease a live coordinator renews.** A finalize that is alive and inside a productive
 wait — its prepare refused only by predecessors whose records are already decided and whose intents are
 still settling, or a prepare and validation that consumed most of the margin — proposes an

@@ -1,5 +1,6 @@
 
 using System.Collections.Concurrent;
+using System.Text;
 using System.Diagnostics;
 using DotNext;
 using Kommander;
@@ -202,6 +203,29 @@ internal sealed partial class TransactionCoordinator
         }
     }
 
+    /// <summary>The releases a reap could not get acknowledged, as "shape key" pairs for its warning; the list is
+    /// taken because the next sweep's release pass starts it over.</summary>
+    private static string DescribeUnacknowledgedReleases(TransactionContext context)
+    {
+        List<PendingLockRelease>? releases = context.TakeUnacknowledgedReleases();
+        if (releases is null || releases.Count == 0)
+            return "none recorded";
+
+        const int shown = 8;
+        StringBuilder text = new();
+        for (int i = 0; i < releases.Count && i < shown; i++)
+        {
+            if (i > 0)
+                text.Append(", ");
+            text.Append(releases[i].Shape).Append(' ').Append(releases[i].Key);
+        }
+
+        if (releases.Count > shown)
+            text.Append(" and ").Append(releases.Count - shown).Append(" more");
+
+        return text.ToString();
+    }
+
     /// <summary>
     /// Reclaims one abandoned session whose finalize slot this tick owns. Releases its confirmed working set and
     /// decides the outcome published to any racing finalizer:
@@ -241,10 +265,17 @@ internal sealed partial class TransactionCoordinator
                 (DurableFinalizeOutcome fenced, _) = await FenceUnresolvedDurableFinalize(unresolved, now, CancellationToken.None);
 
                 if (fenced.Result == DurableFinalizeResult.MustRetry)
+                {
                     // The fence could not be installed (replication unavailable), so the outcome is still
                     // indeterminate. Keep the working set (releasing it would widen the window for a stalled
-                    // commit to interleave with new writers) and retry on a later sweep.
+                    // commit to interleave with new writers) and retry on a later sweep. Named here because a
+                    // reap that never completes is otherwise silent while the session's claimed intents block
+                    // every writer and every snapshot reader of its keys.
+                    logger.LogWarning(
+                        "Reap of abandoned transaction {TransactionId} could not fence its unresolved finalize at anchor {Anchor} (frozen partition {Partition}): {Refusal} {Reason}; keeping its working set until a later sweep",
+                        transactionId, unresolved.RecordAnchorKey, unresolved.AnchorPartitionId, fenced.Refusal, fenced.Reason);
                     return;
+                }
 
                 context.UnresolvedDurableFinalize = null;
 
@@ -263,6 +294,11 @@ internal sealed partial class TransactionCoordinator
             }
 
             bool cleaned = await ReleaseWorkingSet(context);
+
+            if (!cleaned)
+                logger.LogWarning(
+                    "Reap of abandoned transaction {TransactionId} left mandatory releases unacknowledged ({Releases}); keeping the session until a later sweep",
+                    transactionId, DescribeUnacknowledgedReleases(context));
 
             if (context.HasPendingOperations)
                 // Operations still unresolved after the extended deadline: give up without reporting a rollback

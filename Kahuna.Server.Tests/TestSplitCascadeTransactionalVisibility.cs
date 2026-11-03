@@ -95,7 +95,13 @@ public sealed class TestSplitCascadeTransactionalVisibility : BaseCluster
             }
 
             (KeyValueResponseType commitType, _) = await session.LocateAndCommitTransaction(handle, ct);
-            return commitType == KeyValueResponseType.Committed ? next : null;
+            if (commitType == KeyValueResponseType.Committed)
+                return next;
+
+            // The attempt is not retried, so release what it staged, as a client that gives up does: a session left
+            // behind after a retryable refusal keeps its claimed write intents until the reaper reaches it.
+            await session.LocateAndRollbackTransaction(handle, ct);
+            return null;
         }
         catch (OperationCanceledException)
         {
@@ -345,7 +351,13 @@ public sealed class TestSplitCascadeTransactionalVisibility : BaseCluster
             }
 
             (KeyValueResponseType commitType, _) = await session.LocateAndCommitTransaction(handle, ct);
-            return commitType == KeyValueResponseType.Committed ? (versionFromA + 1, versionFromB + 1) : null;
+            if (commitType == KeyValueResponseType.Committed)
+                return (versionFromA + 1, versionFromB + 1);
+
+            // The attempt is not retried, so release what it staged, as a client that gives up does: a session left
+            // behind after a retryable refusal keeps its claimed write intents until the reaper reaches it.
+            await session.LocateAndRollbackTransaction(handle, ct);
+            return null;
         }
         catch (OperationCanceledException)
         {

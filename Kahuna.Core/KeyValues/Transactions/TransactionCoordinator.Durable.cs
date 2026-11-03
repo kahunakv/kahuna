@@ -83,6 +83,9 @@ internal sealed partial class TransactionCoordinator
         // Re-resolve each intent's data partition at resolution time. A split/merge after the decision moves key
         // ownership; materializing into the frozen partition would hide the committed value from the new range.
         resolveCurrentPartition: key => manager.LocateDurablePartition(key).PartitionId,
+        // A record transition of an input whose anchor range moved since the freeze goes where the record lives
+        // now; stamped with the frozen route it is released at dispatch on every send.
+        locateRoute: manager.LocateDurablePartition,
         // A prepare the leader released against a range quiesce is a clean retry from the first classification,
         // not helped and backed off against a window no other transaction holds.
         isKeyQuiesced: manager.IsKeyQuiesced,
@@ -281,18 +284,39 @@ internal sealed partial class TransactionCoordinator
         // any commit whose attempt HLC passed it, and HLCs only advance. Re-driving the prepares would re-init the
         // record on the (possibly new) anchor leader and lose again, in a loop. Conclude now through the reaper's
         // and rollback's record-CAS fence: a presumed abort that yields to a commit the ordered log applied first.
-        if (context.UnresolvedDurableFinalize is not null && opId > input.DecisionDeadline)
+        //
+        // A frozen input one of whose fenced ranges moved since the freeze is the same dead end: every prepare and
+        // record transition it re-drives is released at the leader's dispatch fence, so it can neither commit nor
+        // ever answer. The fence follows the record to the anchor key's current partition (see
+        // DurableTransactionFinalizer.AnchorRouteNow), which is where a split's hand-off carried it.
+        if (context.UnresolvedDurableFinalize is not null)
         {
-            (DurableFinalizeOutcome fenced, bool fenceRan) = await FenceUnresolvedDurableFinalize(input, opId, cancellationToken).ConfigureAwait(false);
+            bool pastDeadline = opId > input.DecisionDeadline;
+            string? movedKey = pastDeadline ? null : input.FencedKeyMoved(manager.LocateDurablePartition);
 
-            DurableTransactionMetrics.RetryPastDeadlineConcluded(fenced.Result);
+            if (pastDeadline || movedKey is not null)
+            {
+                (DurableFinalizeOutcome fenced, bool fenceRan) = await FenceUnresolvedDurableFinalize(input, opId, cancellationToken).ConfigureAwait(false);
 
-            logger.LogWarning(
-                "Durable commit retry of transaction {TransactionId} arrived past its frozen decision deadline {Deadline} (attempt {Attempt}); concluded through the record fence as {Outcome}",
-                input.TransactionId, input.DecisionDeadline, opId, fenced.Result);
+                if (pastDeadline)
+                {
+                    DurableTransactionMetrics.RetryPastDeadlineConcluded(fenced.Result);
 
-            // Only a fence that ran is a deadline-gate conclusion; a throw classified from the record is not.
-            return ApplyDurableOutcome(context, fenceRan ? fenced with { LateCommitRejected = true } : fenced);
+                    logger.LogWarning(
+                        "Durable commit retry of transaction {TransactionId} arrived past its frozen decision deadline {Deadline} (attempt {Attempt}); concluded through the record fence as {Outcome}",
+                        input.TransactionId, input.DecisionDeadline, opId, fenced.Result);
+                }
+                else
+                {
+                    logger.LogWarning(
+                        "Durable commit retry of transaction {TransactionId} re-drove a frozen input whose key {Key} left the range it was frozen against (attempt {Attempt}); concluded through the record fence as {Outcome}",
+                        input.TransactionId, movedKey, opId, fenced.Result);
+                }
+
+                // Only a fence that ran past the deadline is a deadline-gate conclusion; a throw classified from
+                // the record is not, and neither is the conclusion of a moved input.
+                return ApplyDurableOutcome(context, pastDeadline && fenceRan ? fenced with { LateCommitRejected = true } : fenced);
+            }
         }
 
         // Admission gate 0: range quiesce. Refuse when a key or the record anchor lies in a range that is moving to

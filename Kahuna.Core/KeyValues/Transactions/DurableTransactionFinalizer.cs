@@ -39,6 +39,33 @@ internal sealed record DurableFinalizeInput(
     /// Carried by the record initialization and the decision, which replicate on the anchor partition alone; the
     /// anchor partition's prepare group carries this fence among its own.</summary>
     public RangeFence[] AnchorFence => [new RangeFence(RecordAnchorKey, AnchorGeneration)];
+
+    /// <summary>
+    /// The first fenced key whose range is not where this input froze it: the anchor, then every key-range key of
+    /// every partition group, each compared by partition and range generation against its current route. Null
+    /// when none moved. A hash-routed key has no range to move. A frozen input with a moved fence can never be
+    /// re-driven: every prepare and record transition it sends is released at dispatch (see
+    /// <see cref="DurableProposalSubmission.IsStale"/>), so its owner concludes it through the record instead.
+    /// </summary>
+    public string? FencedKeyMoved(Func<string, DurableKeyRoute> locate)
+    {
+        if (RouteMoved(locate(RecordAnchorKey), AnchorPartitionId, AnchorGeneration))
+            return RecordAnchorKey;
+
+        foreach (DurablePartitionPrepare partition in Partitions)
+        {
+            foreach (RangeFence fence in partition.Fences)
+            {
+                if (RouteMoved(locate(fence.Key), partition.PartitionId, fence.Generation))
+                    return fence.Key;
+            }
+        }
+
+        return null;
+    }
+
+    internal static bool RouteMoved(DurableKeyRoute current, int frozenPartitionId, long frozenGeneration) =>
+        current.IsKeyRange && (current.PartitionId != frozenPartitionId || current.Generation != frozenGeneration);
 }
 
 internal enum DurableFinalizeResult
@@ -327,6 +354,11 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     // the frozen target (protocol tests, deployments without key-range routing).
     private readonly Func<string, int>? resolveCurrentPartition;
 
+    // Resolves a key's CURRENT route (partition and range generation), so a record transition of an input whose
+    // anchor range moved since the freeze is sent where the record lives now (see AnchorRouteNow). Null keeps the
+    // frozen route (protocol tests, deployments without key-range routing).
+    private readonly Func<string, DurableKeyRoute>? locateRoute;
+
     // Whether a key lies in a range quiesced for a data move, as the coordinator's node sees it: a refused
     // participant whose key is quiesced was released by its leader's dispatch fence, and is answered as a clean
     // retry instead of being helped or backed off. Null means no classification (protocol tests).
@@ -401,9 +433,11 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         int maxDeadlineExtensions = 0,
         ILogger? logger = null,
         long commitAdmissionLagMs = 0,
-        ClaimStagedIntentsDelegate? claimStagedIntents = null)
+        ClaimStagedIntentsDelegate? claimStagedIntents = null,
+        Func<string, DurableKeyRoute>? locateRoute = null)
     {
         this.decide = decide;
+        this.locateRoute = locateRoute;
         this.claimStagedIntents = claimStagedIntents;
         this.commitAdmissionLagMs = Math.Max(0, commitAdmissionLagMs);
         this.materializeOnResolve = materializeOnResolve;
@@ -1324,17 +1358,19 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         Writes.DurableDecisionReply? typed = null;
         try
         {
+            (int PartitionId, IReadOnlyList<RangeFence> Fence) anchor = AnchorRouteNow(input);
+
             if (decide is not null)
             {
-                Writes.DurableDecisionReply reply = await decide(input.AnchorPartitionId, delta, input.TransactionId, input.Epoch, input.AnchorFence, cancellationToken).ConfigureAwait(false);
+                Writes.DurableDecisionReply reply = await decide(anchor.PartitionId, delta, input.TransactionId, input.Epoch, anchor.Fence, cancellationToken).ConfigureAwait(false);
                 typed = reply;
                 replicated = reply.Replicated;
             }
             else
             {
                 replicated = replicateDecision is not null
-                    ? await replicateDecision(input.AnchorPartitionId, delta, input.AnchorFence, cancellationToken).ConfigureAwait(false)
-                    : await ReplicateRecordAsync(input.AnchorPartitionId, delta, input.AnchorFence, Writes.WriteAdmissionClass.Terminal, Writes.WriteSubmissionStage.Decision, cancellationToken).ConfigureAwait(false);
+                    ? await replicateDecision(anchor.PartitionId, delta, anchor.Fence, cancellationToken).ConfigureAwait(false)
+                    : await ReplicateRecordAsync(anchor.PartitionId, delta, anchor.Fence, Writes.WriteAdmissionClass.Terminal, Writes.WriteSubmissionStage.Decision, cancellationToken).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException)
@@ -1767,17 +1803,19 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         long replicateStart = Stopwatch.GetTimestamp();
         bool replicated;
         Writes.DurableDecisionReply? typed = null;
+        (int PartitionId, IReadOnlyList<RangeFence> Fence) anchor = AnchorRouteNow(input);
+
         if (decide is not null)
         {
-            Writes.DurableDecisionReply reply = await decide(input.AnchorPartitionId, delta, input.TransactionId, input.Epoch, input.AnchorFence, cancellationToken).ConfigureAwait(false);
+            Writes.DurableDecisionReply reply = await decide(anchor.PartitionId, delta, input.TransactionId, input.Epoch, anchor.Fence, cancellationToken).ConfigureAwait(false);
             typed = reply;
             replicated = reply.Replicated;
         }
         else
         {
             replicated = replicateDecision is not null
-                ? await replicateDecision(input.AnchorPartitionId, delta, input.AnchorFence, cancellationToken).ConfigureAwait(false)
-                : await ReplicateRecordAsync(input.AnchorPartitionId, delta, input.AnchorFence, Writes.WriteAdmissionClass.Terminal, Writes.WriteSubmissionStage.Decision, cancellationToken).ConfigureAwait(false);
+                ? await replicateDecision(anchor.PartitionId, delta, anchor.Fence, cancellationToken).ConfigureAwait(false)
+                : await ReplicateRecordAsync(anchor.PartitionId, delta, anchor.Fence, Writes.WriteAdmissionClass.Terminal, Writes.WriteSubmissionStage.Decision, cancellationToken).ConfigureAwait(false);
         }
         DurableTransactionMetrics.FinalizeDecisionReplicateMs.Record(Stopwatch.GetElapsedTime(replicateStart).TotalMilliseconds);
 
@@ -1857,6 +1895,32 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         }
 
         await Task.WhenAll(input.Partitions.Select(partition => ResolvePartitionAsync(partition, commit, localApplyGate, cancellationToken))).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Where a record transition of <paramref name="input"/> is sent: the anchor key's current partition, fenced at
+    /// its current range generation. The input froze both when it was built, and every record transition is fenced
+    /// with them so a split between the freeze and the dispatch releases it instead of appending to a partition the
+    /// anchor key left. A split's hand-off carries the records anchored in the moving half to the child partition,
+    /// so after the cutover the record is at the anchor key's current route, and only a transition stamped with
+    /// that route can reach it: a decision, a fence or a lease renewal stamped with the frozen route is released at
+    /// dispatch on every send, and nothing could ever conclude the transaction. A hash-routed anchor never moves;
+    /// without a resolver the frozen route stands.
+    /// </summary>
+    private (int PartitionId, IReadOnlyList<RangeFence> Fence) AnchorRouteNow(DurableFinalizeInput input)
+    {
+        if (locateRoute is null)
+            return (input.AnchorPartitionId, input.AnchorFence);
+
+        DurableKeyRoute current = locateRoute(input.RecordAnchorKey);
+        if (!DurableFinalizeInput.RouteMoved(current, input.AnchorPartitionId, input.AnchorGeneration))
+            return (input.AnchorPartitionId, input.AnchorFence);
+
+        logger?.LogWarning(
+            "Transaction {TransactionId}: its record anchor {Anchor} moved from partition {FrozenPartition} at generation {FrozenGeneration} to partition {Partition} at generation {Generation} since its finalize was frozen; sending the record transition to the current partition",
+            input.TransactionId, input.RecordAnchorKey, input.AnchorPartitionId, input.AnchorGeneration, current.PartitionId, current.Generation);
+
+        return (current.PartitionId, [new RangeFence(input.RecordAnchorKey, current.Generation)]);
     }
 
     /// <summary>The transaction's canonical record — routed by the anchor key when the routed lookup is wired

@@ -268,14 +268,12 @@ public sealed class TestSplitQuiesceAbortAtomicity : BaseCluster
         // retry's lock proof finds leg 2's lock granted by a partition the key no longer routes to and
         // ends the attempt terminally, which releases what it held. A retry that lands before any
         // cutover-dependent refusal commits the transfer itself; both are exactly-once outcomes.
-        KeyValueResponseType commitARetried = commitA;
-        for (int attempt = 0; attempt < 40 && commitARetried == KeyValueResponseType.MustRetry; attempt++)
-        {
-            await Task.Delay(100, ct);
-            (commitARetried, _) = await driver.LocateAndCommitTransaction(handle, ct);
-        }
+        TransactionCommitAnswer retried = await RetryOnMustRetryAsync(
+            () => driver.LocateAndCommitTransaction(handle, ct), a => a.Type);
+        Assert.True(retried.Type != KeyValueResponseType.MustRetry,
+            $"the retry under the same handle still answered MustRetry after the budget ({retried.Refusal}: {retried.Reason})");
 
-        Assert.NotEqual(KeyValueResponseType.MustRetry, commitARetried);
+        KeyValueResponseType commitARetried = retried.Type;
 
         if (commitARetried == KeyValueResponseType.Committed)
         {
