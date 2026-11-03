@@ -139,7 +139,7 @@ public class KahunaClient
     /// seen. A transport from outside this assembly implements neither hook, so it keeps working
     /// unchanged and its client stays on endpoint rotation.
     /// </summary>
-    private ClientRouteResolver? BuildRouter()
+    private ClientRouteResolver? BuildRouter(IKahunaCommunication transport)
     {
         effectiveRouting = ResolveRoutingMode(Options.Routing, urls.Length);
 
@@ -150,13 +150,13 @@ public class KahunaClient
             effectiveRouting,
             new RouteCache(Options.RouteCacheCapacity, Options.RouteHintLifetime),
             new RoutingEndpointPolicy(urls, Options.RoutingEndpointMap, Options.AllowUnlistedRoutingEndpoints),
-            communication as IKahunaRoutingTransport,
+            transport as IKahunaRoutingTransport,
             GetRoundRobinUrl,
             Options.RoutingMetadataLifetime,
             Options.RoutingEndpointCooldown,
             logger);
 
-        if (communication is IKahunaRouteSinkReceiver receiver)
+        if (transport is IKahunaRouteSinkReceiver receiver)
             receiver.RouteSink = resolver;
 
         return resolver;
@@ -174,8 +174,9 @@ public class KahunaClient
         this.urls = [url];
         this.logger = logger;
         this.Options = options ?? new();
-        this.communication = communication ?? new GrpcCommunication(Options, logger);
-        this.router = BuildRouter();
+        IKahunaCommunication transport = communication ?? new GrpcCommunication(Options, logger);
+        this.communication = new InstrumentedKahunaCommunication(transport);
+        this.router = BuildRouter(transport);
     }
     
     /// <summary>
@@ -190,8 +191,9 @@ public class KahunaClient
         this.urls = urls;
         this.logger = logger;
         this.Options = options ?? new();
-        this.communication = communication ?? new GrpcCommunication(Options, logger);
-        this.router = BuildRouter();
+        IKahunaCommunication transport = communication ?? new GrpcCommunication(Options, logger);
+        this.communication = new InstrumentedKahunaCommunication(transport);
+        this.router = BuildRouter(transport);
     }
 
     /// <summary>

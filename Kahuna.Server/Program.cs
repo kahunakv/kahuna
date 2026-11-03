@@ -204,6 +204,10 @@ builder.Services.AddSingleton(opts);
 // disposed with it, which stops the MeterListener at shutdown — a leaked listener observes forever.
 builder.Services.AddSingleton<EngineMetricsCollector>();
 
+// Off unless OTEL_EXPORTER_OTLP_ENDPOINT names a collector; the collector above serves the dashboard
+// either way, since both read the same instruments through their own listeners.
+bool otlpExport = OtlpTelemetry.AddIfConfigured(builder, opts.RaftNodeName);
+
 builder.Services.AddGrpc();
 builder.Services.AddGrpcReflection();
 
@@ -320,6 +324,9 @@ if (app.Logger.IsEnabled(LogLevel.Information))
     app.Logger.LogInformation("Storage: {Storage} at {StoragePath}", opts.Storage, DataPathResolver.IsInMemory(opts.Storage) ? "(in-memory)" : opts.StoragePath);
     app.Logger.LogInformation("WAL: {WalStorage} at {WalPath}", opts.WalStorage, DataPathResolver.IsInMemory(opts.WalStorage) ? "(in-memory)" : opts.WalPath);
 }
+
+if (otlpExport && app.Logger.IsEnabled(LogLevel.Information))
+    app.Logger.LogInformation("OpenTelemetry: exporting metrics, traces and logs to {OtlpEndpoint}", builder.Configuration[OtlpTelemetry.EndpointVariable]);
 
 if (!httpsConfigured)
     app.Logger.LogInformation("HTTPS disabled: no certificate configured (pass --https-certificate to enable it)");
