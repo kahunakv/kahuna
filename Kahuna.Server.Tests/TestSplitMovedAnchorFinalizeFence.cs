@@ -169,9 +169,12 @@ public sealed class TestSplitMovedAnchorFinalizeFence : BaseCluster
                 kahuna.KeyValues.Coordinator.TestSkipRangeQuiesceAdmissionGate = false;
         }
 
-        // The anchor routes to the child partition at a new generation; the staying key kept its partition.
-        RangeDescriptor anchorNow = kahunas[0].RangeMapStore.Current.Find(Space, AnchorKey)!;
-        RangeDescriptor stayNow = kahunas[0].RangeMapStore.Current.Find(Space, StayingKey)!;
+        // The anchor routes to the child partition at a new generation; the staying key kept its partition. The split
+        // returned on the meta leader, and this node applies the map that carries the cutover a moment later.
+        await WaitUntilAsync(() => kahunas[0].RangeMapStore.Current.Find(Space, AnchorKey)?.Generation > 1);
+        RangeMap applied = kahunas[0].RangeMapStore.Current;
+        RangeDescriptor anchorNow = applied.Find(Space, AnchorKey)!;
+        RangeDescriptor stayNow = applied.Find(Space, StayingKey)!;
         Assert.NotEqual(stayNow.PartitionId, anchorNow.PartitionId);
         Assert.True(anchorNow.Generation > 1, $"anchor descriptor still at generation {anchorNow.Generation}");
 

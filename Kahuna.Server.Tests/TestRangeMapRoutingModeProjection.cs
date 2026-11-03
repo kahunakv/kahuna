@@ -215,4 +215,65 @@ public sealed class TestRangeMapRoutingModeProjection : IDisposable
         foreach (RangeDescriptor descriptor in seeded)
             Assert.Equal(RoutingMode.KeyRange, registry.GetMode(descriptor.KeySpace));
     }
+
+    /// <summary>
+    /// A route captures the map and then reads the mode. When an install reconciles the registry between those two
+    /// reads, the reader holds a map from before the swap and a mode from after the reconcile, and no descriptor
+    /// covers its key. On that map alone the key is unroutable; the route that reads the map from the store reads it
+    /// again under the install lock, where that install has published its map, and routes the key by range.
+    /// </summary>
+    [Fact]
+    public async Task AReaderWhoseModeReadRanAheadOfItsMap_RoutesByTheMapTheInstallPublished()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        KeySpaceRegistry registry = new();
+        using RangeMapStore store = NewStore(new ProposeOutcomeStubRaft(), registry);
+        DataPartitionRouter router = new(4);
+
+        RangeDescriptor first = FullRange("ahead-a:r", 1);
+        RangeDescriptor second = FullRange("ahead-b:r", 2);
+        string key = second.KeySpace + "/k";
+
+        Assert.True(store.Replicate(RangeMapStore.MetaPartitionId, CommittedEntry(1, Encode(first))));
+        RangeMap before = store.Current;
+
+        using ManualResetEventSlim reconciled = new(false);
+        using ManualResetEventSlim release = new(false);
+        store.TestAfterRoutingModeReconcile = () =>
+        {
+            reconciled.Set();
+            release.Wait(ct);
+        };
+
+        try
+        {
+            Task install = Task.Run(
+                () => Assert.True(store.Replicate(RangeMapStore.MetaPartitionId, CommittedEntry(2, Encode(first, second)))), ct);
+            reconciled.Wait(ct);
+
+            // The window: the mode is flipped while the published map still lacks the space.
+            Assert.Equal(RoutingMode.KeyRange, registry.GetMode(second.KeySpace));
+            Assert.Same(before, store.Current);
+            Assert.False(RangeRouting.TryLocate(registry, before, router, key, out _));
+
+            // The route that reads from the store waits for the install under its lock and routes by the map it published.
+            Task<(int PartitionId, long Generation, bool IsKeyRange, RangeDescriptor? Descriptor)> route =
+                Task.Run(() => RangeRouting.LocateWithMode(registry, store, router, key), ct);
+
+            release.Set();
+            await install;
+
+            (int partitionId, long generation, bool isKeyRange, RangeDescriptor? descriptor) = await route;
+            Assert.True(isKeyRange);
+            Assert.Equal(second.PartitionId, partitionId);
+            Assert.Equal(second.Generation, generation);
+            Assert.NotNull(descriptor);
+            Assert.Equal(second.KeySpace, descriptor.KeySpace);
+        }
+        finally
+        {
+            release.Set();
+            store.TestAfterRoutingModeReconcile = null;
+        }
+    }
 }

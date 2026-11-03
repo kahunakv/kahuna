@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Text;
 using Kahuna;
 using Kahuna.Client;
+using Kahuna.Server.KeyValues.Data;
 using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.KeyValues.Watch;
@@ -174,6 +175,18 @@ public sealed class TestKeyValueWatchResume : BaseCluster
             string group = $"inst{Guid.NewGuid():N}|";
             await SetValue(nodes[0], group + "k", "v", ct);
             int partitionId = nodes[0].KeyValues.LocateDurablePartition(group + "k").PartitionId;
+
+            // The replay judges the cursor against this replica's own applied log. With nothing applied here yet it
+            // would hand over to the live stream with nothing to replay, whatever the boundary says, so the boundary
+            // is only reached once the write is applied on this replica: its applied id is positive and no replica
+            // is ahead of it.
+            await WaitUntilAsync(async () =>
+            {
+                long here = await AppliedLogIdOn(nodes[1], partitionId, ct);
+                return here > 0
+                    && here >= await AppliedLogIdOn(nodes[0], partitionId, ct)
+                    && here >= await AppliedLogIdOn(nodes[2], partitionId, ct);
+            });
 
             nodes[1].KeyValues.HistoryBoundsForTests.Record(partitionId, long.MaxValue / 2);
 
@@ -418,6 +431,13 @@ public sealed class TestKeyValueWatchResume : BaseCluster
         KeyValueWatchOpening opening = await RetryOnMustRetryAsync(() => node.WatchKeyValues(request, ct), o => o.Type);
         Assert.Equal(KeyValueResponseType.Get, opening.Type);
         return new FrameCollector(opening.Watch!);
+    }
+
+    /// <summary>The last key-value log id <paramref name="node"/> applied on <paramref name="partitionId"/>, or -1 while it cannot say.</summary>
+    private static async Task<long> AppliedLogIdOn(KahunaManager node, int partitionId, CancellationToken ct)
+    {
+        (KeyValueResponseType type, KeyValueApplyFingerprint fingerprint) = await node.GetPartitionApplyFingerprint(partitionId, ct);
+        return type == KeyValueResponseType.Get ? fingerprint.AppliedLogId : -1;
     }
 
     private static async Task SetValue(IKahuna node, string key, string value, CancellationToken ct)

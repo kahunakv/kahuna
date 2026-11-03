@@ -687,7 +687,9 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
         finally
         {
             // Publish the head records of every entry this turn changed, before the reply leaves the actor, so an
-            // off-actor reader never finds a record older than the state the reply was built from.
+            // off-actor reader never finds a record older than the state the reply was built from. A handler that
+            // resolves a reply itself before it returns, as the proposal completion does, flushes before it resolves
+            // it; this flush then finds nothing left for that entry.
             kvContext?.FlushHeadPublications();
 
             if (logThis)

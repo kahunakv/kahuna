@@ -119,6 +119,11 @@ internal sealed class CompleteProposalHandler : BaseHandler
                 throw new NotImplementedException();
         }
 
+        // The reply is resolved here, inside the turn, so its caller can run before the actor's end-of-turn
+        // publication. Publish the head this apply produced first: a read that follows the acknowledged write is
+        // then served from the record, as the end-of-turn flush promises for a reply that leaves with the turn.
+        context.FlushHeadPublications();
+
         message.Promise.TrySetResult(response);
 
         return response;

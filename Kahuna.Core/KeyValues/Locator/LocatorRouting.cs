@@ -127,10 +127,12 @@ internal sealed class LocatorRouting
     /// generation)</c> through the range-descriptor map for key-range spaces, or falls back to the
     /// hash router (<c>GetPartitionKey</c>) for hash spaces. Both this router and the leader-side direct-write
     /// resolver (<c>BaseHandler.ResolveDirectWritePartition</c>) go through the same
-    /// <see cref="RangeRouting.Locate"/> so the two routing sites cannot drift.
+    /// <see cref="RangeRouting.Locate"/> so the two routing sites cannot drift. The map is read from the store,
+    /// so a route that met a mode flipped by an install still in progress reads the map that install published
+    /// (see <see cref="RangeMapStore.CurrentUnderInstallLock"/>) instead of refusing the key.
     /// </summary>
     public (int PartitionId, long Generation) LocateRange(string key) =>
-        RangeRouting.Locate(keySpaceRegistry, manager.RangeMapStore.Current, dataPartitionRouter, key);
+        RangeRouting.Locate(keySpaceRegistry, manager.RangeMapStore, dataPartitionRouter, key);
 
     /// <summary>
     /// <see cref="LocateRange"/> without the exception: <see langword="false"/> when the key belongs to a
@@ -138,11 +140,11 @@ internal sealed class LocatorRouting
     /// unroutable one as a routine answer (see <see cref="RangeRouting.TryLocate"/>).
     /// </summary>
     public bool TryLocateRange(string key, out int partitionId) =>
-        RangeRouting.TryLocate(keySpaceRegistry, manager.RangeMapStore.Current, dataPartitionRouter, key, out partitionId);
+        RangeRouting.TryLocate(keySpaceRegistry, manager.RangeMapStore, dataPartitionRouter, key, out partitionId);
 
     /// <summary>Routes a key and reports its routing mode in the same single classification pass.</summary>
     internal (int PartitionId, long Generation, bool IsKeyRange, RangeDescriptor? Descriptor) LocateRangeWithMode(string key) =>
-        RangeRouting.LocateWithMode(keySpaceRegistry, manager.RangeMapStore.Current, dataPartitionRouter, key);
+        RangeRouting.LocateWithMode(keySpaceRegistry, manager.RangeMapStore, dataPartitionRouter, key);
 
     /// <summary>
     /// True when <paramref name="key"/> lands in the part of <paramref name="descriptor"/> that is
@@ -161,7 +163,7 @@ internal sealed class LocatorRouting
 
     /// <summary>Routes a per-key operation via <see cref="RangeRouting.Locate"/>.</summary>
     internal int RouteKey(string key) =>
-        RangeRouting.Locate(keySpaceRegistry, manager.RangeMapStore.Current, dataPartitionRouter, key).PartitionId;
+        RangeRouting.Locate(keySpaceRegistry, manager.RangeMapStore, dataPartitionRouter, key).PartitionId;
 
     /// <summary>
     /// Routes a prefix/bucket operation to the partition of the key space the prefix names. The prefix
@@ -172,7 +174,7 @@ internal sealed class LocatorRouting
     /// placement group, and so a partition whose leader does not serve the keys the scan is about.
     /// </summary>
     internal int RoutePrefixKey(string prefix) =>
-        RangeRouting.Locate(keySpaceRegistry, manager.RangeMapStore.Current, dataPartitionRouter, KeyValueKeySpace.OfPrefix(prefix) + "/").PartitionId;
+        RangeRouting.Locate(keySpaceRegistry, manager.RangeMapStore, dataPartitionRouter, KeyValueKeySpace.OfPrefix(prefix) + "/").PartitionId;
 
     /// <summary>
     /// The term a lock about to be granted on <paramref name="partitionId"/> is reported under

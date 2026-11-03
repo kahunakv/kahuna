@@ -40,10 +40,11 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// which key spaces route by key range is a projection of the installed map, and this store keeps
 /// it: every install — a committed entry, the durable snapshot at startup, a whole-partition state
 /// transfer — reconciles the registry to the new map's key spaces under <see cref="installLock"/>,
-/// before the map is published. A route reads the mode first and the map second, so a reader that
-/// sees a space's descriptor in <see cref="Current"/> always sees the space key-range routed; the
-/// reverse window (mode flipped, map not yet swapped) is refused retryably rather than hash-routed
-/// to a partition the rest of the cluster does not use for that key.
+/// before the map is published. A route captures the map and then reads the mode, so a reader that
+/// sees a space's descriptor in <see cref="Current"/> always sees the space key-range routed. A reader
+/// whose mode read ran ahead of its map (mode flipped, its map captured before the swap) finds no
+/// descriptor and reads the map again under <see cref="installLock"/>
+/// (<see cref="CurrentUnderInstallLock"/>), where the install that flipped the mode has published it.
 /// </para>
 /// </summary>
 internal sealed class RangeMapStore : IDisposable
@@ -176,6 +177,22 @@ internal sealed class RangeMapStore : IDisposable
 
     /// <summary>The current committed-and-applied map snapshot. Lock-free read.</summary>
     public RangeMap Current => current;
+
+    /// <summary>
+    /// <see cref="Current"/> read under <see cref="installLock"/>: an install in progress has finished first, so the
+    /// map returned carries every key space the routing-mode registry was reconciled to before this read. For a
+    /// route that captured <see cref="Current"/> and then found the mode of a key space ahead of that map, because
+    /// an install reconciled the registry between the two reads. Never for a hot path, which reads
+    /// <see cref="Current"/>.
+    /// </summary>
+    public RangeMap CurrentUnderInstallLock
+    {
+        get
+        {
+            lock (installLock)
+                return current;
+        }
+    }
 
     /// <summary>
     /// The single descriptor-map writer. Computes the next descriptor set from the current
@@ -663,18 +680,25 @@ internal sealed class RangeMapStore : IDisposable
     /// <summary>
     /// Publishes <paramref name="map"/> as <see cref="Current"/>. The caller holds <see cref="installLock"/>,
     /// which orders the projection and the swap of one install against those of the next.
-    /// The routing modes are reconciled <b>before</b> the swap: a route reads the mode and then the map,
-    /// so a reader that finds a space's descriptor in the new map must already find the space key-range
+    /// The routing modes are reconciled <b>before</b> the swap: a route captures the map and then reads the
+    /// mode, so a reader that finds a space's descriptor in the new map must already find the space key-range
     /// routed, or it hash-routes the key to a partition the rest of the cluster does not use for it. The
-    /// other order of the same two reads — mode flipped, map not yet swapped — finds no covering
-    /// descriptor and is refused retryably, and it lasts only until the swap on the next line.
+    /// other order of the same two reads — a map captured before the swap, the mode read after the reconcile —
+    /// finds no covering descriptor; such a reader reads the map again through
+    /// <see cref="CurrentUnderInstallLock"/>, which waits for this install to finish and so returns the map
+    /// that carries the descriptor.
     /// </summary>
     private void Publish(RangeMap map)
     {
         routingModes?.ReconcileTo(map);
+        TestAfterRoutingModeReconcile?.Invoke();
         current = map;
         Interlocked.Increment(ref mapVersion);
     }
+
+    /// <summary>Test seam: runs inside <see cref="Publish"/>, under <see cref="installLock"/>, after the routing
+    /// modes are reconciled and before the map is swapped, so a test can hold an install open in that window.</summary>
+    internal Action? TestAfterRoutingModeReconcile { get; set; }
 
     /// <summary>
     /// Installs the map committed at meta-log index <paramref name="logIndex"/> and persists it,

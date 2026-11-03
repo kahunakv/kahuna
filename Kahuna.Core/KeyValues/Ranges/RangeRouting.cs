@@ -63,9 +63,11 @@ internal static class RangeRouting
     /// </summary>
     /// <exception cref="RangeDescriptorMissingException">
     /// A key-range space has no descriptor covering the key on this node. A validated map has no gaps
-    /// (<see cref="RangeMap.Validate"/> rejects them), so this is the transient state of a space whose seed
-    /// descriptor has not replicated here yet, or whose descriptors were removed and whose routing mode is not
-    /// reconciled yet. Retryable: nothing was routed.
+    /// (<see cref="RangeMap.Validate"/> rejects them), so this is a space registered by mode alone
+    /// (<see cref="KeySpaceRegistry.RegisterKeyRange"/>) with no seed descriptor installed here, or a map that
+    /// was captured before the install that flipped the mode. The overloads that read the map from the
+    /// <see cref="RangeMapStore"/> read it again under the install lock, so they refuse only the first.
+    /// Retryable: nothing was routed.
     /// </exception>
     public static (int PartitionId, long Generation) Locate(
         KeySpaceRegistry registry,
@@ -94,9 +96,79 @@ internal static class RangeRouting
         if (TryLocateWithMode(registry, rangeMap, dataPartitionRouter, key, out (int, long, bool, RangeDescriptor?) located))
             return located;
 
-        int separator = key.LastIndexOf('/');
+        throw DescriptorMissing(key);
+    }
 
-        throw new RangeDescriptorMissingException(key, separator < 0 ? key : key[..separator]);
+    /// <summary>
+    /// As <see cref="Locate(KeySpaceRegistry, RangeMap, DataPartitionRouter, string)"/>, reading the map from
+    /// <paramref name="store"/> (see <see cref="LocateWithMode(KeySpaceRegistry, RangeMapStore, DataPartitionRouter, string)"/>).
+    /// </summary>
+    public static (int PartitionId, long Generation) Locate(
+        KeySpaceRegistry registry,
+        RangeMapStore store,
+        DataPartitionRouter dataPartitionRouter,
+        string key)
+    {
+        (int partitionId, long generation, _, _) = LocateWithMode(registry, store, dataPartitionRouter, key);
+        return (partitionId, generation);
+    }
+
+    /// <summary>
+    /// As <see cref="LocateWithMode(KeySpaceRegistry, RangeMap, DataPartitionRouter, string)"/>, reading the map from
+    /// <paramref name="store"/>. A route captures <see cref="RangeMapStore.Current"/> and then reads the mode, and the
+    /// store reconciles the mode before it swaps the map, so a key-range mode with no covering descriptor means that
+    /// an install ran between the two reads. The map is then read again under the store's install lock, where that
+    /// install has finished. Only a space whose mode is set with no installed map carrying it stays unroutable there.
+    /// </summary>
+    public static (int PartitionId, long Generation, bool IsKeyRange, RangeDescriptor? Descriptor) LocateWithMode(
+        KeySpaceRegistry registry,
+        RangeMapStore store,
+        DataPartitionRouter dataPartitionRouter,
+        string key)
+    {
+        if (TryLocateWithMode(registry, store, dataPartitionRouter, key, out (int, long, bool, RangeDescriptor?) located))
+            return located;
+
+        throw DescriptorMissing(key);
+    }
+
+    /// <summary>
+    /// As <see cref="TryLocate(KeySpaceRegistry, RangeMap, DataPartitionRouter, string, out int)"/>, reading the map
+    /// from <paramref name="store"/> with the second read under the install lock of
+    /// <see cref="LocateWithMode(KeySpaceRegistry, RangeMapStore, DataPartitionRouter, string)"/>.
+    /// </summary>
+    public static bool TryLocate(
+        KeySpaceRegistry registry,
+        RangeMapStore store,
+        DataPartitionRouter dataPartitionRouter,
+        string key,
+        out int partitionId)
+    {
+        bool routable = TryLocateWithMode(registry, store, dataPartitionRouter, key, out (int PartitionId, long, bool, RangeDescriptor?) located);
+        partitionId = routable ? located.PartitionId : -1;
+        return routable;
+    }
+
+    /// <summary>
+    /// The two reads behind every route that reads the map from the store: the lock-free map first, and the map under
+    /// the install lock only when the first read left the key unroutable
+    /// (see <see cref="LocateWithMode(KeySpaceRegistry, RangeMapStore, DataPartitionRouter, string)"/>). The mode the
+    /// first read saw was read before the second map, so a space that mode names is in the second map unless an
+    /// install removed it since.
+    /// </summary>
+    public static bool TryLocateWithMode(
+        KeySpaceRegistry registry,
+        RangeMapStore store,
+        DataPartitionRouter dataPartitionRouter,
+        string key,
+        out (int PartitionId, long Generation, bool IsKeyRange, RangeDescriptor? Descriptor) located) =>
+        TryLocateWithMode(registry, store.Current, dataPartitionRouter, key, out located)
+        || TryLocateWithMode(registry, store.CurrentUnderInstallLock, dataPartitionRouter, key, out located);
+
+    private static RangeDescriptorMissingException DescriptorMissing(string key)
+    {
+        int separator = key.LastIndexOf('/');
+        return new RangeDescriptorMissingException(key, separator < 0 ? key : key[..separator]);
     }
 
     /// <summary>
@@ -118,9 +190,13 @@ internal static class RangeRouting
         return routable;
     }
 
-    // The one classification and lookup behind both the throwing and the non-throwing resolution, so the two
-    // cannot route a key differently. Nothing is allocated on either branch.
-    private static bool TryLocateWithMode(
+    /// <summary>
+    /// The one classification and lookup behind both the throwing and the non-throwing resolution, so the two
+    /// cannot route a key differently. Nothing is allocated on either branch. The map is the caller's snapshot
+    /// and the mode is read here, after it: see <see cref="RangeMapStore.CurrentUnderInstallLock"/> for the
+    /// order the store keeps between the two.
+    /// </summary>
+    public static bool TryLocateWithMode(
         KeySpaceRegistry registry,
         RangeMap rangeMap,
         DataPartitionRouter dataPartitionRouter,
@@ -205,6 +281,33 @@ internal static class RangeRouting
         partitionId = dataPartitionRouter.Locate(key);
         fenceGeneration = 0; // hash space: never fenced at flush.
         return DirectWriteRouting.Ok;
+    }
+
+    /// <summary>
+    /// As <see cref="ResolveForDirectWrite(KeySpaceRegistry, RangeMap, DataPartitionRouter, string, long, HLCTimestamp, out int, out long)"/>,
+    /// reading the map from <paramref name="store"/>: a <see cref="DirectWriteRouting.NoDescriptor"/> answer on the
+    /// lock-free map is judged again on the map under the install lock, for the reason given at
+    /// <see cref="LocateWithMode(KeySpaceRegistry, RangeMapStore, DataPartitionRouter, string)"/>. A range that
+    /// really moved out from under the write is still refused there.
+    /// </summary>
+    public static DirectWriteRouting ResolveForDirectWrite(
+        KeySpaceRegistry registry,
+        RangeMapStore store,
+        DataPartitionRouter dataPartitionRouter,
+        string key,
+        long routedGeneration,
+        HLCTimestamp now,
+        out int partitionId,
+        out long fenceGeneration)
+    {
+        DirectWriteRouting routing = ResolveForDirectWrite(
+            registry, store.Current, dataPartitionRouter, key, routedGeneration, now, out partitionId, out fenceGeneration);
+
+        if (routing != DirectWriteRouting.NoDescriptor)
+            return routing;
+
+        return ResolveForDirectWrite(
+            registry, store.CurrentUnderInstallLock, dataPartitionRouter, key, routedGeneration, now, out partitionId, out fenceGeneration);
     }
 
     /// <summary>True when <paramref name="key"/> belongs to a key-range-routed space.</summary>

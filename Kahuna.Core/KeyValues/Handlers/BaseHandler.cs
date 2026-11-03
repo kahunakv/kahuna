@@ -101,7 +101,7 @@ internal abstract class BaseHandler
         // generation to detect a range move during linger, not the zero that would disable it.
         return RangeRouting.ResolveForDirectWrite(
             context.KeySpaceRegistry,
-            context.RangeMapStore.Current,
+            context.RangeMapStore,
             dataPartitionRouter,
             message.Key,
             message.RoutedGeneration,

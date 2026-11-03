@@ -233,11 +233,14 @@ the descriptor map; everything else hashes.
 The registry is the routing-mode projection of the installed range map, and `RangeMapStore`
 keeps it: every map the store installs (a committed entry, the leader's own entry, the durable
 snapshot at startup, a P0 state transfer) reconciles the registry to that map's key spaces under
-the store's install lock, **before** the map is published. A route reads the mode first and the
-map second, so a reader that sees a space's descriptor in the map always sees the space in
-`KeyRange` mode; the other order would hash-route a key of a freshly seeded space to a partition
-the rest of the cluster does not use for it. The reverse window (mode flipped, map not yet
-swapped) is refused retryably and lasts only until the swap.
+the store's install lock, **before** the map is published. A route captures the map first and
+reads the mode second, so a reader that sees a space's descriptor in the map always sees the space
+in `KeyRange` mode; reconciled after the swap, it would hash-route a key of a freshly seeded space
+to a partition the rest of the cluster does not use for it. The reverse window (mode flipped, the
+reader's map captured before the swap) leaves the reader with no covering descriptor. The locator
+and the leader-side direct-write resolver then read the map again under the store's install lock
+(`RangeMapStore.CurrentUnderInstallLock`), where the install that flipped the mode has published
+its map, so a writer that races a registration never meets that window.
 
 ### DataPartitionRouter (the hash path)
 
@@ -308,9 +311,10 @@ Three consequences to keep in mind:
   the registration is routed by hash until the descriptor is visible, never meets a key-range
   space with no descriptor, and never hash-routes a key whose descriptor it can already see.
   Should the first state ever be observed (a space registered with the mode-only
-  `RegisterKeyRange`, or a route that read the mode an instant before the map swap), the lookup
-  refuses with `RangeDescriptorMissingException`, a `KahunaServerException` carrying `MustRetry`
-  that every public surface answers as a retryable refusal.
+  `RegisterKeyRange` and no descriptor installed for it), the lookup refuses with
+  `RangeDescriptorMissingException`, a `KahunaServerException` carrying `MustRetry` that every
+  public surface answers as a retryable refusal. A route whose map was captured an instant before
+  the swap is not that state: it reads the map again under the install lock and routes by range.
 * **Clients see the rule.** The routing metadata (`GET /v1/cluster/routing`) publishes the hash
   identifier `kahuna.placement-group-jump-xxh32-v1` together with `prefixSeparator` (`/`) and
   `groupSeparator` (`|`); a client that does not implement exactly that stays on learned routes

@@ -63,12 +63,13 @@ internal sealed class KeySpaceRegistry
     /// <c>registry == {range-map key spaces}</c>.
     /// <para>
     /// <see cref="RangeMapStore"/> calls this under its install lock, <b>before</b> it publishes the map.
-    /// A route reads the mode and then the map, so a reader that finds a space's descriptor in
-    /// <see cref="RangeMapStore.Current"/> must already find the space key-range routed: read the other
-    /// way round, the reader hash-routes a key of a seeded space to a partition the rest of the cluster
+    /// A route captures the map and then reads the mode, so a reader that finds a space's descriptor in
+    /// <see cref="RangeMapStore.Current"/> must already find the space key-range routed: reconciled after
+    /// the swap, the reader hash-routes a key of a seeded space to a partition the rest of the cluster
     /// does not use for it, and the write lands where no range read will find it. The reverse window,
-    /// mode flipped and map not yet swapped, refuses the route retryably (no descriptor covers the key)
-    /// and lasts only until the swap.
+    /// mode flipped and the reader's map captured before the swap, leaves the reader with no covering
+    /// descriptor; it then reads the map again under the install lock
+    /// (<see cref="RangeMapStore.CurrentUnderInstallLock"/>), where this install has published it.
     /// </para>
     /// </summary>
     public void ReconcileTo(RangeMap map)
