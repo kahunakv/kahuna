@@ -155,7 +155,7 @@ public static class DashboardHandlers
     /// </summary>
     private static KahunaDashboardSummaryResponse BuildSummary(IRaft raft, IKahuna kahuna, KahunaCommandLineOptions opts)
     {
-        KahunaClusterHealthResponse health = ClusterHandlers.BuildHealthResponse(raft);
+        KahunaClusterHealthResponse health = ClusterHandlers.BuildHealthResponse(raft, kahuna);
 
         string endpoint;
         long membershipVersion = 0;

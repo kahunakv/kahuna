@@ -47,7 +47,7 @@ internal sealed class ByRevisionReadContinuation : ReadContinuation
 
         if (Faulted)
         {
-            Resolve(KeyValueStaticResponses.MustRetryResponse);
+            Resolve(FaultResponse(context));
             return;
         }
 

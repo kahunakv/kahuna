@@ -38,4 +38,27 @@ public sealed class KahunaClusterHealthResponse
     /// </summary>
     [JsonPropertyName("fatalFault")]
     public string? FatalFault { get; set; }
+
+    /// <summary>
+    /// Set when the node's key-value and lock store is fail-stopped on storage damage (the engine reported a
+    /// <c>Corruption</c> status: a block or file whose checksum did not match), or when the store was found
+    /// empty at start while the node's Raft log holds history (the store directory was lost or replaced). In
+    /// the first case the node answers <c>StorageCorrupt</c> to every read and write of the partitions it
+    /// hosts and has withheld its candidacy for them; in the second its partitions are rebuilt from their
+    /// peers (or stay quarantined where none exist). A node in either state answers 503 until an operator
+    /// repairs or replaces the store and restarts it. Null on a healthy node.
+    /// </summary>
+    [JsonPropertyName("storageFault")]
+    public string? StorageFault { get; set; }
+
+    /// <summary>
+    /// Hosted partitions whose Raft storage verdict is anything but healthy or restoring, one line per
+    /// partition naming the verdict and its evidence: a log that lost acknowledged entries, an application
+    /// floor below the WAL's compaction floor (the store is missing a prefix the WAL no longer holds; the
+    /// partition is being rebuilt by snapshot), a fail-stopped WAL engine, or a failed restore. Such a
+    /// partition is not served from this node, so the node answers 503 while the list is non-empty.
+    /// Null or empty on a healthy node.
+    /// </summary>
+    [JsonPropertyName("partitionStorageFaults")]
+    public List<string>? PartitionStorageFaults { get; set; }
 }

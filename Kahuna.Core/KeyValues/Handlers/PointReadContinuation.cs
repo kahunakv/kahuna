@@ -57,7 +57,7 @@ internal sealed class PointReadContinuation : ReadContinuation
         RemovePendingKey(context);
 
         if (Faulted)
-            return KeyValueStaticResponses.MustRetryResponse;
+            return FaultResponse(context);
 
         ReadOnlyKeyValueEntry? disk = DiskResult;
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock

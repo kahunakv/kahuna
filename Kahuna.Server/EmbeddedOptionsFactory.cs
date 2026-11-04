@@ -27,6 +27,19 @@ public static class EmbeddedOptionsFactory
     /// standalone node and a clustered node cannot end up with different function sets from one
     /// command line. Null leaves the node with built-ins only.
     /// </param>
+    /// <summary>
+    /// The <c>--raft-lost-acknowledged-entries-policy</c> value as Kommander's policy, case-insensitively.
+    /// A value that names no policy fails the start with the accepted names, like every other refused option.
+    /// </summary>
+    public static LostAcknowledgedEntriesPolicy ParseLostAcknowledgedEntriesPolicy(string value)
+    {
+        if (Enum.TryParse(value, ignoreCase: true, out LostAcknowledgedEntriesPolicy policy) && Enum.IsDefined(policy))
+            return policy;
+
+        throw new KahunaServerException(
+            $"--raft-lost-acknowledged-entries-policy must be one of {string.Join(", ", Enum.GetNames<LostAcknowledgedEntriesPolicy>())}; got '{value}'.");
+    }
+
     public static EmbeddedKahunaOptions CreateEmbeddedOptions(
         KahunaCommandLineOptions opts,
         RaftTransportSecurityOptions? transportSecurity = null,
@@ -34,6 +47,7 @@ public static class EmbeddedOptionsFactory
         StorageProviders? storageProviders = null) => new()
     {
         TransportSecurity = transportSecurity,
+        RaftLostAcknowledgedEntriesPolicy = ParseLostAcknowledgedEntriesPolicy(opts.RaftLostAcknowledgedEntriesPolicy),
         StorageProviders = storageProviders ?? StorageProviders.CreateDefault(),
         ExtensionOptions = opts.GetExtensionOptions(),
         Functions = functions ?? new(),

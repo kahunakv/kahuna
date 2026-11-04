@@ -252,6 +252,17 @@ public sealed partial class KahunaManager : IKahuna, IDisposable
     }
     
     /// <summary>
+    /// The store's own fail-stop latch is read directly, so the probe reports damage from the moment the
+    /// backend found it — before the writer's next tick trips the node-level gate; the replaced-store
+    /// notice was recorded by the identity check at construction.
+    /// </summary>
+    public KahunaStorageHealth GetStorageHealth()
+    {
+        StorageFailStopGate gate = StorageFailStopGate.For(persistenceBackend);
+        return new(persistenceBackend.GetFailStopReason() ?? gate.FailStopReason, gate.ReplacedStoreNotice);
+    }
+
+    /// <summary>
     /// Flushes all pending dirty objects to the persistence backend and waits for completion.
     /// Use this before closing/disposing to ensure all queued writes land in storage.
     /// </summary>

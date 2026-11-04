@@ -7,6 +7,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using Kahuna.Server.Locks;
 using Kahuna.Persistence.Protos;
+using Kahuna.Server.Persistence.Logging;
 using Kahuna.Server.Persistence.Pitr;
 using Kommander.Time;
 using Kommander.WAL;
@@ -170,6 +171,21 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     private bool storageUnavailable;
 
     private bool disposed;
+
+    /// <summary>
+    /// The storage damage this store fail-stopped on, or null while it is healthy. Set exactly once
+    /// (compare-exchange from null) by <see cref="FailStop(string, Exception?)"/>; read lock-free on every
+    /// fence entry. A damaged store is never reopened and never served again in this process: the files
+    /// stay as they are for forensics, and the repair is the operator's (restore the store from a backup,
+    /// or move it aside so the node is rebuilt from its peers).
+    /// </summary>
+    private StorageCorruptionException? corruptionFailure;
+
+    /// <summary>
+    /// The store identity row (<see cref="PersistentStoreIdentity"/>), in the reserved '\0' namespace so
+    /// every user scan is inert to it, like the pruned-history floor and the tilde registry.
+    /// </summary>
+    private static ReadOnlySpan<byte> StoreIdentityKeyUtf8 => "\0store_identity"u8;
 
     /// <summary>
     /// Reports write failures that this backend converts into a <c>false</c> return — see the
@@ -440,9 +456,29 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         this.enableStatistics = enableStatistics;
         this.logger = logger ?? NullLogger.Instance;
 
-        db = OpenStore(out columnFamilyKeys, out columnFamilyLocks);
+        try
+        {
+            db = OpenStore(out columnFamilyKeys, out columnFamilyLocks);
+        }
+        catch (Exception ex) when (IsCorruption(ex))
+        {
+            // A store whose files fail their checksums at open (a truncated or damaged SST the manifest
+            // still lists) is refused, not opened short: the constructor fails, so the node does not
+            // start over it.
+            throw FailStop(ex.Message, ex);
+        }
 
-        InitializeTildeRegistry();
+        try
+        {
+            InitializeTildeRegistry();
+            ValidateDurabilityFloors();
+        }
+        catch
+        {
+            // The constructor is the only owner; releasing the engine here frees the path's LOCK file.
+            db.Dispose();
+            throw;
+        }
     }
 
     /// <summary>
@@ -484,7 +520,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         {
             iterator.Seek(TildeRegistryRowPrefixUtf8);
 
-            while (iterator.Valid())
+            while (!IteratorEnded(iterator))
             {
                 ReadOnlySpan<byte> rawKey = iterator.GetKeySpan();
                 if (!rawKey.StartsWith(TildeRegistryRowPrefixUtf8))
@@ -509,7 +545,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         using Iterator iterator = db.NewIterator(cf: columnFamilyKeys);
         iterator.SeekToFirst();
 
-        while (iterator.Valid())
+        while (!IteratorEnded(iterator))
         {
             ReadOnlySpan<byte> rawKey = iterator.GetKeySpan();
 
@@ -543,12 +579,15 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             // that single event into a permanently unopenable store — at process start (crash
             // loop) and equally on the in-place recovery reopen after a storage failure.
             //
-            // TolerateCorruptedTailRecords (RocksDB's own default) drops that one short record and
-            // opens. Dropping it loses nothing that was promised: every write here is synced
-            // (DefaultWriteOptions), so a record that is short was never acknowledged — it belongs
-            // to a failed batch the background writer still retains, or to state whose Raft WAL
-            // entries the durability floor keeps replayable. Real damage — a checksum mismatch
-            // with whole records after it — still refuses to open in this mode.
+            // TolerateCorruptedTailRecords drops that one short record and opens. (RocksDB's own
+            // default is kPointInTimeRecovery, which also stops at the first damaged record but keeps
+            // whatever precedes it; the two differ only in what they do with a corrupt record that has
+            // intact records after it, which the tolerant mode refuses.) Dropping a short tail loses
+            // nothing that was promised: every write here is synced (DefaultWriteOptions), so a record
+            // that is short was never acknowledged — it belongs to a failed batch the background writer
+            // still retains, or to state whose Raft WAL entries the durability floor keeps replayable.
+            // Real damage — a checksum mismatch with whole records after it — still refuses to open in
+            // this mode, and the constructor turns that refusal into a fail-stop.
             .SetWalRecoveryMode(Recovery.TolerateCorruptedTailRecords)
             // Use available cores for background flush/compaction so writes don't stall behind a
             // single-threaded compactor under sustained load.
@@ -655,6 +694,11 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// </summary>
     private void EnterDbFence()
     {
+        // Fail-stopped on damage: refused before the fence, so the answer is the same whether the engine
+        // is still open (damage found on a read or a write) or closed (damage found on a reopen).
+        if (Volatile.Read(ref corruptionFailure) is { } corruption)
+            throw Refusal(corruption);
+
         swapFence.EnterReadLock();
 
         if (storageUnavailable)
@@ -662,6 +706,112 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             swapFence.ExitReadLock();
             throw new IOException(
                 $"The RocksDB store at '{path}/{dbRevision}' is closed after a storage failure; recovery has not reopened it yet.");
+        }
+    }
+
+    // ── Fail-stop on storage damage ──────────────────────────────────────────────────────────
+    //
+    // RocksDB reports a damaged block, SST or log file as a Status whose code is Corruption. The C API
+    // hands the binding only the status text, which Status::ToString() renders as the code's name followed
+    // by ": " ("Corruption: block checksum mismatch: ..."), so the prefix is the one classification
+    // available. Every path to the engine can meet it: a point read or MultiGet of a damaged block, an
+    // iterator that reaches one (it goes invalid and parks the status; see IteratorEnded), a write
+    // after a compaction latched it as the engine's background error, and the open itself. Each one
+    // fail-stops the store: the first damage wins, and from then on every operation is refused at the
+    // fence with the same StorageCorruptionException, stores return false, and the ENOSPC recovery
+    // declines to close or reopen the engine, so the files are left exactly as they are.
+    //
+    // This is deliberately not a reopen-and-retry: the ENOSPC recovery exists because a full volume is
+    // transient, while a checksum mismatch is not — reopening would meet the same damage on the next
+    // read or compaction and loop, with the node looking healthy in between.
+
+    /// <summary>True when <paramref name="ex"/> is a storage-engine failure whose status code is <c>Corruption</c>.</summary>
+    private static bool IsCorruption(Exception? ex) =>
+        ex is RocksDbException or RocksDbSharpException
+        && ex.Message.StartsWith("Corruption:", StringComparison.Ordinal);
+
+    /// <summary>
+    /// Latches the fail-stop once (the first damage wins; later ones are the same damage seen again),
+    /// with one Critical line naming the store directory and the evidence, and returns the exception
+    /// every refused operation throws from now on. Idempotent and lock-free, so it is safe from any read
+    /// or write path and from inside an exception filter.
+    /// </summary>
+    private StorageCorruptionException FailStop(string evidence, Exception? cause = null)
+    {
+        string storePath = $"{path}/{dbRevision}";
+
+        StorageCorruptionException failure = new(
+            storePath,
+            $"The RocksDB store at '{storePath}' is fail-stopped on storage damage and refuses every operation until an operator repairs or replaces it: {evidence}",
+            cause);
+
+        StorageCorruptionException? first = Interlocked.CompareExchange(ref corruptionFailure, failure, null);
+        if (first is not null)
+            return Refusal(first);
+
+        logger.LogStoreFailStop(cause, path, dbRevision, evidence);
+
+        return failure;
+    }
+
+    /// <summary>
+    /// A fresh exception carrying the latched failure, so concurrent refusals never throw one shared
+    /// instance (a thrown exception records its stack on itself). Only ever built on the refusal path.
+    /// </summary>
+    private static StorageCorruptionException Refusal(StorageCorruptionException latched) =>
+        new(latched.StorePath, latched.Message, latched.InnerException);
+
+    /// <summary>
+    /// For the store paths, whose contract is a <c>false</c> return rather than a throw: latches the
+    /// fail-stop when <paramref name="ex"/> is storage damage, so the writer's next attempt is refused at
+    /// the fence instead of touching the engine again.
+    /// </summary>
+    private void NoteStoreFailure(Exception ex)
+    {
+        if (IsCorruption(ex))
+            FailStop(ex.Message, ex);
+    }
+
+    /// <summary>
+    /// True when <paramref name="iterator"/> has no current entry, after checking why. A RocksDB
+    /// iterator that reaches a damaged block does not throw: it becomes invalid and parks the
+    /// <c>Corruption</c> status on itself, so a scan that only tested <c>Valid()</c> ended early and
+    /// returned a short page as if the range ended there — a range scan would have silently dropped every
+    /// row past the damage. Every iterator loop in this file ends through this check, which rethrows a
+    /// parked error as the engine's own exception; the public entry points then fail-stop the store. One
+    /// native call per scan end, nothing per entry.
+    /// </summary>
+    private static bool IteratorEnded(Iterator iterator)
+    {
+        if (iterator.Valid())
+            return false;
+
+        // The binding exposes no Status() on Iterator; the native getter throws the engine's own
+        // exception when the iterator parked an error, and returns quietly at a normal end.
+        Native.Instance.rocksdb_iter_get_error(iterator.Handle);
+        return true;
+    }
+
+    public string? GetFailStopReason() => Volatile.Read(ref corruptionFailure)?.Message;
+
+    /// <summary>Test seam: flushes every memtable to SST files and waits, so a test can damage a data block on disk.</summary>
+    internal void FlushMemTablesForTesting()
+    {
+        EnterDbFence();
+        try
+        {
+            FlushOptions flushOptions = new();
+            Native.Instance.rocksdb_flushoptions_set_wait(flushOptions.Handle, 1);
+            Native.Instance.rocksdb_flush_cf(db.Handle, flushOptions.Handle, columnFamilyKeys.Handle);
+            Native.Instance.rocksdb_flush_cf(db.Handle, flushOptions.Handle, columnFamilyLocks.Handle);
+        }
+        catch (Exception ex) when (IsCorruption(ex))
+        {
+            throw FailStop(ex.Message, ex);
+        }
+        finally
+        {
+            ExitDbFence();
         }
     }
 
@@ -713,6 +863,14 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// </summary>
     public bool TryRecoverFromStorageFailure()
     {
+        // Damage is not what this recovery is for: a reopen would meet it again on the next read or
+        // compaction. The store stays as it is (open or closed) and keeps refusing at the fence.
+        if (Volatile.Read(ref corruptionFailure) is { } corruption)
+        {
+            logger.LogStoreRecoveryDeclinedOnDamage(path, dbRevision, corruption.Message);
+            return false;
+        }
+
         if (!HasFreeSpaceForReopen())
         {
             logger.LogWarning(
@@ -742,6 +900,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 {
                     db = OpenStore(out columnFamilyKeys, out columnFamilyLocks);
                     InitializeTildeRegistry();
+                    ValidateDurabilityFloors();
                     ClearPruneMemos();
                     ResetSweepQuiescence();
                     storageUnavailable = false;
@@ -757,6 +916,14 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                     logger.LogError(ex,
                         "RocksDb store at {Path}/{Revision} failed reopen attempt {Attempt}/{Max}",
                         path, dbRevision, attempt, RecoveryReopenAttempts);
+
+                    // A reopen that fails on damage fails the same way every time; stop retrying it. The
+                    // store stays closed and fail-stopped, and every caller is refused at the fence.
+                    if (IsCorruption(ex))
+                    {
+                        FailStop(ex.Message, ex);
+                        return false;
+                    }
 
                     if (attempt < RecoveryReopenAttempts)
                         Thread.Sleep(200 * attempt);
@@ -778,6 +945,10 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         {
             lock (_floorLock)
                 return CurrentPrunedFloorLocked();
+        }
+        catch (Exception ex) when (IsCorruption(ex))
+        {
+            throw FailStop(ex.Message, ex);
         }
         finally
         {
@@ -824,8 +995,9 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 else
                     _prunedFloorCorrupt = true;
             }
-            catch
+            catch (Exception ex)
             {
+                NoteStoreFailure(ex);
                 _prunedFloorCorrupt = true;
             }
         }
@@ -884,7 +1056,17 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
 
     public bool StoreDurabilityFloors(IReadOnlyList<(int PartitionId, long Floor)> floors)
     {
-        EnterDbFence();
+        // "false on failure" contract (see StoreDurabilityFloorsFenced): once the store is fail-stopped the
+        // fence refuses the write before the body runs, and that refusal is a failed store, not a throw.
+        try
+        {
+            EnterDbFence();
+        }
+        catch (StorageCorruptionException)
+        {
+            return false;
+        }
+
         try
         {
             return StoreDurabilityFloorsFenced(floors);
@@ -929,6 +1111,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         }
         catch (Exception ex)
         {
+            NoteStoreFailure(ex);
             logger.LogError(ex, "RocksDb write of {Count} durability floors failed", floors.Count);
             return false;
         }
@@ -943,7 +1126,140 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         {
             byte[]? data = db.Get(Encoding.UTF8.GetBytes(DurabilityFloorKeyPrefix + partitionId), cf: columnFamilyKeys);
 
-            return data is { Length: 8 } ? BinaryPrimitives.ReadInt64LittleEndian(data) : -1;
+            if (data is null)
+                return -1;
+
+            // A floor row that is not exactly 8 bytes is damage to the store's own bookkeeping, not an
+            // absent floor: reading it as "no floor" would let the restart replay only the suffix the
+            // WAL still holds over rows this store may have, or may not have.
+            if (data.Length != 8)
+                throw FailStop($"the durability floor row of partition #{partitionId} holds {data.Length} bytes; expected 8");
+
+            return BinaryPrimitives.ReadInt64LittleEndian(data);
+        }
+        catch (Exception ex) when (IsCorruption(ex))
+        {
+            throw FailStop(ex.Message, ex);
+        }
+        finally
+        {
+            ExitDbFence();
+        }
+    }
+
+    public bool KeepsDurabilityFloors => true;
+
+    /// <summary>
+    /// Refuses a store whose durability floor rows cannot be decoded. Runs at every open (the
+    /// constructor and the recovery reopen), before any floor is consulted, so a damaged row fails the
+    /// open with a clear message instead of being read as "no floor" at the restart replay. The rows are
+    /// few (one per partition this node ever flushed for), so the scan costs nothing measurable.
+    /// </summary>
+    private void ValidateDurabilityFloors()
+    {
+        using Iterator iterator = db.NewIterator(cf: columnFamilyKeys);
+        iterator.Seek(DurabilityFloorKeyPrefixUtf8);
+
+        while (!IteratorEnded(iterator))
+        {
+            ReadOnlySpan<byte> rawKey = iterator.GetKeySpan();
+            if (!rawKey.StartsWith(DurabilityFloorKeyPrefixUtf8))
+                break;
+
+            if (iterator.GetValueSpan().Length != 8)
+            {
+                throw FailStop(
+                    $"the durability floor row '{Encoding.UTF8.GetString(rawKey)}' holds {iterator.GetValueSpan().Length} bytes; expected 8");
+            }
+
+            iterator.Next();
+        }
+    }
+
+    public bool SupportsStoreIdentity => true;
+
+    public PersistentStoreIdentity? GetStoreIdentity()
+    {
+        EnterDbFence();
+        try
+        {
+            byte[]? data = db.Get(StoreIdentityKeyUtf8, cf: columnFamilyKeys);
+            if (data is null)
+                return null;
+
+            if (!PersistentStoreIdentity.TryDecode(data, out PersistentStoreIdentity? identity))
+                throw FailStop($"the store identity row holds {data.Length} bytes that do not decode as an identity");
+
+            return identity;
+        }
+        catch (Exception ex) when (IsCorruption(ex))
+        {
+            throw FailStop(ex.Message, ex);
+        }
+        finally
+        {
+            ExitDbFence();
+        }
+    }
+
+    public bool WriteStoreIdentity(PersistentStoreIdentity identity)
+    {
+        EnterDbFence();
+        try
+        {
+            // Synced: the identity is what tells a wiped store from a fresh one at the next open, so it
+            // must not be lost to a crash right after the first open.
+            db.Put(StoreIdentityKeyUtf8, identity.Encode(), cf: columnFamilyKeys, writeOptions: DefaultWriteOptions);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            NoteStoreFailure(ex);
+            logger.LogError(ex, "RocksDb write of the store identity failed");
+            return false;
+        }
+        finally
+        {
+            ExitDbFence();
+        }
+    }
+
+    /// <summary>
+    /// True when the store holds a key-value row, a lock row or a durability floor: anything a node
+    /// wrote, as opposed to the internal '\0' markers and the legacy pruned-history floor.
+    /// </summary>
+    public bool HoldsDurableState()
+    {
+        EnterDbFence();
+        try
+        {
+            using (Iterator iterator = db.NewIterator(cf: columnFamilyKeys))
+            {
+                iterator.SeekToFirst();
+
+                while (!IteratorEnded(iterator))
+                {
+                    ReadOnlySpan<byte> rawKey = iterator.GetKeySpan();
+
+                    if ((rawKey.Length > 0 && rawKey[0] == 0) || rawKey.SequenceEqual(LegacyPrunedFloorKeyUtf8))
+                    {
+                        iterator.Next();
+                        continue;
+                    }
+
+                    return true;
+                }
+            }
+
+            using (Iterator iterator = db.NewIterator(cf: columnFamilyLocks))
+            {
+                iterator.SeekToFirst();
+                return !IteratorEnded(iterator);
+            }
+        }
+        catch (Exception ex) when (IsCorruption(ex))
+        {
+            throw FailStop(ex.Message, ex);
         }
         finally
         {
@@ -959,6 +1275,10 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             db.Remove(Encoding.UTF8.GetBytes(DurabilityFloorKeyPrefix + partitionId), cf: columnFamilyKeys);
             return true;
         }
+        catch (Exception ex) when (IsCorruption(ex))
+        {
+            throw FailStop(ex.Message, ex);
+        }
         finally
         {
             ExitDbFence();
@@ -972,7 +1292,17 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// <returns>Returns <c>true</c> if the operation completes successfully.</returns>
     public bool StoreLocks(List<PersistenceRequestItem> items)
     {
-        EnterDbFence();
+        // "false on failure" contract (see StoreDurabilityFloorsFenced): once the store is fail-stopped the
+        // fence refuses the write before the body runs, and that refusal is a failed store, not a throw.
+        try
+        {
+            EnterDbFence();
+        }
+        catch (StorageCorruptionException)
+        {
+            return false;
+        }
+
         try
         {
             return StoreLocksFenced(items);
@@ -1020,6 +1350,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         }
         catch (Exception ex)
         {
+            NoteStoreFailure(ex);
             logger.LogError(ex, "RocksDb write of {Count} locks failed", items.Count);
             return false;
         }
@@ -1091,7 +1422,17 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// <returns>Returns <c>true</c> if the operation is successfully completed.</returns>
     public bool StoreKeyValues(List<PersistenceRequestItem> items)
     {
-        EnterDbFence();
+        // "false on failure" contract (see StoreDurabilityFloorsFenced): once the store is fail-stopped the
+        // fence refuses the write before the body runs, and that refusal is a failed store, not a throw.
+        try
+        {
+            EnterDbFence();
+        }
+        catch (StorageCorruptionException)
+        {
+            return false;
+        }
+
         try
         {
             return StoreKeyValuesFenced(items);
@@ -1148,6 +1489,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         }
         catch (Exception ex)
         {
+            NoteStoreFailure(ex);
             logger.LogError(ex, "RocksDb read of {Count} current heads failed", currentCandidates.Count);
             return false;
         }
@@ -1217,6 +1559,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         }
         catch (Exception ex)
         {
+            NoteStoreFailure(ex);
             logger.LogError(ex, "RocksDb read of guarded history rows failed");
             return false;
         }
@@ -1251,6 +1594,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         }
         catch (Exception ex)
         {
+            NoteStoreFailure(ex);
             logger.LogError(ex, "RocksDb write of {Count} key-values failed", items.Count);
             return false;
         }
@@ -1923,6 +2267,10 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         {
             return GetLockFenced(resource);
         }
+        catch (Exception ex) when (IsCorruption(ex))
+        {
+            throw FailStop(ex.Message, ex);
+        }
         finally
         {
             ExitDbFence();
@@ -1990,6 +2338,10 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         try
         {
             return GetKeyValueFenced(keyName);
+        }
+        catch (Exception ex) when (IsCorruption(ex))
+        {
+            throw FailStop(ex.Message, ex);
         }
         finally
         {
@@ -2062,6 +2414,10 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         {
             return GetKeyValuesFenced(keyNames);
         }
+        catch (Exception ex) when (IsCorruption(ex))
+        {
+            throw FailStop(ex.Message, ex);
+        }
         finally
         {
             ExitDbFence();
@@ -2118,6 +2474,10 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         try
         {
             return GetKeyValueRevisionFenced(keyName, revision);
+        }
+        catch (Exception ex) when (IsCorruption(ex))
+        {
+            throw FailStop(ex.Message, ex);
         }
         finally
         {
@@ -2246,6 +2606,10 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
 
             return new KeyValueHydration(head, recent);
         }
+        catch (Exception ex) when (IsCorruption(ex))
+        {
+            throw FailStop(ex.Message, ex);
+        }
         finally
         {
             ExitDbFence();
@@ -2275,6 +2639,10 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         try
         {
             return GetKeyValueRevisionAtOrBeforeFenced(keyName, maxRevision, readTimestamp, ref tally);
+        }
+        catch (Exception ex) when (IsCorruption(ex))
+        {
+            throw FailStop(ex.Message, ex);
         }
         finally
         {
@@ -2370,7 +2738,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             // One parse shell serves every row of the scan; fields are copied out per row.
             RocksDbKeyValueMessage shell = new();
 
-            while (iterator.Valid())
+            while (!IteratorEnded(iterator))
             {
                 ReadOnlySpan<byte> rawKey = iterator.GetKeySpan();
 
@@ -2443,6 +2811,10 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         {
             return GetKeyValueByPrefixFenced(prefixKeyName);
         }
+        catch (Exception ex) when (IsCorruption(ex))
+        {
+            throw FailStop(ex.Message, ex);
+        }
         finally
         {
             ExitDbFence();
@@ -2472,7 +2844,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
 
             int nonCurrentRun = 0;
 
-            while (iterator.Valid() && result.Count < KeyValueScanLimits.MaxPrefixScanResults)
+            while (!IteratorEnded(iterator) && result.Count < KeyValueScanLimits.MaxPrefixScanResults)
             {
                 // GetKeySpan returns a span directly over native memory — no byte[] copy.
                 // Valid only until the next iterator move; consumed entirely before Next().
@@ -2532,6 +2904,10 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         {
             return GetKeyValueByPrefixAtOrBeforeFenced(prefixKeyName, readTimestamp, shouldAbort);
         }
+        catch (Exception ex) when (IsCorruption(ex))
+        {
+            throw FailStop(ex.Message, ex);
+        }
         finally
         {
             ExitDbFence();
@@ -2570,7 +2946,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             // One parse shell serves every row of the scan; fields are copied out per row.
             RocksDbKeyValueMessage shell = new();
 
-            while (iterator.Valid())
+            while (!IteratorEnded(iterator))
             {
                 if ((rowsExamined & 1023) == 0 && shouldAbort is not null && shouldAbort())
                 {
@@ -2790,6 +3166,10 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         {
             return GetKeyValueByRangeFenced(prefix, startKey, null, false, limit, ref tally);
         }
+        catch (Exception ex) when (IsCorruption(ex))
+        {
+            throw FailStop(ex.Message, ex);
+        }
         finally
         {
             ExitDbFence();
@@ -2807,6 +3187,10 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         try
         {
             return GetKeyValueByRangeFenced(prefix, startKey, endKey, endInclusive, limit, ref tally);
+        }
+        catch (Exception ex) when (IsCorruption(ex))
+        {
+            throw FailStop(ex.Message, ex);
         }
         finally
         {
@@ -2867,7 +3251,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             int nonCurrentRun = 0;
             bool stoppedAtEndBound = false;
 
-            while (iterator.Valid() && result.Count < limit)
+            while (!IteratorEnded(iterator) && result.Count < limit)
             {
                 // GetKeySpan returns a span directly over native memory — no byte[] copy.
                 // Valid only until the next iterator move; consumed entirely before Next().
@@ -3012,7 +3396,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 CurrentMarkerUtf8.CopyTo(head[length..]);
 
                 iterator.Seek(head);
-                if (!iterator.Valid() || !iterator.GetKeySpan().SequenceEqual(head))
+                if (IteratorEnded(iterator) || !iterator.GetKeySpan().SequenceEqual(head))
                     continue;
 
                 string key = Encoding.UTF8.GetString(candidate);
@@ -3057,6 +3441,10 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         {
             return ScanKeyValuesFenced(cursor, limit);
         }
+        catch (Exception ex) when (IsCorruption(ex))
+        {
+            throw FailStop(ex.Message, ex);
+        }
         finally
         {
             ExitDbFence();
@@ -3080,7 +3468,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
 
         int nonCurrentRun = 0;
 
-        while (iterator.Valid() && items.Count < limit)
+        while (!IteratorEnded(iterator) && items.Count < limit)
         {
             ReadOnlySpan<byte> rawKey = iterator.GetKeySpan();
 
@@ -3131,6 +3519,10 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         {
             return ScanLocksFenced(cursor, limit);
         }
+        catch (Exception ex) when (IsCorruption(ex))
+        {
+            throw FailStop(ex.Message, ex);
+        }
         finally
         {
             ExitDbFence();
@@ -3149,7 +3541,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         else
             iterator.Seek(Encoding.UTF8.GetBytes(cursor));
 
-        while (iterator.Valid() && items.Count < limit)
+        while (!IteratorEnded(iterator) && items.Count < limit)
         {
             ReadOnlySpan<byte> rawKey = iterator.GetKeySpan();
 
@@ -3203,6 +3595,10 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         {
             return DeleteFamilyRows(keys, columnFamilyKeys);
         }
+        catch (Exception ex) when (IsCorruption(ex))
+        {
+            throw FailStop(ex.Message, ex);
+        }
         finally
         {
             ExitDbFence();
@@ -3216,6 +3612,10 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         try
         {
             return DeleteFamilyRows(resources, columnFamilyLocks);
+        }
+        catch (Exception ex) when (IsCorruption(ex))
+        {
+            throw FailStop(ex.Message, ex);
         }
         finally
         {
@@ -3234,7 +3634,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
 
             iterator.Seek(prefix);
 
-            while (iterator.Valid())
+            while (!IteratorEnded(iterator))
             {
                 ReadOnlySpan<byte> rawKey = iterator.GetKeySpan();
 
@@ -3550,6 +3950,10 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         {
             return PruneKeyValueRevisionsFenced(keys, retentionCount, retentionAge, batchSize, floorTimestamp, timeBudget, out result);
         }
+        catch (Exception ex) when (IsCorruption(ex))
+        {
+            throw FailStop(ex.Message, ex);
+        }
         finally
         {
             ExitDbFence();
@@ -3679,7 +4083,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             else
                 iterator.Seek(sweepCursor);
 
-            while (iterator.Valid())
+            while (!IteratorEnded(iterator))
             {
                 if (deleted >= batchSize || keysVisited >= keyBudget)
                 {
@@ -3866,7 +4270,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             Iterator iterator = walk.Iterator;
             iterator.Seek(prefixBytes);
 
-            while (iterator.Valid())
+            while (!IteratorEnded(iterator))
             {
                 // Filter on the native key span — no per-row string decode. Only rows we keep are
                 // materialised (their key bytes are retained below for the later batch.Delete).
@@ -4088,6 +4492,10 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         {
             return CreateCheckpointFenced(destinationPath, appliedIndex, appliedTime, cut, retainKey, ct);
         }
+        catch (Exception ex) when (IsCorruption(ex))
+        {
+            throw FailStop(ex.Message, ex);
+        }
         finally
         {
             ExitDbFence();
@@ -4303,7 +4711,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             using (Iterator it = copy.NewIterator(readOptions: scanReadOptions, cf: kv))
             {
                 it.SeekToFirst();
-                while (it.Valid())
+                while (!IteratorEnded(it))
                 {
                     ct.ThrowIfCancellationRequested();
 
@@ -4311,7 +4719,11 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                     int lastTilde = rawKey.LastIndexOf((byte)'~');
                     if (lastTilde < 0)
                     {
-                        if (retainKey is not null && rawKey.StartsWith(DurabilityFloorKeyPrefixUtf8))
+                        // The identity names the node that owns the live store, never the data: an image
+                        // restored or seeded on another node must not carry it, or that node would refuse
+                        // its own store as foreign. The node that opens the image stamps its own.
+                        if (rawKey.SequenceEqual(StoreIdentityKeyUtf8)
+                            || (retainKey is not null && rawKey.StartsWith(DurabilityFloorKeyPrefixUtf8)))
                         {
                             batch.Delete(rawKey.ToArray(), cf: kv);
                             batchOps++;
@@ -4390,7 +4802,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             using (Iterator lockIt = copy.NewIterator(readOptions: scanReadOptions, cf: locksCf))
             {
                 lockIt.SeekToFirst();
-                while (lockIt.Valid())
+                while (!IteratorEnded(lockIt))
                 {
                     ct.ThrowIfCancellationRequested();
                     batch.Delete(lockIt.GetKeySpan().ToArray(), cf: locksCf);
@@ -4456,7 +4868,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             using (Iterator it = source.NewIterator(readOptions: MaintenanceScanReadOptions, cf: sourceKv))
             {
                 it.SeekToFirst();
-                while (it.Valid())
+                while (!IteratorEnded(it))
                 {
                     ct.ThrowIfCancellationRequested();
 
@@ -4465,9 +4877,9 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                     if (rawKey.SequenceEqual(TildeRegistrySentinelKeyUtf8))
                         sourceHasSentinel = true;
                     else if (rawKey.SequenceEqual(PrunedFloorKeyUtf8) || rawKey.SequenceEqual(LegacyPrunedFloorKeyUtf8)
-                             || rawKey.StartsWith(DurabilityFloorKeyPrefixUtf8))
+                             || rawKey.StartsWith(DurabilityFloorKeyPrefixUtf8) || rawKey.SequenceEqual(StoreIdentityKeyUtf8))
                     {
-                        // Combined (the floor) or dropped (durability floors) below.
+                        // Combined (the floor) or dropped (durability floors, the source node's identity) below.
                     }
                     else
                     {

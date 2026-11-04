@@ -410,6 +410,9 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-snapshot-chunk-ack-timeout", Required = false, HelpText = "Upper bound on the acknowledgement of one snapshot chunk, in milliseconds. A receiver whose install path is stuck fails the transfer after this bound instead of holding it open for the whole transfer step timeout. The effective bound is the smaller of the two options. Must be positive.", Default = 15000)]
     public int RaftSnapshotChunkAckTimeout { get; set; } = 15000;
 
+    [Option("raft-lost-acknowledged-entries-policy", Required = false, HelpText = "What a partition does when its WAL restore finds the log shorter than what this node had acknowledged as durably held (a synced tail truncated or lost after the leader may have counted it): Quarantine (the partition neither votes nor campaigns until the leader has replicated past the lost range again or a snapshot covers it; a single-voter partition stays leaderless until the operator acts) or AcceptAndLog (accept the loss, log it at Critical, and run normally; the lost entries are gone for good on this node).", Default = "Quarantine")]
+    public string RaftLostAcknowledgedEntriesPolicy { get; set; } = "Quarantine";
+
     [Option("raft-max-pre-auth-request-body-bytes", Required = false, HelpText = "Ceiling on a Raft REST request body before it is authenticated/signed, in bytes. Bounds buffering independent of the host's own request-size limit.", Default = 32L * 1024 * 1024)]
     public long RaftMaxPreAuthRequestBodyBytes { get; set; } = 32L * 1024 * 1024;
 

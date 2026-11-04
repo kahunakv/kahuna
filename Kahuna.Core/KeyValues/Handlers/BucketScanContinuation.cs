@@ -114,7 +114,7 @@ internal sealed class BucketScanContinuation : ReadContinuation
 
         if (Faulted)
         {
-            Resolve(KeyValueStaticResponses.MustRetryResponse);
+            Resolve(FaultResponse(context));
             return;
         }
 

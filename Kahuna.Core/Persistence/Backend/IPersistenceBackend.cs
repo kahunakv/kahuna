@@ -68,6 +68,51 @@ public interface IPersistenceBackend
     public bool TryRecoverFromStorageFailure() => false;
 
     /// <summary>
+    /// The storage engine's own message when this backend is fail-stopped on storage damage — a
+    /// <c>Corruption</c> status (a block or file whose checksum did not match, a file shorter than its
+    /// manifest records) seen on a read, a write or the open, or a bookkeeping row of the backend's own
+    /// that could not be decoded — or null while it is healthy. A fail-stopped backend answers every
+    /// operation with <see cref="StorageCorruptionException"/> (stores return false) and
+    /// <see cref="TryRecoverFromStorageFailure"/> declines without touching the files, so the damage is
+    /// kept for forensics; the condition is permanent for the process. The default never fail-stops,
+    /// which is right for backends that have no such fault class.
+    /// </summary>
+    public string? GetFailStopReason() => null;
+
+    /// <summary>
+    /// True when this backend persists the per-partition durability floors it is given, so that a
+    /// partition with no recorded floor is one this store has never flushed for: its durable state for
+    /// that partition is empty. The durability provider answers <c>0</c> ("nothing durably applied") for
+    /// such a data partition, which is what lets Kommander refuse to replay a compacted suffix onto a store
+    /// that lost its prefix. The default is false: a backend that keeps no floors has no opinion.
+    /// </summary>
+    public bool KeepsDurabilityFloors => false;
+
+    /// <summary>
+    /// True when this backend records a <see cref="PersistentStoreIdentity"/> in its own storage, so the
+    /// node can check at start that the store is its own and was not emptied behind its back. False for
+    /// backends whose state does not outlive the process.
+    /// </summary>
+    public bool SupportsStoreIdentity => false;
+
+    /// <summary>
+    /// The identity recorded in the store, or null when none was recorded (a store written by a build
+    /// that predates the identity, a fresh store, or a store that was emptied). Throws
+    /// <see cref="StorageCorruptionException"/> for a row that cannot be decoded.
+    /// </summary>
+    public PersistentStoreIdentity? GetStoreIdentity() => null;
+
+    /// <summary>Records <paramref name="identity"/> durably. False when the backend could not write it.</summary>
+    public bool WriteStoreIdentity(PersistentStoreIdentity identity) => false;
+
+    /// <summary>
+    /// True when the store holds any durable state of a node's own — a key-value or lock row, a durability
+    /// floor — as opposed to the backend's internal markers only. Consulted once at start, with the identity
+    /// absent, to tell a store that predates the identity from one that was emptied.
+    /// </summary>
+    public bool HoldsDurableState() => false;
+
+    /// <summary>
     /// True when every read this backend serves comes from process memory and never waits for storage
     /// I/O. A read then costs microseconds, so a scan page may be read on the key-value actor's own
     /// thread instead of a backend read scheduler worker: the scheduler hand-off, the thread-pool

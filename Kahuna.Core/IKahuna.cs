@@ -639,6 +639,16 @@ public interface IKahuna
     /// </summary>
     public Task<int> TriggerAutoMergeAsync(CancellationToken ct = default);
 
+    // ── Storage health ─────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// What the node knows about the integrity of its own key-value and lock store: whether it is
+    /// fail-stopped on storage damage, and whether it was found empty at start while the Raft log held
+    /// history. Either fault makes the node not ready; the readiness probe reports them. The default is
+    /// the healthy report, for implementations that have no persistent store.
+    /// </summary>
+    public Server.Persistence.KahunaStorageHealth GetStorageHealth() => Server.Persistence.KahunaStorageHealth.Healthy;
+
     // ── Backup / PITR ──────────────────────────────────────────────────────────────────────
 
     /// <summary>Returns true when a backup directory is configured on this node.</summary>

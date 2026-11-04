@@ -90,8 +90,38 @@ internal abstract class ReadContinuation
     /// </summary>
     internal bool Faulted { get; private set; }
 
+    /// <summary>The exception the backend read faulted with, when the stage-2 callback had one; see <see cref="FaultResponse"/>.</summary>
+    private Exception? fault;
+
     /// <summary>Marks this continuation as faulted. Call only from the stage-2 callback.</summary>
     internal void SetFaulted() => Faulted = true;
+
+    /// <summary>
+    /// Marks this continuation as faulted with the exception the backend read faulted with, so stage 3
+    /// can tell storage damage from a transient fault. Call only from the stage-2 callback.
+    /// </summary>
+    internal void SetFaulted(Exception? exception)
+    {
+        Faulted = true;
+        fault = exception;
+    }
+
+    /// <summary>
+    /// The response every waiter of a faulted read receives, decided on the actor thread (stage 3). A
+    /// read that met storage damage (<see cref="Persistence.Backend.StorageCorruptionException"/>) is
+    /// answered <c>StorageCorrupt</c>, which no client retries against this node, and trips the node's
+    /// storage fail-stop so it withholds its candidacy and steps down; nothing read from the damaged
+    /// store is served. Every other fault — a scheduler rejection, a transient I/O error, a disposed
+    /// engine mid-recovery — stays the retryable <c>MustRetry</c>.
+    /// </summary>
+    internal KeyValueResponse FaultResponse(KeyValueContext context)
+    {
+        if (Persistence.Backend.StorageCorruptionException.Find(fault) is not { } corruption)
+            return KeyValueStaticResponses.MustRetryResponse;
+
+        Persistence.StorageFailStopGate.For(context.PersistenceBackend).Trip(corruption.Message);
+        return KeyValueStaticResponses.StorageCorruptResponse;
+    }
 
     protected ReadContinuation(KeyValueReplyRef promise)
     {

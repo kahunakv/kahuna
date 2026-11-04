@@ -124,7 +124,7 @@ internal sealed class SnapshotReadContinuation : ReadContinuation
         RemovePendingKey(context);
 
         if (Faulted)
-            return KeyValueStaticResponses.MustRetryResponse;
+            return FaultResponse(context);
 
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock
             .TrySendOrLocalEvent(context.Raft.GetLocalNodeId());

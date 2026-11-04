@@ -2,6 +2,7 @@
 using System.Collections.Concurrent;
 using Kahuna.Server.Persistence.Backend;
 using Kommander;
+using Kommander.System;
 
 namespace Kahuna.Server.Persistence;
 
@@ -39,11 +40,32 @@ internal sealed class KahunaDurabilityProvider : IApplicationDurabilityProvider
 
     public long GetDurablyAppliedIndex(int partitionId)
     {
-        long persisted = persistedFloors.GetOrAdd(partitionId, persistenceBackend.GetDurabilityFloor);
+        long persisted = persistedFloors.GetOrAdd(partitionId, ReadPersistedFloor);
 
         long live = tracker.GetWatermark(partitionId);
 
         return Math.Max(live, persisted);
+    }
+
+    /// <summary>
+    /// The backend's floor for the partition, with an absent floor resolved by what absence means for the
+    /// backend. A store that persists floors (<see cref="IPersistenceBackend.KeepsDurabilityFloors"/>) and
+    /// has none for a data partition has flushed nothing for it: the durable state is empty, and the
+    /// provider contract asks for 0 there, so Kommander treats the store as empty rather than as "no
+    /// opinion" — an empty store under a compacted log is then refused replay and rebuilt by snapshot
+    /// instead of silently serving a suffix without its prefix (a store that was wiped or replaced). The
+    /// system partition keeps "no opinion": its consumer entries (the range map, the hold registry) are
+    /// not floor-tracked, so their absence says nothing about the store. A backend that keeps no floors
+    /// never has an opinion.
+    /// </summary>
+    private long ReadPersistedFloor(int partitionId)
+    {
+        long floor = persistenceBackend.GetDurabilityFloor(partitionId);
+
+        if (floor >= 0)
+            return floor;
+
+        return persistenceBackend.KeepsDurabilityFloors && partitionId != RaftSystemConfig.SystemPartition ? 0 : -1;
     }
 
     /// <summary>

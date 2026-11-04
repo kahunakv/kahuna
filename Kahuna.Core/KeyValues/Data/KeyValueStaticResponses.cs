@@ -32,6 +32,9 @@ internal static class KeyValueStaticResponses
     
     internal static readonly KeyValueResponse MustRetryResponse = new(KeyValueResponseType.MustRetry);
 
+    /// <summary>The store reported damage, or is fail-stopped on it: terminal for this node, never retried.</summary>
+    internal static readonly KeyValueResponse StorageCorruptResponse = new(KeyValueResponseType.StorageCorrupt);
+
     /// <summary>MustRetry from a release that may only acknowledge what is held and found nothing of the
     /// transaction; see <see cref="KeyValueResponse.NothingHeld"/>.</summary>
     internal static readonly KeyValueResponse NothingHeldResponse = KeyValueResponse.NothingHeldHere();

@@ -86,6 +86,7 @@ public sealed class TestKommanderConfigurationSurface
         [nameof(RaftConfiguration.AllowLegacySnapshotSenders)] = nameof(KahunaCommandLineOptions.RaftAllowLegacySnapshotSenders),
         [nameof(RaftConfiguration.SnapshotTransferStepTimeout)] = nameof(KahunaCommandLineOptions.RaftSnapshotTransferStepTimeout),
         [nameof(RaftConfiguration.SnapshotChunkAckTimeout)] = nameof(KahunaCommandLineOptions.RaftSnapshotChunkAckTimeout),
+        [nameof(RaftConfiguration.LostAcknowledgedEntriesPolicy)] = nameof(KahunaCommandLineOptions.RaftLostAcknowledgedEntriesPolicy),
         [nameof(RaftConfiguration.ReseedRequestTimeout)] = nameof(KahunaCommandLineOptions.RaftReseedRequestTimeout),
         [nameof(RaftConfiguration.EnableAutoRejoin)] = nameof(KahunaCommandLineOptions.RaftEnableAutoRejoin),
         [nameof(RaftConfiguration.EnableQuiescence)] = nameof(KahunaCommandLineOptions.RaftEnableQuiescence),
@@ -255,5 +256,33 @@ public sealed class TestKommanderConfigurationSurface
         Assert.Equal(3, overridden.Value.RaftSnapshotMaxPendingSessions);
         Assert.Equal(64L * 1024 * 1024, overridden.Value.RaftSnapshotMaxPendingBytes);
         Assert.True(overridden.Value.RaftAllowLegacySnapshotSenders);
+    }
+
+    /// <summary>
+    /// The lost-acknowledged-entries policy parses from the command line, case-insensitively, defaults to the
+    /// safe quarantine, reaches both the clustered Raft configuration and the embedded options, and refuses a
+    /// value that names no policy with the accepted names.
+    /// </summary>
+    [Fact]
+    public void TestLostAcknowledgedEntriesPolicyOptionParsesFromTheCommandLine()
+    {
+        ParserResult<KahunaCommandLineOptions> defaults = Parser.Default.ParseArguments<KahunaCommandLineOptions>([]);
+
+        Assert.Equal(ParserResultType.Parsed, defaults.Tag);
+        Assert.Equal("Quarantine", defaults.Value.RaftLostAcknowledgedEntriesPolicy);
+        Assert.Equal(LostAcknowledgedEntriesPolicy.Quarantine, EmbeddedOptionsFactory.ParseLostAcknowledgedEntriesPolicy(defaults.Value.RaftLostAcknowledgedEntriesPolicy));
+        Assert.Equal(LostAcknowledgedEntriesPolicy.Quarantine, EmbeddedOptionsFactory.CreateEmbeddedOptions(defaults.Value).RaftLostAcknowledgedEntriesPolicy);
+
+        ParserResult<KahunaCommandLineOptions> overridden = Parser.Default.ParseArguments<KahunaCommandLineOptions>([
+            "--raft-lost-acknowledged-entries-policy", "acceptandlog"
+        ]);
+
+        Assert.Equal(ParserResultType.Parsed, overridden.Tag);
+        Assert.Equal(LostAcknowledgedEntriesPolicy.AcceptAndLog, EmbeddedOptionsFactory.ParseLostAcknowledgedEntriesPolicy(overridden.Value.RaftLostAcknowledgedEntriesPolicy));
+        Assert.Equal(LostAcknowledgedEntriesPolicy.AcceptAndLog, EmbeddedOptionsFactory.CreateEmbeddedOptions(overridden.Value).RaftLostAcknowledgedEntriesPolicy);
+
+        KahunaServerException refused = Assert.Throws<KahunaServerException>(() => EmbeddedOptionsFactory.ParseLostAcknowledgedEntriesPolicy("ignore"));
+        Assert.Contains("Quarantine", refused.Message, StringComparison.Ordinal);
+        Assert.Contains("AcceptAndLog", refused.Message, StringComparison.Ordinal);
     }
 }

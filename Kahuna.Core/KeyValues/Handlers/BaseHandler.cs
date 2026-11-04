@@ -228,7 +228,7 @@ internal abstract class BaseHandler
             // Runs on a thread-pool thread: only the continuation's own stage-2 fields are touched;
             // every actor-owned mutation waits for the ResumeRead message.
             if (!t.IsCompletedSuccessfully)
-                cont.SetFaulted();
+                cont.SetFaulted(t.Exception);
             actorContext.Self.Send(
                 new KeyValueRequest(KeyValueRequestType.ResumeRead) { Continuation = cont });
         }, TaskScheduler.Default);

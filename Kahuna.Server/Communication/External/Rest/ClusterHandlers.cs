@@ -41,9 +41,9 @@ public static class ClusterHandlers
         // restart. This route makes the two states distinguishable: 200 when the node can serve,
         // 503 while it cannot, so load balancers / Kubernetes probes / client node pickers can
         // route traffic elsewhere without sending a real request just to be refused.
-        app.MapGet("/v1/cluster/health", (IRaft raft) =>
+        app.MapGet("/v1/cluster/health", (IRaft raft, IKahuna kahuna) =>
         {
-            KahunaClusterHealthResponse health = BuildHealthResponse(raft);
+            KahunaClusterHealthResponse health = BuildHealthResponse(raft, kahuna);
 
             return Results.Text(
                 JsonSerializer.Serialize(health, KahunaJsonContext.Default.KahunaClusterHealthResponse),
@@ -218,11 +218,12 @@ public static class ClusterHandlers
     /// to leave was for.
     /// </para>
     /// </summary>
-    public static KahunaClusterHealthResponse BuildHealthResponse(IRaft raft)
+    public static KahunaClusterHealthResponse BuildHealthResponse(IRaft raft, IKahuna? kahuna = null)
     {
         bool initialized;
         string localRole;
         int hostedPartitions = 0;
+        List<string>? partitionStorageFaults = null;
 
         try
         {
@@ -249,13 +250,37 @@ public static class ClusterHandlers
             try
             {
                 foreach (RaftPartitionRange range in raft.GetPartitionMap())
-                    if (range.State != RaftPartitionState.Removed && raft.HostsPartition(range.PartitionId))
-                        hostedPartitions++;
+                {
+                    if (range.State == RaftPartitionState.Removed || !raft.HostsPartition(range.PartitionId))
+                        continue;
+
+                    hostedPartitions++;
+
+                    // A partition whose storage verdict is not healthy (or still restoring) is not served from
+                    // this node: it lost acknowledged log entries, its store is missing a prefix the WAL no
+                    // longer holds, its WAL engine fail-stopped, or its restore failed. Each one is a
+                    // readiness condition and is named for the operator.
+                    RaftPartitionStorageHealth? storage = raft.GetPartitionStorageHealth(range.PartitionId);
+                    if (storage is not null && storage.State is not (RaftPartitionStorageState.Healthy or RaftPartitionStorageState.Restoring))
+                        (partitionStorageFaults ??= []).Add($"#{range.PartitionId} {storage}");
+                }
             }
             catch (Exception)
             {
                 hostedPartitions = 0;
             }
+        }
+
+        // The node's own store: fail-stopped on damage (every read and write of its partitions is refused
+        // with StorageCorrupt), or found emptied at start. Either is terminal for the process.
+        string? storageFault = null;
+        try
+        {
+            storageFault = kahuna?.GetStorageHealth().Fault;
+        }
+        catch (Exception)
+        {
+            storageFault = "The storage health of this node could not be read.";
         }
 
         // A process that ran out of heap inside its WAL/apply pipeline and was configured not to fail fast is
@@ -268,11 +293,15 @@ public static class ClusterHandlers
             Ready = initialized
                 && localRole != nameof(ClusterMemberRole.NotMember)
                 && localRole != nameof(ClusterMemberRole.Leaving)
-                && fatalFault is null,
+                && fatalFault is null
+                && storageFault is null
+                && partitionStorageFaults is null,
             Initialized = initialized,
             LocalRole = localRole,
             HostedPartitions = hostedPartitions,
-            FatalFault = fatalFault
+            FatalFault = fatalFault,
+            StorageFault = storageFault,
+            PartitionStorageFaults = partitionStorageFaults
         };
     }
 }

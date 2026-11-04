@@ -155,6 +155,15 @@ internal sealed class LockActor : IActor<LockRequest, LockResponse>
                 message.Type, message.Resource, ex.PartitionId, ex.CurrentDepth);
             return LockStaticResponses.MustRetryResponse;
         }
+        catch (StorageCorruptionException ex)
+        {
+            // The lock row's backend read met storage damage, or the store is already fail-stopped on it.
+            // Terminal: the caller is told so instead of retrying, and the node stops serving from this store.
+            logger.LogError("LockActor: storage damage answering {Type} for '{Resource}': {Message}", message.Type, message.Resource, ex.Message);
+            if (persistenceBackend is not null)
+                StorageFailStopGate.For(persistenceBackend).Trip(ex.Message);
+            return LockStaticResponses.StorageCorruptResponse;
+        }
         catch (Exception ex)
         {
             logger.LogError("LockActor: Error processing message: {Type} {Message}\n{Stacktrace}", ex.GetType().Name, ex.Message, ex.StackTrace);

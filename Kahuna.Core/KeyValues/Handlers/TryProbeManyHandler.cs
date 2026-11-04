@@ -363,7 +363,7 @@ internal sealed class TryProbeManyHandler : BaseHandler
             // actor-owned mutation waits for the ResumeRead message. A joined read never faults (its waiter is a
             // completion source that only receives results), so a fault here is the probe's own backend read.
             if (!t.IsCompletedSuccessfully)
-                deferred.SetFaulted();
+                deferred.SetFaulted(t.Exception);
 
             actorContext.Self.Send(new KeyValueRequest(KeyValueRequestType.ResumeRead) { Continuation = deferred });
         }, TaskScheduler.Default);

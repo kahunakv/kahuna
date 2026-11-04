@@ -91,6 +91,14 @@ internal static class KahunaNodeComposer
         IPersistenceBackend persistenceBackend = new UnflushedOverlayPersistenceBackend(
             backend, new UnflushedKeyValueWritesIndex(), new UnflushedLockWritesIndex());
 
+        // The store must be this node's own, checked before Kommander consults any durability floor: a
+        // foreign store refuses the start, a store found emptied is reported and rebuilt. The gate that
+        // takes the node out of consensus when the store fail-stops is attached here so the actors and
+        // the writer, which look it up by the backend they hold, find it armed.
+        StorageFailStopGate storageFailStop = StorageFailStopGate.For(persistenceBackend);
+        storageFailStop.Attach(raft, logger);
+        storageFailStop.ReplacedStoreNotice = StoreIdentityGuard.Verify(persistenceBackend, raft, configuration.StoragePath, logger);
+
         // The scheduler only logs its own defensive errors through this logger; production hosts pass a real
         // ILogger<IRaft>, while test harnesses that omit it get a silent sink.
         raftLogger ??= NullLogger<IRaft>.Instance;

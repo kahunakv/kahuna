@@ -319,7 +319,7 @@ internal sealed class TryExistsHandler : BaseHandler
 
             _ = readTask.ContinueWith(t =>
             {
-                if (!t.IsCompletedSuccessfully) cont.SetFaulted();
+                if (!t.IsCompletedSuccessfully) cont.SetFaulted(t.Exception);
                 else cont.DiskResult = t.Result;
                 actorContext.Self.Send(
                     new KeyValueRequest(KeyValueRequestType.ResumeRead) { Continuation = cont });
@@ -438,7 +438,7 @@ internal sealed class TryExistsHandler : BaseHandler
 
         _ = readTask.ContinueWith(t =>
         {
-            if (!t.IsCompletedSuccessfully) cont.SetFaulted();
+            if (!t.IsCompletedSuccessfully) cont.SetFaulted(t.Exception);
             else cont.DiskResult = t.Result;
             actorContext.Self.Send(
                 new KeyValueRequest(KeyValueRequestType.ResumeRead) { Continuation = cont });
