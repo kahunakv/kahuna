@@ -144,7 +144,7 @@ internal sealed class TryScanByPrefixFromDiskHandler : BaseHandler
 
         _ = readTask.ContinueWith(t =>
         {
-            if (!t.IsCompletedSuccessfully) cont.SetFaulted();
+            if (!t.IsCompletedSuccessfully) cont.SetFaulted(t.Exception);
             else cont.ScanDiskResult = t.Result;
             actorContext.Self.Send(
                 new KeyValueRequest(KeyValueRequestType.ResumeRead) { Continuation = cont });

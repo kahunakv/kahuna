@@ -691,6 +691,15 @@ public sealed class EmbeddedKahunaOptions
     /// </summary>
     public TimeSpan? RaftSnapshotTransferStepTimeout { get; set; }
 
+    /// <summary>
+    /// What a partition does when its WAL restore finds the log shorter than what this node had acknowledged as
+    /// durably held (a synced tail truncated or lost after the leader may have counted it). Mirrors
+    /// <c>RaftConfiguration.LostAcknowledgedEntriesPolicy</c> (<c>--raft-lost-acknowledged-entries-policy</c> on
+    /// <c>Kahuna.Server</c>); null keeps Kommander's default, which quarantines the partition (it neither votes
+    /// nor campaigns until the leader has replicated past the lost range again or a snapshot covers it).
+    /// </summary>
+    public Kommander.LostAcknowledgedEntriesPolicy? RaftLostAcknowledgedEntriesPolicy { get; set; }
+
     // ── Raft WAL shard column-family sizing (Kommander RocksDbWalTuning) ──────────────────────
     // Each knob below is null by default, and null means "leave Kommander's own default for that
     // field untouched". RaftWalTuningFactory starts from RocksDbWalTuning.Default and applies only

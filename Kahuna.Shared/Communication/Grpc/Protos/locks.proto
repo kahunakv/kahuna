@@ -153,6 +153,9 @@ enum GrpcLockResponseType {
   LOCK_RESPONSE_TYPE_LOCK_DOES_NOT_EXIST = 102;
   LOCK_RESPONSE_TYPE_INVALID_OWNER = 103;
   LOCK_RESPONSE_TYPE_ABORTED = 104;
+  // The node's lock store reported damage or had already fail-stopped on such damage. Not retryable against
+  // this node; see TYPE_STORAGE_CORRUPT in the key-value surface for the contract.
+  LOCK_RESPONSE_TYPE_STORAGE_CORRUPT = 105;
 }
 
 enum GrpcLockDurability {

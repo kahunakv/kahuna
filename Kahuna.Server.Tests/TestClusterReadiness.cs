@@ -1,5 +1,6 @@
 
 using Kahuna.Communication.External.Rest;
+using Kahuna.Server.Persistence;
 using Kahuna.Shared.Communication.Rest;
 
 using Kommander;
@@ -123,6 +124,90 @@ public sealed class TestClusterReadiness : IDisposable
         Assert.True(membership.Initialized);
         Assert.Equal("Voter", membership.LocalRole);
         Assert.Single(membership.Members);
+    }
+
+    /// <summary>A node whose key-value store is fail-stopped on storage damage must answer 503 and name the
+    /// engine's message, whatever its roster role says: it refuses every read and write of its partitions.</summary>
+    [Fact]
+    public void Health_StoreFailStopped_ReportsNotReadyWithTheReason()
+    {
+        KahunaClusterHealthResponse health = ClusterHandlers.BuildHealthResponse(
+            new FakeRaft { Initialized = true, Role = ClusterMemberRole.Voter },
+            new FaultedStoreKahuna(new KahunaStorageHealth("Corruption: block checksum mismatch in 000012.sst", null)));
+
+        Assert.False(health.Ready);
+        Assert.True(health.Initialized);
+        Assert.Equal("Corruption: block checksum mismatch in 000012.sst", health.StorageFault);
+        Assert.Null(health.PartitionStorageFaults);
+    }
+
+    /// <summary>A node that started over an empty store while its log held history is being rebuilt from its
+    /// peers (or stays quarantined): not ready, with the notice.</summary>
+    [Fact]
+    public void Health_StoreReplacedAtStart_ReportsNotReady()
+    {
+        KahunaClusterHealthResponse health = ClusterHandlers.BuildHealthResponse(
+            new FakeRaft { Initialized = true, Role = ClusterMemberRole.Voter },
+            new FaultedStoreKahuna(new KahunaStorageHealth(null, "The store was empty while the log holds history.")));
+
+        Assert.False(health.Ready);
+        Assert.Equal("The store was empty while the log holds history.", health.StorageFault);
+    }
+
+    /// <summary>A hosted partition whose Raft storage verdict is not healthy is not served from this node;
+    /// the probe names it. A restoring partition is the normal startup state and does not flip readiness.</summary>
+    [Fact]
+    public void Health_PartitionStorageVerdict_ReportsNotReadyAndNamesThePartition()
+    {
+        FakeRaft raft = new()
+        {
+            Initialized = true,
+            Role = ClusterMemberRole.Voter,
+            PartitionMap =
+            [
+                new RaftPartitionRange { PartitionId = 1, State = RaftPartitionState.Active },
+                new RaftPartitionRange { PartitionId = 2, State = RaftPartitionState.Active },
+                new RaftPartitionRange { PartitionId = 3, State = RaftPartitionState.Active },
+            ],
+            StorageVerdicts =
+            {
+                [1] = new RaftPartitionStorageHealth(RaftPartitionStorageState.ApplicationFloorBelowCompaction, "floor 0 below compaction floor 120"),
+                [2] = RaftPartitionStorageHealth.Restoring,
+            }
+        };
+
+        KahunaClusterHealthResponse health = ClusterHandlers.BuildHealthResponse(raft, new FaultedStoreKahuna(KahunaStorageHealth.Healthy));
+
+        Assert.False(health.Ready);
+        Assert.Null(health.StorageFault);
+        Assert.Equal(3, health.HostedPartitions);
+        Assert.NotNull(health.PartitionStorageFaults);
+        string fault = Assert.Single(health.PartitionStorageFaults);
+        Assert.StartsWith("#1 ApplicationFloorBelowCompaction", fault, StringComparison.Ordinal);
+        Assert.Contains("floor 0 below compaction floor 120", fault, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Health_HealthyStoreAndPartitions_ReportsReady()
+    {
+        FakeRaft raft = new()
+        {
+            Initialized = true,
+            Role = ClusterMemberRole.Voter,
+            PartitionMap = [new RaftPartitionRange { PartitionId = 1, State = RaftPartitionState.Active }]
+        };
+
+        KahunaClusterHealthResponse health = ClusterHandlers.BuildHealthResponse(raft, new FaultedStoreKahuna(KahunaStorageHealth.Healthy));
+
+        Assert.True(health.Ready);
+        Assert.Null(health.StorageFault);
+        Assert.Null(health.PartitionStorageFaults);
+    }
+
+    /// <summary>An <see cref="IKahuna"/> that reports a given storage health and nothing else.</summary>
+    private sealed class FaultedStoreKahuna(KahunaStorageHealth health) : FakeKahunaBase, IKahuna
+    {
+        public KahunaStorageHealth GetStorageHealth() => health;
     }
 
     /// <summary>Drives the real Raft implementation end to end: a fully started node must report
@@ -314,7 +399,14 @@ public sealed class TestClusterReadiness : IDisposable
 
         public long GetCommitIndex(int partitionId) => throw new NotImplementedException();
 
-        public IReadOnlyList<RaftPartitionRange> GetPartitionMap() => throw new NotImplementedException();
+        public List<RaftPartitionRange> PartitionMap { get; init; } = [];
+
+        public Dictionary<int, RaftPartitionStorageHealth> StorageVerdicts { get; init; } = [];
+
+        public IReadOnlyList<RaftPartitionRange> GetPartitionMap() => PartitionMap;
+
+        public RaftPartitionStorageHealth? GetPartitionStorageHealth(int partitionId) =>
+            StorageVerdicts.TryGetValue(partitionId, out RaftPartitionStorageHealth? health) ? health : RaftPartitionStorageHealth.Healthy;
 
         public int GetPartitionKey(string partitionKey) => throw new NotImplementedException();
 
@@ -332,7 +424,7 @@ public sealed class TestClusterReadiness : IDisposable
 
         public IReadOnlyList<RaftBackfillStatus> GetBackfillStatuses(int partitionId) => throw new NotImplementedException();
 
-        public bool HostsPartition(int partitionId) => throw new NotImplementedException();
+        public bool HostsPartition(int partitionId) => true;
 
         public string? GetPartitionLeaderHint(int partitionId) => throw new NotImplementedException();
 

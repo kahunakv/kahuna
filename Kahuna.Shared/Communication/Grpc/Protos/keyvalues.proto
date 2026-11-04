@@ -1995,6 +1995,11 @@ enum GrpcKeyValueResponseType {
   // the batch was refused or answered a transient type: a transactional batch stages every item or none.
   // Resend the whole batch after a transient answer.
   TYPE_NOT_APPLIED = 114;
+  // The node's store reported damage (a checksum mismatch in a block or file it read) or had already
+  // fail-stopped on such damage. Nothing was served from it, and the node has stopped serving its partitions
+  // from this store. Not retryable against this node: a retry gets the same answer until an operator
+  // repairs or replaces the store; another replica of the partition serves once the leadership moves.
+  TYPE_STORAGE_CORRUPT = 115;
 }
 
 enum GrpcKeyValueDurability {

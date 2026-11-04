@@ -166,3 +166,76 @@ gets its own objects of the same sizes.
 - **`sqlite` and `memory`** have no memtables or cache, and ignore them.
 - **An engine added by an extension** reads them from the context. The `solarium` engine's own documentation
   says what it does with them.
+
+## 7. Storage damage and the store identity
+
+The RocksDB store checks every block it reads (XXH3 checksums, `format_version=7`, so a checksum also
+covers the block's file and offset). A flipped bit, a misdirected write or a truncated file is found by
+the next read of the block, as a status whose code is `Corruption`. What the node does with that finding
+is a contract CamusDB's storage-corruption campaign relies on; SQLite has no page checksums and is outside
+it.
+
+### A damaged store fail-stops
+
+The first `Corruption` the store meets — on a point read, a batched read, a range scan (an iterator that
+reaches a damaged block parks the status instead of throwing; every scan ends through a check that
+rethrows it, so a scan never returns a short page as if the range ended at the damage), on a write after a
+compaction latched it as the engine's background error, or at the open — fail-stops the store for the rest
+of the process:
+
+- every later operation is refused with `StorageCorruptionException`; the store methods return `false`,
+  and the background writer stops retrying and stops asking for the ENOSPC recovery;
+- the recovery never closes or reopens a damaged store, so the files stay exactly as they are for
+  forensics (the reopen built for a full volume would meet the damage again on the next read or
+  compaction and loop);
+- the engine's message, which names the file and the block, is logged once at Critical and is readable
+  from `IPersistenceBackend.GetFailStopReason` and from the node's `IKahuna.GetStorageHealth()`;
+- `kahuna.persistence.store_fail_stops_total` counts it, once per process.
+
+The node answers the read that found the damage, and every read and write of its partitions after it,
+with `StorageCorrupt` (key-value response type 115, lock response type 105): a terminal answer, deliberately
+distinct from `MustRetry`, so a client does not spend its retry budget against a node that cannot change
+its answer. Nothing read from the damaged store is ever served. The node then withholds its candidacy for
+every partition it hosts and steps down where it leads (the gate is tripped by the first classified read
+and re-asserted on each writer tick), so a replicated partition moves to another replica; a single-replica
+partition stays unavailable until the operator acts. `/v1/cluster/health` answers 503 with `storageFault`
+set to the engine's message.
+
+Repair is the operator's: restore the store from a backup, or move the damaged directory aside and restart
+the node so it is rebuilt from its peers (see the next section for what the node does with an empty
+store). A store whose files fail their checksums at open, or whose own durability-floor rows cannot be
+decoded (a floor row that is not 8 bytes is damage, never "no floor"), refuses the open: the node does not
+start over it.
+
+### The store identity
+
+A RocksDB store belongs to one node's Raft log: its durability floors certify that log's entries. The
+first time a node opens a store it stamps it with its Raft endpoint, a creation id and a creation time
+(`PersistentStoreIdentity`, kept in a reserved row that user scans never see). At every later open, before
+Kommander consults any floor, the node checks the stamp:
+
+| What it finds | What it does |
+| --- | --- |
+| its own stamp | opens the store |
+| another node's stamp | refuses to start (`StoreIdentityMismatchException`): the floors would vouch for a different log, and Kommander would skip replay over entries this copy never applied |
+| no stamp, but rows or floors | a store written by a build that predates the stamp: stamps it and opens it |
+| no stamp, no rows, a Raft log without history | a fresh node: stamps it |
+| no stamp, no rows, a Raft log with history | the store directory was lost or replaced: logs it at Critical, counts `kahuna.persistence.store_replaced_at_start_total`, reports it in `/v1/cluster/health` (`storageFault`, 503), stamps the store and starts |
+
+In the last case the empty store answers a durability floor of `0` for every data partition ("nothing
+durably applied"; the system partition keeps "no opinion", since its range-map and hold-registry entries
+are not floor-tracked). Kommander then replays the whole log where it still holds it, and where the log
+was compacted below what the store needs it refuses to replay the surviving suffix onto a store missing
+its prefix: the partition withholds its candidacy, keeps voting, and asks its leader for a whole-partition
+snapshot, the only repair. A single-replica partition has no leader to ask and stays quarantined, never
+serving partial data, until the store is restored from a backup. Either verdict shows in
+`/v1/cluster/health` as `partitionStorageFaults`.
+
+Backup images carry no stamp: a checkpoint is trimmed of the identity row, and a coordinated backup never
+merges one, so a node that restores or bootstraps from an image stamps its own and is never refused as
+foreign.
+
+An engine added by an extension takes part through the same members: `GetFailStopReason` for the fail-stop,
+`KeepsDurabilityFloors` for the empty-store floor, and `SupportsStoreIdentity` / `GetStoreIdentity` /
+`WriteStoreIdentity` / `HoldsDurableState` for the identity check. The defaults opt an engine out of all of
+them.

@@ -441,11 +441,12 @@ internal sealed class TryGetHandler : BaseHandler
         {
             if (!t.IsCompletedSuccessfully)
             {
-                // Mark as faulted so Execute (stage 3) resolves all waiters with MustRetry.
-                // We deliberately still route through ResumeRead rather than calling
-                // Resolve / PendingReads.Remove here: this callback runs on a thread-pool
-                // thread and PendingReads is actor-owned state (no lock).
-                cont.SetFaulted();
+                // Mark as faulted so Execute (stage 3) resolves all waiters with the fault's response:
+                // MustRetry for a transient fault, StorageCorrupt for storage damage. We deliberately
+                // still route through ResumeRead rather than calling Resolve / PendingReads.Remove
+                // here: this callback runs on a thread-pool thread and PendingReads is actor-owned
+                // state (no lock).
+                cont.SetFaulted(t.Exception);
             }
             else
             {
@@ -560,7 +561,7 @@ internal sealed class TryGetHandler : BaseHandler
 
         _ = readTask.ContinueWith(t =>
         {
-            if (!t.IsCompletedSuccessfully) cont.SetFaulted();
+            if (!t.IsCompletedSuccessfully) cont.SetFaulted(t.Exception);
             else cont.DiskResult = t.Result;
             actorContext.Self.Send(
                 new KeyValueRequest(KeyValueRequestType.ResumeRead) { Continuation = cont });

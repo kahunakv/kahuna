@@ -561,6 +561,10 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 break;
             
             case BackgroundWriteType.Flush:
+                // A store that fail-stopped on damage since the last tick (on a flush, a compaction, or a
+                // read on the actor path) takes the node out of consensus for its partitions before
+                // anything else runs; every tick re-asserts it for partitions gained since.
+                await ObserveStoreFailStop();
                 // Both queues hold exactly what the producers rented since the last tick, and the drains
                 // below return it: size the request pool to that population first (see the pool's remarks).
                 BackgroundWriteRequestPool.Shared.SizeToQueued(dirtyLocks.Count + dirtyKeyValues.Count);
@@ -1043,6 +1047,17 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         storeFaultSinceLastRecoveryCheck = false;
         storeSuccessSinceLastRecoveryCheck = false;
 
+        // Storage damage is not a wedge a reopen can clear: the backend keeps the files as they are and
+        // refuses every operation until an operator replaces the store. The retained batches stay
+        // retained (their entries are in the Raft log, and the replica that takes over applies them from
+        // its own), and no recovery is requested.
+        if (persistenceBackend.GetFailStopReason() is not null)
+        {
+            consecutiveStoreFailureCycles = 0;
+            await ObserveStoreFailStop();
+            return false;
+        }
+
         if (consecutiveStoreFailureCycles < StoreFailureCyclesBeforeRecovery)
             return false;
 
@@ -1072,6 +1087,36 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         logger.LogWarning(
             "Persistence backend storage engine could not be recovered yet; retained batches continue to be retried");
         return false;
+    }
+
+    /// <summary>
+    /// Turns the backend's fail-stop latch into the node's: trips the storage fail-stop gate on the first
+    /// observation (candidacy withheld, leaders stepped down, readiness reports the fault) and re-asserts it
+    /// on every later tick, so a partition gained after the trip is gated too. Cheap while the store is
+    /// healthy: one volatile read.
+    /// </summary>
+    private async ValueTask ObserveStoreFailStop()
+    {
+        if (persistenceBackend.GetFailStopReason() is not { } reason)
+            return;
+
+        StorageFailStopGate gate = StorageFailStopGate.For(persistenceBackend);
+        gate.Trip(reason);
+        await gate.ReassertAsync();
+    }
+
+    /// <summary>
+    /// True when the store is fail-stopped on damage, in which case a store attempt is refused at the
+    /// backend's fence without touching the engine: the retry loops stop at once instead of spending their
+    /// backoff schedule on an answer that cannot change, and re-park the batch.
+    /// </summary>
+    private bool StoreIsFailStopped()
+    {
+        if (persistenceBackend.GetFailStopReason() is null)
+            return false;
+
+        storeFaultSinceLastRecoveryCheck = true;
+        return true;
     }
 
     /// <summary>
@@ -1175,6 +1220,9 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             bool success = false;
             for (int retryAttempt = 0; retryAttempt < WriteRetries; retryAttempt++)
             {
+                if (StoreIsFailStopped())
+                    break;
+
                 try
                 {
                     success = await RunStoreAsync(StoreWriteKind.Locks, items.Count, () => persistenceBackend.StoreLocks(items));
@@ -1361,6 +1409,9 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             bool success = false;
             for (int retryAttempt = 0; retryAttempt < WriteRetries; retryAttempt++)
             {
+                if (StoreIsFailStopped())
+                    break;
+
                 try
                 {
                     success = await RunStoreAsync(StoreWriteKind.KeyValues, items.Count, () => persistenceBackend.StoreKeyValues(items));

@@ -135,8 +135,8 @@ internal sealed class ProbeManyContinuation : ReadContinuation
                 }
                 else if (Faulted)
                 {
-                    own.Fail(context, KeyValueStaticResponses.MustRetryResponse);
-                    answer = KeyValueStaticResponses.MustRetryResponse;
+                    answer = FaultResponse(context);
+                    own.Fail(context, answer);
                 }
                 else
                 {

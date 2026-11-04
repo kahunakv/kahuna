@@ -283,7 +283,7 @@ internal sealed class RangeScanContinuation : ReadContinuation
     internal KeyValueResponse? MergePage(KeyValueContext context)
     {
         if (Faulted)
-            return KeyValueStaticResponses.MustRetryResponse;
+            return FaultResponse(context);
 
         // The rows of this page the projection could answer for only from below their queued revisions, each with
         // the ceiling it was projected at (see TryGetByRangeHandler.ProjectSnapshotPage).
@@ -619,7 +619,7 @@ internal sealed class RangeScanContinuation : ReadContinuation
                 // Surface the fault — a swallowed exception here becomes an undiagnosable
                 // retry-exhaustion at the client.
                 context.Logger.LogWarning(t.Exception?.GetBaseException(), "KeyValueActor/RangeScan: disk page read faulted for prefix {Prefix}", prefix);
-                SetFaulted();
+                SetFaulted(t.Exception);
             }
             else RangeScanPage = t.Result;
             self.Send(new KeyValueRequest(KeyValueRequestType.ResumeRead) { Continuation = this });

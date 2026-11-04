@@ -71,7 +71,7 @@ internal sealed class ProbeRangesContinuation : ReadContinuation
     {
         if (Faulted)
         {
-            FailOpen();
+            FailOpen(FaultResponse(context));
             return true;
         }
 
@@ -145,7 +145,7 @@ internal sealed class ProbeRangesContinuation : ReadContinuation
             if (!t.IsCompletedSuccessfully)
             {
                 context.Logger.LogWarning(t.Exception?.GetBaseException(), "KeyValueActor/TryProbeManyRanges: disk page read faulted under {Prefix}", prefix);
-                SetFaulted();
+                SetFaulted(t.Exception);
             }
 
             self.Send(new KeyValueRequest(KeyValueRequestType.ResumeRead) { Continuation = this });
@@ -167,10 +167,13 @@ internal sealed class ProbeRangesContinuation : ReadContinuation
     }
 
     /// <summary>Answers every open seek <c>MustRetry</c>, keeping its lock flag, and closes them.</summary>
-    internal void FailOpen()
+    internal void FailOpen() => FailOpen(KeyValueStaticResponses.MustRetryResponse);
+
+    /// <summary>Answers every open seek with <paramref name="response"/>'s type: retryable for a transient fault, terminal for storage damage.</summary>
+    internal void FailOpen(KeyValueResponse response)
     {
         foreach (Seek seek in open)
-            results[seek.Index] = KeyValueProbeRangeResult.MustRetry with { Locked = seek.Locked };
+            results[seek.Index] = KeyValueProbeRangeResult.MustRetry with { Type = response.Type, Locked = seek.Locked };
 
         open = [];
     }

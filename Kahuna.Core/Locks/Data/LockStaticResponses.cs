@@ -16,6 +16,9 @@ internal static class LockStaticResponses
     internal static readonly LockResponse DoesNotExistResponse = new(LockResponseType.LockDoesNotExist);
     
     internal static readonly LockResponse MustRetryResponse = new(LockResponseType.MustRetry);
+
+    /// <summary>The store reported damage, or is fail-stopped on it: terminal for this node, never retried.</summary>
+    internal static readonly LockResponse StorageCorruptResponse = new(LockResponseType.StorageCorrupt);
     
     internal static readonly LockResponse LockedResponse = new(LockResponseType.Locked);
     

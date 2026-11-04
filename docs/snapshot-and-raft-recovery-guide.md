@@ -8,7 +8,10 @@ from operator-triggered [backups and PITR](backups-and-point-in-time-recovery-gu
 For replica moves and staging-cap sizing, see the
 [replication factor guide](replication-factor-guide.md#6-how-a-replica-move-proceeds). For detection and
 containment of a divergent replica, see the
-[leadership fencing guide](leadership-fencing-and-apply-fingerprint-guide.md#containment).
+[leadership fencing guide](leadership-fencing-and-apply-fingerprint-guide.md#containment). For a replica
+whose store was damaged or lost — the store fail-stops, the node steps down, and an empty store under a
+compacted log is rebuilt by exactly this snapshot install — see the
+[storage engines guide](storage-engines-guide.md#7-storage-damage-and-the-store-identity).
 
 ## What a data-partition snapshot carries
 
@@ -74,6 +77,7 @@ underlying default unchanged unless set:
 | `--raft-snapshot-chunk-ack-timeout` | `RaftSnapshotChunkAckTimeout` | 15 s | Wait for a chunk acknowledgement, including the final chunk's install. |
 | `--raft-snapshot-transfer-step-timeout` | `RaftSnapshotTransferStepTimeout` | 120 s | No-progress bound for an export, stream read or chunk send, not a total transfer deadline. |
 | `--raft-reseed-request-timeout` | No corresponding option | 180 s | Bounds a requested repair's apply hold and the leader's pending checkpoint request. |
+| `--raft-lost-acknowledged-entries-policy` | `RaftLostAcknowledgedEntriesPolicy` | `Quarantine` | What a partition does when its restore finds the log shorter than what the node had acknowledged: `Quarantine` (neither votes nor campaigns until repaired by the leader or a snapshot) or `AcceptAndLog` (accept the loss, log it at Critical, run normally). |
 
 Server durations in this table are **milliseconds** on the command line. Embedded durations are
 `TimeSpan`. Pending-byte/session caps must be positive and staging-memory bytes must be nonnegative.

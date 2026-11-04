@@ -56,7 +56,7 @@ internal sealed class PrefixFromDiskScanContinuation : ReadContinuation
 
         if (Faulted)
         {
-            Resolve(KeyValueStaticResponses.MustRetryResponse);
+            Resolve(FaultResponse(context));
             return;
         }
 

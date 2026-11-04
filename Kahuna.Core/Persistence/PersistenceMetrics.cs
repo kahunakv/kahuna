@@ -24,6 +24,23 @@ internal static class PersistenceMetrics
         Meter.CreateHistogram<double>("kahuna.persistence.store_write_duration", unit: "ms",
             description: "Time one store write spent between hand-off to the persistence backend and its answer, success or failure, tagged by kind and result.");
 
+    /// <summary>
+    /// Times the node's key-value store fail-stopped on storage damage: once per process at most, since
+    /// the condition is permanent until an operator replaces the store and restarts the node. A non-zero
+    /// value on a node is the alarm; the readiness probe names the engine's message.
+    /// </summary>
+    internal static readonly Counter<long> StoreFailStops =
+        Meter.CreateCounter<long>("kahuna.persistence.store_fail_stops_total",
+            description: "Times the key-value store fail-stopped on storage damage (a Corruption status or an undecodable bookkeeping row); permanent for the process.");
+
+    /// <summary>
+    /// Times a node started over an empty store while its Raft log held history: the store directory was
+    /// lost or replaced, and the node's partitions are rebuilt from their peers or quarantined.
+    /// </summary>
+    internal static readonly Counter<long> StoreReplacedAtStart =
+        Meter.CreateCounter<long>("kahuna.persistence.store_replaced_at_start_total",
+            description: "Times the node started over an empty key-value store while its Raft log held history (the store was lost or replaced).");
+
     internal static readonly KeyValuePair<string, object?> KindKeyValues = new("kind", "key_values");
     internal static readonly KeyValuePair<string, object?> KindLocks = new("kind", "locks");
     internal static readonly KeyValuePair<string, object?> KindFloors = new("kind", "floors");

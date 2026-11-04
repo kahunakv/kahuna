@@ -436,6 +436,8 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
         }
     }
 
+    public bool KeepsDurabilityFloors => true;
+
     public long GetDurabilityFloor(int partitionId)
     {
         try

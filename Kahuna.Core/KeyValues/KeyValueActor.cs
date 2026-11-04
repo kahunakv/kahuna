@@ -680,6 +680,16 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
                 message.Type, message.Key, ex.PartitionId, ex.CurrentDepth);
             return KeyValueStaticResponses.MustRetryResponse;
         }
+        catch (StorageCorruptionException ex)
+        {
+            // A backend read awaited on the actor's own path (a read-before-write, an inline page) met
+            // storage damage, or the store is already fail-stopped on it. Terminal: the caller is told
+            // so instead of retrying, and the node stops serving its partitions from this store.
+            logger.LogError("Storage damage answering {Type} for '{Key}': {Message}", message.Type, message.Key, ex.Message);
+            if (kvContext?.PersistenceBackend is { } backend)
+                StorageFailStopGate.For(backend).Trip(ex.Message);
+            return KeyValueStaticResponses.StorageCorruptResponse;
+        }
         catch (Exception ex)
         {
             logger.LogError("Error processing message: {Type} {Message}\n{Stacktrace}", ex.GetType().Name, ex.Message, ex.StackTrace);

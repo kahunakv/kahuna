@@ -790,6 +790,9 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         if (options.RaftSnapshotTransferStepTimeout is TimeSpan stepTimeout)
             configuration.SnapshotTransferStepTimeout = stepTimeout;
 
+        if (options.RaftLostAcknowledgedEntriesPolicy is { } lostEntriesPolicy)
+            configuration.LostAcknowledgedEntriesPolicy = lostEntriesPolicy;
+
         return configuration;
     }
 

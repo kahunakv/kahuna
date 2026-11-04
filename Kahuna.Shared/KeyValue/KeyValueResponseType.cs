@@ -140,4 +140,16 @@ public enum KeyValueResponseType
     /// transient items. Never returned for a non-transactional batch, whose items are independent writes.
     /// </summary>
     NotApplied = 114,
+
+    /// <summary>
+    /// The node's key-value store reported damage (a checksum mismatch in a block or file it read) while
+    /// answering, or had already fail-stopped on such damage. Nothing was served from the damaged store, and
+    /// the node has stopped serving its partitions from it: it withholds its candidacy, steps down where it
+    /// led, and answers this to every read and write until an operator repairs or replaces the store.
+    /// <b>Not retryable against this node</b>: a retry gets the same answer. A client that routes to
+    /// another replica of the partition (after the leadership moves) succeeds there; a client of a
+    /// single-replica partition must wait for the repair. Deliberately distinct from
+    /// <see cref="MustRetry"/>, which names a transient condition.
+    /// </summary>
+    StorageCorrupt = 115,
 }
