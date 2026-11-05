@@ -162,6 +162,7 @@ with `keyspace`:
 | `kahuna.range.split.indivisible_refusals` | Splits refused: all writes on one key | Persistently high = a **hot-key** workload that splitting cannot relieve (re-key, don't expect splits to help). |
 | `kahuna.range.split.settle_skips` | Descriptors skipped inside the settle window | Normal during active splitting. Never dropping to 0 may mean the settle window is too long. |
 | `kahuna.range.split.incomplete_source_refusals` | Splits refused before the copy: the source leader held fewer committed heads than a replica at the same applied log id | **Any value = a replica divergence.** See the [leadership fencing and apply-fingerprint guide](leadership-fencing-and-apply-fingerprint-guide.md). |
+| `kahuna.range.move.unconfirmed_quiesce_refusals` | Splits and merges refused: the source leader did not confirm within 5 s that it enforces the quiesce | Occasional = an election or a slow node during a move, retried on the next pass. A value that keeps rising names a source leader whose apply of the meta partition lags. |
 | `kahuna.range.merge.warm_skips` | Merges skipped because a side is still warm | The oscillation guard working — merge declined to coalesce an active range. |
 
 ---

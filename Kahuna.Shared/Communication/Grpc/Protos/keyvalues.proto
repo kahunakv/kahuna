@@ -45,6 +45,7 @@ service KeyValuer {
   rpc GetSnapshotFloor    (GrpcGetSnapshotFloorRequest)     returns (GrpcGetSnapshotFloorResponse);
   rpc GetPartitionApplyFingerprint (GrpcGetPartitionApplyFingerprintRequest) returns (GrpcGetPartitionApplyFingerprintResponse);
   rpc GetPreparedIntentPresence (GrpcGetPreparedIntentPresenceRequest) returns (GrpcGetPreparedIntentPresenceResponse);
+  rpc ConfirmRangeQuiesce (GrpcConfirmRangeQuiesceRequest) returns (GrpcConfirmRangeQuiesceResponse);
   rpc Watch (stream GrpcWatchRequest) returns (stream GrpcWatchResponse);
   rpc HistoryHold (GrpcHistoryHoldRequest) returns (GrpcHistoryHoldResponse);
 }
@@ -2130,6 +2131,26 @@ message GrpcGetPreparedIntentPresenceResponse {
   GrpcKeyValueResponseType Type = 1;
   bool Held = 2;
   int64 AppliedLogId = 3;
+}
+
+// Asked by a range move (split or merge) of the leader of the partition it takes data out of: whether
+// that node enforces the quiesce the move opened over [StartKey, EndKey) of KeySpace. The owner is the
+// move's own id, which stamps the quiesce on the range map. An absent bound is that side's infinity.
+message GrpcConfirmRangeQuiesceRequest {
+  int32 PartitionId = 1;
+  string KeySpace = 2;
+  optional string StartKey = 3;
+  optional string EndKey = 4;
+  int32 OwnerNode = 5;
+  int64 OwnerPhysical = 6;
+  uint32 OwnerCounter = 7;
+}
+
+message GrpcConfirmRangeQuiesceResponse {
+  // TYPE_LOCKED when a quorum confirms that the node leads the partition, its applied range map shows
+  // the quiesce, and every write it had dispatched for the partition is applied; TYPE_MUST_RETRY in
+  // every other state.
+  GrpcKeyValueResponseType Type = 1;
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -149,4 +149,18 @@ internal sealed class KeyValueSnapshotHandler
             AppliedLogId = appliedLogId
         };
     }
+
+    internal async Task<GrpcConfirmRangeQuiesceResponse> ConfirmRangeQuiesceCore(
+        GrpcConfirmRangeQuiesceRequest request, ServerCallContext context)
+    {
+        KeyValueResponseType type = await keyValues.ConfirmRangeQuiesce(
+            request.PartitionId,
+            request.KeySpace,
+            request.HasStartKey ? request.StartKey : null,
+            request.HasEndKey ? request.EndKey : null,
+            new HLCTimestamp(request.OwnerNode, request.OwnerPhysical, request.OwnerCounter),
+            context.CancellationToken).ConfigureAwait(false);
+
+        return new() { Type = (GrpcKeyValueResponseType)type };
+    }
 }

@@ -782,6 +782,17 @@ public interface IKahuna
     public Task<(KeyValueResponseType Type, bool Held, long AppliedLogId)>
         GetPreparedIntentPresence(int partitionId, HLCTimestamp transactionId, long epoch, string key, CancellationToken ct);
 
+    /// <summary>
+    /// Asked by a range move of the leader of the partition it moves data out of: whether this node enforces
+    /// the quiesce <paramref name="owner"/> opened over <c>[startKey, endKey)</c> of <paramref name="keySpace"/>.
+    /// <see cref="KeyValueResponseType.Locked"/> when a quorum confirms that this node leads
+    /// <paramref name="partitionId"/>, its applied range map shows the quiesce, and every write its scheduler
+    /// dispatched for the partition before that is applied here: from then on nothing new enters the interval
+    /// on this leader. <see cref="KeyValueResponseType.MustRetry"/> in every other state; the move asks again.
+    /// </summary>
+    public Task<KeyValueResponseType>
+        ConfirmRangeQuiesce(int partitionId, string keySpace, string? startKey, string? endKey, HLCTimestamp owner, CancellationToken ct);
+
     // ── Watch streams ───────────────────────────────────────────────────────────────────────
 
     /// <summary>

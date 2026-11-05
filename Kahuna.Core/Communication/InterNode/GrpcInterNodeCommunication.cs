@@ -2758,6 +2758,52 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         return ((KeyValueResponseType)response.Type, response.Held, response.AppliedLogId);
     }
 
+    /// <summary>
+    /// Asks the leader of a range move's source partition whether it enforces the move's quiesce; a plain unary
+    /// call, sent once or a few times per move. A node of an older version does not know the call and answers
+    /// Unimplemented, which is reported as <see cref="KeyValueResponseType.DoesNotExist"/> so the move can go on
+    /// as it did before the call existed.
+    /// </summary>
+    public async Task<KeyValueResponseType> ConfirmRangeQuiesce(
+        string node, int partitionId, string keySpace, string? startKey, string? endKey, HLCTimestamp owner, CancellationToken cancellationToken)
+    {
+        GrpcConfirmRangeQuiesceRequest request = new()
+        {
+            PartitionId   = partitionId,
+            KeySpace      = keySpace,
+            OwnerNode     = owner.N,
+            OwnerPhysical = owner.L,
+            OwnerCounter  = owner.C
+        };
+
+        if (startKey is not null)
+            request.StartKey = startKey;
+
+        if (endKey is not null)
+            request.EndKey = endKey;
+
+        try
+        {
+            global::KeyValuer.KeyValuerClient client = new(SharedChannels.GetChannel(ResolveNodeUrl(node), transportSecurity));
+
+            GrpcConfirmRangeQuiesceResponse response = await client
+                .ConfirmRangeQuiesceAsync(request, headers: InterNodeHeaders.ForwardedCall, cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+
+            return (KeyValueResponseType)response.Type;
+        }
+        catch (RpcException ex) when (ex.StatusCode == StatusCode.Unimplemented)
+        {
+            return KeyValueResponseType.DoesNotExist;
+        }
+        catch (RpcException ex) when (IsRetryableTransportFailure(ex))
+        {
+            LogForwardingTransportFailure("ConfirmRangeQuiesce", node, ex.StatusCode);
+
+            return KeyValueResponseType.MustRetry;
+        }
+    }
+
     // ── sequences ───────────────────────────────────────────────────────────────────────────────
     // Forwarded as plain unary calls on the shared channel rather than through the batcher. Sequence
     // traffic between nodes is sparse by construction — a node reserves a block of values with one

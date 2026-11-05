@@ -54,6 +54,9 @@ public sealed partial class KeyValuesService
     public override Task<GrpcGetPreparedIntentPresenceResponse> GetPreparedIntentPresence(GrpcGetPreparedIntentPresenceRequest request, ServerCallContext context)
         => Guard(request, context, static (s, r, c) => s.snapshots.GetPreparedIntentPresenceCore(r, c), static _ => KeyValueMustRetry.GetPreparedIntentPresence());
 
+    public override Task<GrpcConfirmRangeQuiesceResponse> ConfirmRangeQuiesce(GrpcConfirmRangeQuiesceRequest request, ServerCallContext context)
+        => Guard(request, context, static (s, r, c) => s.snapshots.ConfirmRangeQuiesceCore(r, c), static _ => KeyValueMustRetry.ConfirmRangeQuiesce());
+
     internal Task<GrpcAcquireSnapshotHoldResponse> AcquireSnapshotHoldInternal(GrpcAcquireSnapshotHoldRequest request, ServerCallContext context)
         => Guard(request, context, static (s, r, c) => s.snapshots.AcquireSnapshotHoldCore(r, c), static _ => KeyValueMustRetry.AcquireSnapshotHold());
 

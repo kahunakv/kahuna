@@ -204,6 +204,222 @@ internal sealed class RangeStateTransferService
     }
 
     /// <summary>
+    /// Wall-clock budget a range move gives the source partition's leader to confirm that it enforces the
+    /// move's quiesce. The same size as one quiesced copy step: the confirmation runs inside the bounded quiesce
+    /// window, and what it waits for is one replication round of the meta partition plus one of the source
+    /// partition, so a leader that cannot answer in this time is not going to answer in this window.
+    /// </summary>
+    internal const int QuiesceConfirmationDeadlineMs = RangeCopyQuiescedDeadlineMs;
+
+    private const int QuiesceConfirmationRetryDelayMs = 50;
+
+    /// <summary>How long the source leader waits for its own ordered apply to reach the entry it proposed behind
+    /// the writes it had already dispatched, and how often it looks.</summary>
+    private const int DispatchedWritesApplyWaitMs = 5_000;
+
+    private const int DispatchedWritesApplyPollMs = 2;
+
+    // A progress entry carries nothing; one byte, because that is the form the entry is always proposed in.
+    private static readonly byte[] ProgressEntryPayload = [0];
+
+    /// <summary>
+    /// The mover's half of a range move's quiesce confirmation: asks the leader of <paramref name="partitionId"/>,
+    /// the source of the move, to confirm that it enforces the quiesce <paramref name="owner"/> opened over
+    /// <c>[startKey, endKey)</c> of <paramref name="keySpace"/> (see <see cref="ConfirmRangeQuiesceLocalAsync"/>),
+    /// and asks again until it does or <see cref="QuiesceConfirmationDeadlineMs"/> runs out.
+    ///
+    /// <para>Why the move cannot go on without it. The quiesce is committed on the meta partition by the node
+    /// that runs the move, and every other node applies it a replication round later. The write scheduler's
+    /// dispatch fence judges a proposal against the applied map of the node that dispatches it, which is the
+    /// source leader. Until that map shows the quiesce the fence refuses nothing there, and the move's settle
+    /// barrier, catch-up copy and state hand-off would run over a range that still takes new state: a one-phase
+    /// commit whose validation ran before the move's range lock existed is appended after the hand-off, is
+    /// acknowledged, and is left on a partition the range no longer routes to.</para>
+    ///
+    /// <para>True when the source leader confirmed, and also when it is a node that does not know the call (an
+    /// older version in a rolling upgrade): the move then goes on as it did before the confirmation existed,
+    /// with a warning. False when no leader confirmed in time; the caller refuses the move attempt, which is
+    /// retryable.</para>
+    /// </summary>
+    internal async Task<bool> ConfirmRangeQuiesceOnPartitionLeaderAsync(
+        int partitionId, string keySpace, string? startKey, string? endKey, HLCTimestamp owner, CancellationToken cancellationToken)
+    {
+        long deadline = Environment.TickCount64 + QuiesceConfirmationDeadlineMs;
+        string localEndpoint = raft.GetLocalEndpoint();
+        string? asked = null;
+
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            KeyValueResponseType answer = KeyValueResponseType.MustRetry;
+
+            // One attempt never outlives the budget: a leader that stalls inside its answer costs what is left
+            // of it, and the move is refused.
+            using CancellationTokenSource attempt = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            attempt.CancelAfter(TimeSpan.FromMilliseconds(Math.Max(1, deadline - Environment.TickCount64)));
+
+            try
+            {
+                string? leader = !raft.Joined || await raft.AmILeaderIfHosted(partitionId, attempt.Token).ConfigureAwait(false)
+                    ? localEndpoint
+                    : await raft.TryResolveLeader(partitionId, attempt.Token).ConfigureAwait(false);
+
+                asked = leader;
+
+                if (leader is not null)
+                {
+                    answer = string.Equals(leader, localEndpoint, StringComparison.Ordinal)
+                        ? await ConfirmRangeQuiesceLocalAsync(partitionId, keySpace, startKey, endKey, owner, attempt.Token).ConfigureAwait(false)
+                        : await interNodeCommunication.ConfirmRangeQuiesce(leader, partitionId, keySpace, startKey, endKey, owner, attempt.Token).ConfigureAwait(false);
+                }
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                // The attempt's own bound fired; the deadline check below ends the confirmation.
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // A source leader lost to a fault answers with a transport error until its group elects
+                // again: the same retryable condition as an unconfirmed answer, so it costs one attempt.
+                logger.LogWarning(
+                    "Range quiesce confirmation attempt failed for partition {PartitionId} on {Leader}: {Type} {Message}",
+                    partitionId, asked ?? "no known leader", ex.GetType().Name, ex.Message);
+            }
+
+            if (answer == KeyValueResponseType.Locked)
+                return true;
+
+            if (answer == KeyValueResponseType.DoesNotExist)
+            {
+                logger.LogWarning(
+                    "The leader {Leader} of partition {PartitionId} does not know the range quiesce confirmation (an older version); the move of {Space} [{Start},{End}) goes on without it",
+                    asked, partitionId, keySpace, startKey ?? "-inf", endKey ?? "+inf");
+
+                return true;
+            }
+
+            if (Environment.TickCount64 >= deadline)
+            {
+                logger.LogWarning(
+                    "The leader of partition {PartitionId} ({Leader}) did not confirm within {DeadlineMs} ms that it enforces the quiesce of {Space} [{Start},{End}); last answer {Answer}",
+                    partitionId, asked ?? "none resolved", QuiesceConfirmationDeadlineMs, keySpace, startKey ?? "-inf", endKey ?? "+inf", answer);
+
+                return false;
+            }
+
+            await Task.Delay(QuiesceConfirmationRetryDelayMs, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// The source leader's half of a range move's quiesce confirmation. Answers
+    /// <see cref="KeyValueResponseType.Locked"/> only when all of this holds on this node, in this order:
+    /// <list type="number">
+    /// <item>a quorum confirms that it leads <paramref name="partitionId"/>, so it is the node whose write
+    /// scheduler dispatches the partition's proposals;</item>
+    /// <item>its applied range map shows the quiesce <paramref name="owner"/> opened over the interval, so its
+    /// dispatch fence refuses every new prepare, one-phase bundle, record initialization and direct write into
+    /// the interval from here on;</item>
+    /// <item>every submission its scheduler dispatched for the partition before that is applied to its stores,
+    /// so nothing the fence let through earlier can still appear after the mover looks.</item>
+    /// </list>
+    /// Any other state answers <see cref="KeyValueResponseType.MustRetry"/>, and the mover asks again, which
+    /// resolves the leader again. A node that signaled its shutdown answers from no leadership belief.
+    ///
+    /// <para>The quiesce was committed on the meta partition before the mover asked. When this node's map does
+    /// not show it yet, a confirmed read of the meta partition brings the applied state up to everything
+    /// committed before the call, so the answer does not wait for the next replication round to arrive on its
+    /// own.</para>
+    /// </summary>
+    internal async Task<KeyValueResponseType> ConfirmRangeQuiesceLocalAsync(
+        int partitionId, string keySpace, string? startKey, string? endKey, HLCTimestamp owner, CancellationToken cancellationToken)
+    {
+        if (manager.Stopping)
+            return KeyValueResponseType.MustRetry;
+
+        if (raft.Joined && !await raft.ConfirmLeadershipIfHosted(partitionId, cancellationToken).ConfigureAwait(false))
+            return KeyValueResponseType.MustRetry;
+
+        if (!rangeMapStore.IsQuiescedBy(keySpace, startKey, endKey, owner))
+        {
+            if (!raft.Joined || !await raft.ConfirmLocalApplicationAsync(RangeMapStore.MetaPartitionId, cancellationToken).ConfigureAwait(false))
+                return KeyValueResponseType.MustRetry;
+
+            if (!rangeMapStore.IsQuiescedBy(keySpace, startKey, endKey, owner))
+                return KeyValueResponseType.MustRetry;
+        }
+
+        return await DrainDispatchedWritesAsync(partitionId, cancellationToken).ConfigureAwait(false)
+            ? KeyValueResponseType.Locked
+            : KeyValueResponseType.MustRetry;
+    }
+
+    /// <summary>
+    /// Waits until every submission this node's write scheduler dispatched for <paramref name="partitionId"/>
+    /// before the call is applied to this node's stores. It proposes one progress entry, which carries nothing,
+    /// through the same scheduler: the entry is appended behind everything dispatched earlier, and this node's
+    /// ordered apply reaches it only after all of that.
+    ///
+    /// <para>The caller has just seen the dispatch fence turn for a range. A submission that passed the fence a
+    /// moment before can still be between its proposal and the stores, where neither the fence nor a read of
+    /// the stores sees it. Behind this wait there is no such submission left.</para>
+    ///
+    /// <para>False when the entry did not commit (this node stopped leading the partition, or the scheduler
+    /// turned it away) or the apply did not reach it inside the bound. Nothing is known then, and the caller
+    /// answers that it cannot confirm.</para>
+    /// </summary>
+    private async Task<bool> DrainDispatchedWritesAsync(int partitionId, CancellationToken cancellationToken)
+    {
+        TaskCompletionSource<bool> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        // Proposed under the term read here, as every scheduled write is: a node that lost the partition and
+        // leads it again in a newer term is refused instead of appending an entry that orders nothing.
+        long expectedTerm = raft.GetPartitionTerm(partitionId);
+
+        Writes.DurableProposalSubmission marker = new(
+            partitionId,
+            [new RaftProposalEntry(ReplicationTypes.ProgressTick, ProgressEntryPayload, AutoCommit: true, ExpectedGeneration: 0, ExpectedTerm: expectedTerm)],
+            completion,
+            Writes.WriteAdmissionClass.Terminal,
+            Writes.WriteSubmissionStage.Other,
+            (markerPartitionId, _, entryLogIndices) => AwaitAppliedThroughAsync(markerPartitionId, entryLogIndices, cancellationToken));
+
+        if (!writeAggregator.TryEnqueue(marker))
+            return false;
+
+        using CancellationTokenRegistration _ = cancellationToken.Register(static state => ((TaskCompletionSource<bool>)state!).TrySetResult(false), completion);
+
+        return await marker.Committed.ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The completion of the entry <see cref="DrainDispatchedWritesAsync"/> proposed: waits for this node's
+    /// ordered apply of the partition to pass the entry's log index. The entry applies nothing, so its index is
+    /// only a position in the log; an executor that reported none leaves nothing to wait on.
+    /// </summary>
+    private async Task<Writes.DurableCompletionAnswer> AwaitAppliedThroughAsync(int partitionId, IReadOnlyList<long>? entryLogIndices, CancellationToken cancellationToken)
+    {
+        long markerIndex = entryLogIndices is { Count: > 0 } ? entryLogIndices[^1] : 0;
+
+        if (markerIndex <= 0)
+            return Writes.DurableCompletionAnswer.Unobserved;
+
+        KeyValueReplicationDispatcher dispatcher = manager.ReplicationDispatcher;
+        long deadline = Environment.TickCount64 + DispatchedWritesApplyWaitMs;
+
+        while (dispatcher.AppliedIndex(partitionId) < markerIndex)
+        {
+            if (cancellationToken.IsCancellationRequested || Environment.TickCount64 >= deadline)
+                return Writes.DurableCompletionAnswer.Unobserved;
+
+            await Task.Delay(DispatchedWritesApplyPollMs, CancellationToken.None).ConfigureAwait(false);
+        }
+
+        return Writes.DurableCompletionAnswer.Acknowledged;
+    }
+
+    /// <summary>
     /// Injects <paramref name="locks"/> into the actor pool for <paramref name="keySpace"/>
     /// on the leader of <paramref name="partitionId"/>. Forwards via IPC when this node is
     /// not the leader.

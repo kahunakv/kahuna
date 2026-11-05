@@ -283,13 +283,35 @@ internal sealed class RangeMerger
         // to the survivor.
         string? movingEndKey = KeySpaceBounds.MovingEndKey(keySpace, right.EndKey);
 
+        // -- 1d. The retiring partition's leader enforces the quiesce before anything depends on it --
+        // Same reason as the splitter's: the quiesce is committed on the meta partition and P2's
+        // leader applies it a replication round later, and until its own map shows it the dispatch
+        // fence refuses nothing there. A one-phase commit validated before the range lock above
+        // existed would be appended on P2 after the settle, the copy and the hand-off below, and be
+        // acknowledged on a partition that is about to be retired. The leader answers only once its
+        // map shows the quiesce and everything it had already dispatched for P2 is applied. No answer
+        // inside the budget refuses the attempt; the caller's finally reopens the range and the
+        // trigger retries.
+        if (!await manager.ConfirmRangeQuiesceOnPartitionLeaderAsync(
+                right.PartitionId, keySpace, right.StartKey, right.EndKey, mergeTxId, windowCt))
+        {
+            RangeSplitMetrics.UnconfirmedQuiesceRefusals.Add(1);
+
+            logger.LogWarning(
+                "RangeMerger: the leader of P{Source} did not confirm that it enforces the quiesce of {Space} [{Start},{End}); refusing this merge attempt",
+                right.PartitionId, keySpace, right.StartKey, right.EndKey ?? "+inf");
+
+            return MergeOutcome.QuiesceFailed;
+        }
+
         // -- 2. Settle the moving range's durable intents before the copy ---------
         // Under deferred settlement a committed value can exist only as a decided-but-unsettled
         // prepared intent, and the copy below captures base rows: cutting over now would move the
-        // range while its newest committed values still ride intents. The quiesce blocks new
-        // prepares, so settling here is stable — decided intents materialize into the moving range
-        // and the copy carries the rows. An intent still undecided inside its window refuses this
-        // attempt; the trigger retries once its coordinator has decided.
+        // range while its newest committed values still ride intents. The retiring partition's
+        // leader confirmed the quiesce above, so no new prepare enters the range there and settling
+        // here is stable — decided intents materialize into the moving range and the copy carries
+        // the rows. An intent still undecided inside its window refuses this attempt; the trigger
+        // retries once its coordinator has decided.
         if (!await manager.SettleMovingRangeIntentsAsync(right.PartitionId, right.StartKey, movingEndKey, windowCt))
         {
             logger.LogWarning(

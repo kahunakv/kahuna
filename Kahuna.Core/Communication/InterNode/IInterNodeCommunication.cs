@@ -276,4 +276,15 @@ public interface IInterNodeCommunication
     /// </summary>
     public Task<(KeyValueResponseType Type, bool Held, long AppliedLogId)> GetPreparedIntentPresence(
         string node, int partitionId, HLCTimestamp transactionId, long epoch, string key, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Asks <paramref name="node"/>, the leader of the partition a range move takes data out of, whether it
+    /// enforces the quiesce <paramref name="owner"/> opened over <c>[startKey, endKey)</c> of
+    /// <paramref name="keySpace"/> (see <see cref="IKahuna.ConfirmRangeQuiesce"/>).
+    /// <see cref="KeyValueResponseType.Locked"/> when it does; <see cref="KeyValueResponseType.MustRetry"/> when
+    /// it cannot confirm now, and on a transport failure; <see cref="KeyValueResponseType.DoesNotExist"/> when
+    /// the node does not know the call, which is a node of an older version.
+    /// </summary>
+    public Task<KeyValueResponseType> ConfirmRangeQuiesce(
+        string node, int partitionId, string keySpace, string? startKey, string? endKey, HLCTimestamp owner, CancellationToken cancellationToken);
 }

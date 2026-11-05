@@ -575,6 +575,65 @@ internal sealed class RangeMapStore : IDisposable
     }
 
     /// <summary>
+    /// True when this node's applied map shows the quiesce that <paramref name="owner"/> opened over
+    /// <c>[startKey, endKey)</c> of <paramref name="keySpace"/>, still in force: every descriptor of the key
+    /// space that touches the interval carries the owner's stamp and a deadline that has not lapsed, its
+    /// quiesced part covers all of it that lies in the interval, and at least one descriptor touches the
+    /// interval. This is the map every write-side quiesce check on this node reads, so a true answer means
+    /// those checks refuse the whole interval from now on, until the window closes.
+    ///
+    /// <para>
+    /// False before this node applied the entry that published the quiesce, after the window closed (released,
+    /// lapsed, or replaced by the cutover), and for a window another move opened.
+    /// </para>
+    /// </summary>
+    public bool IsQuiescedBy(string keySpace, string? startKey, string? endKey, HLCTimestamp owner)
+    {
+        if (owner == HLCTimestamp.Zero)
+            return false;
+
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+        bool matched = false;
+
+        foreach (RangeDescriptor descriptor in current.Descriptors)
+        {
+            if (!string.Equals(descriptor.KeySpace, keySpace, StringComparison.Ordinal) || !Overlaps(descriptor, startKey, endKey))
+                continue;
+
+            if (descriptor.QuiesceOwner != owner || !descriptor.IsQuiescedAt(now) || !QuiesceCovers(descriptor, startKey, endKey))
+                return false;
+
+            matched = true;
+        }
+
+        return matched;
+    }
+
+    /// <summary>
+    /// True when the quiesced part of <paramref name="descriptor"/> covers all of the descriptor that lies in
+    /// <c>[startKey, endKey)</c>. A null bound is that side's infinity, on the interval, the descriptor and the
+    /// quiesced part alike.
+    /// </summary>
+    private static bool QuiesceCovers(RangeDescriptor descriptor, string? startKey, string? endKey)
+    {
+        // The part of the descriptor the interval touches is [low, high): the later start and the earlier end.
+        string? low = startKey is null ? descriptor.StartKey
+            : descriptor.StartKey is null || string.CompareOrdinal(startKey, descriptor.StartKey) >= 0 ? startKey : descriptor.StartKey;
+
+        string? high = endKey is null ? descriptor.EndKey
+            : descriptor.EndKey is null || string.CompareOrdinal(endKey, descriptor.EndKey) <= 0 ? endKey : descriptor.EndKey;
+
+        if (descriptor.QuiesceStartKey is not null && (low is null || string.CompareOrdinal(descriptor.QuiesceStartKey, low) > 0))
+            return false;
+
+        if (descriptor.QuiesceEndKey is not null && (high is null || string.CompareOrdinal(descriptor.QuiesceEndKey, high) < 0))
+            return false;
+
+        return true;
+    }
+
+    /// <summary>
     /// True when <paramref name="descriptor"/>'s half-open interval intersects
     /// <c>[startKey, endKey)</c>. A null bound on either side is that side's infinity, so it always
     /// intersects.

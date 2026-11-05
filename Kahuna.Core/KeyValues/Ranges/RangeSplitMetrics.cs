@@ -111,4 +111,15 @@ internal static class RangeSplitMetrics
         Meter.CreateCounter<long>(
             "kahuna.range.split.incomplete_source_refusals",
             description: "Splits refused because the source partition leader's apply state was incomplete versus a replica.");
+
+    /// <summary>
+    /// Range moves (splits and merges) refused because the source partition's leader did not confirm, inside
+    /// the move's budget, that it enforces the quiesce: no leader could be confirmed, its applied range map did
+    /// not show the window, or the writes it had already dispatched did not finish applying. Retryable. A value
+    /// that keeps rising names a source leader whose apply of the meta partition lags.
+    /// </summary>
+    internal static readonly Counter<long> UnconfirmedQuiesceRefusals =
+        Meter.CreateCounter<long>(
+            "kahuna.range.move.unconfirmed_quiesce_refusals",
+            description: "Range moves refused because the source partition leader did not confirm that it enforces the quiesce.");
 }

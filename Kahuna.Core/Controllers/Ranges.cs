@@ -618,4 +618,8 @@ public sealed partial class KahunaManager
     public Task<(KeyValueResponseType Type, bool Held, long AppliedLogId)>
         GetPreparedIntentPresence(int partitionId, HLCTimestamp transactionId, long epoch, string key, CancellationToken ct) =>
         keyValues.GetPreparedIntentPresence(partitionId, transactionId, epoch, key, ct);
+
+    public Task<KeyValueResponseType>
+        ConfirmRangeQuiesce(int partitionId, string keySpace, string? startKey, string? endKey, HLCTimestamp owner, CancellationToken ct) =>
+        keyValues.ConfirmRangeQuiesce(partitionId, keySpace, startKey, endKey, owner, ct);
 }

@@ -123,6 +123,18 @@ internal sealed partial class KeyValuesManager
         CancellationToken cancellationToken) =>
         rangeStateTransfer.ImportRangeLocksToPartitionLeaderAsync(keySpace, partitionId, locks, cancellationToken);
 
+    /// <summary>The mover's half of a range move's quiesce confirmation; see
+    /// <see cref="RangeStateTransferService.ConfirmRangeQuiesceOnPartitionLeaderAsync"/>.</summary>
+    internal Task<bool> ConfirmRangeQuiesceOnPartitionLeaderAsync(
+        int partitionId, string keySpace, string? startKey, string? endKey, HLCTimestamp owner, CancellationToken cancellationToken) =>
+        rangeStateTransfer.ConfirmRangeQuiesceOnPartitionLeaderAsync(partitionId, keySpace, startKey, endKey, owner, cancellationToken);
+
+    /// <summary>The source leader's half of a range move's quiesce confirmation; see
+    /// <see cref="IKahuna.ConfirmRangeQuiesce"/>.</summary>
+    public Task<KeyValueResponseType> ConfirmRangeQuiesce(
+        int partitionId, string keySpace, string? startKey, string? endKey, HLCTimestamp owner, CancellationToken cancellationToken) =>
+        rangeStateTransfer.ConfirmRangeQuiesceLocalAsync(partitionId, keySpace, startKey, endKey, owner, cancellationToken);
+
     internal IReadOnlyCollection<CompletionReceiptRecord> GetLocalCompletionReceiptsForRange(string? startKey, string? endKey) =>
         rangeStateTransfer.GetLocalCompletionReceiptsForRange(startKey, endKey);
 

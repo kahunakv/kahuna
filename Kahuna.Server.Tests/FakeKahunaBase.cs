@@ -164,6 +164,7 @@ internal abstract class FakeKahunaBase : IKahuna
 
     public virtual Task<(KeyValueResponseType Type, KeyValueApplyFingerprint Fingerprint)> GetPartitionApplyFingerprint(int partitionId, CancellationToken ct) => throw new NotImplementedException();
     public virtual Task<(KeyValueResponseType Type, bool Held, long AppliedLogId)> GetPreparedIntentPresence(int partitionId, HLCTimestamp transactionId, long epoch, string key, CancellationToken ct) => throw new NotImplementedException();
+    public virtual Task<KeyValueResponseType> ConfirmRangeQuiesce(int partitionId, string keySpace, string? startKey, string? endKey, HLCTimestamp owner, CancellationToken ct) => throw new NotImplementedException();
     public virtual Task<Kahuna.Server.KeyValues.Watch.KeyValueWatchOpening> WatchKeyValues(KeyValueWatchRequest request, CancellationToken ct) => throw new NotImplementedException();
 
     public virtual Task<HistoryHoldAnswer> HistoryHold(HistoryHoldRequest request, CancellationToken ct) => throw new NotImplementedException();

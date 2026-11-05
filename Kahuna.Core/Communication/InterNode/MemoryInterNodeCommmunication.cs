@@ -1964,4 +1964,17 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
 
         throw Unreachable(node);
     }
+
+    public async Task<KeyValueResponseType> ConfirmRangeQuiesce(
+        string node, int partitionId, string keySpace, string? startKey, string? endKey, HLCTimestamp owner, CancellationToken cancellationToken)
+    {
+        if (TryGetNode(node, out IKahuna? kahunaNode))
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.ConfirmRangeQuiesce(partitionId, keySpace, startKey, endKey, owner, cancellationToken);
+        }
+
+        throw Unreachable(node);
+    }
 }

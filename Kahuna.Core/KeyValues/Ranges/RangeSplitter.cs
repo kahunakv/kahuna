@@ -364,15 +364,37 @@ internal sealed class RangeSplitter
 
         try
         {
+            // ── 6a. The source leader enforces the quiesce before anything depends on it ────────
+            // The quiesce is committed on the meta partition, and P's leader applies it a replication
+            // round later. Until that leader's own map shows it, its dispatch fence refuses nothing: a
+            // one-phase commit whose validation ran before the range lock above existed is appended on
+            // P after the settle barrier, the catch-up copy and the hand-off below, and is acknowledged
+            // on a partition that [K,E) is about to stop routing to. The leader answers only once its
+            // map shows the quiesce and everything it had already dispatched for P is applied, so the
+            // steps below run over a range that takes no new state on that leader. No answer inside the
+            // budget refuses the attempt; the range reopens in the finally below and the trigger retries.
+            if (!await manager.ConfirmRangeQuiesceOnPartitionLeaderAsync(
+                    descriptor.PartitionId, keySpace, splitKey, descriptor.EndKey, splitTxId, windowCt))
+            {
+                RangeSplitMetrics.UnconfirmedQuiesceRefusals.Add(1);
+
+                logger.LogWarning(
+                    "RangeSplitter: the leader of P{Source} did not confirm that it enforces the quiesce of {Space} [{Key},{End}); refusing this split attempt",
+                    descriptor.PartitionId, keySpace, splitKey, descriptor.EndKey ?? "+inf");
+
+                return SplitOutcome.QuiesceFailed;
+            }
+
             // ── 6b. Settle the moving range's durable intents before the catch-up copy ──────────
             // Under deferred settlement a committed value can exist only as a decided-but-unsettled
             // prepared intent: the copies capture base rows, so cutting over now would move the range
             // while its newest committed values still ride intents — any leg of the intent handoff or
             // overlay that fails then serves the prior revision from the child (observed by Jepsen as
-            // read skew with no faults injected). The quiesce above blocks new prepares, so settling
-            // here is stable: decided intents materialize into the source range and the catch-up copy
-            // carries the rows. An intent still undecided inside its window refuses this attempt —
-            // the trigger retries once its coordinator has decided.
+            // read skew with no faults injected). The source leader confirmed the quiesce above, so no
+            // new prepare enters the range there and settling here is stable: decided intents
+            // materialize into the source range and the catch-up copy carries the rows. An intent
+            // still undecided inside its window refuses this attempt — the trigger retries once its
+            // coordinator has decided.
             if (!await manager.SettleMovingRangeIntentsAsync(descriptor.PartitionId, splitKey, movingEndKey, windowCt))
             {
                 logger.LogWarning(

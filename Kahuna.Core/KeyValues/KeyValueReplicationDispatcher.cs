@@ -81,6 +81,13 @@ internal sealed class KeyValueReplicationDispatcher
         return Math.Max(Volatile.Read(ref progress.LastApplied), Volatile.Read(ref progress.Applying));
     }
 
+    /// <summary>
+    /// The highest log index of <paramref name="partitionId"/> whose apply on this node has finished. Applies are
+    /// serialized per partition and run in log order, so every entry of the partition at or below it that this
+    /// subsystem owns has reached this node's stores.
+    /// </summary>
+    internal long AppliedIndex(int partitionId) => Volatile.Read(ref ProgressOf(partitionId).LastApplied);
+
     /// <summary>Records the applied id (monotonic) and marks the apply complete (even version).</summary>
     private static void EndApply(ApplyProgress progress, long logId)
     {

@@ -458,6 +458,31 @@ Step by step:
    during the window. Releases are counted under `kahuna.kv.write.rejections{reason="range_quiesced"}`
    and coordinator refusals under `kahuna.durable_tx.range_quiesce_refusals`.
 
+   The dispatch fence reads the map of the node that dispatches, and the quiesce reaches that node
+   a replication round after the node that runs the move commits it. So before the move settles or
+   copies anything, it asks the **source partition's leader to confirm the quiesce**
+   (`RangeStateTransferService.ConfirmRangeQuiesceOnPartitionLeaderAsync`, a unary inter-node call).
+   The leader answers yes only when all three hold, in this order:
+
+   1. A quorum confirms that it leads the source partition, so it is the node whose write scheduler
+      dispatches the partition's proposals.
+   2. Its own applied map shows this move's quiesce over the whole interval. A leader whose map does
+      not show it yet runs a confirmed read of the meta partition, which applies everything committed
+      before the question, instead of waiting for the entry to arrive on its own.
+   3. Every write its scheduler had already dispatched for the partition is applied. The leader
+      proposes one empty progress entry through the same scheduler and waits for its own ordered
+      apply to pass it.
+
+   Without the second, a one-phase commit whose validation ran before the range lock existed is
+   appended on the source after the move gathered the range's state, and is acknowledged there.
+   Without the third, a proposal that passed the fence a moment earlier reaches the stores after
+   the settle barrier looked. The move asks again until the leader confirms; no confirmation within
+   5 s refuses the attempt (`QuiesceFailed`, which the trigger retries) and is counted under
+   `kahuna.range.move.unconfirmed_quiesce_refusals`. A leader of an older version does not know the
+   call, and the move then goes on as it did before, with a warning. The confirmation is about the
+   leader that answered: a leader promoted after it, whose map has not applied the quiesce yet, is
+   still a window, bounded by that node's own apply of the meta partition.
+
    The quiesce carries a **deadline**, not a flag: a split executor that dies mid-window leaves a
    range that reopens on its own rather than one that refuses writes forever. The release is scoped
    to the split's own transaction id, so a straggling release cannot reopen a *later* split's
@@ -537,8 +562,9 @@ With split in place, the rest of the system is about *using* and *maintaining* t
 both under the minimum size, coalesce them. It bulk-exports `[B,C)` to the survivor P1, does an
 atomic `MutateMapAsync` cutover replacing the two descriptors with one `[A,C)@P1` at a bumped
 generation, and returns the retired partition id so the caller can `RemovePartitionAsync` it.
-Before copying, merge acquires a `WriteFence` on `[B,C)` and publishes descriptor quiesce; it settles
-decided intents and transfers transaction state before cutover. A failure prevents cutover.
+Before copying, merge acquires a `WriteFence` on `[B,C)`, publishes descriptor quiesce and asks P2's
+leader to confirm it, exactly as a split does for its source; it settles decided intents and
+transfers transaction state before cutover. A failure prevents cutover.
 The same cutover entry lists P2 in the map's `RetiredPartitionIds`, so the pending removal is
 part of the committed map rather than a memory of the node that merged. The generation fence
 covers stale routing exactly as in split.
