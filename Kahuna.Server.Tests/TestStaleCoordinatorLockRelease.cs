@@ -165,6 +165,36 @@ public sealed class TestStaleCoordinatorLockRelease : BaseCluster
         return held.Any(l => l.TransactionId == transactionId);
     }
 
+    /// <summary>
+    /// Rolls back a session its consumer gives up on, the way a client ends a transaction it will not commit.
+    /// Asks again while the answer is retryable or the call throws, up to the usual scaled budget: the
+    /// coordinator partition may be electing, and the node that began the session may be going away. Returns the
+    /// last answer. Any answer but MustRetry ended the session: RolledBack, or the outcome it had already reached.
+    /// </summary>
+    private static async Task<KeyValueResponseType> RollBackAbandoned(KahunaManager session, TransactionHandle handle, CancellationToken ct)
+    {
+        long deadline = Environment.TickCount64 + (long)(10_000 * TimingScale);
+
+        while (true)
+        {
+            try
+            {
+                KeyValueResponseType answer = await session.LocateAndRollbackTransaction(handle, ct);
+                if (answer != KeyValueResponseType.MustRetry)
+                    return answer;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // The forward met the node that is going away; the next attempt routes again.
+            }
+
+            if (Environment.TickCount64 >= deadline)
+                return KeyValueResponseType.MustRetry;
+
+            await Task.Delay(50, ct);
+        }
+    }
+
     private async Task<(IRaft[] Rafts, KahunaManager[] Managers, List<LeadershipOverridingRaft> Overrides)> AssembleOverridable()
     {
         List<LeadershipOverridingRaft> overrides = [];
@@ -485,10 +515,52 @@ public sealed class TestStaleCoordinatorLockRelease : BaseCluster
     }
 
     /// <summary>
+    /// The contract the consumer loop below depends on. A commit whose caller cancelled before it was sent
+    /// throws and decides nothing: the session stays open on its coordinator and its lock stays in force on the
+    /// data leader, as for any session whose client went quiet. The lock is then bounded by its lease, unless the
+    /// client ends the session; a rollback does, and drops the lock at once.
+    /// </summary>
+    [Fact]
+    public async Task CommitCancelledBeforeItIsSent_LeavesTheSessionOpen_AndARollbackDropsItsLock()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft[] rafts, KahunaManager[] managers, _) = await AssembleOverridable();
+
+        try
+        {
+            KeyValuePair<int, string>[] keys = FreshKeyPerPartition(managers[0], "ccs");
+            Assert.True(keys.Length >= 2, "the fixture needs a data partition and a coordinator partition");
+
+            (_, string dataKey, int dataLeader, string coordinatorKey, _) = await PickDistinctLeaders(keys, rafts, ct);
+
+            KahunaManager leader = managers[dataLeader];
+            await Seed(leader, dataKey, ct);
+
+            TransactionHandle holder = await StartPessimistic(leader, coordinatorKey, ct);
+            Assert.Equal(KeyValueResponseType.Locked, await TryPointRangeLock(leader, holder, dataKey, RangeLockMode.Shared, ct));
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                () => leader.LocateAndCommitTransaction(holder, new CancellationToken(canceled: true)));
+
+            Assert.True(await HoldsRangeLock(leader, dataKey, holder.TransactionId), "a commit that was never sent must not have ended the session");
+
+            Assert.Equal(KeyValueResponseType.RolledBack, await RollBackAbandoned(leader, holder, ct));
+            Assert.False(await HoldsRangeLock(leader, dataKey, holder.TransactionId));
+        }
+        finally
+        {
+            await LeaveCluster(rafts[0], rafts[1], rafts[2]);
+        }
+    }
+
+    /// <summary>
     /// The shutdown form end to end, as a cluster consumer meets it: sessions begun through the coordinator
     /// partition's leader take Shared range locks on another node's partition and commit, in a loop, while the
-    /// coordinator node is disposed under them. No lock of a finished transaction may stay on the data leader,
-    /// and a writer into the range must be admitted within seconds, not after the lock lease.
+    /// coordinator node is disposed under them. The consumer ends every session it begins: it rolls back the
+    /// one whose commit gave no final answer, and the one it has open when the loop stops. No lock of an ended
+    /// transaction may stay on the data leader, and a writer into the range must be admitted within seconds,
+    /// not after the lock lease.
     /// </summary>
     [Fact]
     public async Task DisposedCoordinatorNode_LeavesNoLockBehind_OnTheDataLeader()
@@ -511,12 +583,24 @@ public sealed class TestStaleCoordinatorLockRelease : BaseCluster
 
             using CancellationTokenSource loopCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             int scans = 0;
+            int unended = 0;
 
             // The consumer's loop, on the data leader: begin (routed to the coordinator leader), lock, commit.
+            //
+            // The consumer ends every session it begins. A commit that gave no final answer leaves the session
+            // open on its coordinator with its lock in force: a retryable refusal while the coordinator
+            // partition elects, a throw from the node that is going away, or the loop's own stop signal, which
+            // a commit that was not sent yet honors by throwing. The consumer then rolls the session back, as a
+            // client does with a transaction it gives up on. A session that nobody ends keeps its lock until
+            // the lease runs out on any cluster, and no node can shorten that; the subject here is what the
+            // cluster leaves behind for sessions that were ended.
             async Task ScanLoop()
             {
                 while (!loopCts.IsCancellationRequested)
                 {
+                    TransactionHandle open = TransactionHandle.None;
+                    bool threw = false;
+
                     try
                     {
                         (KeyValueResponseType beginType, TransactionHandle handle) = await leader.LocateAndStartTransaction(
@@ -534,6 +618,8 @@ public sealed class TestStaleCoordinatorLockRelease : BaseCluster
                             continue;
                         }
 
+                        open = handle;
+
                         (KeyValueResponseType lockType, _) = await leader.LocateAndTryAcquireRangeLock(
                             handle.TransactionId, BucketOf(dataKey), dataKey, true, dataKey, true, LockExpiresMs, KeyValueDurability.Persistent, RangeLockMode.Shared, loopCts.Token,
                             coordinatorKey: handle.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
@@ -541,15 +627,26 @@ public sealed class TestStaleCoordinatorLockRelease : BaseCluster
                         if (lockType == KeyValueResponseType.Locked)
                             Interlocked.Increment(ref scans);
 
-                        await leader.LocateAndCommitTransaction(handle, loopCts.Token);
+                        TransactionCommitAnswer answer = await leader.LocateAndCommitTransaction(handle, loopCts.Token);
+
+                        if (answer.Type is KeyValueResponseType.Committed or KeyValueResponseType.Aborted)
+                            open = TransactionHandle.None;
                     }
                     catch (OperationCanceledException)
                     {
-                        return;
+                        // The stop signal arrived inside a call.
                     }
                     catch (Exception)
                     {
                         // The coordinator node is going away under the loop; the next iteration routes again.
+                        threw = true;
+                    }
+
+                    if (!open.IsEmpty && await RollBackAbandoned(leader, open, ct) == KeyValueResponseType.MustRetry)
+                        Interlocked.Increment(ref unended);
+
+                    if (threw)
+                    {
                         try { await Task.Delay(20, loopCts.Token); } catch (OperationCanceledException) { return; }
                     }
                 }
@@ -567,6 +664,11 @@ public sealed class TestStaleCoordinatorLockRelease : BaseCluster
             await loop;
 
             Assert.True(Volatile.Read(ref scans) >= 3);
+
+            // The lock check below is only about sessions that were ended. A session whose rollback stayed
+            // retryable for the whole budget is still open, and is reported as that instead of as a lock.
+            Assert.True(Volatile.Read(ref unended) == 0,
+                $"{Volatile.Read(ref unended)} session(s) could be neither committed nor rolled back: the rollback still answered MustRetry after its budget");
 
             // Every scan's lock is gone from the data leader within seconds, not after the 60 s lease.
             await WaitUntilAsync(async () => (await leader.KeyValues.GetRangeLocksAsync(BucketOf(dataKey))).Count == 0, timeoutMs: 10_000);

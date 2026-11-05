@@ -153,6 +153,18 @@ public sealed class TestSplitMovedAnchorFinalizeFence : BaseCluster
             (_, KahunaManager splitDriver) = await LeaderOf(RangeMapStore.MetaPartitionId, rafts, kahunas, ct);
             SplitOutcome outcome = await splitDriver.ForceSplitAtKeyAsync(Space, SplitKey, async () =>
             {
+                // The quiesce is committed on the meta leader when this seam runs; every other node applies
+                // the map that carries it a replication round later. The dispatch fence judges a prepare
+                // against the source leader's own applied map, and that leader is by construction not the
+                // meta leader. A prepare that arrives before the map does is appended, and the commit is then
+                // refused by the split's range lock as a conflict abort, which is a correct answer but not the
+                // interleaving under test. The seam holds the window open, so wait for every node to show it.
+                foreach (KahunaManager kahuna in kahunas)
+                {
+                    KahunaManager observer = kahuna;
+                    await WaitUntilAsync(() => observer.KeyValues.IsKeyQuiesced(AnchorKey));
+                }
+
                 // Inside the quiesce window: the anchor's prepare meets the leader's dispatch fence.
                 refused = await session.LocateAndCommitTransaction(handle, ct);
                 commitRan = true;
