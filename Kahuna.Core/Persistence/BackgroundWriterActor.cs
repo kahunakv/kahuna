@@ -439,9 +439,24 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     /// <summary>
     /// Test seam replacing the meta-partition catch-up confirmation that gates destructive
     /// revision prunes. Null in production (the real <c>ConfirmLocalApplicationAsync</c> runs);
-    /// set by tests to force the confirmed/unconfirmed outcome without controlling elections.
+    /// set by tests to force the confirmed/unconfirmed outcome without controlling elections. The
+    /// token is the deadline of <see cref="ConfirmFloorRegistryFreshness"/>, so a seam that parks on
+    /// it exercises the same path a confirmation that never answers takes.
     /// </summary>
-    internal Func<ValueTask<bool>>? ConfirmPruneFreshnessOverride;
+    internal Func<CancellationToken, ValueTask<bool>>? ConfirmPruneFreshnessOverride;
+
+    /// <summary>
+    /// Monotonic stamp (<see cref="Environment.TickCount64"/>) before which no catch-up confirmation is
+    /// attempted: set when one runs out of time, to <see cref="KahunaConfiguration.RevisionPruneConfirmRetryInterval"/>
+    /// ahead. A node whose confirmation parks (not yet a roster member, partitioned from the meta leader)
+    /// then costs the writer at most one deadline per interval; without it every flush cycle with queued
+    /// cleanup keys waited the full deadline. A confirmation that fails at once (no meta leader known yet,
+    /// a refused fetch) costs nothing and is retried on the next cycle as it always was.
+    /// </summary>
+    private long nextConfirmAttemptTicks;
+
+    /// <summary>How many confirmations were skipped by the retry interval since the last one was attempted (tests).</summary>
+    internal int ConfirmAttemptsSkipped;
 
     /// <summary>
     /// A destructive revision prune must never run from a possibly-stale local hold registry: a
@@ -455,15 +470,52 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     /// residual exposure narrows from unbounded staleness to the confirmation→sample window.
     /// With no floor store there are no holds to protect and no gate is needed.
     /// </summary>
-    private ValueTask<bool> ConfirmFloorRegistryFreshness()
+    /// <para>
+    /// The confirmation is bounded by <see cref="KahunaConfiguration.RevisionPruneConfirmTimeout"/>:
+    /// it is a read-index round to the meta leader followed by a wait for this node's own application
+    /// to reach the index, and the wait has no end of its own. A replica that is not a roster member
+    /// receives no meta-partition entries until its join commits, and the writer's turn parked on
+    /// that wait for 174 s inside a whole-partition install (its drain waited for the turn, and every
+    /// other write queued behind it). A writer turn must never park: the prune can wait, the flush
+    /// cannot. A confirmation that runs out of time is unconfirmed, and none is attempted again for
+    /// <see cref="KahunaConfiguration.RevisionPruneConfirmRetryInterval"/>; one that fails at once is
+    /// retried on the next cycle.
+    /// </para>
+    private async ValueTask<bool> ConfirmFloorRegistryFreshness()
     {
         if (snapshotFloorStore is null)
-            return ValueTask.FromResult(true);
+            return true;
 
-        if (ConfirmPruneFreshnessOverride is not null)
-            return ConfirmPruneFreshnessOverride();
+        long nowTicks = Environment.TickCount64;
+        if (nowTicks < nextConfirmAttemptTicks)
+        {
+            ConfirmAttemptsSkipped++;
+            return false;
+        }
 
-        return raft.ConfirmLocalApplicationAsync(RangeMapStore.MetaPartitionId);
+        bool confirmed;
+        using CancellationTokenSource deadline = new(configuration.RevisionPruneConfirmTimeout);
+
+        try
+        {
+            confirmed = ConfirmPruneFreshnessOverride is not null
+                ? await ConfirmPruneFreshnessOverride(deadline.Token)
+                : await raft.ConfirmLocalApplicationAsync(RangeMapStore.MetaPartitionId, deadline.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            // The deadline, or a cancellation from inside the raft layer (an executor shutting down):
+            // either way unconfirmed, and never an exception out of the writer's turn.
+            confirmed = false;
+        }
+
+        if (deadline.IsCancellationRequested)
+        {
+            SnapshotFloorMetrics.PruneConfirmTimedOut.Add(1);
+            nextConfirmAttemptTicks = Environment.TickCount64 + (long)configuration.RevisionPruneConfirmRetryInterval.TotalMilliseconds;
+        }
+
+        return confirmed;
     }
 
 
@@ -610,12 +662,13 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 
             case BackgroundWriteType.FlushAndNotify:
             case BackgroundWriteType.FlushBeforeCapture:
-                // Explicit pre-backup/pre-close flush: drain fully (ignore the time budget) so the
-                // completion signal means every queued write has landed in storage. The completion
+            case BackgroundWriteType.FlushForStateTransfer:
+                // Explicit pre-backup/pre-close/pre-transfer flush: drain fully (ignore the time budget)
+                // so the completion signal means every queued write has landed in storage. The completion
                 // source MUST be completed on every path — success, partial persistence failure, or
                 // an exception thrown mid-flush (e.g. the writer scheduler rejecting an enqueue during
                 // shutdown). A flush that never signals would hang its awaiter (FlushPersistenceAsync)
-                // forever, which stalls backups and node close.
+                // forever, which stalls backups, node close and whole-partition installs.
                 try
                 {
                     bool locksFlushed = await FlushLocks(drainFully: true);
@@ -630,7 +683,13 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                         keyValuesFlushed = await FlushKeyValues(drainFully: true);
                     }
 
-                    await AdvanceDurabilityFloors(forceSnapshotCapture: true);
+                    // The state-transfer flush keeps the periodic capture cadence: the exporter reads the
+                    // stores directly and the installer replaces them, so a forced full-store snapshot
+                    // rewrite would be work for nothing on the partition's executor.
+                    await AdvanceDurabilityFloors(forceSnapshotCapture: message.Type != BackgroundWriteType.FlushForStateTransfer);
+                    // Only the general flush runs the cleanup: it begins with a meta-partition catch-up
+                    // confirmation (bounded, but still a wait on the cluster) that neither a backup capture
+                    // nor a state transfer has any use for.
                     if (message.Type == BackgroundWriteType.FlushAndNotify)
                         await RunTargetedRevisionCleanup();
                     if (locksFlushed && keyValuesFlushed)

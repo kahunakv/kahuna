@@ -213,7 +213,9 @@ internal sealed class KeyValuesManagerBuilder
 
         // Whole-partition state transfer: seeds a replica whose needed log entries were compacted.
         // Drains the background writer before exporting so the physical-family scan reflects every
-        // applied entry (the export contract requires at least everything applied at the boundary).
+        // applied entry (the export contract requires at least everything applied at the boundary), and
+        // before an install's purge. The drain is the state-transfer flush: a full drain and the floors,
+        // but not the revision cleanup, whose meta-partition confirmation a non-member cannot obtain.
         partitionStateTransfer = new(
             partitionDataEnumerator,
             persistenceBackend,
@@ -225,7 +227,7 @@ internal sealed class KeyValuesManagerBuilder
             () =>
             {
                 TaskCompletionSource<bool> flushed = new(TaskCreationOptions.RunContinuationsAsynchronously);
-                backgroundWriter.Send(new(BackgroundWriteType.FlushAndNotify, flushed));
+                backgroundWriter.Send(new(BackgroundWriteType.FlushForStateTransfer, flushed));
                 return flushed.Task;
             },
             configuration.StoragePath,

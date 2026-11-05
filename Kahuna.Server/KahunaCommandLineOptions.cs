@@ -461,8 +461,8 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-suspicion-timeout", Required = false, HelpText = "How long a node may remain Suspect before being declared Dead in milliseconds", Default = 5000)]
     public int RaftSuspicionTimeout { get; set; } = 5000;
 
-    [Option("raft-dead-member-eviction-grace", Required = false, HelpText = "Grace period before a Dead node is committed as removed from the roster in milliseconds", Default = 30000)]
-    public int RaftDeadMemberEvictionGrace { get; set; } = 30000;
+    [Option("raft-dead-member-eviction-grace", Required = false, HelpText = "Milliseconds a node must stay Dead before it is committed as removed from the roster. Size it to the longest outage the roster should ride through intact: an evicted node rejoins as a learner and is a voter again only once caught up, and on a three-voter cluster the eviction buys nothing while that window costs fault tolerance. Default 600000 (Kommander's default).", Default = 600000)]
+    public int RaftDeadMemberEvictionGrace { get; set; } = 600000;
 
     [Option("raft-self-repair-peer-down-grace", Required = false, HelpText = "How long the promotion-gate self-repair (gap-skipping committed drain and orphaned-tail truncation) defers while a voter peer is not Alive, in milliseconds. 0 disables the grace", Default = 30000)]
     public int RaftSelfRepairPeerDownGrace { get; set; } = 30000;
@@ -725,6 +725,12 @@ public sealed class KahunaCommandLineOptions
 
     [Option("persistent-revision-cleanup-time-budget", Required = false, HelpText = "Milliseconds per flush cycle the targeted persistent revision cleanup may spend; keys not reached stay queued for the next cycle so cleanup never starves the flush. Default 250.", Default = 250)]
     public int PersistentRevisionCleanupTimeBudgetMs { get; set; } = 250;
+
+    [Option("revision-prune-confirm-timeout", Required = false, HelpText = "Milliseconds the background writer waits for the meta-partition catch-up confirmation that gates a revision prune; a confirmation that runs out of time skips the prune (keys stay queued). Default 1000.", Default = 1000)]
+    public int RevisionPruneConfirmTimeoutMs { get; set; } = 1000;
+
+    [Option("revision-prune-confirm-retry-interval", Required = false, HelpText = "Milliseconds the writer refrains from re-attempting the catch-up confirmation after one ran out of time. Default 5000.", Default = 5000)]
+    public int RevisionPruneConfirmRetryIntervalMs { get; set; } = 5000;
 
     [Option("persistence-max-unflushed-items", Required = false, HelpText = "Maximum committed key/value writes held in memory awaiting the background flush before ordinary writes are rejected with a retryable status (0 = unbounded). Default 1000000.", Default = 1_000_000L)]
     public long PersistenceMaxUnflushedItems { get; set; } = 1_000_000;

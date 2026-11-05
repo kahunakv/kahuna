@@ -321,13 +321,20 @@ detection requires the periodic ping to be enabled (it is, for cluster mode, by 
 | `--raft-ping-timeout` | Milliseconds to wait for a direct ping reply | `500` |
 | `--raft-indirect-ping-fanout` | How many peers are asked to ping a suspect indirectly | `2` |
 | `--raft-suspicion-timeout` | Milliseconds a member stays *suspect* before being declared dead | `5000` |
-| `--raft-dead-member-eviction-grace` | Milliseconds of cushion before the dead member's removal is committed | `30000` |
+| `--raft-dead-member-eviction-grace` | Milliseconds a member stays dead before its removal is committed | `600000` |
 
 > **Guidance — set the suspicion and eviction-grace timeouts generously.** A "dead" verdict is
 > irreversible. On a network with occasional latency spikes or nodes that pause under load, give
 > `--raft-suspicion-timeout` and `--raft-dead-member-eviction-grace` enough room to ride out a
 > blip. The cost of being slightly slow to evict a truly dead node is far lower than the cost of
-> evicting a healthy one mid-pause.
+> evicting a healthy one mid-pause. Size the eviction grace to the longest outage the roster should
+> ride through intact, not to a routine restart: an evicted member rejoins as a learner and is a
+> voter again only once it has caught up on every partition (after a whole-partition install, minutes),
+> and on a three-voter cluster the eviction buys nothing while that window costs the cluster's fault
+> tolerance — a 30-second pause of one of the two remaining voters inside it is a 30-second outage.
+> Eviction pays off on clusters with spare nodes, where the placement pass re-replicates the evicted
+> member's ranges. While evicted members are out, the meta-partition leader logs a Warning once a
+> minute. Embedded hosts set the same value through `EmbeddedKahunaOptions.RaftDeadMemberEvictionGrace`.
 
 ---
 

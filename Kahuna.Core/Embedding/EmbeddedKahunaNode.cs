@@ -632,6 +632,8 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             PersistentRevisionCleanupBatchSize = options.PersistentRevisionCleanupBatchSize,
             PersistentRevisionCleanupOnWrite = options.PersistentRevisionCleanupOnWrite,
             PersistentRevisionCleanupTimeBudget = options.PersistentRevisionCleanupTimeBudget,
+            RevisionPruneConfirmTimeout = options.RevisionPruneConfirmTimeout,
+            RevisionPruneConfirmRetryInterval = options.RevisionPruneConfirmRetryInterval,
             PersistenceMaxUnflushedItems = options.PersistenceMaxUnflushedItems,
             PersistenceMaxUnflushedBytes = options.PersistenceMaxUnflushedBytes,
             PersistenceWriteStallWarnMs = options.PersistenceWriteStallWarnMs,
@@ -791,6 +793,9 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         if (options.RaftSnapshotTransferStepTimeout is TimeSpan stepTimeout)
             configuration.SnapshotTransferStepTimeout = stepTimeout;
 
+        if (options.RaftDeadMemberEvictionGrace is TimeSpan evictionGrace)
+            configuration.DeadMemberEvictionGrace = evictionGrace;
+
         if (options.RaftLostAcknowledgedEntriesPolicy is { } lostEntriesPolicy)
             configuration.LostAcknowledgedEntriesPolicy = lostEntriesPolicy;
 
@@ -879,6 +884,11 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         if (options.RaftSnapshotTransferStepTimeout is { } stepTimeout && stepTimeout <= TimeSpan.Zero)
             throw new ArgumentException(
                 $"RaftSnapshotTransferStepTimeout ({stepTimeout}) must be positive, or null for Kommander's default.",
+                nameof(options));
+
+        if (options.RaftDeadMemberEvictionGrace is { } evictionGrace && evictionGrace <= TimeSpan.Zero)
+            throw new ArgumentException(
+                $"RaftDeadMemberEvictionGrace ({evictionGrace}) must be positive, or null for Kommander's default.",
                 nameof(options));
 
         // Kommander bounds a chunk's acknowledgement by the smaller of the two, so a chunk-ack timeout above the step

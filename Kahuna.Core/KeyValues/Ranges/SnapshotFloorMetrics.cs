@@ -63,6 +63,17 @@ internal static class SnapshotFloorMetrics
             description: "Revision-prune cycles skipped because meta-partition catch-up could not be confirmed.");
 
     /// <summary>
+    /// Catch-up confirmations that ran out of <see cref="Configuration.KahunaConfiguration.RevisionPruneConfirmTimeout"/>
+    /// before the meta leader answered or this node's application reached the read index. Each one is also a
+    /// skipped prune cycle; a sustained rate means this node is not receiving the meta partition (not yet a
+    /// roster member, or partitioned from its leader).
+    /// </summary>
+    internal static readonly Counter<long> PruneConfirmTimedOut =
+        Meter.CreateCounter<long>(
+            "kahuna.snapshot_floor.prune_confirm_timed_out_total",
+            description: "Meta-partition catch-up confirmations that ran out of time before answering.");
+
+    /// <summary>
     /// Increments when a snapshot hold acquire is refused because a registry bound was reached, tagged with the
     /// bound (holder, total). A sustained rate means a holder leaks holds or the bounds are too small.
     /// </summary>

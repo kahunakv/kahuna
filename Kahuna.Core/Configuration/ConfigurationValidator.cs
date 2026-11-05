@@ -495,6 +495,12 @@ public static class ConfigurationValidator
         if (configuration.PersistentRevisionCleanupTimeBudget <= TimeSpan.Zero)
             configuration.PersistentRevisionCleanupTimeBudget = TimeSpan.FromMilliseconds(250);
 
+        if (configuration.RevisionPruneConfirmTimeout <= TimeSpan.Zero)
+            configuration.RevisionPruneConfirmTimeout = TimeSpan.FromSeconds(1);
+
+        if (configuration.RevisionPruneConfirmRetryInterval <= TimeSpan.Zero)
+            configuration.RevisionPruneConfirmRetryInterval = TimeSpan.FromSeconds(5);
+
         if (configuration.PersistenceMaxUnflushedItems < 0)
             configuration.PersistenceMaxUnflushedItems = 0;
 

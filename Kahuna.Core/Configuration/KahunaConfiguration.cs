@@ -821,6 +821,25 @@ public sealed class KahunaConfiguration
     public TimeSpan PersistentRevisionCleanupTimeBudget { get; set; } = TimeSpan.FromMilliseconds(250);
 
     /// <summary>
+    /// How long the background writer waits for the meta-partition catch-up confirmation that gates a
+    /// destructive revision prune (targeted cleanup or full sweep). The confirmation is a read-index
+    /// round to the meta leader and a wait for this node's own application to reach the index; the wait
+    /// has no end of its own, and a replica that is not a roster member receives no meta-partition
+    /// entries until its join commits. A confirmation that runs out of time counts as unconfirmed: the
+    /// prune is skipped and its keys stay queued. Must be positive. The writer's turn must never park,
+    /// so this bounds the flush stall a lagging node can cause itself.
+    /// </summary>
+    public TimeSpan RevisionPruneConfirmTimeout { get; set; } = TimeSpan.FromSeconds(1);
+
+    /// <summary>
+    /// After a catch-up confirmation runs out of time, no confirmation is attempted for this long: the
+    /// queued cleanup keys wait, and the writer loses at most one <see cref="RevisionPruneConfirmTimeout"/>
+    /// per interval instead of one per flush cycle. A confirmation that fails at once (no meta leader
+    /// known yet) costs nothing and is retried on the next cycle. Must be positive.
+    /// </summary>
+    public TimeSpan RevisionPruneConfirmRetryInterval { get; set; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>
     /// Maximum committed key/value writes this node may hold in memory awaiting the background
     /// flush (the writer's inbox plus its dirty queues) before the write aggregator stops admitting
     /// ordinary writes with a retryable rejection. Terminal work (transaction decisions and

@@ -247,6 +247,35 @@ public sealed class TestEmbeddedRaftConfigurationSurface
         configuration.Validate();
     }
 
+    [Fact]
+    public void TestTheDeadMemberEvictionGraceIsMapped_AndNullKeepsKommandersDefault()
+    {
+        RaftConfiguration byDefault = EmbeddedKahunaNode.CreateRaftConfiguration(new EmbeddedKahunaOptions());
+        Assert.Equal(new RaftConfiguration().DeadMemberEvictionGrace, byDefault.DeadMemberEvictionGrace);
+
+        RaftConfiguration configured = EmbeddedKahunaNode.CreateRaftConfiguration(new EmbeddedKahunaOptions
+        {
+            RaftDeadMemberEvictionGrace = TimeSpan.FromMinutes(7)
+        });
+        Assert.Equal(TimeSpan.FromMinutes(7), configured.DeadMemberEvictionGrace);
+        configured.Validate();
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void TestANonPositiveDeadMemberEvictionGraceIsRefusedWithTheOptionNamed(int seconds)
+    {
+        EmbeddedKahunaOptions options = new()
+        {
+            NodeName = "eviction-grace",
+            RaftDeadMemberEvictionGrace = TimeSpan.FromSeconds(seconds)
+        };
+
+        ArgumentException refused = Assert.Throws<ArgumentException>(() => new EmbeddedKahunaNode(options));
+        Assert.Contains("RaftDeadMemberEvictionGrace", refused.Message);
+    }
+
     [Theory]
     [InlineData(0, null, "RaftSnapshotChunkAckTimeout")]
     [InlineData(-1, null, "RaftSnapshotChunkAckTimeout")]

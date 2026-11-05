@@ -215,6 +215,72 @@ public sealed class TestPartitionStateTransfer : IDisposable
         Assert.NotNull(target.Backend.GetLock($"{foreign}/l"));
     }
 
+    /// <summary>
+    /// The purge on the RocksDB backend: a scan of the key-value family filtered by ownership, one
+    /// delete per page. Current and revision rows share the family; the scan walks a key's revision
+    /// run and seeks past it once it is long enough, so the cost grows with the key count and only
+    /// mildly with the revision count. The same end state as a single direct delete of the owned keys;
+    /// the two timings are written to the test output for the feature that asked for the measurement
+    /// (an installing replica on another engine spent 19–28 s in this phase).
+    /// </summary>
+    [Fact]
+    public async Task Purge_OnRocksDb_ScansCurrentRowsOnly_AndMatchesADirectDelete()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        const int keys = 6_000;
+        const int revisions = 20;
+        string foreign = HashSpaceNotOwnedBy(2);
+
+        string pagedPath = Path.Combine(tempDir, "purge-paged");
+        string directPath = Path.Combine(tempDir, "purge-direct");
+        Directory.CreateDirectory(pagedPath);
+        Directory.CreateDirectory(directPath);
+
+        using RocksDbPersistenceBackend paged = new(pagedPath, "v1");
+        using RocksDbPersistenceBackend direct = new(directPath, "v1");
+
+        List<string> ownedKeys = new(keys);
+        for (int i = 0; i < keys; i++)
+            ownedKeys.Add($"ranged1/k{i}");
+
+        foreach (RocksDbPersistenceBackend backend in new[] { paged, direct })
+        {
+            for (int revision = 1; revision <= revisions; revision++)
+            {
+                List<PersistenceRequestItem> batch = new(revision == 1 ? keys * 2 : keys);
+                for (int i = 0; i < keys; i++)
+                {
+                    batch.Add(KvItem(ownedKeys[i], revision));
+                    if (revision == 1)
+                        batch.Add(KvItem($"{foreign}/k{i}"));
+                }
+
+                Assert.True(backend.StoreKeyValues(batch));
+            }
+        }
+
+        Node node = MakeNode(backend: paged);
+
+        long started = global::System.Diagnostics.Stopwatch.GetTimestamp();
+        Assert.True(await node.Transfer.PurgePartitionBackendRowsAsync(2, ct));
+        TimeSpan pagedElapsed = global::System.Diagnostics.Stopwatch.GetElapsedTime(started);
+
+        started = global::System.Diagnostics.Stopwatch.GetTimestamp();
+        Assert.True(direct.DeleteKeyValues(ownedKeys));
+        TimeSpan directElapsed = global::System.Diagnostics.Stopwatch.GetElapsedTime(started);
+
+        foreach (RocksDbPersistenceBackend backend in new[] { paged, direct })
+        {
+            Assert.Null(backend.GetKeyValue("ranged1/k0"));
+            Assert.Null(backend.GetKeyValue($"ranged1/k{keys - 1}"));
+            Assert.NotNull(backend.GetKeyValue($"{foreign}/k0"));
+            Assert.NotNull(backend.GetKeyValue($"{foreign}/k{keys - 1}"));
+        }
+
+        TestContext.Current.TestOutputHelper?.WriteLine(
+            $"RocksDB purge of {keys} owned keys x {revisions} revisions among {keys} foreign keys: paged scan+delete {pagedElapsed.TotalMilliseconds:F0} ms; direct delete of the same keys {directElapsed.TotalMilliseconds:F0} ms");
+    }
+
     [Fact]
     public async Task Import_ReplacesTheDurableStoreSlices_APendingIntentFromBeforeTheInstallDoesNotSurvive()
     {

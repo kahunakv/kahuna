@@ -465,7 +465,7 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
         long phaseStartedAt = startedAt;
         long verifyTicks = 0, gateTicks = 0, drainTicks = 0, purgeRowsTicks = 0, purgeStoresTicks = 0;
         long rowsTicks = 0, storesTicks = 0, snapshotsTicks = 0, floorTicks = 0, hooksTicks = 0;
-        int purgedPages = 0;
+        PurgeScan purge = default;
 
         // ── Phase 1: read, verify and decode the whole stream before mutating anything, so a truncated or corrupt
         // snapshot leaves the prior state untouched and the sender simply retries. ──
@@ -533,7 +533,7 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
 
             drainTicks = EndPhase(ref phaseStartedAt);
 
-            purgedPages = await PurgePartitionBackendRowsCountingPagesAsync(partitionId, ct).ConfigureAwait(false);
+            purge = await PurgePartitionBackendRowsCountingPagesAsync(partitionId, ct).ConfigureAwait(false);
 
             purgeRowsTicks = EndPhase(ref phaseStartedAt);
 
@@ -647,7 +647,7 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
                 logger.LogSlowPartitionStateImport(
                     partitionId, header.UpToIndex, totalMs, (long)SlowInstallThreshold.TotalMilliseconds,
                     keyValueCount, lockCount, recordCount, receiptCount, intentSection.Intents.Count, input.Length,
-                    Ms(verifyTicks), Ms(gateTicks), Ms(drainTicks), Ms(purgeRowsTicks), purgedPages, Ms(purgeStoresTicks),
+                    Ms(verifyTicks), Ms(gateTicks), Ms(drainTicks), Ms(purgeRowsTicks), purge.PurgedPages, purge.ScannedPages, purge.ScannedRows, Ms(purgeStoresTicks),
                     Ms(rowsTicks), Ms(storesTicks), Ms(snapshotsTicks), Ms(floorTicks), Ms(hooksTicks));
         }
 
@@ -655,7 +655,7 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
             logger.LogImportedPartitionState(
                 partitionId, header.UpToIndex, totalMs,
                 keyValueCount, lockCount, recordCount, receiptCount, intentSection.Intents.Count, input.Length,
-                Ms(verifyTicks), Ms(gateTicks), Ms(drainTicks), Ms(purgeRowsTicks), Ms(purgeStoresTicks),
+                Ms(verifyTicks), Ms(gateTicks), Ms(drainTicks), Ms(purgeRowsTicks), purge.PurgedPages, purge.ScannedPages, purge.ScannedRows, Ms(purgeStoresTicks),
                 Ms(rowsTicks), Ms(storesTicks), Ms(snapshotsTicks), Ms(floorTicks), Ms(hooksTicks));
     }
 
@@ -1091,24 +1091,31 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
     /// moment the partition is re-hosted. Returns true when the walk completed.
     /// </summary>
     internal async Task<bool> PurgePartitionBackendRowsAsync(int partitionId, CancellationToken ct, Func<bool>? proceed = null) =>
-        await PurgePartitionBackendRowsAsync(partitionId, proceed, pagesDeleted: null, ct).ConfigureAwait(false);
+        await PurgePartitionBackendRowsAsync(partitionId, proceed, scanned: null, ct).ConfigureAwait(false);
 
-    /// <summary>The install's form of the purge: the walk is never aborted, and the number of owned pages deleted
-    /// (each one backend scan page that held owned rows, followed by one delete) is returned for the install's
-    /// phase report, since the purge is a whole-family scan whose cost is the node's data, not the partition's.</summary>
-    private async Task<int> PurgePartitionBackendRowsCountingPagesAsync(int partitionId, CancellationToken ct)
+    /// <summary>What one purge walked: the backend key-value pages the scan read and the rows they held, whatever
+    /// their owner, and the pages that held owned rows and were deleted (key-value and lock pages alike).</summary>
+    internal readonly record struct PurgeScan(int ScannedPages, long ScannedRows, int PurgedPages);
+
+    /// <summary>The install's form of the purge: the walk is never aborted, and what it scanned and deleted is
+    /// returned for the install's phase report, since the purge is a whole-family scan whose cost is the node's
+    /// data, not the partition's. The scanned counts tell a family with nothing to purge from a filter that
+    /// matched nothing: a purge that reported no owned page after 28 s of scanning could not be read either way.</summary>
+    private async Task<PurgeScan> PurgePartitionBackendRowsCountingPagesAsync(int partitionId, CancellationToken ct)
     {
-        int pages = 0;
-        await PurgePartitionBackendRowsAsync(partitionId, proceed: null, pagesDeleted: p => pages = p, ct).ConfigureAwait(false);
-        return pages;
+        PurgeScan scan = default;
+        await PurgePartitionBackendRowsAsync(partitionId, proceed: null, scanned: s => scan = s, ct).ConfigureAwait(false);
+        return scan;
     }
 
-    private async Task<bool> PurgePartitionBackendRowsAsync(int partitionId, Func<bool>? proceed, Action<int>? pagesDeleted, CancellationToken ct)
+    private async Task<bool> PurgePartitionBackendRowsAsync(int partitionId, Func<bool>? proceed, Action<PurgeScan>? scanned, CancellationToken ct)
     {
         int pages = 0;
+        int scannedPages = 0;
+        long scannedRows = 0;
 
         await foreach (IReadOnlyList<(string Key, ReadOnlyKeyValueEntry Entry)> page in
-            enumerator.EnumerateKeyValuesAsync(partitionId, PageSize, ct).ConfigureAwait(false))
+            enumerator.EnumerateKeyValuesAsync(partitionId, PageSize, rows => { scannedPages++; scannedRows += rows; }, ct).ConfigureAwait(false))
         {
             if (proceed is not null && !proceed())
                 return false;
@@ -1139,7 +1146,7 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
             pages++;
         }
 
-        pagesDeleted?.Invoke(pages);
+        scanned?.Invoke(new PurgeScan(scannedPages, scannedRows, pages));
         return true;
     }
 

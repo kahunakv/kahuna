@@ -288,4 +288,17 @@ public sealed partial class KahunaManager : IKahuna, IDisposable
         return tcs.Task;
     }
 
+    /// <summary>
+    /// The flush a whole-partition state transfer waits for (<see cref="BackgroundWriteType.FlushForStateTransfer"/>):
+    /// every queued write lands in storage and the writer's turn ends without the revision cleanup or
+    /// the meta-partition confirmation it starts with, so the drain completes on a node that is not a
+    /// roster member. Exposed for tests; the transfer itself sends the same request through its drain callback.
+    /// </summary>
+    internal Task FlushPersistenceForStateTransferAsync()
+    {
+        TaskCompletionSource<bool> tcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        backgroundWriter.Send(new(BackgroundWriteType.FlushForStateTransfer, tcs));
+        return tcs.Task;
+    }
+
 }

@@ -19,7 +19,10 @@ compacted log is rebuilt by exactly this snapshot install — see the
 transaction records, prepared intents and the committed-head/settled-transaction ledger for the
 partition. Ownership is derived from the range map or hash routing over the node-global backend.
 Export first drains queued backend writes so the rows include state applied through the requested
-boundary. This is an **at-least boundary**, not an exact point-in-time image: pages and store slices
+boundary. That drain is the writer's state-transfer flush (`BackgroundWriteType.FlushForStateTransfer`):
+a full drain and the durability floors, without the targeted revision cleanup an ordinary explicit
+flush runs afterwards, because the cleanup begins with a meta-partition catch-up confirmation that a
+replica outside the committed roster cannot obtain (an install's drain parked on it for 174 s). This is an **at-least boundary**, not an exact point-in-time image: pages and store slices
 can include later applies, and the receiver replays the retained tail idempotently. It is unsuitable
 as an operator backup cut. It writes paged,
 checksummed rows and store payloads into pooled segments rather than a growing contiguous array.
@@ -38,7 +41,8 @@ through the seekable staged stream:
    receipts, records and intents. Truncation, checksum failure or undecodable store entries leave the
    prior state untouched. When `OnePhaseApplyTimeValidation` is enabled, a snapshot lacking the
    committed-head ledger is refused.
-2. **Replace the owned state.** Mark the install incomplete; drain queued persistence; purge the
+2. **Replace the owned state.** Mark the install incomplete; drain queued persistence (the same
+   state-transfer flush as the export); purge the
    partition's old backend rows and receipt/record slices; stream in the new rows, records and receipts;
    replace the intent/ledger slice (the node's old slice is released before the installed ledger is built,
    so the two are never resident together). Persist the durable-store snapshots, invalidate resident
@@ -59,10 +63,14 @@ and the leader's live-replica log retention is a bounded window of recent entrie
 outlasts that window ends in a non-contiguous backfill and another install. Every install records its
 phase durations on `kahuna.partition_install.phase_duration` (tag `phase`: `verify`, `gate`, `drain`,
 `purge_rows`, `purge_stores`, `rows`, `stores`, `snapshots`, `floor`, `hooks`, `total`) and logs them at
-Information; one that takes 10 s or longer is also logged at **Warning** with the breakdown and the number
-of backend pages the purge deleted, and counted on `kahuna.partition_install.slow_total`. Read the
-dominant phase: `drain` and `purge_rows` are the storage engine (the purge is a whole-family scan whose
-cost is the node's data, not the partition's, plus one range delete per page), `stores` is the durable-2PC
+Information; one that takes 10 s or longer is also logged at **Warning** with the breakdown, and counted on
+`kahuna.partition_install.slow_total`. Both lines report the purge as owned pages deleted out of backend
+pages scanned and the rows those pages held, so a purge that deleted nothing can be read as a family with
+nothing of the partition's in it rather than an ownership filter that matched nothing. Read the
+dominant phase: `drain` is the writer's queue and the storage engine (a drain of minutes with an idle
+writer was the catch-up confirmation described above, fixed by the state-transfer flush), `purge_rows` is
+the storage engine (the purge is a whole-family scan whose cost is the node's data, not the partition's,
+plus one range delete per page), `stores` is the durable-2PC
 metadata decode (hundreds of thousands of records, receipts and intents decode in a few seconds on an
 idle node), `hooks` are the actors. At the shape of a busy durable-2PC partition (2,000 rows, 400,000
 records, 800,000 receipts, 170,000 pending and 200,000 settled intents, a 159 MB snapshot) the whole

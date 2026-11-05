@@ -48,6 +48,7 @@ public static class EmbeddedOptionsFactory
     {
         TransportSecurity = transportSecurity,
         RaftLostAcknowledgedEntriesPolicy = ParseLostAcknowledgedEntriesPolicy(opts.RaftLostAcknowledgedEntriesPolicy),
+        RaftDeadMemberEvictionGrace = TimeSpan.FromMilliseconds(opts.RaftDeadMemberEvictionGrace),
         StorageProviders = storageProviders ?? StorageProviders.CreateDefault(),
         ExtensionOptions = opts.GetExtensionOptions(),
         Functions = functions ?? new(),
@@ -146,6 +147,8 @@ public static class EmbeddedOptionsFactory
         PersistentRevisionCleanupBatchSize = opts.PersistentRevisionCleanupBatchSize,
         PersistentRevisionCleanupOnWrite = opts.GetPersistentRevisionCleanupOnWrite(),
         PersistentRevisionCleanupTimeBudget = TimeSpan.FromMilliseconds(opts.PersistentRevisionCleanupTimeBudgetMs),
+        RevisionPruneConfirmTimeout = TimeSpan.FromMilliseconds(opts.RevisionPruneConfirmTimeoutMs),
+        RevisionPruneConfirmRetryInterval = TimeSpan.FromMilliseconds(opts.RevisionPruneConfirmRetryIntervalMs),
         PersistenceMaxUnflushedItems = opts.PersistenceMaxUnflushedItems,
         PersistenceMaxUnflushedBytes = opts.PersistenceMaxUnflushedBytes,
         PersistenceWriteStallWarnMs = opts.PersistenceWriteStallWarnMs,

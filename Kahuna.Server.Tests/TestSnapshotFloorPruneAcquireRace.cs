@@ -153,7 +153,9 @@ public sealed class TestSnapshotFloorPruneAcquireRace : RaftTrackingTest
             int retentionCount = 1,
             bool cleanupOnWrite = true,
             TimeSpan? cleanupInterval = null,
-            int dirtyObjectsWriterDelay = 0)
+            int dirtyObjectsWriterDelay = 0,
+            TimeSpan? confirmTimeout = null,
+            TimeSpan? confirmRetryInterval = null)
     {
         ActorSystem actorSystem = new(logger: raftLogger);
         EmbeddedRaftCommunication raftComm = new();
@@ -204,7 +206,9 @@ public sealed class TestSnapshotFloorPruneAcquireRace : RaftTrackingTest
             PersistentRevisionRetentionCount   = retentionCount,
             PersistentRevisionCleanupBatchSize = 1000,
             PersistentRevisionCleanupInterval  = cleanupInterval ?? TimeSpan.FromMinutes(5),
-            DirtyObjectsWriterDelay            = dirtyObjectsWriterDelay
+            DirtyObjectsWriterDelay            = dirtyObjectsWriterDelay,
+            RevisionPruneConfirmTimeout        = confirmTimeout ?? TimeSpan.FromSeconds(1),
+            RevisionPruneConfirmRetryInterval  = confirmRetryInterval ?? TimeSpan.FromSeconds(5)
         });
 
         PruningBackend backend = new();
@@ -612,7 +616,7 @@ public sealed class TestSnapshotFloorPruneAcquireRace : RaftTrackingTest
             Assert.NotNull(actor);
 
             // Simulate a node that cannot prove catch-up (partitioned / still applying P0).
-            actor.ConfirmPruneFreshnessOverride = () => ValueTask.FromResult(false);
+            actor.ConfirmPruneFreshnessOverride = _ => ValueTask.FromResult(false);
 
             (KeyValueResponseType r1, _, _) = await kahuna.LocateAndTrySetKeyValue(
                 HLCTimestamp.Zero, key, "v1"u8.ToArray(), null, -1,
@@ -633,8 +637,9 @@ public sealed class TestSnapshotFloorPruneAcquireRace : RaftTrackingTest
             await kahuna.FlushPersistenceAsync();
             Assert.NotNull(backend.GetKeyValueRevision(key, 0));
 
-            // Catch-up confirms (single-node leader: the real path also succeeds) — the queued
-            // key from the skipped cycles is pruned on the next cycle.
+            // Catch-up confirms (single-node leader: the real path also succeeds) — the queued key from
+            // the skipped cycles is pruned on the next cycle: a confirmation that failed at once (as the
+            // seam's did) is retried on the next cycle, unlike one that ran out of time.
             actor.ConfirmPruneFreshnessOverride = null;
             await kahuna.FlushPersistenceAsync();
             Assert.Null(backend.GetKeyValueRevision(key, 0));
@@ -717,7 +722,7 @@ public sealed class TestSnapshotFloorPruneAcquireRace : RaftTrackingTest
             BackgroundWriterActor? actor = kahuna.BackgroundWriterActor;
             Assert.NotNull(actor);
 
-            actor.ConfirmPruneFreshnessOverride = () => ValueTask.FromResult(false);
+            actor.ConfirmPruneFreshnessOverride = _ => ValueTask.FromResult(false);
 
             (KeyValueResponseType r1, _, _) = await kahuna.LocateAndTrySetKeyValue(
                 HLCTimestamp.Zero, key, "v1"u8.ToArray(), null, -1,
@@ -745,6 +750,134 @@ public sealed class TestSnapshotFloorPruneAcquireRace : RaftTrackingTest
                     await Task.Delay(100, ct);
             }
             Assert.True(pruned, "the full sweep must prune revision 0 once catch-up confirms");
+        }
+        finally
+        {
+            await Cleanup(raft, kahuna);
+        }
+    }
+
+    /// <summary>
+    /// The flush a whole-partition state transfer waits for must complete while the meta-partition
+    /// catch-up confirmation cannot be obtained at all: a replica that is being installed while it is
+    /// not a roster member receives no meta-partition entries, and the general flush's cleanup parked
+    /// on that confirmation for 174 s of a 205-s install. The state-transfer flush runs no cleanup and
+    /// asks for no confirmation; the writes it drains still land.
+    /// </summary>
+    [Fact]
+    public async Task BackgroundWriter_StateTransferFlush_CompletesWhileCatchUpConfirmationParks()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        (RaftManager raft, KahunaManager kahuna, PruningBackend backend) = BuildNode(
+            retentionCount: 1, confirmTimeout: TimeSpan.FromSeconds(30));
+
+        try
+        {
+            await raft.JoinCluster(ct);
+            await raft.WaitForLeader(0, ct);
+            await raft.WaitForLeader(1, ct);
+
+            const string key = "prune/transfer/flush";
+
+            await kahuna.FlushPersistenceAsync();
+
+            BackgroundWriterActor? actor = kahuna.BackgroundWriterActor;
+            Assert.NotNull(actor);
+
+            // A confirmation that never answers within its (here, generous) deadline.
+            int confirmationsStarted = 0;
+            actor.ConfirmPruneFreshnessOverride = async token =>
+            {
+                Interlocked.Increment(ref confirmationsStarted);
+                await Task.Delay(Timeout.Infinite, token);
+                return true;
+            };
+
+            (KeyValueResponseType r1, _, _) = await kahuna.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, key, "v1"u8.ToArray(), null, -1,
+                KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Set, r1);
+
+            (KeyValueResponseType r2, _, _) = await kahuna.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, key, "v2"u8.ToArray(), null, -1,
+                KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Set, r2);
+
+            // The state-transfer flush lands both revisions and returns without asking for a confirmation.
+            Task transferFlush = kahuna.FlushPersistenceForStateTransferAsync();
+            await transferFlush.WaitAsync(TimeSpan.FromSeconds(10), ct);
+
+            Assert.NotNull(backend.GetKeyValueRevision(key, 0));
+            Assert.NotNull(backend.GetKeyValueRevision(key, 1));
+            Assert.Equal(0, Volatile.Read(ref confirmationsStarted));
+        }
+        finally
+        {
+            await Cleanup(raft, kahuna);
+        }
+    }
+
+    /// <summary>
+    /// A catch-up confirmation that never answers runs out of its deadline instead of parking the writer:
+    /// the general flush completes, the prune is skipped (the revision stays), and the writer does not ask
+    /// again until the retry interval has passed. Once the confirmation answers again (after the interval),
+    /// the queued key is pruned.
+    /// </summary>
+    [Fact]
+    public async Task BackgroundWriter_CatchUpConfirmationThatNeverAnswers_RunsOutOfTime_AndBacksOff()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        TimeSpan retryInterval = TimeSpan.FromSeconds(2);
+        (RaftManager raft, KahunaManager kahuna, PruningBackend backend) = BuildNode(
+            retentionCount: 1, confirmTimeout: TimeSpan.FromMilliseconds(200), confirmRetryInterval: retryInterval);
+
+        try
+        {
+            await raft.JoinCluster(ct);
+            await raft.WaitForLeader(0, ct);
+            await raft.WaitForLeader(1, ct);
+
+            const string key = "prune/confirm/deadline";
+
+            await kahuna.FlushPersistenceAsync();
+
+            BackgroundWriterActor? actor = kahuna.BackgroundWriterActor;
+            Assert.NotNull(actor);
+
+            int confirmationsStarted = 0;
+            actor.ConfirmPruneFreshnessOverride = async token =>
+            {
+                Interlocked.Increment(ref confirmationsStarted);
+                await Task.Delay(Timeout.Infinite, token);
+                return true;
+            };
+
+            (KeyValueResponseType r1, _, _) = await kahuna.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, key, "v1"u8.ToArray(), null, -1,
+                KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Set, r1);
+
+            (KeyValueResponseType r2, _, _) = await kahuna.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, key, "v2"u8.ToArray(), null, -1,
+                KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Set, r2);
+
+            // The flush completes although the confirmation never answers: the deadline ends it.
+            await kahuna.FlushPersistenceAsync().WaitAsync(TimeSpan.FromSeconds(10), ct);
+            Assert.NotNull(backend.GetKeyValueRevision(key, 0));
+            Assert.Equal(1, Volatile.Read(ref confirmationsStarted));
+
+            // Inside the retry interval no confirmation is attempted at all; the prune stays skipped.
+            await kahuna.FlushPersistenceAsync().WaitAsync(TimeSpan.FromSeconds(10), ct);
+            Assert.NotNull(backend.GetKeyValueRevision(key, 0));
+            Assert.Equal(1, Volatile.Read(ref confirmationsStarted));
+            Assert.True(actor.ConfirmAttemptsSkipped >= 1, "the second cycle must skip the confirmation inside the retry interval");
+
+            // The confirmation answers again; once the interval has passed the queued key is pruned.
+            actor.ConfirmPruneFreshnessOverride = null;
+            await Task.Delay(retryInterval + TimeSpan.FromMilliseconds(100), ct);
+            await kahuna.FlushPersistenceAsync().WaitAsync(TimeSpan.FromSeconds(10), ct);
+            Assert.Null(backend.GetKeyValueRevision(key, 0));
         }
         finally
         {

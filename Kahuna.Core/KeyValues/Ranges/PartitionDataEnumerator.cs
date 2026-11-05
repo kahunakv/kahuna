@@ -103,9 +103,22 @@ internal sealed class PartitionDataEnumerator
     /// pages (each at most <paramref name="pageSize"/> entries after filtering; empty pages are
     /// never yielded). Each backend page read runs off the caller's thread.
     /// </summary>
+    public IAsyncEnumerable<IReadOnlyList<(string Key, ReadOnlyKeyValueEntry Entry)>> EnumerateKeyValuesAsync(
+        int partitionId,
+        int pageSize,
+        CancellationToken cancellationToken = default) =>
+        EnumerateKeyValuesAsync(partitionId, pageSize, onPageScanned: null, cancellationToken);
+
+    /// <summary>
+    /// <see cref="EnumerateKeyValuesAsync(int, int, CancellationToken)"/> reporting every backend page the
+    /// scan read, owned rows or not, with the number of rows it held: the walk is a whole-family scan whose
+    /// cost is the node's data, and a caller that sees no owned page cannot otherwise tell an empty family
+    /// from a filter that matched nothing.
+    /// </summary>
     public async IAsyncEnumerable<IReadOnlyList<(string Key, ReadOnlyKeyValueEntry Entry)>> EnumerateKeyValuesAsync(
         int partitionId,
         int pageSize,
+        Action<int>? onPageScanned,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         RangeMap map = currentMap();
@@ -120,6 +133,8 @@ internal sealed class PartitionDataEnumerator
             string? capturedCursor = cursor;
             KeyValueScanPage page = await Task.Run(
                 () => persistenceBackend.ScanKeyValues(capturedCursor, pageSize), cancellationToken).ConfigureAwait(false);
+
+            onPageScanned?.Invoke(page.Items.Count);
 
             List<(string, ReadOnlyKeyValueEntry)>? owned = null;
 

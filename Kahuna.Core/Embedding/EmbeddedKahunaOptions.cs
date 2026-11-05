@@ -700,6 +700,16 @@ public sealed class EmbeddedKahunaOptions
     public TimeSpan? RaftSnapshotTransferStepTimeout { get; set; }
 
     /// <summary>
+    /// How long a member must stay <c>Dead</c> to the SWIM failure detector before the meta-partition
+    /// leader commits its removal from the roster. Mirrors <c>RaftConfiguration.DeadMemberEvictionGrace</c>
+    /// (<c>--raft-dead-member-eviction-grace</c> on <c>Kahuna.Server</c>); null keeps Kommander's default
+    /// (10 min). Size it to the longest outage the roster should ride through intact: an evicted member
+    /// rejoins as a learner and is a voter again only once it has caught up on every partition, and on a
+    /// three-voter cluster the eviction buys nothing while that window costs the cluster's fault tolerance.
+    /// </summary>
+    public TimeSpan? RaftDeadMemberEvictionGrace { get; set; }
+
+    /// <summary>
     /// What a partition does when its WAL restore finds the log shorter than what this node had acknowledged as
     /// durably held (a synced tail truncated or lost after the leader may have counted it). Mirrors
     /// <c>RaftConfiguration.LostAcknowledgedEntriesPolicy</c> (<c>--raft-lost-acknowledged-entries-policy</c> on
@@ -810,6 +820,19 @@ public sealed class EmbeddedKahunaOptions
     /// reached stay queued for the next cycle so the cleanup never starves the flush.
     /// </summary>
     public TimeSpan PersistentRevisionCleanupTimeBudget { get; set; } = TimeSpan.FromMilliseconds(250);
+
+    /// <summary>
+    /// How long the background writer waits for the meta-partition catch-up confirmation that gates a
+    /// destructive revision prune; a confirmation that runs out of time skips the prune. Mirrors
+    /// <see cref="KahunaConfiguration.RevisionPruneConfirmTimeout"/>.
+    /// </summary>
+    public TimeSpan RevisionPruneConfirmTimeout { get; set; } = TimeSpan.FromSeconds(1);
+
+    /// <summary>
+    /// How long the writer refrains from re-attempting the confirmation after one ran out of time.
+    /// Mirrors <see cref="KahunaConfiguration.RevisionPruneConfirmRetryInterval"/>.
+    /// </summary>
+    public TimeSpan RevisionPruneConfirmRetryInterval { get; set; } = TimeSpan.FromSeconds(5);
 
     /// <summary>
     /// Maximum committed writes held in memory awaiting the background flush before ordinary writes

@@ -224,6 +224,7 @@ The subsystem publishes these instruments under the `Kahuna` meter scope:
 | `kahuna.snapshot_floor.live_holds` | gauge | Number of currently live (non-expired) holds. |
 | `kahuna.snapshot_floor.effective_floor_ms` | gauge | Physical (millisecond) component of the effective floor, or 0 when no hold is live. |
 | `kahuna.snapshot_floor.prune_skipped_unconfirmed_total` | counter | Prune cycles skipped because local meta-partition catch-up could not be confirmed; work is retried later. |
+| `kahuna.snapshot_floor.prune_confirm_timed_out_total` | counter | Catch-up confirmations that ran out of `RevisionPruneConfirmTimeout` (default 1 s) before answering. Each is also a skipped prune cycle; a sustained rate means the node is not receiving the meta partition (not yet a roster member, or cut off from its leader). |
 | `kahuna.snapshot_floor.missing_protected_version_total` | counter | **Must stay 0.** Increments if reclamation ever schedules a floor-protected version for deletion. |
 
 `missing_protected_version_total` is the **fault signal**. It is wired at both reclamation sites: the in-memory trim (if the
@@ -274,8 +275,13 @@ rows as well as before every key.
   replication/commit overlaps that window returns `MustRetry`, even if its hold was committed.
   Retry with the same `(holderId, timestamp)`; acquisition cannot restore history already deleted.
   Before destructive pruning, each node confirms meta-partition application catch-up. An unconfirmed
-  node skips pruning and retains the work for a later cycle. This is not a cluster-wide atomic barrier:
-  a remote hold can still commit between that confirmation and the local floor sample.
+  node skips pruning and retains the work for a later cycle. The confirmation is bounded by
+  `RevisionPruneConfirmTimeout` (default 1 s) and, after a timeout, not attempted again for
+  `RevisionPruneConfirmRetryInterval` (default 5 s); a confirmation that fails at once is retried on
+  the next cycle. It runs on the background writer, whose turn must never park (a replica installing a
+  snapshot outside the committed roster parked on it for 174 s).
+  This is not a cluster-wide atomic barrier: a remote hold can still commit between that confirmation
+  and the local floor sample.
 - **Hold-registry replication cost.** Routine acquire/renew/release mutations replicate keyed
   upsert/remove **deltas** through the system-partition Raft log, rather than the entire registry.
   Floor checks use cached minima; registry copies and local snapshot writes still grow with the
@@ -297,6 +303,7 @@ hold has to protect:
 | `PersistentRevisionRetentionAge` | disabled | Age-based persistent pruning; also clamped by the floor. |
 | `PersistentRevisionCleanupBatchSize` | 10000 | Revision rows one prune pass (a targeted cycle or a sweep pass) may delete. The time budget bounds the pass; this only caps its tombstones. Keep it well above what one hot key sheds per visit: a walk cut short by this limit has already paid for the whole block and must walk it again next cycle. |
 | `PersistentRevisionCleanupTimeBudget` | 250 ms | Wall-clock the revision prune may spend per flush cycle, shared by the targeted prune and the sweep that follows it (the sweep always gets at least a quarter). The RocksDB backend checks it before every key and every 1,024 sweep rows; keys and keyspace it does not reach are resumed next cycle. Keep it well under `DirtyObjectsWriterDelay` (the flush budget): the prune runs on the same writer, so its time comes straight out of flush throughput. |
+| `RevisionPruneConfirmTimeout` / `RevisionPruneConfirmRetryInterval` | 1 s / 5 s | How long the writer waits for the meta-partition catch-up confirmation that gates a prune, and how long it waits before asking again after one timed out (a confirmation that fails at once is retried next cycle). A node that cannot be confirmed keeps its revisions (the safe direction) and loses the writer at most one timeout per interval. |
 | `leaseMs` (per acquire/renew) | — caller-chosen | How long a hold survives without renewal. Renew well inside it; choose it coarse enough that renewals aren't a hot path. |
 
 General guidance:
