@@ -614,6 +614,17 @@ public sealed class KahunaConfiguration
     public TimeSpan DurableMaintenanceInterval { get; set; } = TimeSpan.FromSeconds(5);
 
     /// <summary>
+    /// Consecutive starts that may end in an out-of-memory fail-fast early in recovery (within ten minutes of
+    /// starting, under the same managed heap limit) before the node trips its out-of-memory restart breaker on
+    /// the next start: it still restores and votes, but withholds its candidacy for every partition it hosts and
+    /// reports not ready with the reason, instead of crash-looping under an orchestrator and costing its peers a
+    /// snapshot export per loop. The exits are kept in <c>out-of-memory-exits.log</c> under the storage path;
+    /// raising the memory limit, an hour without a crash, or removing the file clears the count. 0 disables the
+    /// breaker (the exits are still recorded).
+    /// </summary>
+    public int OutOfMemoryRestartBreakerThreshold { get; set; } = 3;
+
+    /// <summary>
     /// When true (default), a durable transaction's post-decision resolution (materialize committed values, settle
     /// intents) runs off the commit critical path: finalize returns as soon as the decision record is durable, and
     /// settlement completes in the background (a lost run is finished by recovery). Reads and writes that meet a

@@ -201,6 +201,7 @@ public static class EmbeddedOptionsFactory
         DurableRecordRetentionFloor = TimeSpan.FromSeconds(opts.DurableRecordRetentionFloorSeconds),
         DurableMaintenanceInterval = TimeSpan.FromSeconds(opts.DurableMaintenanceIntervalSeconds),
         FailFastOnOutOfMemory = opts.FailFastOnOutOfMemory,
+        OutOfMemoryRestartBreakerThreshold = opts.OutOfMemoryRestartBreakerThreshold,
         RangeSplitLoadWindow = TimeSpan.FromSeconds(opts.RangeSplitLoadWindowSeconds),
         RangeSplitLoadPollInterval = TimeSpan.FromSeconds(opts.RangeSplitLoadPollIntervalSeconds),
         // The embedded node validates the settle window against its own stability value, so feed the

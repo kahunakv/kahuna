@@ -40,8 +40,34 @@ through the seekable staged stream:
    committed-head ledger is refused.
 2. **Replace the owned state.** Mark the install incomplete; drain queued persistence; purge the
    partition's old backend rows and receipt/record slices; stream in the new rows, records and receipts;
-   replace the intent/ledger slice. Persist the durable-store snapshots before acknowledging success,
-   invalidate resident key/value and lock state, and then clear the incomplete marker.
+   replace the intent/ledger slice (the node's old slice is released before the installed ledger is built,
+   so the two are never resident together). Persist the durable-store snapshots, invalidate resident
+   key/value and lock state, record the install for watch resume, then — as the last durable step, after
+   every hook that could still fail — persist the partition's application-durability floor at the
+   installed boundary (never below a floor the backend already holds), clear the incomplete marker, and
+   tell the installed-through observers the boundary, which seeds the live durability tracker and the
+   provider's cached floor. The floor step is what keeps WAL compaction from staying clamped at the
+   pre-install floor right after an install, and what keeps a restart before the first post-install flush
+   from reading a persisted floor below the compaction floor, the verdict that asks the leader for the
+   snapshot that was just installed. It comes last because a floor at the boundary vouches for a complete
+   install: persisted earlier, a crash in a later step would leave a retry's purge running under it, and a
+   restart would trust the floor over rows the purge removed.
+
+**Install duration is the fault to watch.** The whole import runs on the partition's Raft executor and
+holds it: the follower applies nothing, acknowledges nothing and answers no heartbeat while it installs,
+and the leader's live-replica log retention is a bounded window of recent entries. An install that
+outlasts that window ends in a non-contiguous backfill and another install. Every install records its
+phase durations on `kahuna.partition_install.phase_duration` (tag `phase`: `verify`, `gate`, `drain`,
+`purge_rows`, `purge_stores`, `rows`, `stores`, `snapshots`, `floor`, `hooks`, `total`) and logs them at
+Information; one that takes 10 s or longer is also logged at **Warning** with the breakdown and the number
+of backend pages the purge deleted, and counted on `kahuna.partition_install.slow_total`. Read the
+dominant phase: `drain` and `purge_rows` are the storage engine (the purge is a whole-family scan whose
+cost is the node's data, not the partition's, plus one range delete per page), `stores` is the durable-2PC
+metadata decode (hundreds of thousands of records, receipts and intents decode in a few seconds on an
+idle node), `hooks` are the actors. At the shape of a busy durable-2PC partition (2,000 rows, 400,000
+records, 800,000 receipts, 170,000 pending and 200,000 settled intents, a 159 MB snapshot) the whole
+import measures about 2.5 s against the in-memory backend; a multi-minute install on the same shape is
+the engine or the node's environment, not the decode.
 
 Backend batches flush at 4,096 rows or after accumulated value bytes reach 16 MiB. The byte threshold
 can be exceeded by the final row; it is not a maximum value size. Records and receipts are decoded one

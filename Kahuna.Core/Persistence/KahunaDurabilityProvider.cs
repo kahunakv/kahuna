@@ -77,4 +77,19 @@ internal sealed class KahunaDurabilityProvider : IApplicationDurabilityProvider
     /// purge left there.
     /// </summary>
     internal void Forget(int partitionId) => persistedFloors.TryRemove(partitionId, out _);
+
+    /// <summary>
+    /// Records that a whole-partition snapshot install persisted the partition's floor at
+    /// <paramref name="upToIndex"/> (the install writes it to the backend before it reports success). The
+    /// "read once per partition" cache above assumed the floor only advances through this node's own flush
+    /// cycle, which also raises the live watermark; an install advances it directly, so the cached value is
+    /// raised here to what the backend now holds. Never lowers it.
+    /// </summary>
+    internal void NoteInstalledThrough(int partitionId, long upToIndex)
+    {
+        if (upToIndex < 0)
+            return;
+
+        persistedFloors.AddOrUpdate(partitionId, static (_, installed) => installed, static (_, existing, installed) => Math.Max(existing, installed), upToIndex);
+    }
 }

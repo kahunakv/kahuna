@@ -259,7 +259,10 @@ public sealed partial class KahunaManager : IKahuna, IDisposable
     public KahunaStorageHealth GetStorageHealth()
     {
         StorageFailStopGate gate = StorageFailStopGate.For(persistenceBackend);
-        return new(persistenceBackend.GetFailStopReason() ?? gate.FailStopReason, gate.ReplacedStoreNotice);
+        return new(
+            persistenceBackend.GetFailStopReason() ?? gate.FailStopReason,
+            gate.ReplacedStoreNotice,
+            global::Kahuna.Server.Diagnostics.OutOfMemoryRestartBreaker.For(persistenceBackend).Notice);
     }
 
     /// <summary>

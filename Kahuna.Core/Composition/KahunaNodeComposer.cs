@@ -11,6 +11,7 @@ using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.Persistence.Providers;
 using Kahuna.Server.Locks;
+using Kahuna.Server.Diagnostics;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Sequencer;
@@ -98,6 +99,11 @@ internal static class KahunaNodeComposer
         StorageFailStopGate storageFailStop = StorageFailStopGate.For(persistenceBackend);
         storageFailStop.Attach(raft, logger);
         storageFailStop.ReplacedStoreNotice = StoreIdentityGuard.Verify(persistenceBackend, raft, configuration.StoragePath, logger);
+
+        // A node whose last starts all died of an out-of-memory early in recovery is not going to finish this
+        // one either; armed before the stores load so the exit that follows is recorded, and tripped here so
+        // the containment is already in place when the partitions come up.
+        OutOfMemoryRestartBreaker.For(persistenceBackend).Arm(configuration.StoragePath, configuration.OutOfMemoryRestartBreakerThreshold, raft, logger);
 
         // The scheduler only logs its own defensive errors through this logger; production hosts pass a real
         // ILogger<IRaft>, while test harnesses that omit it get a silent sink.
@@ -220,6 +226,16 @@ internal static class KahunaNodeComposer
         // fencing tokens below the installed high-water mark on the next leader promotion,
         // regressing and reusing tokens already granted by other replicas.
         keyValues.PartitionStateTransfer.AddResidentStateInvalidationHook(locks.EvictPartitionLocksAsync);
+
+        // A snapshot install persists the partition's durability floor at the installed boundary (the installed
+        // state is durable when the install reports success). The live tracker and the provider's cached floor
+        // learn the boundary here, so Kommander's compaction is not clamped at the pre-install floor and a
+        // restart does not read a persisted floor below the compaction floor.
+        keyValues.PartitionStateTransfer.AddInstalledThroughObserver((partitionId, upToIndex) =>
+        {
+            durabilityTracker.SeedInstalledThrough(partitionId, upToIndex);
+            durabilityProvider.NoteInstalledThrough(partitionId, upToIndex);
+        });
 
         return new KahunaNodeComponents(
             persistenceBackend,

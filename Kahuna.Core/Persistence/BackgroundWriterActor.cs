@@ -1097,6 +1097,10 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     /// </summary>
     private async ValueTask ObserveStoreFailStop()
     {
+        // The out-of-memory restart breaker's containment is re-asserted on the same tick: a partition hosted
+        // after it tripped at start is gated too. One volatile read while it is open.
+        await Diagnostics.OutOfMemoryRestartBreaker.For(persistenceBackend).ReassertAsync();
+
         if (persistenceBackend.GetFailStopReason() is not { } reason)
             return;
 

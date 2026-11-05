@@ -694,6 +694,35 @@ leaves a reachable, "healthy" replica whose WAL queue is pinned and appends noth
 disabled the node reports `ready: false` with a `fatalFault` on `/v1/cluster/health` from the first
 such fault on.
 
+**Sizing the heap for the retained metadata.** The budget cannot be honoured below the floor: a node
+retains at least `commit rate × DurableRecordRetentionFloor` terminal records (and their participants'
+completion receipts) whatever `DurableRecordRetentionMax` says, because nothing younger than the floor
+may be reclaimed early. At 4,300 committed transactions per second and the default 90-second floor that
+is about 390,000 resident records against a 200,000 budget, roughly 250 MiB of records, receipts and
+strings, plus the live prepared intents of the moment (about 170,000 with 256-byte values after a
+restart under that load, 60 MiB more) and the ledger's settled identities of the last minute. A node
+restarts into that baseline before it applies a single entry, and a whole-partition snapshot install
+of the same partition decodes a second copy of the records and receipts into the stores after purging
+the first, so plan the managed heap limit for the baseline plus one install's allocation burst (about
+ten times the snapshot's size in short-lived garbage) with headroom, or lower the floor (and the
+decision-deadline ceiling it must cover) so the baseline fits.
+
+**The out-of-memory restart breaker.** A node whose heap limit cannot hold its restart baseline dies of
+an out-of-memory fail-fast on every start, inside its restore or its first snapshot install, and under an
+orchestrator it crash-loops while costing the leader a snapshot export per loop. The fail-fast policy
+records each such exit in `out-of-memory-exits.log` under the storage path (when the process failed, how
+long it had been up, the managed heap limit, the site). At start the node reads the ledger: a trailing
+run of exits that happened within ten minutes of starting, within the last hour, under the heap limit
+the process still runs with, of `OutOfMemoryRestartBreakerThreshold` or more
+(`--oom-restart-breaker-threshold`, default 3, 0 disables) trips the breaker. The node still starts,
+restores and votes, but withholds its candidacy for every partition it hosts and reports `ready: false`
+on `/v1/cluster/health` with the reason in `storageFault`;
+`kahuna.process.out_of_memory_restart_breaker_trips_total` counts the trip. Raising the memory limit
+changes the heap limit the ledger lines are matched against and clears the count on its own; so does an
+hour without a crash, or removing the file. The breaker does not defer the restore or refuse installs: a
+refused install still costs the leader the export, and a restore without the durable-2PC metadata would
+answer idempotency and fence questions wrongly.
+
 ---
 
 ## 10. Maintaining and extending the coordinator

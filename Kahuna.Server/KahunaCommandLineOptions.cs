@@ -945,6 +945,9 @@ public sealed class KahunaCommandLineOptions
     [Option("fail-fast-on-oom", Required = false, HelpText = "Terminate the process on any OutOfMemoryException so the orchestrator restarts the node with an empty heap, instead of leaving a reachable replica whose WAL/apply pipeline is dead. When false the node still never swallows the fault in its own apply paths and reports itself not ready on /v1/cluster/health from the first fatal fault on. Default true.", Default = true)]
     public bool FailFastOnOutOfMemory { get; set; } = true;
 
+    [Option("oom-restart-breaker-threshold", Required = false, HelpText = "Consecutive starts that may end in an out-of-memory fail-fast early in recovery (within ten minutes of starting, under the same heap limit) before the node trips its restart breaker on the next start: it still restores and votes, but withholds its candidacy and reports not ready with the reason instead of crash-looping. The exits are kept in out-of-memory-exits.log under the storage path; raising the memory limit, an hour without a crash, or removing the file clears the count. 0 disables the breaker. Default 3.", Default = 3)]
+    public int OutOfMemoryRestartBreakerThreshold { get; set; } = 3;
+
     [Option("range-split-load-window", Required = false, HelpText = "Seconds the load predicate must hold continuously before a load split is triggered. Default 15.", Default = 15)]
     public int RangeSplitLoadWindowSeconds { get; set; } = 15;
 

@@ -362,6 +362,14 @@ public sealed class EmbeddedKahunaOptions
     /// </summary>
     public bool FailFastOnOutOfMemory { get; set; } = true;
 
+    /// <summary>
+    /// Consecutive starts that may end in an out-of-memory fail-fast early in recovery (within ten minutes of
+    /// starting, under the same managed heap limit) before the node trips its restart breaker on the next start
+    /// and withholds its candidacy and readiness instead of crash-looping. Mirrors
+    /// <c>KahunaConfiguration.OutOfMemoryRestartBreakerThreshold</c>; 0 disables the breaker. Default 3.
+    /// </summary>
+    public int OutOfMemoryRestartBreakerThreshold { get; set; } = 3;
+
     public int DurableDecisionOutstandingMax { get; set; } = 100_000;
 
     /// <summary>

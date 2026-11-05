@@ -294,6 +294,50 @@ public sealed class TestPartitionStateTransfer : IDisposable
         Assert.False(target.Transfer.IsInstallIncomplete(2));
     }
 
+    /// <summary>
+    /// The installed state reflects every entry at or below the boundary and is durable when the install reports
+    /// success, so the partition's application-durability floor is persisted at the boundary before the install
+    /// returns, and the installed-through observers learn it. Left at its pre-install value, the floor kept the
+    /// WAL's compaction clamped below the installed checkpoint, and a restart before the first post-install flush
+    /// read a persisted floor below the compaction floor and asked for the snapshot it had just installed.
+    /// </summary>
+    [Fact]
+    public async Task Import_PersistsTheDurabilityFloorAtTheInstalledBoundary_AndTellsTheObservers()
+    {
+        Node source = MakeNode();
+        Assert.True(source.Backend.StoreKeyValues([KvItem("ranged1/a", 4)]));
+
+        byte[] snapshot = await Export(source, 2, upToIndex: 4_200);
+
+        Node target = MakeNode();
+        List<(int PartitionId, long UpToIndex)> observed = [];
+        target.Transfer.AddInstalledThroughObserver((partitionId, upToIndex) => observed.Add((partitionId, upToIndex)));
+
+        Assert.Equal(-1, target.Backend.GetDurabilityFloor(2));
+
+        await Import(target, 2, snapshot);
+
+        Assert.Equal(4_200, target.Backend.GetDurabilityFloor(2));
+        Assert.Equal([(2, 4_200L)], observed);
+    }
+
+    /// <summary>A floor the backend already holds above the boundary is never regressed by an install.</summary>
+    [Fact]
+    public async Task Import_NeverLowersAFloorTheBackendAlreadyHoldsAboveTheBoundary()
+    {
+        Node source = MakeNode();
+        Assert.True(source.Backend.StoreKeyValues([KvItem("ranged1/a", 4)]));
+
+        byte[] snapshot = await Export(source, 2, upToIndex: 100);
+
+        Node target = MakeNode();
+        Assert.True(target.Backend.StoreDurabilityFloors([(2, 500L)]));
+
+        await Import(target, 2, snapshot);
+
+        Assert.Equal(500, target.Backend.GetDurabilityFloor(2));
+    }
+
     // ── failure discipline ───────────────────────────────────────────────────────
 
     [Fact]

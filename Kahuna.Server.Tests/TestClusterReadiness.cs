@@ -154,6 +154,23 @@ public sealed class TestClusterReadiness : IDisposable
         Assert.Equal("The store was empty while the log holds history.", health.StorageFault);
     }
 
+    /// <summary>A node that tripped its out-of-memory restart breaker at start keeps running and voting but is not
+    /// ready, and the probe carries the reason, so the orchestrator stops routing to it instead of restarting it
+    /// into the same crash.</summary>
+    [Fact]
+    public void Health_OutOfMemoryRestartBreakerTripped_ReportsNotReadyWithTheReason()
+    {
+        const string reason = "3 consecutive starts ended in an out-of-memory fail-fast within 10 minutes of starting";
+
+        KahunaClusterHealthResponse health = ClusterHandlers.BuildHealthResponse(
+            new FakeRaft { Initialized = true, Role = ClusterMemberRole.Voter },
+            new FaultedStoreKahuna(new KahunaStorageHealth(null, null, reason)));
+
+        Assert.False(health.Ready);
+        Assert.True(health.Initialized);
+        Assert.Equal(reason, health.StorageFault);
+    }
+
     /// <summary>A hosted partition whose Raft storage verdict is not healthy is not served from this node;
     /// the probe names it. A restoring partition is the normal startup state and does not flip readiness.</summary>
     [Fact]

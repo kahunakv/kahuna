@@ -1,6 +1,8 @@
 
 using System.Buffers;
 using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Diagnostics.Metrics;
 using Google.Protobuf;
 using Kommander;
 using Kommander.Time;
@@ -399,6 +401,16 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
     private const long ApplyBatchBytes = 16L * 1024 * 1024;
 
     /// <summary>
+    /// An install that holds the partition's Raft executor longer than this is logged at Warning with its phase
+    /// breakdown. The follower applies nothing while it installs, and the leader's live-replica retention is a
+    /// bounded window of recent entries: an install that outlasts it is followed by a non-contiguous backfill
+    /// and another install, so the duration itself is the fault to report, whichever phase spent it. Ten
+    /// seconds is well under any retention window a leader publishes and well over an install of a partition
+    /// of hundreds of thousands of durable-2PC records on an idle node.
+    /// </summary>
+    internal static readonly TimeSpan SlowInstallThreshold = TimeSpan.FromSeconds(10);
+
+    /// <summary>
     /// Partitions with an install running on this node. A second install of the same partition while one runs
     /// is refused rather than queued: it would verify and then re-purge underneath the first one's apply, and a
     /// queued attempt pins its whole staged snapshot for as long as it waits. Kommander already serializes
@@ -449,6 +461,12 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
     /// </summary>
     private async Task ImportSeekableAsync(int partitionId, Stream input, CancellationToken ct)
     {
+        long startedAt = Stopwatch.GetTimestamp();
+        long phaseStartedAt = startedAt;
+        long verifyTicks = 0, gateTicks = 0, drainTicks = 0, purgeRowsTicks = 0, purgeStoresTicks = 0;
+        long rowsTicks = 0, storesTicks = 0, snapshotsTicks = 0, floorTicks = 0, hooksTicks = 0;
+        int purgedPages = 0;
+
         // ── Phase 1: read, verify and decode the whole stream before mutating anything, so a truncated or corrupt
         // snapshot leaves the prior state untouched and the sender simply retries. ──
         PartitionStateHeader header = ParseDelimited(PartitionStateHeader.Parser, input, "header");
@@ -488,6 +506,8 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
 
         ct.ThrowIfCancellationRequested();
 
+        verifyTicks = EndPhase(ref phaseStartedAt);
+
         // ── Phase 2: install. Marker → purge → apply → durable store snapshots → clear. A crash, or a failure,
         // anywhere in here leaves the marker on disk; the sender's retry re-drives the whole sequence, and the
         // purge makes the re-drive idempotent: whatever a failed attempt applied is removed before the next one
@@ -496,6 +516,8 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
         // partition and delete freshly installed rows. ──
         SemaphoreSlim installGate = InstallGateOf(partitionId);
         await installGate.WaitAsync(ct).ConfigureAwait(false);
+
+        gateTicks = EndPhase(ref phaseStartedAt);
 
         try
         {
@@ -509,7 +531,11 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
             // re-insert pre-snapshot state over an installed gap.
             await drainPersistence().ConfigureAwait(false);
 
-            await PurgePartitionBackendRowsAsync(partitionId, ct).ConfigureAwait(false);
+            drainTicks = EndPhase(ref phaseStartedAt);
+
+            purgedPages = await PurgePartitionBackendRowsCountingPagesAsync(partitionId, ct).ConfigureAwait(false);
+
+            purgeRowsTicks = EndPhase(ref phaseStartedAt);
 
             // The durable stores' slices follow the same purge-then-apply discipline as the rows, for the
             // same reason: whatever this node retained for the partition from before the install — a receipt,
@@ -525,6 +551,8 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
             completionReceiptStore.PurgeWhere(isOwned);
             transactionRecordStore.PurgeWhere(isOwned);
 
+            purgeStoresTicks = EndPhase(ref phaseStartedAt);
+
             input.Position = rowsStart;
 
             ReadKeyValuePages(input, batch =>
@@ -539,10 +567,14 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
                     throw new KahunaServerException("ImportPartitionState: StoreLocks failed to persist the snapshot.");
             }, ct);
 
+            rowsTicks = EndPhase(ref phaseStartedAt);
+
             // Each entry is decoded off the staged snapshot and folded into its store before the next is read.
             completionReceiptStore.ImportRange(CompletionReceiptStore.ReadReceipts(new PayloadStream(input, layout.Receipts)));
             transactionRecordStore.ImportRecords(TransactionRecordStore.ReadRecords(new PayloadStream(input, layout.Records)));
             preparedIntentStore.ReplacePartitionIntents(partitionId, intentSection, requireLedgerOnInstall, isOwned);
+
+            storesTicks = EndPhase(ref phaseStartedAt);
 
             // The WAL boundary installed right after this import compacts the log entries the imported
             // receipts/records/intents were originally replicated through — a cold restart could never
@@ -552,6 +584,8 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
                 || !preparedIntentStore.PersistSnapshot(partitionId))
                 throw new KahunaServerException(
                     "ImportPartitionState: a durable store snapshot could not be persisted; the install is left marked incomplete for retry.");
+
+            snapshotsTicks = EndPhase(ref phaseStartedAt);
 
             // Drop resident actor state that predates the install; anything left resident would be
             // served with precedence over the freshly installed rows. Runs while the partition's
@@ -568,6 +602,24 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
                 header.UpToIndex,
                 new HLCTimestamp(header.UnboundedCeilingNode, header.UnboundedCeilingPhysical, header.UnboundedCeilingCounter));
 
+            hooksTicks = EndPhase(ref phaseStartedAt);
+
+            // The installed state reflects every entry at or below the boundary, and all of it is durable now:
+            // the rows were written to the backend synchronously above and the stores' snapshots landed. So the
+            // partition's application-durability floor is the boundary, and it is persisted here, before the
+            // install reports success — the periodic flush could only raise it again after post-install applies
+            // landed. Left at its pre-install value, the floor kept Kommander's compaction clamped thousands of
+            // entries below the installed checkpoint ("floor has not moved" right after an install), and a restart
+            // before the first post-install flush read a persisted floor below the compaction floor: the verdict
+            // for a store that lost its prefix, which asks the leader for the snapshot that was just installed.
+            // It is the LAST durable step, after every hook: a floor at the boundary vouches for a complete
+            // install, so nothing may persist it while a later step can still fail and leave the attempt to be
+            // purged and re-driven — a restart would then trust a floor over rows the retry's purge had removed,
+            // and a store missing its prefix would restore as healthy instead of being re-seeded.
+            PersistInstalledDurabilityFloor(partitionId, header.UpToIndex);
+
+            floorTicks = EndPhase(ref phaseStartedAt);
+
             ClearInstallIncomplete(partitionId);
 
             foreach (Action<int, long> observer in installedThroughObservers)
@@ -581,7 +633,80 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
             installGate.Release();
         }
 
-        logger.LogImportedPartitionState(partitionId, keyValueCount, lockCount, recordCount, receiptCount, intentSection.Intents.Count, input.Length);
+        TimeSpan total = Stopwatch.GetElapsedTime(startedAt);
+
+        RecordPhases(total, verifyTicks, gateTicks, drainTicks, purgeRowsTicks, purgeStoresTicks, rowsTicks, storesTicks, snapshotsTicks, floorTicks, hooksTicks);
+
+        long totalMs = (long)total.TotalMilliseconds;
+
+        if (total >= SlowInstallThreshold)
+        {
+            PartitionInstallMetrics.SlowInstalls.Add(1);
+
+            if (logger.IsEnabled(LogLevel.Warning))
+                logger.LogSlowPartitionStateImport(
+                    partitionId, header.UpToIndex, totalMs, (long)SlowInstallThreshold.TotalMilliseconds,
+                    keyValueCount, lockCount, recordCount, receiptCount, intentSection.Intents.Count, input.Length,
+                    Ms(verifyTicks), Ms(gateTicks), Ms(drainTicks), Ms(purgeRowsTicks), purgedPages, Ms(purgeStoresTicks),
+                    Ms(rowsTicks), Ms(storesTicks), Ms(snapshotsTicks), Ms(floorTicks), Ms(hooksTicks));
+        }
+
+        if (logger.IsEnabled(LogLevel.Information))
+            logger.LogImportedPartitionState(
+                partitionId, header.UpToIndex, totalMs,
+                keyValueCount, lockCount, recordCount, receiptCount, intentSection.Intents.Count, input.Length,
+                Ms(verifyTicks), Ms(gateTicks), Ms(drainTicks), Ms(purgeRowsTicks), Ms(purgeStoresTicks),
+                Ms(rowsTicks), Ms(storesTicks), Ms(snapshotsTicks), Ms(floorTicks), Ms(hooksTicks));
+    }
+
+    /// <summary>Elapsed ticks of the phase that began at <paramref name="phaseStartedAt"/>, which is moved to now.</summary>
+    private static long EndPhase(ref long phaseStartedAt)
+    {
+        long now = Stopwatch.GetTimestamp();
+        long elapsed = now - phaseStartedAt;
+        phaseStartedAt = now;
+        return elapsed;
+    }
+
+    private static long Ms(long ticks) => (long)(ticks * 1000.0 / Stopwatch.Frequency);
+
+    private static void RecordPhases(
+        TimeSpan total, long verify, long gate, long drain, long purgeRows, long purgeStores,
+        long rows, long stores, long snapshots, long floor, long hooks)
+    {
+        Histogram<double> phases = PartitionInstallMetrics.PhaseMs;
+        phases.Record(TicksToMs(verify), PartitionInstallMetrics.PhaseVerify);
+        phases.Record(TicksToMs(gate), PartitionInstallMetrics.PhaseGate);
+        phases.Record(TicksToMs(drain), PartitionInstallMetrics.PhaseDrain);
+        phases.Record(TicksToMs(purgeRows), PartitionInstallMetrics.PhasePurgeRows);
+        phases.Record(TicksToMs(purgeStores), PartitionInstallMetrics.PhasePurgeStores);
+        phases.Record(TicksToMs(rows), PartitionInstallMetrics.PhaseRows);
+        phases.Record(TicksToMs(stores), PartitionInstallMetrics.PhaseStores);
+        phases.Record(TicksToMs(snapshots), PartitionInstallMetrics.PhaseSnapshots);
+        phases.Record(TicksToMs(floor), PartitionInstallMetrics.PhaseFloor);
+        phases.Record(TicksToMs(hooks), PartitionInstallMetrics.PhaseHooks);
+        phases.Record(total.TotalMilliseconds, PartitionInstallMetrics.PhaseTotal);
+    }
+
+    private static double TicksToMs(long ticks) => ticks * 1000.0 / Stopwatch.Frequency;
+
+    /// <summary>
+    /// Persists the partition's application-durability floor at the installed boundary, never below a floor
+    /// the backend already holds (an install never regresses what the node certified durable). A backend that
+    /// keeps no floors accepts the write as a no-op. A refused write is a storage fault: the install is left
+    /// incomplete for the sender to drive again, since a node whose floor the backend would not record cannot
+    /// vouch for the installed state across a restart.
+    /// </summary>
+    private void PersistInstalledDurabilityFloor(int partitionId, long upToIndex)
+    {
+        if (upToIndex <= 0)
+            return;
+
+        long floor = Math.Max(upToIndex, persistenceBackend.GetDurabilityFloor(partitionId));
+
+        if (!persistenceBackend.StoreDurabilityFloors([(partitionId, floor)]))
+            throw new KahunaServerException(
+                $"ImportPartitionState: the durability floor of partition {partitionId} could not be persisted at the installed boundary {floor}; the install is left marked incomplete for retry.");
     }
 
     /// <summary>
@@ -965,8 +1090,23 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
     /// a false answer aborts the walk (returning false) — the un-host purge uses it to stop the
     /// moment the partition is re-hosted. Returns true when the walk completed.
     /// </summary>
-    internal async Task<bool> PurgePartitionBackendRowsAsync(int partitionId, CancellationToken ct, Func<bool>? proceed = null)
+    internal async Task<bool> PurgePartitionBackendRowsAsync(int partitionId, CancellationToken ct, Func<bool>? proceed = null) =>
+        await PurgePartitionBackendRowsAsync(partitionId, proceed, pagesDeleted: null, ct).ConfigureAwait(false);
+
+    /// <summary>The install's form of the purge: the walk is never aborted, and the number of owned pages deleted
+    /// (each one backend scan page that held owned rows, followed by one delete) is returned for the install's
+    /// phase report, since the purge is a whole-family scan whose cost is the node's data, not the partition's.</summary>
+    private async Task<int> PurgePartitionBackendRowsCountingPagesAsync(int partitionId, CancellationToken ct)
     {
+        int pages = 0;
+        await PurgePartitionBackendRowsAsync(partitionId, proceed: null, pagesDeleted: p => pages = p, ct).ConfigureAwait(false);
+        return pages;
+    }
+
+    private async Task<bool> PurgePartitionBackendRowsAsync(int partitionId, Func<bool>? proceed, Action<int>? pagesDeleted, CancellationToken ct)
+    {
+        int pages = 0;
+
         await foreach (IReadOnlyList<(string Key, ReadOnlyKeyValueEntry Entry)> page in
             enumerator.EnumerateKeyValuesAsync(partitionId, PageSize, ct).ConfigureAwait(false))
         {
@@ -979,6 +1119,8 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
 
             if (!persistenceBackend.DeleteKeyValues(keys))
                 throw new KahunaServerException($"Failed to remove partition #{partitionId} key-value rows during install/purge.");
+
+            pages++;
         }
 
         await foreach (IReadOnlyList<(string Resource, LockRow Entry)> page in
@@ -993,8 +1135,11 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
 
             if (!persistenceBackend.DeleteLocks(resources))
                 throw new KahunaServerException($"Failed to remove partition #{partitionId} lock rows during install/purge.");
+
+            pages++;
         }
 
+        pagesDeleted?.Invoke(pages);
         return true;
     }
 

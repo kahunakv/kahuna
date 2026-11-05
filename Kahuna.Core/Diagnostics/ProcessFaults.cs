@@ -31,6 +31,27 @@ public static class ProcessFaults
     [ThreadStatic]
     private static bool escalating;
 
+    private static OutOfMemoryExitRecorder? exitRecorder;
+
+    /// <summary>
+    /// The recorder that writes one line to the node's out-of-memory exit ledger right before a fail-fast, so
+    /// the next start can tell a crash loop in recovery from a one-off. Armed by
+    /// <see cref="OutOfMemoryRestartBreaker"/> once the node knows its storage path; null before that and for
+    /// nodes without durable storage. Process-wide, like the policy itself.
+    /// </summary>
+    internal static OutOfMemoryExitRecorder? ExitRecorder
+    {
+        get => Volatile.Read(ref exitRecorder);
+        set
+        {
+            // A process hosts one node in production; a test host that builds several arms the recorder once
+            // per node, and the previous one releases its handle rather than leaking it.
+            OutOfMemoryExitRecorder? previous = Interlocked.Exchange(ref exitRecorder, value);
+            if (previous is not null && !ReferenceEquals(previous, value))
+                previous.Dispose();
+        }
+    }
+
     /// <summary>Whether a fatal fault terminates the process (default) or is only recorded for the readiness
     /// probe. Set from <c>EmbeddedKahunaOptions.FailFastOnOutOfMemory</c> at node construction.</summary>
     public static bool FailFastEnabled
@@ -107,6 +128,25 @@ public static class ProcessFaults
     {
         if (failFastEnabled)
         {
+            // The exit is recorded before the process dies, with no allocation on the way (the heap is what
+            // just ran out). The recorder's own failure is irrelevant here — the fail-fast follows either way —
+            // and the thread-static guard keeps an out-of-memory raised inside the recorder from re-entering
+            // this policy through the first-chance observer.
+            bool wasEscalating = escalating;
+            escalating = true;
+            try
+            {
+                Volatile.Read(ref exitRecorder)?.RecordExit(site);
+            }
+            catch (Exception)
+            {
+                // Best effort only.
+            }
+            finally
+            {
+                escalating = wasEscalating;
+            }
+
             Environment.FailFast(
                 $"Kahuna: {exception.GetType().Name} at {site}. Terminating so the orchestrator restarts this node with an empty heap instead of leaving a reachable replica whose WAL/apply pipeline is dead.",
                 exception);

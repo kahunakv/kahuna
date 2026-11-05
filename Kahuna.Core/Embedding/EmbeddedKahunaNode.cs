@@ -599,6 +599,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             DurableRecordRetentionHeapPressure = options.DurableRecordRetentionHeapPressure,
             DurableRecordRetentionFloor = options.DurableRecordRetentionFloor,
             DurableMaintenanceInterval = options.DurableMaintenanceInterval,
+            OutOfMemoryRestartBreakerThreshold = options.OutOfMemoryRestartBreakerThreshold,
             DurableDeferredSettlement = options.DurableDeferredSettlement,
             DurableMaterializeByReference = options.DurableMaterializeByReference,
             DurableMaterializeOnResolve = options.DurableMaterializeOnResolve,

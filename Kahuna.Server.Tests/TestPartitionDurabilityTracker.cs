@@ -34,6 +34,56 @@ public sealed class TestPartitionDurabilityTracker
         Assert.Equal(11, tracker.GetWatermark(1));
     }
 
+    /// <summary>
+    /// A whole-partition install replaces everything at or below its boundary with durable state, so the
+    /// pending indexes at or below it are superseded (their flush or snapshot confirmation may never come now
+    /// that the install purged what they referred to), the registered mark moves to the boundary, and pending
+    /// indexes above it still hold the watermark down.
+    /// </summary>
+    [Fact]
+    public void SeedInstalledThrough_DropsPendingAtOrBelowTheBoundary_AndKeepsThoseAbove()
+    {
+        PartitionDurabilityTracker tracker = new();
+
+        tracker.RegisterPending(1, 10, DurabilityChannel.Flush, DurabilityChannel.Receipts);
+        tracker.RegisterPending(1, 11, DurabilityChannel.Flush);
+        Assert.True(tracker.AddPendingFlushRow(1, 11));
+        tracker.RegisterPending(1, 20, DurabilityChannel.Flush);
+
+        Assert.Equal(9, tracker.GetWatermark(1));
+
+        tracker.SeedInstalledThrough(1, 15);
+
+        Assert.Equal(19, tracker.GetWatermark(1));
+        Assert.False(tracker.HasPendingSnapshotWork(1));
+        Assert.Equal(15, tracker.GetHighestApplied(1, DurabilityChannel.Receipts));
+
+        // A late confirmation for a superseded index is a no-op; the one above the boundary still resolves.
+        tracker.Resolve(1, 11);
+        Assert.Equal(19, tracker.GetWatermark(1));
+
+        tracker.Resolve(1, 20);
+        Assert.Equal(20, tracker.GetWatermark(1));
+    }
+
+    /// <summary>A boundary at or below what the tracker already certified changes nothing, and a seed on an
+    /// untracked partition registers the boundary as its durable mark.</summary>
+    [Fact]
+    public void SeedInstalledThrough_IsIdempotent_AndRegistersAnUntrackedPartition()
+    {
+        PartitionDurabilityTracker tracker = new();
+
+        tracker.SeedInstalledThrough(3, 40);
+        Assert.Equal(40, tracker.GetWatermark(3));
+
+        tracker.SeedInstalledThrough(3, 30);
+        Assert.Equal(40, tracker.GetWatermark(3));
+
+        tracker.RegisterPending(3, 41, DurabilityChannel.Flush);
+        tracker.SeedInstalledThrough(3, 40);
+        Assert.Equal(40, tracker.GetWatermark(3));
+    }
+
     [Fact]
     public void Watermark_CoversGapsFromUndeliveredEntries()
     {

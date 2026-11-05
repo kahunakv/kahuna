@@ -204,6 +204,67 @@ internal sealed class PartitionDurabilityTracker
     }
 
     /// <summary>
+    /// Records that a whole-partition snapshot install replaced the partition's durable state with one that
+    /// reflects every entry at or below <paramref name="upToIndex"/>: the installed rows were written to the
+    /// backend synchronously and the stores' snapshots were persisted before the install reported success, so
+    /// nothing at or below the boundary is still waiting on a flush or a snapshot. Every pending index at or
+    /// below it is dropped (its artifact was superseded by the install, and its flush or snapshot
+    /// confirmation may never arrive now that the install purged what it referred to), the registered
+    /// high-water mark and the per-channel resolve ceilings move up to the boundary, and nothing above it is
+    /// touched. Without this the watermark stayed at the last pre-install resolution: Kommander's compaction
+    /// stayed clamped at a floor far below the installed boundary, and a restart before the first
+    /// post-install flush read a persisted floor below the compaction floor and asked for the snapshot again.
+    /// Idempotent; a boundary at or below the current state changes nothing.
+    /// </summary>
+    public void SeedInstalledThrough(int partitionId, long upToIndex)
+    {
+        if (upToIndex < 0)
+            return;
+
+        while (true)
+        {
+            PartitionState state = partitions.GetOrAdd(partitionId, static _ => new PartitionState());
+
+            lock (state)
+            {
+                // Retired between GetOrAdd and the lock (a concurrent Forget); fetch again.
+                if (state.Removed)
+                    continue;
+
+                List<long>? superseded = null;
+
+                foreach (KeyValuePair<long, byte> kv in state.Pending)
+                {
+                    if (kv.Key > upToIndex)
+                        break;
+
+                    (superseded ??= []).Add(kv.Key);
+                }
+
+                if (superseded is not null)
+                {
+                    foreach (long index in superseded)
+                    {
+                        state.Pending.Remove(index);
+                        state.PendingFlushRows?.Remove(index);
+                    }
+                }
+
+                if (upToIndex > state.HighestRegistered)
+                    state.HighestRegistered = upToIndex;
+
+                for (int channel = 0; channel < state.HighestApplied.Length; channel++)
+                {
+                    if (upToIndex > state.HighestApplied[channel])
+                        state.HighestApplied[channel] = upToIndex;
+                }
+
+                return;
+            }
+        }
+    }
+
+    /// <summary>
     /// Marks a snapshot-channel entry's in-memory apply as completed, raising the resolve ceiling
     /// the next durable snapshot of that store certifies.
     /// </summary>

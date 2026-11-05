@@ -717,11 +717,19 @@ internal sealed partial class PreparedIntentStore
                 $"Partition {partitionId} snapshot carries no committed-head ledger (written by a build that predates it); " +
                 "refusing to install it while OnePhaseApplyTimeValidation is enabled, because this node would judge bundled commits differently from its replicas.");
 
-        PartitionLedger? ledger = section.Ledger is null
-            ? null
-            : BuildLedger(section.Ledger, section.LedgerWatermark, section.ReflectedThroughIndex, section.Settled, section.FullyReflectedThroughIndex);
-
         int purged = 0;
+
+        // The slice this node held for the partition is released BEFORE the installed one is built: the
+        // install's purge-then-apply discipline, applied to the intent side in the same order the receipts and
+        // the records follow. Building the new ledger first kept both slices resident at once — on a partition
+        // with hundreds of thousands of settled identities, two multi-megabyte dictionary arrays plus every
+        // key string — at the one moment a re-seeded node is nearest its heap limit (the soak that ran out of
+        // memory inside this build had the old slice still live). A reader between the two gate sections finds
+        // the partition without a slice, exactly as it finds the receipt and record stores between their purge
+        // and their import; the partition's apply stream is quiescent for the whole install (the install owns
+        // its executor), so no replicated verdict is judged in that window. The reflected positions are
+        // carried over by the swap below, which never regresses them.
+        PartitionLedger? previousLedger;
 
         lock (applyGate)
         {
@@ -749,10 +757,29 @@ internal sealed partial class PreparedIntentStore
             // waiting on a locally queued row no longer certifies anything the installed state needs.
             PurgeSettledAwaitingFlushLocked(isOwned);
 
-            if (ledger is null)
-                ledgers.TryRemove(partitionId, out _);
-            else
+            ledgers.TryRemove(partitionId, out previousLedger);
+        }
+
+        PartitionLedger? ledger = section.Ledger is null
+            ? null
+            : BuildLedger(section.Ledger, section.LedgerWatermark, section.ReflectedThroughIndex, section.Settled, section.FullyReflectedThroughIndex);
+
+        lock (applyGate)
+        {
+            if (ledger is not null)
+            {
+                // The previous slice was taken out above so its memory could go before the build; its reflected
+                // positions still fence the swap, as they did when the slice was replaced in place.
+                if (previousLedger is not null)
+                {
+                    if (previousLedger.ReflectedThroughIndex > ledger.ReflectedThroughIndex)
+                        ledger.ReflectedThroughIndex = previousLedger.ReflectedThroughIndex;
+                    if (previousLedger.FullyReflectedThroughIndex > ledger.FullyReflectedThroughIndex)
+                        ledger.FullyReflectedThroughIndex = previousLedger.FullyReflectedThroughIndex;
+                }
+
                 InstallLedgerLocked(partitionId, ledger);
+            }
 
             foreach (PreparedIntent intent in section.Intents)
                 MergeLoad(intent, partitionId);
