@@ -116,7 +116,7 @@ public sealed class TestSplitCascadeTransactionalVisibility : BaseCluster
     private static async Task<long?> ReadCounter(KahunaManager kahuna, string key, CancellationToken ct)
     {
         (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await RetryOnMustRetryAsync(
-            () => kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+            () => kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask(),
             r => r.Item1, timeoutMs: 30_000);
 
         return type == KeyValueResponseType.Get && entry?.Value is not null ? long.Parse(Encoding.UTF8.GetString(entry.Value)) : null;
@@ -409,7 +409,7 @@ public sealed class TestSplitCascadeTransactionalVisibility : BaseCluster
     private static async Task<(long Balance, long Version)?> ReadRow(KahunaManager kahuna, string key, KeyValueReadMode mode, HLCTimestamp at, CancellationToken ct)
     {
         (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await RetryOnMustRetryAsync(
-            () => kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, at, KeyValueDurability.Persistent, ct, readMode: mode),
+            () => kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, at, KeyValueDurability.Persistent, ct, readMode: mode).AsTask(),
             r => r.Item1, timeoutMs: 30_000);
 
         return type == KeyValueResponseType.Get && entry?.Value is not null ? DecodeRow(entry.Value) : null;

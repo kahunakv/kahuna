@@ -132,7 +132,7 @@ public sealed class TestPlacementDrain : BaseCluster
         {
             (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await RetryTransient(
                 () => reader.LocateAndTryGetValue(
-                    HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+                    HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask(),
                 r => r.Item1);
 
             Assert.Equal(KeyValueResponseType.Get, type);

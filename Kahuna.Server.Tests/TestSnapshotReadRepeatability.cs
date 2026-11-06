@@ -118,7 +118,7 @@ public sealed class TestSnapshotReadRepeatability
         // T2 has not claimed its intent: the read steps over it (raising its commit floor) and answers T1's
         // committed value from the overlay at once.
         Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> read = kahuna.LocateAndTryGetValue(
-            HLCTimestamp.Zero, key, -1, snapshot, KeyValueDurability.Persistent, ct);
+            HLCTimestamp.Zero, key, -1, snapshot, KeyValueDurability.Persistent, ct).AsTask();
 
         Task finished = await Task.WhenAny(read, Task.Delay(2_000, ct));
         Assert.True(finished == read, "the snapshot read waited on an unclaimed staged write it could step over");
@@ -137,7 +137,7 @@ public sealed class TestSnapshotReadRepeatability
 
         HLCTimestamp later = Tick(node);
         Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> waiting = kahuna.LocateAndTryGetValue(
-            HLCTimestamp.Zero, key, -1, later, KeyValueDurability.Persistent, ct);
+            HLCTimestamp.Zero, key, -1, later, KeyValueDurability.Persistent, ct).AsTask();
 
         Task finishedWaiting = await Task.WhenAny(waiting, Task.Delay(500, ct));
         if (finishedWaiting == waiting)

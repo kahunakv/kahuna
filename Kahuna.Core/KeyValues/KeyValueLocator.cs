@@ -85,7 +85,7 @@ internal sealed class KeyValueLocator
     public Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTryExtendKeyValue(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken) =>
         writes.LocateAndTryExtendKeyValue(transactionId, key, expiresMs, durability, cancellationToken);
 
-    public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, KeyValueReadMode readMode = KeyValueReadMode.Default) =>
+    public ValueTask<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, KeyValueReadMode readMode = KeyValueReadMode.Default) =>
         reads.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken, readMode);
 
     public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryExistsValue(HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken) =>

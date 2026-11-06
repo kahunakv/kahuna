@@ -125,7 +125,7 @@ public sealed class TestLeaderChangeLostRangeLock : BaseCluster
     private static Task<(KeyValueResponseType Type, ReadOnlyKeyValueEntry? Entry)> UnregisteredRead(
         KahunaManager session, TransactionHandle handle, string key, CancellationToken ct) =>
         RetryOnMustRetryAsync(
-            () => session.LocateAndTryGetValue(handle.TransactionId, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+            () => session.LocateAndTryGetValue(handle.TransactionId, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask(),
             r => r.Item1);
 
     private static async Task<KeyValueResponseType> TryExclusivePointLock(
@@ -177,7 +177,7 @@ public sealed class TestLeaderChangeLostRangeLock : BaseCluster
     private static async Task<(KeyValueResponseType Type, ReadOnlyKeyValueEntry? Entry)> Read(
         KahunaManager reader, string key, CancellationToken ct) =>
         await RetryOnMustRetryAsync(
-            () => reader.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+            () => reader.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask(),
             r => r.Item1);
 
     /// <summary>The second transaction, on the new leader: read the key under a Shared lock, upgrade, take the
@@ -581,7 +581,7 @@ public sealed class TestLeaderChangeLostRangeLock : BaseCluster
 
             Task<(KeyValueResponseType Type, ReadOnlyKeyValueEntry? Entry)> SnapshotRead() =>
                 RetryOnMustRetryAsync(
-                    () => session.LocateAndTryGetValue(reader.TransactionId, dataKey, -1, reader.TransactionId, KeyValueDurability.Persistent, ct),
+                    () => session.LocateAndTryGetValue(reader.TransactionId, dataKey, -1, reader.TransactionId, KeyValueDurability.Persistent, ct).AsTask(),
                     r => r.Item1);
 
             (KeyValueResponseType firstType, ReadOnlyKeyValueEntry? first) = await SnapshotRead();

@@ -1,4 +1,5 @@
 
+using System.Diagnostics.CodeAnalysis;
 using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Persistence;
@@ -265,6 +266,22 @@ internal sealed class RangeScanContinuation : ReadContinuation
     internal long EntriesInspected => tally.EntriesInspected;
 
     /// <summary>
+    /// Sizes the result list for the merge that is about to run, so it does not grow by doubling from empty: room
+    /// for the larger of the two sources still to merge, and never past the <c>limit + 1</c> rows a page holds.
+    /// The larger source is the exact row count when the resident keys are also the disk keys, or when one side
+    /// is empty, which are the common pages; keys that are in one source only make the list grow once more.
+    /// </summary>
+    private void ReserveResultRoom(int diskRowsAhead)
+    {
+        long room = (long)limit + 1 - accumulated.Count;
+        long ahead = Math.Max(memItems.Count - memIdx, diskRowsAhead);
+        long wanted = Math.Min(room, ahead);
+
+        if (wanted > 0)
+            accumulated.EnsureCapacity((int)Math.Min(accumulated.Count + wanted, Array.MaxLength));
+    }
+
+    /// <summary>
     /// Stage 2: reads the page at <see cref="diskCursor"/> up to the scan's end bound and snapshot-projects it. Reads
     /// only the immutable scan identity and the cursor fields the last merge left, so it may run on a scheduler
     /// thread while the actor is free, as long as no merge of this scan runs at the same time.
@@ -316,7 +333,7 @@ internal sealed class RangeScanContinuation : ReadContinuation
         // projected list may be smaller or empty if rows were filtered by snapshot projection.
         // Using projected.Count for diskHasMore would prematurely terminate the scan when
         // all limit+1 raw rows are post-snapshot and dropped by projection.
-        List<(string, ReadOnlyKeyValueEntry)> diskPage = RangeScanPage?.Projected ?? [];
+        List<(string, ReadOnlyKeyValueEntry)> diskPage = RangeScanPage?.Projected ?? NoRows;
         bool diskHasMore = RangeScanPage?.RawHasMore ?? false;
         int diskAvailable = diskPage.Count;
         int diskIdx = 0;
@@ -326,17 +343,14 @@ internal sealed class RangeScanContinuation : ReadContinuation
             while (diskIdx < diskAvailable && string.CompareOrdinal(diskPage[diskIdx].Item1, lastDiskKeyMerged) <= 0)
                 diskIdx++;
 
-        // For snapshot scans, build a key→projected-entry map from the current disk page so
-        // EvaluateKeySync can fall back to it when the in-memory revision archive misses.
-        // The disk page has already been snapshot-projected by the stage-2 task (off-actor),
-        // so every entry in this map is already at-or-before snapshotTs.
+        // For snapshot scans, a key→projected-entry map of the current disk page lets EvaluateKeySync fall
+        // back to the projection when the in-memory revision archive misses. The disk page has already been
+        // snapshot-projected by stage 2, so every entry in the map is at-or-before snapshotTs. Only a resident
+        // row whose archive was trimmed past the snapshot consults it, so it is built on that first use
+        // (see TryGetDiskProjection) and a page that never needs it pays nothing for it.
         Dictionary<string, ReadOnlyKeyValueEntry>? diskProjections = null;
-        if (isSnapshotRead && diskAvailable > 0)
-        {
-            diskProjections = new(diskAvailable);
-            for (int i = 0; i < diskAvailable; i++)
-                diskProjections[diskPage[i].Item1] = diskPage[i].Item2;
-        }
+
+        ReserveResultRoom(diskAvailable - diskIdx);
 
         while (accumulated.Count <= limit)
         {
@@ -359,7 +373,11 @@ internal sealed class RangeScanContinuation : ReadContinuation
                 break; // both sources exhausted
 
             string keyToProcess;
-            KeyValueEntry? entry;
+
+            // The key is evaluated either through an entry of the store (entry) or from the row the disk page
+            // holds for it, when nothing resident stands in front of that row (diskRow). Exactly one is set.
+            KeyValueEntry? entry = null;
+            ReadOnlyKeyValueEntry? diskRow = null;
 
             int cmp;
             if (memKey is null) cmp = 1;
@@ -390,19 +408,9 @@ internal sealed class RangeScanContinuation : ReadContinuation
                 }
                 else
                 {
-                    // Build a transient entry for the disk-only key; not inserted into the store
+                    // A disk-only key is served from its row; nothing is inserted into the store
                     // (populateCache:false semantics — range scans must not pollute the LRU).
-                    entry = new KeyValueEntry
-                    {
-                        Bucket = GetBucket(keyToProcess),
-                        Value = de.Value,
-                        Revision = de.Revision,
-                        FlushedRevision = de.Revision,
-                        Expires = de.Expires,
-                        LastUsed = de.LastUsed,
-                        LastModified = de.LastModified,
-                        State = de.State
-                    };
+                    diskRow = de;
                 }
             }
             else
@@ -457,21 +465,11 @@ internal sealed class RangeScanContinuation : ReadContinuation
 
                 if (diskIsNewer && !isSnapshotRead && transactionId == HLCTimestamp.Zero)
                 {
-                    // Plain current read: serve the newer committed durable row as a transient entry
+                    // Plain current read: serve the newer committed durable row
                     // (populateCache:false semantics, like the disk-only branch). Transactional and
                     // snapshot reads keep the resident base — its MVCC / RYOW / intent state must not
                     // be bypassed — and converge through the reconcile sent above.
-                    entry = new KeyValueEntry
-                    {
-                        Bucket = GetBucket(keyToProcess),
-                        Value = diskEntry.Value,
-                        Revision = diskEntry.Revision,
-                        FlushedRevision = diskEntry.Revision,
-                        Expires = diskEntry.Expires,
-                        LastUsed = diskEntry.LastUsed,
-                        LastModified = diskEntry.LastModified,
-                        State = diskEntry.State
-                    };
+                    diskRow = diskEntry;
                 }
                 else
                     entry = memEntry;
@@ -495,29 +493,52 @@ internal sealed class RangeScanContinuation : ReadContinuation
                     goto Done;
             }
 
-            KeyValueResponse? response = EvaluateKeySync(context, keyToProcess, entry, diskProjections, fencedKeys);
+            // The verdict on the key: Get with the row to return, DoesNotExist for a row the page leaves out, or
+            // the answer that ends the page (WaitingForReplication, Aborted, MustRetry).
+            KeyValueResponseType verdict;
+            ReadOnlyKeyValueEntry? served;
+            long headRevision;
+            HLCTimestamp headModified;
+
+            if (diskRow is not null && !(isSnapshotRead && diskRow.LastModified > snapshotTs))
+            {
+                verdict = EvaluateDiskRow(diskRow, out served);
+                headRevision = diskRow.Revision;
+                headModified = diskRow.LastModified;
+            }
+            else
+            {
+                // A projected row is at or before the snapshot by the backend's contract. One that is not takes
+                // the entry path, through a transient entry that holds only the row, so the snapshot rules of
+                // EvaluateKeySync decide it as they decide a resident head past the snapshot.
+                entry ??= TransientEntry(keyToProcess, diskRow!);
+                verdict = EvaluateKeySync(context, keyToProcess, entry, diskPage, ref diskProjections, fencedKeys, out served);
+                headRevision = entry.Revision;
+                headModified = entry.LastModified;
+            }
+
             tally.EntriesInspected++;
 
-            if (response is null || response.Type == KeyValueResponseType.DoesNotExist)
+            if (verdict == KeyValueResponseType.DoesNotExist)
             {
                 tally.DeadEntriesSkipped++;
 
                 // A head the page leaves out (a delete, an expired value) still supersedes an older committed intent
                 // on the key; remember it for the intent merge, which otherwise sees no row and would inject the
                 // intent's older value.
-                if (!isSnapshotRead && entry is not null)
-                    DurableSnapshotSource.RecordExcludedHead(context, ref excludedHeads, keyToProcess, entry.Revision, entry.LastModified);
+                if (!isSnapshotRead)
+                    DurableSnapshotSource.RecordExcludedHead(context, ref excludedHeads, keyToProcess, headRevision, headModified);
                 continue;
             }
 
-            if (response.Type != KeyValueResponseType.Get || response.Entry is null)
+            if (verdict != KeyValueResponseType.Get || served is null)
             {
-                // Scan-aborting response (WaitingForReplication, Aborted, etc.). It still carries what the
+                // Scan-aborting answer (WaitingForReplication, Aborted, etc.). It still carries what the
                 // attempt cost, so a page retried from the same cursor can report the sum over its attempts.
-                return new(response.Type, new KeyValueGetByRangeResult(response.Type, [], null, false, Observation));
+                return new(verdict, new KeyValueGetByRangeResult(verdict, [], null, false, Observation));
             }
 
-            accumulated.Add((keyToProcess, response.Entry));
+            accumulated.Add((keyToProcess, served));
         }
 
         Done:
@@ -577,30 +598,25 @@ internal sealed class RangeScanContinuation : ReadContinuation
     /// as a <c>ResumeRead</c> message carrying this continuation. The reply stays deferred to the promise; a
     /// rejected enqueue (back-pressure, a stopping scheduler) resolves every waiter with a retryable result
     /// instead of leaving the scan half-assembled.
+    /// <para>
+    /// The scheduler work and the completion both take this continuation as their state, so a page costs no
+    /// closure and no delegate of its own: what they need from the actor (its backend, its logger, its address)
+    /// is kept in fields that this method sets on the actor thread before the page is enqueued.
+    /// </para>
     /// </summary>
     internal void DispatchNextPage(KeyValueContext context)
     {
         CaptureIntentsAhead(context);
 
+        scheduledBackend = context.PersistenceBackend;
+        scheduledLogger = context.Logger;
+        cancelledProbe ??= IsCancelled;
+
         Task<RangeDiskPage> nextTask;
         try
         {
             nextTask = context.BackendReadScheduler.EnqueueTask(
-                partitionId,
-                () =>
-                {
-                    // The scheduler can run this long after the deadline sweep expired this
-                    // continuation; skip the disk work then — the stage-3 late-completion
-                    // guard drops the result anyway.
-                    if (Cancelled)
-                    {
-                        KeyValueScanMetrics.ScansAbandonedCancelled.Add(1);
-                        return new RangeDiskPage([], false, null);
-                    }
-
-                    KeyValueScanMetrics.PagesReadOnScheduler.Add(1);
-                    return ReadPage(context.PersistenceBackend, () => Cancelled);
-                });
+                partitionId, this, static scan => scan.ReadPageOnScheduler());
         }
         catch (Exception ex)
         {
@@ -611,19 +627,56 @@ internal sealed class RangeScanContinuation : ReadContinuation
             return;
         }
 
-        IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse> self = context.ActorContext.Self;
-        _ = nextTask.ContinueWith(t =>
+        resumeTarget = context.ActorContext.Self;
+
+        _ = nextTask.ContinueWith(
+            static (read, state) => ((RangeScanContinuation)state!).OnPageRead(read), this, TaskScheduler.Default);
+    }
+
+    // What the scheduler work and its completion need from the actor that dispatched the page. Written on the
+    // actor thread by DispatchNextPage before the enqueue, read on the scheduler and thread-pool threads after
+    // it; the enqueue and the completion registration order the two.
+    private Persistence.Backend.IPersistenceBackend? scheduledBackend;
+    private ILogger<IKahuna>? scheduledLogger;
+    private IActorRef<KeyValueActor, KeyValueRequest, KeyValueResponse>? resumeTarget;
+
+    /// <summary>The expiry poll handed to the page projection, created once for the scan and not once per page.</summary>
+    private Func<bool>? cancelledProbe;
+
+    private bool IsCancelled() => Cancelled;
+
+    /// <summary>The scheduler work of one page (scheduler thread).</summary>
+    private RangeDiskPage ReadPageOnScheduler()
+    {
+        // The scheduler can run this long after the deadline sweep expired this
+        // continuation; skip the disk work then — the stage-3 late-completion
+        // guard drops the result anyway.
+        if (Cancelled)
         {
-            if (!t.IsCompletedSuccessfully)
-            {
-                // Surface the fault — a swallowed exception here becomes an undiagnosable
-                // retry-exhaustion at the client.
-                context.Logger.LogWarning(t.Exception?.GetBaseException(), "KeyValueActor/RangeScan: disk page read faulted for prefix {Prefix}", prefix);
-                SetFaulted(t.Exception);
-            }
-            else RangeScanPage = t.Result;
-            self.Send(new KeyValueRequest(KeyValueRequestType.ResumeRead) { Continuation = this });
-        }, TaskScheduler.Default);
+            KeyValueScanMetrics.ScansAbandonedCancelled.Add(1);
+            return new RangeDiskPage([], false, null);
+        }
+
+        KeyValueScanMetrics.PagesReadOnScheduler.Add(1);
+        return ReadPage(scheduledBackend!, cancelledProbe);
+    }
+
+    /// <summary>
+    /// The completion of a page read (thread-pool thread): stores the page, or the fault, and hands the scan back
+    /// to the actor for stage 3.
+    /// </summary>
+    private void OnPageRead(Task<RangeDiskPage> read)
+    {
+        if (!read.IsCompletedSuccessfully)
+        {
+            // Surface the fault — a swallowed exception here becomes an undiagnosable
+            // retry-exhaustion at the client.
+            scheduledLogger!.LogWarning(read.Exception?.GetBaseException(), "KeyValueActor/RangeScan: disk page read faulted for prefix {Prefix}", prefix);
+            SetFaulted(read.Exception);
+        }
+        else RangeScanPage = read.Result;
+
+        resumeTarget!.Send(KeyValueRequestPool.RentResumeRead(this));
     }
 
     // ── Prepared-intent capture (actor thread) ──────────────────────────────────
@@ -689,17 +742,6 @@ internal sealed class RangeScanContinuation : ReadContinuation
     // ── Per-key evaluation (sync; mirrors TryGetByRangeHandler.Get without disk I/O) ──────
 
     /// <summary>
-    /// Evaluates a single key for inclusion in the range scan result.
-    ///
-    /// Returns null to skip (DoesNotExist in scan context), a Get response to include the
-    /// entry, or a scan-aborting response (WaitingForReplication, Aborted) to terminate.
-    /// All paths are synchronous — the entry is already in hand from the in-memory snapshot
-    /// or from the disk page fetched in stage 2, so no further backend I/O is needed.
-    ///
-    /// Runs on the actor thread (stage 3); actor-owned state mutations (MVCC entries,
-    /// TouchEntry) are safe.
-    /// </summary>
-    /// <summary>
     /// Re-queries the next bounded batch of resident keys, starting exclusively after the last key
     /// of the current batch, and resets the batch cursor. Runs on the actor thread (stage 3). This
     /// keeps each actor visit O(memBatch) instead of O(resident-range-size); the trade-off is that a
@@ -716,29 +758,43 @@ internal sealed class RangeScanContinuation : ReadContinuation
         }
 
         string lastKey = memItems[^1].Key;
-        List<(string Key, KeyValueEntry Entry)> next = [];
-        foreach (KeyValuePair<string, KeyValueEntry> kv in
-            context.Store.GetByRange(lastKey, false, memEnd, memEndInclusive, memBatch))
-            next.Add((kv.Key, kv.Value));
+        List<(string Key, KeyValueEntry Entry)> next = context.Store.CopyRange(lastKey, false, memEnd, memEndInclusive, memBatch);
 
         memItems = next;
         memIdx = 0;
         memMaybeMore = next.Count == memBatch;
     }
 
-    private KeyValueResponse? EvaluateKeySync(
+    /// <summary>
+    /// Evaluates a single key, through an entry of the store, for inclusion in the range scan result.
+    ///
+    /// Returns <c>Get</c> with the row in <paramref name="served"/> to include the key, <c>DoesNotExist</c> to
+    /// leave it out, or the answer that ends the page (<c>WaitingForReplication</c>, <c>Aborted</c>,
+    /// <c>MustRetry</c>). The verdict is a plain value and not a response object: a page evaluates every one of
+    /// its keys, and a response per key was one of the largest allocations of a scan page.
+    /// All paths are synchronous — the entry is already in hand from the in-memory snapshot
+    /// or from the disk page fetched in stage 2, so no further backend I/O is needed.
+    ///
+    /// Runs on the actor thread (stage 3); actor-owned state mutations (MVCC entries,
+    /// TouchEntry) are safe.
+    /// </summary>
+    private KeyValueResponseType EvaluateKeySync(
         KeyValueContext context,
         string key,
         KeyValueEntry? entry,
-        Dictionary<string, ReadOnlyKeyValueEntry>? diskProjections,
-        Dictionary<string, long>? fencedKeys = null)
+        List<(string, ReadOnlyKeyValueEntry)> diskPage,
+        ref Dictionary<string, ReadOnlyKeyValueEntry>? diskProjections,
+        Dictionary<string, long>? fencedKeys,
+        out ReadOnlyKeyValueEntry? served)
     {
+        served = null;
+
         // Replication intent: a pending replication on this key means the entry is not yet
         // fully committed. Clear expired intents as housekeeping; block if still live.
         if (entry?.ReplicationIntent is not null)
         {
             if (entry.ReplicationIntent.Expires - currentTime > TimeSpan.Zero)
-                return KeyValueStaticResponses.WaitingForReplicationResponse;
+                return KeyValueResponseType.WaitingForReplication;
             entry.ReplicationIntent = null;
         }
 
@@ -756,7 +812,7 @@ internal sealed class RangeScanContinuation : ReadContinuation
                 entry.WriteIntent = null;
             else if (isSnapshotRead
                      && KeyValueWriteIntentSafeTime.MustWait(entry, entry.WriteIntent, snapshotTs))
-                return KeyValueStaticResponses.WaitingForReplicationResponse;
+                return KeyValueResponseType.WaitingForReplication;
         }
 
         // Transactional MVCC: read-your-own-writes and OCC snapshot tracking. A statement read takes only a
@@ -772,15 +828,16 @@ internal sealed class RangeScanContinuation : ReadContinuation
                     && (!stagedWritesOnly || existing.StagedUnder is not null))
                 {
                     if (entry.Revision > existing.Revision)
-                        return KeyValueStaticResponses.AbortedResponse;
+                        return KeyValueResponseType.Aborted;
 
                     if (existing.State is KeyValueState.Undefined or KeyValueState.Deleted ||
                         (existing.Expires != HLCTimestamp.Zero && existing.Expires - currentTime < TimeSpan.Zero))
-                        return null;
+                        return KeyValueResponseType.DoesNotExist;
 
-                    return new(KeyValueResponseType.Get, new ReadOnlyKeyValueEntry(
+                    served = new ReadOnlyKeyValueEntry(
                         existing.Value, existing.Revision, existing.Expires,
-                        existing.LastUsed, existing.LastModified, entry.State));
+                        existing.LastUsed, existing.LastModified, entry.State);
+                    return KeyValueResponseType.Get;
                 }
             }
 
@@ -809,7 +866,7 @@ internal sealed class RangeScanContinuation : ReadContinuation
                 switch (DurableSnapshotSource.Resolve(context, key, transactionId, entry, currentTime, out KeyValueMvccEntry intentSnapshot))
                 {
                     case SnapshotDecision.Retry:
-                        return KeyValueStaticResponses.WaitingForReplicationResponse;
+                        return KeyValueResponseType.WaitingForReplication;
                     case SnapshotDecision.UseIntent:
                         newMvcc = intentSnapshot;
                         break;
@@ -831,15 +888,16 @@ internal sealed class RangeScanContinuation : ReadContinuation
                     entry, KeyValueStoreAccounting.MvccEntryAddedBytes(entry.MvccEntries.Count == 1, newMvcc.Value));
 
                 if (entry.Revision > newMvcc.Revision)
-                    return KeyValueStaticResponses.AbortedResponse;
+                    return KeyValueResponseType.Aborted;
 
                 if (newMvcc.State is KeyValueState.Undefined or KeyValueState.Deleted ||
                     (newMvcc.Expires != HLCTimestamp.Zero && newMvcc.Expires - currentTime < TimeSpan.Zero))
-                    return null;
+                    return KeyValueResponseType.DoesNotExist;
 
-                return new(KeyValueResponseType.Get, new ReadOnlyKeyValueEntry(
+                served = new ReadOnlyKeyValueEntry(
                     newMvcc.Value, newMvcc.Revision, newMvcc.Expires,
-                    newMvcc.LastUsed, newMvcc.LastModified, newMvcc.State));
+                    newMvcc.LastUsed, newMvcc.LastModified, newMvcc.State);
+                return KeyValueResponseType.Get;
             }
         }
 
@@ -869,13 +927,13 @@ internal sealed class RangeScanContinuation : ReadContinuation
                 // aborts the page, and the caller's page retry loop re-reads once the queued
                 // flushes are acknowledged.
                 if (entry.SnapshotAtRiskFromUnflushedGap(snapshotTs))
-                    return KeyValueStaticResponses.MustRetryResponse;
+                    return KeyValueResponseType.MustRetry;
 
                 // The disk projection was read from the persisted history, which is missing any
                 // revision still queued for the background writer; if one of those is not in the
                 // archive either, the projection may be an older row than the committed answer.
                 if (UnflushedHistoryFence.HistoryMayLag(context.UnflushedWrites, key, entry.Revisions, entry.Revision - 1))
-                    return KeyValueStaticResponses.MustRetryResponse;
+                    return KeyValueResponseType.MustRetry;
 
                 // Every revision queued now is in the archive and past the snapshot, so the row's as-of image
                 // is in the flushed history below them, which is what the projection of a fenced row was taken
@@ -885,43 +943,114 @@ internal sealed class RangeScanContinuation : ReadContinuation
                 // page closed then; the retry projects the row again at the new ceiling.
                 if (fencedKeys is not null && fencedKeys.TryGetValue(key, out long projectedCeiling)
                     && UnflushedHistoryFence.FlushedHistoryCeiling(context.UnflushedWrites, key) != projectedCeiling)
-                    return KeyValueStaticResponses.MustRetryResponse;
+                    return KeyValueResponseType.MustRetry;
 
                 // In-memory revision archive does not reach as far back as snapshotTs.
                 // Fall back to the stage-2 disk projection carried in from the off-actor task.
                 // Purely memory-only keys (never flushed) have no disk projection and are omitted.
-                if (diskProjections is not null && diskProjections.TryGetValue(key, out ReadOnlyKeyValueEntry? diskSnap) && diskSnap is not null)
+                if (TryGetDiskProjection(diskPage, ref diskProjections, key, out ReadOnlyKeyValueEntry? diskSnap))
                 {
                     if (diskSnap.State is KeyValueState.Deleted or KeyValueState.Undefined ||
                         (diskSnap.Expires != HLCTimestamp.Zero && diskSnap.Expires - currentTime < TimeSpan.Zero))
-                        return null;
-                    return new(KeyValueResponseType.Get, diskSnap);
+                        return KeyValueResponseType.DoesNotExist;
+
+                    served = diskSnap;
+                    return KeyValueResponseType.Get;
                 }
-                return null;
+                return KeyValueResponseType.DoesNotExist;
             }
 
             if (snapshot.State is KeyValueState.Deleted or KeyValueState.Undefined ||
                 (snapshot.Expires != HLCTimestamp.Zero && snapshot.Expires - currentTime < TimeSpan.Zero))
-                return null;
+                return KeyValueResponseType.DoesNotExist;
 
-            return new(KeyValueResponseType.Get, new ReadOnlyKeyValueEntry(
+            served = new ReadOnlyKeyValueEntry(
                 snapshot.Value, snapRevision, snapshot.Expires,
-                currentTime, snapshot.LastModified, snapshot.State));
+                currentTime, snapshot.LastModified, snapshot.State);
+            return KeyValueResponseType.Get;
         }
 
         // Non-transactional, non-snapshot path: serve the current committed state.
         if (entry is null || entry.State is KeyValueState.Deleted or KeyValueState.Undefined ||
             (entry.Expires != HLCTimestamp.Zero && entry.Expires - currentTime < TimeSpan.Zero))
-            return null;
+            return KeyValueResponseType.DoesNotExist;
 
         context.TouchEntry(entry, currentTime);
 
-        return new(KeyValueResponseType.Get, new ReadOnlyKeyValueEntry(
+        served = new ReadOnlyKeyValueEntry(
             entry.Value, entry.Revision, entry.Expires,
-            entry.LastUsed, entry.LastModified, entry.State));
+            entry.LastUsed, entry.LastModified, entry.State);
+        return KeyValueResponseType.Get;
+    }
+
+    /// <summary>
+    /// Evaluates a key that only its disk row stands for: a key that is not resident, or a resident key whose
+    /// newer durable row a plain current read serves. Such a key has no replication intent, no write intent and
+    /// no MVCC state to consult, and its row is at or before the snapshot of a snapshot read, so the verdict is
+    /// the state and expiry check alone and the row returned carries the scan's time as its last use, exactly
+    /// what <see cref="EvaluateKeySync"/> answers for an entry that holds only the row. Evaluating the row
+    /// directly saves that entry, which was the largest object of a page of non-resident keys.
+    /// </summary>
+    private KeyValueResponseType EvaluateDiskRow(ReadOnlyKeyValueEntry row, out ReadOnlyKeyValueEntry? served)
+    {
+        if (row.State is KeyValueState.Deleted or KeyValueState.Undefined ||
+            (row.Expires != HLCTimestamp.Zero && row.Expires - currentTime < TimeSpan.Zero))
+        {
+            served = null;
+            return KeyValueResponseType.DoesNotExist;
+        }
+
+        served = new ReadOnlyKeyValueEntry(row.Value, row.Revision, row.Expires, currentTime, row.LastModified, row.State);
+        return KeyValueResponseType.Get;
     }
 
     // ── Static helpers ────────────────────────────────────────────────────────
+
+    /// <summary>The disk page of a merge that has none. Never written to.</summary>
+    private static readonly List<(string, ReadOnlyKeyValueEntry)> NoRows = new(0);
+
+    /// <summary>
+    /// An entry that holds only a disk row, for a key that is evaluated through the entry rules although it is
+    /// not resident. Not inserted into the store.
+    /// </summary>
+    private static KeyValueEntry TransientEntry(string key, ReadOnlyKeyValueEntry row) => new()
+    {
+        Bucket = GetBucket(key),
+        Value = row.Value,
+        Revision = row.Revision,
+        FlushedRevision = row.Revision,
+        Expires = row.Expires,
+        LastUsed = row.LastUsed,
+        LastModified = row.LastModified,
+        State = row.State
+    };
+
+    /// <summary>
+    /// The projected row the current disk page holds for <paramref name="key"/>, through a map of the page that
+    /// is built on the first lookup of a merge and kept in <paramref name="projections"/> for the next ones.
+    /// False when the page has no row for the key.
+    /// </summary>
+    private static bool TryGetDiskProjection(
+        List<(string, ReadOnlyKeyValueEntry)> diskPage,
+        ref Dictionary<string, ReadOnlyKeyValueEntry>? projections,
+        string key,
+        [NotNullWhen(true)] out ReadOnlyKeyValueEntry? row)
+    {
+        if (projections is null)
+        {
+            if (diskPage.Count == 0)
+            {
+                row = null;
+                return false;
+            }
+
+            projections = new(diskPage.Count);
+            for (int i = 0; i < diskPage.Count; i++)
+                projections[diskPage[i].Item1] = diskPage[i].Item2;
+        }
+
+        return projections.TryGetValue(key, out row) && row is not null;
+    }
 
     private static string? GetBucket(string key)
     {

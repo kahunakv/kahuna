@@ -230,7 +230,7 @@ internal abstract class BaseHandler
             if (!t.IsCompletedSuccessfully)
                 cont.SetFaulted(t.Exception);
             actorContext.Self.Send(
-                new KeyValueRequest(KeyValueRequestType.ResumeRead) { Continuation = cont });
+                KeyValueRequestPool.RentResumeRead(cont));
         }, TaskScheduler.Default);
 
         actorContext.ByPassReply = true;

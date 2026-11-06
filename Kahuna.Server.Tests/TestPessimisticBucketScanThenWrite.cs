@@ -59,7 +59,7 @@ public class TestPessimisticBucketScanThenWrite : BaseCluster
     private static async Task<string?> ReadText(IKahuna kahuna, string key, CancellationToken ct)
     {
         (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await RetryOnMustRetryAsync(
-            () => kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+            () => kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask(),
             r => r.Item1);
 
         Assert.Equal(KeyValueResponseType.Get, type);

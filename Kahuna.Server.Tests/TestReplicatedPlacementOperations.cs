@@ -140,7 +140,7 @@ public sealed class TestReplicatedPlacementOperations : BaseCluster
         // Read from a different non-hosting node than the writer when one exists.
         IKahuna reader = kahunas.First(k => !ReferenceEquals(k, writer));
         (KeyValueResponseType getType, ReadOnlyKeyValueEntry? entry) = await RetryTransient(
-            () => reader.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+            () => reader.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask(),
             r => r.Item1);
         Assert.Equal(KeyValueResponseType.Get, getType);
         Assert.Equal(v1, entry!.Value);
@@ -159,7 +159,7 @@ public sealed class TestReplicatedPlacementOperations : BaseCluster
         Assert.Equal(KeyValueResponseType.NotSet, staleType);
 
         (getType, entry) = await RetryTransient(
-            () => reader.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+            () => reader.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask(),
             r => r.Item1);
         Assert.Equal(KeyValueResponseType.Get, getType);
         Assert.Equal(v2, entry!.Value);
@@ -170,7 +170,7 @@ public sealed class TestReplicatedPlacementOperations : BaseCluster
         Assert.Equal(KeyValueResponseType.Deleted, deleteType);
 
         (getType, _) = await RetryTransient(
-            () => reader.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+            () => reader.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask(),
             r => r.Item1);
         Assert.Equal(KeyValueResponseType.DoesNotExist, getType);
 
@@ -292,7 +292,7 @@ public sealed class TestReplicatedPlacementOperations : BaseCluster
         {
             IKahuna reader = DriverFor(rafts, kahunas, key);
             (KeyValueResponseType getType, ReadOnlyKeyValueEntry? entry) = await RetryTransient(
-                () => reader.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+                () => reader.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask(),
                 r => r.Item1);
             Assert.Equal(KeyValueResponseType.Get, getType);
             Assert.Equal(key == keyA ? "a1"u8.ToArray() : "b1"u8.ToArray(), entry!.Value);
@@ -363,7 +363,7 @@ public sealed class TestReplicatedPlacementOperations : BaseCluster
         {
             IKahuna reader = DriverFor(rafts, kahunas, key);
             (KeyValueResponseType getType, ReadOnlyKeyValueEntry? entry) = await RetryTransient(
-                () => reader.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+                () => reader.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask(),
                 r => r.Item1);
             Assert.Equal(KeyValueResponseType.Get, getType);
             Assert.Equal(expected, entry!.Value);

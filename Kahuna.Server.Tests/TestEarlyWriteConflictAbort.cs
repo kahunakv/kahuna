@@ -82,7 +82,7 @@ public sealed class TestEarlyWriteConflictAbort
     private static Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TxGet(IKahuna kahuna, TransactionHandle tx, string key, CancellationToken ct) =>
         kahuna.LocateAndTryGetValue(
             tx.TransactionId, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct,
-            tx.CoordinatorKey, TransactionOperationId.NewRandom());
+            tx.CoordinatorKey, TransactionOperationId.NewRandom()).AsTask();
 
     private static Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TxExists(IKahuna kahuna, TransactionHandle tx, string key, CancellationToken ct) =>
         kahuna.LocateAndTryExistsValue(

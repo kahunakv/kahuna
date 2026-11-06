@@ -70,7 +70,7 @@ internal sealed class RoutedReadOperations
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
+    public ValueTask<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
         HLCTimestamp transactionId,
         string key,
         long revision,
@@ -83,26 +83,45 @@ internal sealed class RoutedReadOperations
     )
     {
         if (ReservedKeys.IsReserved(key) || !KeyValueReadModeChecks.IsWellFormed(readMode, readTimestamp))
-            return Task.FromResult((KeyValueResponseType.InvalidInput, (ReadOnlyKeyValueEntry?)null));
+            return new((KeyValueResponseType.InvalidInput, null));
 
         RegistrationRouting routing = ClassifyRegistration(transactionId, coordinatorKey, operationId);
         if (routing is RegistrationRouting.Legacy)
             return TryGetValueDirect(transactionId, key, revision, readTimestamp, durability, readMode, cancellationToken);
         if (routing is RegistrationRouting.Malformed)
-            return Task.FromResult((KeyValueResponseType.InvalidInput, (ReadOnlyKeyValueEntry?)null));
+            return new((KeyValueResponseType.InvalidInput, null));
 
-        return RegisterAndTryReadValue(OperationKind.Get, transactionId, coordinatorKey, operationId, key, revision, readTimestamp, durability, cancellationToken, readMode);
+        // A registered read always suspends on its registration, so its task is the one allocation it needs.
+        return new(RegisterAndTryReadValue(OperationKind.Get, transactionId, coordinatorKey, operationId, key, revision, readTimestamp, durability, cancellationToken, readMode));
     }
 
     /// <summary>
     /// A get outside any transaction session: no registration, no completion, just the located read. Stamped
     /// as a whole so the <c>direct</c> total series exists beside the <c>registered</c> one.
+    /// <para>
+    /// The located read usually completes on the calling thread (a leadership lease and a published head
+    /// record), and then this path allocates nothing: the answer travels to the caller inside the
+    /// <see cref="ValueTask{TResult}"/>. A read that suspended is finished by <see cref="AwaitDirectRead"/>.
+    /// </para>
     /// </summary>
-    private async Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryGetValueDirect(
+    private ValueTask<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryGetValueDirect(
         HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, KeyValueReadMode readMode, CancellationToken cancellationToken)
     {
         long start = Stopwatch.GetTimestamp();
-        (KeyValueResponseType, ReadOnlyKeyValueEntry?) result = await locator.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken, readMode);
+        ValueTask<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> read = locator.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken, readMode);
+
+        if (!read.IsCompletedSuccessfully)
+            return AwaitDirectRead(read, start);
+
+        (KeyValueResponseType, ReadOnlyKeyValueEntry?) result = read.Result;
+        KeyValueReadMetrics.RecordTotal(start, Stopwatch.GetTimestamp(), registered: false);
+        return new(result);
+    }
+
+    private static async ValueTask<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> AwaitDirectRead(
+        ValueTask<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> read, long start)
+    {
+        (KeyValueResponseType, ReadOnlyKeyValueEntry?) result = await read;
         KeyValueReadMetrics.RecordTotal(start, Stopwatch.GetTimestamp(), registered: false);
         return result;
     }

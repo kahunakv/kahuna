@@ -298,7 +298,7 @@ public sealed class TestRangeLockProbeDecisionWindow
 
                 (KeyValueResponseType readType, ReadOnlyKeyValueEntry? entry) = await kahuna.LocateAndTryGetValue(
                     t2.TransactionId, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, bound.Token,
-                    coordinatorKey: t2.CoordinatorKey, operationId: TransactionOperationId.NewRandom()).WaitAsync(bound.Token);
+                    coordinatorKey: t2.CoordinatorKey, operationId: TransactionOperationId.NewRandom()).AsTask().WaitAsync(bound.Token);
                 reader.ReadType = readType;
                 reader.ReadValue = entry?.Value is null ? null : Encoding.UTF8.GetString(entry.Value);
             }

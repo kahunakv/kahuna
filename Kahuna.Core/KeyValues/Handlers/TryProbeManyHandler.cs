@@ -124,7 +124,10 @@ internal sealed class TryProbeManyHandler : BaseHandler
 
             if (step.Detach == PointReadDetach.None)
             {
-                results[i] = ProbeManyContinuation.ToResult(step.Response, locked);
+                // A served value goes into the key's slot as it is; any other answer is converted from its response.
+                results[i] = step.Served is { } served
+                    ? new KeyValueProbeResult(KeyValueResponseType.Get, served, HLCTimestamp.Zero, locked)
+                    : ProbeManyContinuation.ToResult(step.Response, locked);
                 continue;
             }
 
@@ -365,7 +368,7 @@ internal sealed class TryProbeManyHandler : BaseHandler
             if (!t.IsCompletedSuccessfully)
                 deferred.SetFaulted(t.Exception);
 
-            actorContext.Self.Send(new KeyValueRequest(KeyValueRequestType.ResumeRead) { Continuation = deferred });
+            actorContext.Self.Send(KeyValueRequestPool.RentResumeRead(deferred));
         }, TaskScheduler.Default);
 
         actorContext.ByPassReply = true;

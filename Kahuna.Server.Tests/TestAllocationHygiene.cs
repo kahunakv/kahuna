@@ -44,6 +44,31 @@ public sealed class TestAllocationHygiene
     }
 
     /// <summary>
+    /// Every read that reaches the backend hands its continuation back to the actor in a <c>ResumeRead</c>
+    /// message. The message is rented, marked for the receiving actor to return, and takes the mailbox whatever
+    /// inline scope the completion thread inherited; returned, it keeps no reference to the continuation, which
+    /// holds the waiters and the page of a finished read.
+    /// </summary>
+    [Fact]
+    public void ResumeReadRequest_IsPooledForOneSend_AndReleasesItsContinuationOnReturn()
+    {
+        Kahuna.Server.KeyValues.Handlers.PointReadContinuation continuation = new("acc/1", KeyValueResponseType.Get, default);
+
+        KeyValueRequest request = KeyValueRequestPool.RentResumeRead(continuation);
+
+        Assert.Equal(KeyValueRequestType.ResumeRead, request.Type);
+        Assert.Same(continuation, request.Continuation);
+        Assert.True(request.ReturnToPoolOnReceive, "the receiving actor is the only owner and must return the request");
+        Assert.Null(request.Inline);
+        Assert.True(KeyValueActorRouters.IsControlRequest(request), "a resume is exempt from the inbox bound");
+
+        KeyValueRequestPool.Return(request);
+
+        Assert.Null(request.Continuation);
+        Assert.False(request.ReturnToPoolOnReceive);
+    }
+
+    /// <summary>
     /// A cache hit runs on every routed operation. Allocating on it would trade one saved network
     /// hop for garbage on the hottest client path, so the lookup must be allocation-free.
     /// </summary>

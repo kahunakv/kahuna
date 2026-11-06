@@ -80,7 +80,7 @@ public sealed partial class KahunaManager
     /// <summary>
     /// Locates the leader node for the given key and executes the TryGetValue request.
     /// </summary>
-    public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
+    public ValueTask<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
         HLCTimestamp transactionId,
         string key,
         long revision,

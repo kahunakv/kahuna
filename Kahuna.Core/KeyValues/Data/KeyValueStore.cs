@@ -94,6 +94,19 @@ internal sealed class KeyValueStore
         string start, bool startInclusive, string? end, bool endInclusive, int limit) =>
         ordered.GetByRange(start, startInclusive, end, endInclusive, limit);
 
+    /// <summary>
+    /// The entries <see cref="GetByRange"/> yields for the same bounds and limit, in the same order, as a list
+    /// that holds exactly them. A scan copies its resident batch this way: one allocation of the right size and
+    /// no enumerator, where a list filled from the enumeration grew by doubling and kept up to twice the batch.
+    /// </summary>
+    public List<(string Key, KeyValueEntry Entry)> CopyRange(
+        string start, bool startInclusive, string? end, bool endInclusive, int limit)
+    {
+        List<(string Key, KeyValueEntry Entry)> items = [];
+        ordered.CopyRangeTo(start, startInclusive, end, endInclusive, limit, items);
+        return items;
+    }
+
     /// <summary>Resident entries whose key starts with <paramref name="prefix"/>, in ascending key order.</summary>
     public IEnumerable<KeyValuePair<string, KeyValueEntry>> GetByBucket(string prefix) => ordered.GetByBucket(prefix);
 

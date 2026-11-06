@@ -228,30 +228,46 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
     /// <returns>Returns a list of tuples where each tuple contains a key and its associated <see cref="ReadOnlyKeyValueEntry"/>.</returns>
     public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByPrefix(string prefixKeyName)
     {
-        List<(string, ReadOnlyKeyValueEntry)> items = [];
-
         lock (kvLock)
         {
             IList<string> keys = keyValues.Keys;
             int start = LowerBound(keys, prefixKeyName);
 
-            for (int i = start; i < keys.Count && items.Count < KeyValueScanLimits.MaxPrefixScanResults; i++)
-            {
-                string key = keys[i];
-                if (!key.StartsWith(prefixKeyName, StringComparison.Ordinal))
-                    break;
+            long window = Math.Min((long)keys.Count - start, KeyValueScanLimits.MaxPrefixScanResults);
 
-                ReadOnlyKeyValueEntry value = keyValues.Values[i];
-                items.Add((key, new(
-                    value.Value,
-                    value.Revision,
-                    value.Expires,
-                    value.LastUsed,
-                    value.LastModified,
-                    value.State
-                )));
-            }
+            return window <= 0 ? [] : CopyPrefixRun(keys, start, start + (int)window, prefixKeyName);
         }
+    }
+
+    /// <summary>
+    /// The rows of the keys in <c>[start, stop)</c> that start with <paramref name="prefix"/>, in key order, in a list
+    /// sized to hold exactly them. <paramref name="start"/> must be at or after the first key that is not below the
+    /// prefix: from there the keys that carry the prefix are one unbroken run, since any other key at or above the
+    /// prefix sorts past every key that carries it, so the end of the run is a binary search and not a walk.
+    /// <para>
+    /// The stored rows are handed out as they are. A row is immutable and is replaced, never changed, by a later
+    /// write, so a reader that keeps one sees the version it read; a copy per row bought nothing and was the
+    /// largest allocation of a scan page.
+    /// </para>
+    /// Call with <see cref="kvLock"/> held.
+    /// </summary>
+    private List<(string, ReadOnlyKeyValueEntry)> CopyPrefixRun(IList<string> keys, int start, int stop, string prefix)
+    {
+        int lo = start, hi = stop;
+        while (lo < hi)
+        {
+            int mid = (lo + hi) >>> 1;
+            if (keys[mid].StartsWith(prefix, StringComparison.Ordinal))
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+
+        List<(string, ReadOnlyKeyValueEntry)> items = new(lo - start);
+        IList<ReadOnlyKeyValueEntry> values = keyValues.Values;
+
+        for (int i = start; i < lo; i++)
+            items.Add((keys[i], values[i]));
 
         return items;
     }
@@ -269,12 +285,14 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
     /// <summary>
     /// Same page, ended at <paramref name="endKey"/>: the sorted key list is binary-searched for both ends of the
     /// window, so a short bounded seek visits only the keys inside it. The tally is untouched: this backend keeps
-    /// no revision history on the head walk.
+    /// no revision history on the head walk. The page is a list of exactly its rows, and the rows are the stored
+    /// ones (see <see cref="CopyPrefixRun"/>).
     /// </summary>
     public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(
         string prefix, string? startKey, string? endKey, bool endInclusive, int limit, ref KeyValueScanTally tally)
     {
-        List<(string, ReadOnlyKeyValueEntry)> items = [];
+        if (limit <= 0)
+            return [];
 
         lock (kvLock)
         {
@@ -296,25 +314,12 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
                     end++;
             }
 
-            for (int i = start; i < end && items.Count < limit; i++)
-            {
-                string key = keys[i];
-                if (!key.StartsWith(prefix, StringComparison.Ordinal))
-                    break;
+            // The window is the keys between the two bounds, cut at the page size. The seek target is at or
+            // above the prefix, so the keys of the prefix inside the window are one run from its start.
+            long window = Math.Min((long)end - start, limit);
 
-                ReadOnlyKeyValueEntry value = keyValues.Values[i];
-                items.Add((key, new(
-                    value.Value,
-                    value.Revision,
-                    value.Expires,
-                    value.LastUsed,
-                    value.LastModified,
-                    value.State
-                )));
-            }
+            return window <= 0 ? [] : CopyPrefixRun(keys, start, start + (int)window, prefix);
         }
-
-        return items;
     }
 
     /// <summary>
@@ -323,11 +328,12 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
     /// </summary>
     public KeyValueScanPage ScanKeyValues(string? cursor, int limit)
     {
-        List<(string, ReadOnlyKeyValueEntry)> items = [];
+        List<(string, ReadOnlyKeyValueEntry)> items;
 
         lock (kvLock)
         {
             IList<string> keys = keyValues.Keys;
+            IList<ReadOnlyKeyValueEntry> values = keyValues.Values;
 
             int start = 0;
             if (cursor is not null)
@@ -337,18 +343,11 @@ internal sealed class MemoryPersistenceBackend : IPersistenceBackend, IDisposabl
                     start++;
             }
 
+            long window = Math.Min((long)keys.Count - start, limit);
+            items = new(window <= 0 ? 0 : (int)window);
+
             for (int i = start; i < keys.Count && items.Count < limit; i++)
-            {
-                ReadOnlyKeyValueEntry value = keyValues.Values[i];
-                items.Add((keys[i], new(
-                    value.Value,
-                    value.Revision,
-                    value.Expires,
-                    value.LastUsed,
-                    value.LastModified,
-                    value.State
-                )));
-            }
+                items.Add((keys[i], values[i]));
         }
 
         return new(items, items.Count == limit ? items[^1].Item1 : null);

@@ -91,7 +91,7 @@ public sealed class TestLostExclusionOutcome : BaseCluster
     private static async Task<(KeyValueResponseType Type, ReadOnlyKeyValueEntry? Entry)> Read(
         KahunaManager reader, string key, CancellationToken ct) =>
         await RetryOnMustRetryAsync(
-            () => reader.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+            () => reader.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask(),
             r => r.Item1);
 
     private static async Task SettleEverywhere(KahunaManager[] managers, string key, CancellationToken ct)

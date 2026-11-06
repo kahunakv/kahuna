@@ -321,6 +321,42 @@ internal static class KeyValueRequestPool
         return request;
     }
 
+    /// <summary>
+    /// Rents a <c>ResumeRead</c> message: the completion of a backend read handing its
+    /// <paramref name="continuation"/> back to the actor that owns it, so stage 3 runs on the actor thread.
+    /// Fire-and-forget with ownership transfer: the sender keeps no reference after the send and the receiving
+    /// actor returns the request to the pool. Every read that reaches the backend sends one, so a request
+    /// allocated per send was as large a share of a read's allocation as the read's own pooled request would be.
+    /// <para>
+    /// Rented outside any inline scope: the completion runs on a thread-pool thread, where an inline scope that
+    /// flowed in from the turn that started the read is long over, and the resume must take the mailbox.
+    /// </para>
+    /// </summary>
+    public static KeyValueRequest RentResumeRead(Handlers.ReadContinuation continuation)
+    {
+        KeyValueRequest request = Rent(
+            KeyValueRequestType.ResumeRead,
+            HLCTimestamp.Zero,
+            HLCTimestamp.Zero,
+            string.Empty,
+            null,
+            null,
+            -1,
+            KeyValueFlags.None,
+            0,
+            HLCTimestamp.Zero,
+            KeyValueDurability.Persistent,
+            0,
+            0,
+            default);
+
+        request.Inline = null;
+        request.Continuation = continuation;
+        request.ReturnToPoolOnReceive = true;
+
+        return request;
+    }
+
     public static void Return(KeyValueRequest obj)
     {
         obj.Clear();

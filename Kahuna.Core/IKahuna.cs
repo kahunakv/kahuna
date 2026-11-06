@@ -55,8 +55,15 @@ public interface IKahuna
     /// read treats the transaction's own state: <see cref="KeyValueReadMode.StatementSnapshot"/> shows the
     /// transaction's staged writes at any timestamp and ignores the read pins earlier reads left, so each statement
     /// of a transaction reads one consistent view at its own timestamp; it is <c>InvalidInput</c> without a timestamp.
+    /// <para>
+    /// The result is a <see cref="ValueTask{TResult}"/> because the common read completes on the calling thread:
+    /// this node leads the key under a lease and the key's published head record answers it, and such a read then
+    /// allocates nothing but the entry it returns. Await the result once, at the call. A caller that must keep
+    /// it, await it more than once, or pass it to a method that takes a <see cref="Task"/> converts it with
+    /// <see cref="ValueTask{TResult}.AsTask"/>.
+    /// </para>
     /// </summary>
-    public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default);
+    public ValueTask<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default);
 
     public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryGetManyValues(HLCTimestamp transactionId, HLCTimestamp readTimestamp, List<(string key, long revision, KeyValueDurability durability)> keys, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default);
 

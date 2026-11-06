@@ -186,7 +186,7 @@ public sealed class TestMergeCrossNodeWriteLoss : BaseCluster
         {
             (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await RetryOnMustRetryAsync(
                 () => kahuna.LocateAndTryGetValue(
-                    HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+                    HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask(),
                 r => r.Item1, timeoutMs: 30_000);
 
             string? value = entry?.Value is null ? null : Encoding.UTF8.GetString(entry.Value);

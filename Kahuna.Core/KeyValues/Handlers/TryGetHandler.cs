@@ -34,7 +34,7 @@ internal sealed class TryGetHandler : BaseHandler
 
         return step.Detach switch
         {
-            PointReadDetach.None => step.Response!,
+            PointReadDetach.None => step.ToResponse()!,
             PointReadDetach.LatestMiss => DispatchLatestMiss(message, currentTime),
             PointReadDetach.SnapshotHydrate => await DispatchSnapshotRead(message, KeyValueResponseType.Get, currentTime, hydrate: true, asOfCeiling: -1),
             _ => await DispatchSnapshotRead(message, KeyValueResponseType.Get, currentTime, hydrate: false, asOfCeiling: step.AsOfCeiling),
@@ -139,12 +139,13 @@ internal sealed class TryGetHandler : BaseHandler
 
                     // A committed delete, or a committed value whose TTL has elapsed, is not live — treat it as
                     // does-not-exist, matching the ordinary read's expiry filter rather than serving a dead value.
-                    return foreignIntent.State == KeyValueState.Deleted
-                           || PreparedIntentVisibility.IsExpired(foreignIntent, currentTime)
-                        ? KeyValueStaticResponses.DoesNotExistContextResponse
-                        : new KeyValueResponse(KeyValueResponseType.Get, new ReadOnlyKeyValueEntry(
-                            foreignIntent.Value, foreignIntent.Revision, foreignIntent.Expires,
-                            currentTime, foreignIntent.CommitTimestamp, foreignIntent.State));
+                    if (foreignIntent.State == KeyValueState.Deleted
+                        || PreparedIntentVisibility.IsExpired(foreignIntent, currentTime))
+                        return KeyValueStaticResponses.DoesNotExistContextResponse;
+
+                    return PointReadStep.Serve(new ReadOnlyKeyValueEntry(
+                        foreignIntent.Value, foreignIntent.Revision, foreignIntent.Expires,
+                        currentTime, foreignIntent.CommitTimestamp, foreignIntent.State));
 
                 case ReadVisibilityAction.UseExisting:
                 default:
@@ -272,7 +273,7 @@ internal sealed class TryGetHandler : BaseHandler
                 || (mvccEntry.Expires != HLCTimestamp.Zero && mvccEntry.Expires - currentTime < TimeSpan.Zero))
                 return KeyValueStaticResponses.DoesNotExistContextResponse;
 
-            return new KeyValueResponse(KeyValueResponseType.Get, new ReadOnlyKeyValueEntry(
+            return PointReadStep.Serve(new ReadOnlyKeyValueEntry(
                 mvccEntry.Value, mvccEntry.Revision, mvccEntry.Expires,
                 mvccEntry.LastUsed, mvccEntry.LastModified, mvccEntry.State));
         }
@@ -292,7 +293,7 @@ internal sealed class TryGetHandler : BaseHandler
                 || (ownMvcc.Expires != HLCTimestamp.Zero && ownMvcc.Expires - currentTime < TimeSpan.Zero))
                 return KeyValueStaticResponses.DoesNotExistContextResponse;
 
-            return new KeyValueResponse(KeyValueResponseType.Get, new ReadOnlyKeyValueEntry(
+            return PointReadStep.Serve(new ReadOnlyKeyValueEntry(
                 ownMvcc.Value, ownMvcc.Revision, ownMvcc.Expires,
                 ownMvcc.LastUsed, ownMvcc.LastModified, ownMvcc.State));
         }
@@ -336,7 +337,7 @@ internal sealed class TryGetHandler : BaseHandler
                         && snapshot.Expires - currentTime < TimeSpan.Zero))
                     return KeyValueStaticResponses.DoesNotExistContextResponse;
 
-                return new KeyValueResponse(KeyValueResponseType.Get, new ReadOnlyKeyValueEntry(
+                return PointReadStep.Serve(new ReadOnlyKeyValueEntry(
                     snapshot.Value, snapRevision, snapshot.Expires,
                     currentTime, snapshot.LastModified, snapshot.State));
             }
@@ -361,7 +362,7 @@ internal sealed class TryGetHandler : BaseHandler
         if (entry.Published is null)
             context.QueueHeadPublication(entry);
 
-        return new KeyValueResponse(KeyValueResponseType.Get, new ReadOnlyKeyValueEntry(
+        return PointReadStep.Serve(new ReadOnlyKeyValueEntry(
             entry.Value, entry.Revision, entry.Expires,
             entry.LastUsed, entry.LastModified, entry.State));
     }
@@ -453,7 +454,7 @@ internal sealed class TryGetHandler : BaseHandler
                 cont.DiskResult = t.Result;
             }
             actorContext.Self.Send(
-                new KeyValueRequest(KeyValueRequestType.ResumeRead) { Continuation = cont });
+                KeyValueRequestPool.RentResumeRead(cont));
         }, TaskScheduler.Default);
 
         actorContext.ByPassReply = true;
@@ -564,7 +565,7 @@ internal sealed class TryGetHandler : BaseHandler
             if (!t.IsCompletedSuccessfully) cont.SetFaulted(t.Exception);
             else cont.DiskResult = t.Result;
             actorContext.Self.Send(
-                new KeyValueRequest(KeyValueRequestType.ResumeRead) { Continuation = cont });
+                KeyValueRequestPool.RentResumeRead(cont));
         }, TaskScheduler.Default);
 
         actorContext.ByPassReply = true;

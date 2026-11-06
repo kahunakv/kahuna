@@ -115,7 +115,7 @@ public sealed class TestReplicaPlacementForwarding : BaseCluster
                 otherNonHosting = kahunas[(nodeIndex + 2) % 3];
 
             (KeyValueResponseType getType, ReadOnlyKeyValueEntry? entry) = await RetryKv(
-                () => otherNonHosting.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+                () => otherNonHosting.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask(),
                 r => r.Item1, ct);
             Assert.Equal(KeyValueResponseType.Get, getType);
             Assert.NotNull(entry);
@@ -134,7 +134,7 @@ public sealed class TestReplicaPlacementForwarding : BaseCluster
             Assert.Equal(KeyValueResponseType.Deleted, deleteType);
 
             (KeyValueResponseType afterDeleteType, _) = await RetryKv(
-                () => otherNonHosting.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+                () => otherNonHosting.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask(),
                 r => r.Item1, ct);
             Assert.Equal(KeyValueResponseType.DoesNotExist, afterDeleteType);
         }

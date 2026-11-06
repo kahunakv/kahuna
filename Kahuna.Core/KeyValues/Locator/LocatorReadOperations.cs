@@ -52,7 +52,11 @@ internal sealed class LocatorReadOperations
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
+    /// <remarks>
+    /// A <see cref="ValueTask{TResult}"/>: with a leadership lease and a published head record the whole read
+    /// completes on the calling thread, and that answer allocates no task here. Await the result exactly once.
+    /// </remarks>
+    public async ValueTask<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
         HLCTimestamp transactionId,
         string key,
         long revision,
@@ -262,12 +266,18 @@ internal sealed class LocatorReadOperations
             return [(KeyValueResponseType.InvalidInput, string.Empty, KeyValueDurability.Persistent, null)];
 
         string localNode = raft.GetLocalEndpoint();
-        Dictionary<string, List<(string key, long revision, KeyValueDurability durability)>> acquisitionPlan = [];
+
+        // The plan groups the keys by the node that leads them. Most batches have one such node, so the plan
+        // is built only when a second leader shows up: until then the batch is the group, in input order.
+        string? soleLeader = null;
+        Dictionary<string, List<(string key, long revision, KeyValueDurability durability)>>? acquisitionPlan = null;
 
         Dictionary<int, string> leaderByPartition = [];
-        
-        foreach ((string key, long revision, KeyValueDurability durability) item in keys)
+
+        for (int i = 0; i < keys.Count; i++)
         {
+            (string key, long revision, KeyValueDurability durability) item = keys[i];
+
             if (string.IsNullOrEmpty(item.key))
                 return [(KeyValueResponseType.InvalidInput, item.key, item.durability, null)];
 
@@ -278,10 +288,48 @@ internal sealed class LocatorReadOperations
 
             routing.RecordBatchKeyRoute(item.key, partitionId, leader);
 
+            if (acquisitionPlan is null)
+            {
+                if (soleLeader is null || leader == soleLeader)
+                {
+                    soleLeader = leader;
+                    continue;
+                }
+
+                // A second leader: the keys before this one are the first leader's group.
+                acquisitionPlan = new() { [soleLeader] = keys.GetRange(0, i) };
+            }
+
             if (acquisitionPlan.TryGetValue(leader, out List<(string key, long revision, KeyValueDurability durability)>? list))
                 list.Add(item);
             else
                 acquisitionPlan[leader] = [item];
+        }
+
+        if (acquisitionPlan is null)
+        {
+            if (soleLeader == localNode)
+            {
+                // Every key is led here: what TryGetManyNodeValues does for the local group of a batch that
+                // spans several leaders, without the shared response list, its lock and the copy into it,
+                // which exist to join the answers of several nodes. One result per key, in input order.
+                logger.LogGetManyKeyValueRedirect(keys.Count, localNode);
+
+                if (!await routing.ConfirmLeadershipForGroupRead(localNode, leaderByPartition, cancellationToken))
+                {
+                    List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> refused = new(keys.Count);
+
+                    foreach ((string key, _, KeyValueDurability durability) in keys)
+                        refused.Add((KeyValueResponseType.MustRetry, key, durability, null));
+
+                    return refused;
+                }
+
+                return await manager.TryGetManyValues(transactionId, readTimestamp, keys);
+            }
+
+            // One remote leader: the general path below, with the batch as its only group.
+            acquisitionPlan = new() { [soleLeader!] = keys.GetRange(0, keys.Count) };
         }
 
         Lock lockSync = new();

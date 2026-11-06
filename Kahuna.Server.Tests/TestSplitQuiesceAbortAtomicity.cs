@@ -110,7 +110,7 @@ public sealed class TestSplitQuiesceAbortAtomicity : BaseCluster
     {
         (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await RetryOnMustRetryAsync(
             () => manager.LocateAndTryGetValue(
-                HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+                HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask(),
             r => r.Item1, timeoutMs: 30_000);
 
         Assert.Equal(KeyValueResponseType.Get, type);

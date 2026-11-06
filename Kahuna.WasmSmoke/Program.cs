@@ -91,7 +91,7 @@ try
     Check(committed == KeyValueResponseType.Committed, $"the transaction committed (status {committed}, reason {reason ?? "none"})");
 
     (KeyValueResponseType read, ReadOnlyKeyValueEntry? entry) = await PhaseOf("read",
-        node.Kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, cts.Token));
+        node.Kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, cts.Token).AsTask());
     Check(read == KeyValueResponseType.Get && entry?.Value is not null && Encoding.UTF8.GetString(entry.Value) == "interactive-value",
         $"the committed value reads back (status {read})");
 
@@ -103,7 +103,7 @@ try
         $"the script transaction committed (status {script.Type}, reason {script.Reason ?? "none"})");
 
     (read, entry) = await PhaseOf("script read",
-        node.Kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, "smoke/script", -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, cts.Token));
+        node.Kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, "smoke/script", -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, cts.Token).AsTask());
     Check(read == KeyValueResponseType.Get && entry?.Value is not null && Encoding.UTF8.GetString(entry.Value) == "script-value",
         $"the script's value reads back (status {read})");
 

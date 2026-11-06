@@ -77,7 +77,7 @@ internal sealed partial class KeyValuesManager
         routedWrites.LocateAndTryExtendKeyValue(transactionId, key, expiresMs, durability, cancellationToken, coordinatorKey, operationId);
 
 
-    public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
+    public ValueTask<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
         HLCTimestamp transactionId,
         string key,
         long revision,

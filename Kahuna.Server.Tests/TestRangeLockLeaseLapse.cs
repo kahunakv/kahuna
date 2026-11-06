@@ -135,7 +135,7 @@ public sealed class TestRangeLockLeaseLapse : BaseCluster
         Assert.Equal(KeyValueResponseType.Locked, await TryPointRangeLock(session, handle, key, RangeLockMode.Shared, expiresMs, ct));
 
         (KeyValueResponseType readType, _) = await RetryOnMustRetryAsync(
-            () => session.LocateAndTryGetValue(handle.TransactionId, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+            () => session.LocateAndTryGetValue(handle.TransactionId, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask(),
             r => r.Item1);
 
         Assert.Equal(KeyValueResponseType.Get, readType);
@@ -210,7 +210,7 @@ public sealed class TestRangeLockLeaseLapse : BaseCluster
     private static async Task<string?> ReadValue(KahunaManager reader, string key, CancellationToken ct)
     {
         (KeyValueResponseType readType, ReadOnlyKeyValueEntry? entry) = await RetryOnMustRetryAsync(
-            () => reader.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+            () => reader.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask(),
             r => r.Item1);
 
         return readType == KeyValueResponseType.Get ? Encoding.UTF8.GetString(entry!.Value!) : null;

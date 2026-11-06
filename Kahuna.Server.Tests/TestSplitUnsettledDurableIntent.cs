@@ -132,7 +132,7 @@ public sealed class TestSplitUnsettledDurableIntent : BaseCluster
         // Base revision of the seeded row (a single direct set ⇒ revision 0).
         (KeyValueResponseType baseType, ReadOnlyKeyValueEntry? baseEntry) = await RetryOnMustRetryAsync(
             () => driver.LocateAndTryGetValue(
-                HLCTimestamp.Zero, MovedKey, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+                HLCTimestamp.Zero, MovedKey, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask(),
             r => r.Item1);
         Assert.Equal(KeyValueResponseType.Get, baseType);
         long baseRevision = baseEntry!.Revision;
@@ -185,7 +185,7 @@ public sealed class TestSplitUnsettledDurableIntent : BaseCluster
         {
             (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await RetryOnMustRetryAsync(
                 () => kahunas[i].LocateAndTryGetValue(
-                    HLCTimestamp.Zero, MovedKey, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+                    HLCTimestamp.Zero, MovedKey, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask(),
                 r => r.Item1, timeoutMs: 30_000);
 
             string? value = entry?.Value is null ? null : Encoding.UTF8.GetString(entry.Value);

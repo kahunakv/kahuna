@@ -194,7 +194,7 @@ public sealed class TestOnePhaseLeaderLossAfterQuorumDurability : BaseCluster
                 continue;
 
             (KeyValueResponseType readType, ReadOnlyKeyValueEntry? entry) = await RetryOnMustRetryAsync(
-                () => managers[i].LocateAndTryGetValue(HLCTimestamp.Zero, scenario.Key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+                () => managers[i].LocateAndTryGetValue(HLCTimestamp.Zero, scenario.Key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask(),
                 r => r.Item1);
 
             Assert.Equal(KeyValueResponseType.Get, readType);

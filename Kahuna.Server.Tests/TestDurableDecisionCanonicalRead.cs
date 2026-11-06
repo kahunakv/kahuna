@@ -188,7 +188,7 @@ public sealed class TestDurableDecisionCanonicalRead : BaseCluster
         // The row is untouched: value and revision identical to the seed on every node's view.
         (KeyValueResponseType readType, ReadOnlyKeyValueEntry? entry) = await RetryOnMustRetryAsync(
             () => driver.LocateAndTryGetValue(
-                HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+                HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask(),
             r => r.Item1);
 
         Assert.Equal(KeyValueResponseType.Get, readType);

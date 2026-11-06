@@ -200,7 +200,7 @@ public sealed class TestRangeMoveQuiesceConfirmation : BaseCluster
     private static async Task<string?> ReadLatest(KahunaManager kahuna, string key, CancellationToken ct)
     {
         (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await RetryOnMustRetryAsync(
-            () => kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+            () => kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask(),
             r => r.Item1, timeoutMs: 30_000);
 
         return type == KeyValueResponseType.Get && entry?.Value is not null ? Encoding.UTF8.GetString(entry.Value) : null;

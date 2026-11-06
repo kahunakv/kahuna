@@ -244,7 +244,7 @@ public sealed class TestPointLockOverCommittedUnsettledWrite
     /// <summary>A transactional point read that is not registered with the coordinator: the pessimistic
     /// read-modify-write shape, which relies on the key's pin and the lock rather than on read-set validation.</summary>
     private static Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> Read(IKahuna kahuna, TransactionHandle tx, string key, CancellationToken ct) =>
-        kahuna.LocateAndTryGetValue(tx.TransactionId, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+        kahuna.LocateAndTryGetValue(tx.TransactionId, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask();
 
     private static async Task<string> ReadCommitted(IKahuna kahuna, string key, CancellationToken ct)
     {

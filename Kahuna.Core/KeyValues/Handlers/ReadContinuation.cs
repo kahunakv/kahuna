@@ -32,9 +32,12 @@ internal abstract class ReadContinuation
     /// </summary>
     internal const int DefaultMaxWaiters = 1024;
 
-    // Primary promise plus any coalesced waiters. Mutated only on the actor thread (stage 1
-    // adds waiters, stage 3 broadcasts). No synchronisation needed.
-    private readonly List<KeyValueReplyRef> waiters;
+    // The primary promise, and the callers that coalesced onto the read after it. Nearly every read has only
+    // its primary, so the list exists only once a second caller attaches. Mutated only on the actor thread
+    // (stage 1 adds waiters, stage 3 broadcasts). No synchronisation needed.
+    private readonly KeyValueReplyRef primary;
+
+    private List<KeyValueReplyRef>? coalesced;
 
     /// <summary>
     /// Actor-enforced deadline for this in-flight read. <see cref="HLCTimestamp.Zero"/> means no
@@ -61,10 +64,10 @@ internal abstract class ReadContinuation
     internal int MaxWaiters { get; init; } = DefaultMaxWaiters;
 
     /// <summary>The primary caller's completion source (the one that initiated the read).</summary>
-    internal KeyValueReplyRef Promise => waiters[0];
+    internal KeyValueReplyRef Promise => primary;
 
     /// <summary>Current waiter count (primary + coalesced). Actor-thread only.</summary>
-    internal int WaiterCount => waiters.Count;
+    internal int WaiterCount => 1 + (coalesced?.Count ?? 0);
 
     /// <summary>True once the deadline at <paramref name="now"/> has passed and the read is unfinished.</summary>
     internal bool IsExpired(HLCTimestamp now) =>
@@ -125,7 +128,7 @@ internal abstract class ReadContinuation
 
     protected ReadContinuation(KeyValueReplyRef promise)
     {
-        waiters = new(1) { promise };
+        primary = promise;
     }
 
     /// <summary>
@@ -138,10 +141,10 @@ internal abstract class ReadContinuation
     /// </summary>
     internal bool AddWaiter(KeyValueReplyRef promise)
     {
-        if (Cancelled || waiters.Count >= MaxWaiters)
+        if (Cancelled || WaiterCount >= MaxWaiters)
             return false;
 
-        waiters.Add(promise);
+        (coalesced ??= []).Add(promise);
         return true;
     }
 
@@ -151,7 +154,12 @@ internal abstract class ReadContinuation
     /// </summary>
     internal void Resolve(KeyValueResponse? response)
     {
-        foreach (KeyValueReplyRef w in waiters)
+        primary.TrySetResult(response);
+
+        if (coalesced is null)
+            return;
+
+        foreach (KeyValueReplyRef w in coalesced)
             w.TrySetResult(response);
     }
 

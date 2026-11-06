@@ -345,7 +345,7 @@ public sealed class TestKeyValueFailoverCoherence : RaftTrackingTest
             (KeyValueResponseType getType, ReadOnlyKeyValueEntry? entry) = await RetryGet(
                 () => nodes[0].Kahuna.LocateAndTryGetValue(
                     HLCTimestamp.Zero, "coherence-key", -1, HLCTimestamp.Zero,
-                    KeyValueDurability.Persistent, ct));
+                    KeyValueDurability.Persistent, ct).AsTask());
 
             Assert.Equal(KeyValueResponseType.Get, getType);
             Assert.NotNull(entry);
@@ -416,7 +416,7 @@ public sealed class TestKeyValueFailoverCoherence : RaftTrackingTest
             (KeyValueResponseType getType, ReadOnlyKeyValueEntry? entry) = await RetryGet(
                 () => nodes[0].Kahuna.LocateAndTryGetValue(
                     HLCTimestamp.Zero, "race-key", -1, HLCTimestamp.Zero,
-                    KeyValueDurability.Persistent, ct));
+                    KeyValueDurability.Persistent, ct).AsTask());
 
             Assert.Equal(KeyValueResponseType.Get, getType);
             Assert.NotNull(entry);

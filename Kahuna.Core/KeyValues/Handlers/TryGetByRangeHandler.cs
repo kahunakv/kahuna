@@ -232,10 +232,7 @@ internal sealed class TryGetByRangeHandler : BaseHandler
         // turn this pre-check into O(resident-count) work; if the merge consumes the whole batch,
         // the continuation re-queries the next batch on the actor thread.
         int memBatch = Math.Max(limit + 1, memoryBatch);
-        List<(string, KeyValueEntry)> memItems = [];
-        foreach (KeyValuePair<string, KeyValueEntry> kv in
-            context.Store.GetByRange(memStart, memStartIncl, memEnd, memEndIncl, memBatch))
-            memItems.Add((kv.Key, kv.Value));
+        List<(string, KeyValueEntry)> memItems = context.Store.CopyRange(memStart, memStartIncl, memEnd, memEndIncl, memBatch);
 
         // Full batch ⟹ there may be more resident keys past the last one copied.
         bool memMaybeMore = memItems.Count == memBatch;
@@ -363,22 +360,35 @@ internal sealed class TryGetByRangeHandler : BaseHandler
         if (!isSnapshotRead)
             return new RangeDiskPage(rawPage, rawHasMore, rawNextCursor, tally);
 
+        // A row at or before the snapshot is its own projection, so a page with no row past the snapshot (every
+        // page of a quiet key space) is its own projection too and is handed on as it is. The copy starts at the
+        // first row the projection replaces or drops, with the rows before it.
         int usableCount = rawPage.Count;
-        List<(string, ReadOnlyKeyValueEntry)> projected = new(usableCount);
+        List<(string, ReadOnlyKeyValueEntry)>? projected = null;
         Dictionary<string, long>? fencedKeys = null;
         for (int i = 0; i < usableCount; i++)
         {
             // Stop projecting once the continuation is expired: each stale key costs a
             // revision-history read, and the result of an expired page is dropped at stage 3.
             if (shouldAbort is not null && shouldAbort())
+            {
+                projected ??= rawPage.GetRange(0, i);
                 break;
+            }
 
             (string k, ReadOnlyKeyValueEntry e) = rawPage[i];
 
             if (e.LastModified.CompareTo(snapshotTs) <= 0)
             {
-                projected.Add((k, e));
+                projected?.Add((k, e));
                 continue;
+            }
+
+            if (projected is null)
+            {
+                projected = new(usableCount);
+                for (int kept = 0; kept < i; kept++)
+                    projected.Add(rawPage[kept]);
             }
 
             // The history below the head is the only source this projection has for the row's as-of
@@ -413,10 +423,10 @@ internal sealed class TryGetByRangeHandler : BaseHandler
                 continue;
             }
 
-            projected.Add((k, new ReadOnlyKeyValueEntry(
-                snap.Value, snap.Revision, snap.Expires, snap.LastUsed, snap.LastModified, snap.State)));
+            // The backend's row is immutable, so it is the projection as it is.
+            projected.Add((k, snap));
         }
-        return new RangeDiskPage(projected, rawHasMore, rawNextCursor, tally, fencedKeys);
+        return new RangeDiskPage(projected ?? rawPage, rawHasMore, rawNextCursor, tally, fencedKeys);
     }
 
     /// <summary>

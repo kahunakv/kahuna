@@ -83,18 +83,18 @@ internal sealed class LocatorProbeOperations
         KeyValueReadMode readMode = KeyValueReadMode.Default
     )
     {
-        KeyValueProbeResult[] results = new KeyValueProbeResult[keys.Count];
-
         if (!IsWellFormedProbe(transactionId, keys, lockMode, expiresMs) || !KeyValueReadModeChecks.IsWellFormed(readMode, readTimestamp))
         {
-            Array.Fill(results, KeyValueProbeResult.MustRetry with { Type = KeyValueResponseType.InvalidInput });
-            return results;
+            KeyValueProbeResult[] invalid = new KeyValueProbeResult[keys.Count];
+            Array.Fill(invalid, KeyValueProbeResult.MustRetry with { Type = KeyValueResponseType.InvalidInput });
+            return invalid;
         }
 
         if (!raft.Joined)
         {
-            Array.Fill(results, KeyValueProbeResult.MustRetry);
-            return results;
+            KeyValueProbeResult[] notJoined = new KeyValueProbeResult[keys.Count];
+            Array.Fill(notJoined, KeyValueProbeResult.MustRetry);
+            return notJoined;
         }
 
         // Group the key positions by partition, keeping input order inside each group.
@@ -112,6 +112,11 @@ internal sealed class LocatorProbeOperations
                 groups[partitionId] = [i];
         }
 
+        // Several groups write their answers into one array, each at its own positions. One group is the whole
+        // batch in input order (the keys of a key space that one partition holds), so the array its leader
+        // answers with is the result as it is, and none is allocated here unless that group is refused.
+        KeyValueProbeResult[]? results = groups.Count == 1 ? null : new KeyValueProbeResult[keys.Count];
+
         string localNode = raft.GetLocalEndpoint();
         Dictionary<int, string> leaderByPartition = [];
         Dictionary<string, List<int>>? remoteGroups = null;
@@ -123,6 +128,7 @@ internal sealed class LocatorProbeOperations
 
             if (leader is null)
             {
+                results ??= new KeyValueProbeResult[keys.Count];
                 foreach (int position in positions)
                     results[position] = KeyValueProbeResult.MustRetry;
                 continue;
@@ -159,6 +165,9 @@ internal sealed class LocatorProbeOperations
         if (work is not null)
             await Task.WhenAll(work);
 
+        // Every group answered or was refused above, so the array exists; the fallback only satisfies the compiler.
+        results ??= new KeyValueProbeResult[keys.Count];
+
         if (lockMode == KeyValueProbeLock.Shared)
             await FenceMovedProbeLocks(transactionId, keys, partitionOf, results, durability, cancellationToken);
 
@@ -174,6 +183,7 @@ internal sealed class LocatorProbeOperations
 
             if (!confirmed)
             {
+                results ??= new KeyValueProbeResult[keys.Count];
                 foreach (int position in positions)
                     results[position] = KeyValueProbeResult.MustRetry;
                 return;
@@ -182,10 +192,19 @@ internal sealed class LocatorProbeOperations
             KeyValueProbeResult[] answers = await manager.TryProbeMany(
                 transactionId, readTimestamp, Subset(keys, positions), lockMode, expiresMs, durability, readMode);
 
+            // No shared array means this group is the only one and holds every key in input order: its answers
+            // are the result. The array is this call's own; nothing else writes to it.
+            bool wholeBatch = results is null && answers.Length == keys.Count;
+            if (wholeBatch)
+                results = answers;
+            else
+                results ??= new KeyValueProbeResult[keys.Count];
+
             string? firstLocked = null;
             for (int j = 0; j < positions.Count; j++)
             {
-                results[positions[j]] = answers[j];
+                if (!wholeBatch)
+                    results[positions[j]] = answers[j];
                 if (answers[j].Locked)
                     firstLocked ??= keys[positions[j]];
             }
@@ -201,6 +220,8 @@ internal sealed class LocatorProbeOperations
 
             KeyValueProbeResult[] answers = await interNodeCommunication.TryProbeMany(
                 leader, transactionId, readTimestamp, Subset(keys, positions), lockMode, expiresMs, durability, cancellationToken, readMode);
+
+            results ??= new KeyValueProbeResult[keys.Count];
 
             for (int j = 0; j < positions.Count; j++)
                 results[positions[j]] = j < answers.Length ? answers[j] : KeyValueProbeResult.MustRetry;

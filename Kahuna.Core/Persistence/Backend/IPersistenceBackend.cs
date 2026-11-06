@@ -268,6 +268,11 @@ public interface IPersistenceBackend
     /// page shorter than <paramref name="limit"/> means the range is exhausted. Backends override this so the
     /// walk ends at the bound instead of filling the page past it; the default reads a full page and trims it,
     /// which is correct but pays the full page.
+    /// <para>
+    /// The list is the caller's. Its rows are immutable and may be the very objects the backend keeps (the
+    /// in-memory backend hands out its stored rows), so a row a caller holds never changes, and no caller may
+    /// rely on a row being a copy of its own.
+    /// </para>
     /// </summary>
     public List<(string, ReadOnlyKeyValueEntry)> GetKeyValueByRange(
         string prefix, string? startKey, string? endKey, bool endInclusive, int limit, ref KeyValueScanTally tally)

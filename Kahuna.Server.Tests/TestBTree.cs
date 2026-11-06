@@ -972,4 +972,116 @@ public class TestBTree
 
         Assert.Equal(50, matches);
     }
+
+    // ── CopyRangeTo: the counted leaf walk must yield exactly what the enumeration yields ───────
+
+    /// <summary>
+    /// <see cref="BTree{TKey,TValue}.CopyRangeTo"/> finds its range by searching the first and the last leaf and
+    /// taking whole leaves in between, where <see cref="BTree{TKey,TValue}.GetByRange"/> compares every key. Both
+    /// must give the same pairs in the same order for any bounds and limit: bounds that are present, absent,
+    /// below every key or past every key, either one exclusive, no end bound, and limits from zero to unbounded.
+    /// The trees have small and large node orders, so ranges start and end inside a leaf, at a leaf edge, and
+    /// span many leaves, and half of them have keys removed, so leaves are sparse.
+    /// </summary>
+    [Theory]
+    [InlineData(3, 7)]
+    [InlineData(4, 60)]
+    [InlineData(5, 300)]
+    [InlineData(32, 31)]
+    [InlineData(32, 32)]
+    [InlineData(32, 33)]
+    [InlineData(32, 2_000)]
+    public void CopyRangeTo_MatchesGetByRange_ForRandomBoundsAndLimits(int order, int keyCount)
+    {
+        Random random = new(order * 7919 + keyCount);
+
+        for (int round = 0; round < 4; round++)
+        {
+            BTree<string, string> btree = new(order);
+            List<string> present = [];
+
+            for (int i = 0; i < keyCount; i++)
+            {
+                // Keys of several buckets that share prefixes, so a bound can fall between buckets.
+                string key = $"b{random.Next(4)}/{random.Next(keyCount * 3):D6}";
+                btree.Insert(key, "v-" + key);
+                present.Add(key);
+            }
+
+            if (round % 2 == 1)
+            {
+                foreach (string key in present.Where((_, index) => index % 3 == 0).Distinct().ToList())
+                    btree.Remove(key);
+            }
+
+            List<string> remaining = btree.GetItems().Select(static kv => kv.Key).ToList();
+
+            for (int probe = 0; probe < 400; probe++)
+            {
+                string start = PickBound(random, remaining, keyCount);
+                string? end = random.Next(5) == 0 ? null : PickBound(random, remaining, keyCount);
+                bool startInclusive = random.Next(2) == 0;
+                bool endInclusive = random.Next(2) == 0;
+                int limit = random.Next(8) switch
+                {
+                    0 => 0,
+                    1 => 1,
+                    2 => int.MaxValue,
+                    3 => remaining.Count,
+                    _ => random.Next(1, keyCount + 4)
+                };
+
+                List<(string Key, string Value)> expected = btree
+                    .GetByRange(start, startInclusive, end, endInclusive, limit)
+                    .Select(static kv => (kv.Key, kv.Value))
+                    .ToList();
+
+                // The destination already holds a row: the copy appends and reports only what it added.
+                List<(string Key, string Value)> copied = [("already", "there")];
+                int added = btree.CopyRangeTo(start, startInclusive, end, endInclusive, limit, copied);
+
+                Assert.Equal(expected.Count, added);
+                Assert.Equal(("already", "there"), copied[0]);
+                Assert.Equal(expected, copied.Skip(1).ToList());
+            }
+        }
+    }
+
+    /// <summary>
+    /// The copy sizes its destination from a count taken before it copies anything, so a range of any length
+    /// grows an empty list exactly once, to exactly its length.
+    /// </summary>
+    [Fact]
+    public void CopyRangeTo_GrowsAnEmptyDestinationToExactlyTheRange()
+    {
+        BTree<string, string> btree = new(32);
+        for (int i = 0; i < 1_000; i++)
+            btree.Insert($"k/{i:D4}", "v");
+
+        List<(string Key, string Value)> copied = [];
+        int added = btree.CopyRangeTo("k/0100", true, "k/0611", false, int.MaxValue, copied);
+
+        Assert.Equal(511, added);
+        Assert.Equal(511, copied.Count);
+        Assert.Equal(511, copied.Capacity);
+        Assert.Equal("k/0100", copied[0].Key);
+        Assert.Equal("k/0610", copied[^1].Key);
+
+        List<(string Key, string Value)> none = [];
+        Assert.Equal(0, btree.CopyRangeTo("z", true, null, false, 10, none));
+        Assert.Equal(0, none.Capacity);
+
+        Assert.Equal(0, new BTree<string, string>(32).CopyRangeTo("a", true, null, false, 10, none));
+    }
+
+    private static string PickBound(Random random, List<string> keys, int keyCount) =>
+        random.Next(6) switch
+        {
+            0 => "a",                                              // below every key
+            1 => "c",                                              // past every key
+            2 => $"b{random.Next(4)}/",                            // the start of a bucket
+            3 => $"b{random.Next(4)}0",                            // just past a bucket
+            4 when keys.Count > 0 => keys[random.Next(keys.Count)], // a key that is present
+            _ => $"b{random.Next(4)}/{random.Next(keyCount * 3):D6}"
+        };
 }

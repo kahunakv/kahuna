@@ -117,7 +117,7 @@ public sealed class TestAllOrNothingSetMany : BaseCluster
     private static async Task AssertStoredValue(IKahuna kahuna, string key, string? expected, CancellationToken ct)
     {
         (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await RetryOnMustRetryAsync(
-            () => kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+            () => kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask(),
             static r => r.Item1);
 
         if (expected is null)
@@ -186,7 +186,7 @@ public sealed class TestAllOrNothingSetMany : BaseCluster
 
         // The transaction itself sees no staged value for a sibling.
         (KeyValueResponseType ownRead, ReadOnlyKeyValueEntry? ownEntry) = await RetryOnMustRetryAsync(
-            () => kahuna.LocateAndTryGetValue(handle.TransactionId, "aon/one/fresh1", -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct, handle.CoordinatorKey, TransactionOperationId.NewRandom()),
+            () => kahuna.LocateAndTryGetValue(handle.TransactionId, "aon/one/fresh1", -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct, handle.CoordinatorKey, TransactionOperationId.NewRandom()).AsTask(),
             static r => r.Item1);
         Assert.NotEqual(KeyValueResponseType.Get, ownRead);
         Assert.Null(ownEntry?.Value);

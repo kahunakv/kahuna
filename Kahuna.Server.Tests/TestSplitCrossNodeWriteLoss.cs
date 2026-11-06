@@ -129,7 +129,7 @@ public sealed class TestSplitCrossNodeWriteLoss : BaseCluster
         {
             (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await RetryOnMustRetryAsync(
                 () => kahuna.LocateAndTryGetValue(
-                    HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+                    HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask(),
                 r => r.Item1, timeoutMs: 30_000);
 
             string? value = entry?.Value is null ? null : Encoding.UTF8.GetString(entry.Value);
@@ -448,7 +448,7 @@ public sealed class TestSplitCrossNodeWriteLoss : BaseCluster
         foreach (KahunaManager kahuna in kahunas)
         {
             (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await RetryOnMustRetryAsync(
-                () => kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+                () => kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask(),
                 r => r.Item1, timeoutMs: 30_000);
 
             Assert.Equal(KeyValueResponseType.Get, type);
@@ -461,7 +461,7 @@ public sealed class TestSplitCrossNodeWriteLoss : BaseCluster
         foreach (KahunaManager kahuna in kahunas)
         {
             (KeyValueResponseType type, _) = await RetryOnMustRetryAsync(
-                () => kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+                () => kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask(),
                 r => r.Item1, timeoutMs: 30_000);
 
             Assert.Equal(KeyValueResponseType.DoesNotExist, type);

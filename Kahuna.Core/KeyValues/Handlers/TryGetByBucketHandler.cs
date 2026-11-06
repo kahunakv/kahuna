@@ -241,7 +241,7 @@ internal sealed class TryGetByBucketHandler : BaseHandler
             if (!t.IsCompletedSuccessfully) cont.SetFaulted(t.Exception);
             else (cont.ScanDiskResult, cont.SnapshotProjections, cont.HistoryFencedKeys) = t.Result;
             actorContext.Self.Send(
-                new KeyValueRequest(KeyValueRequestType.ResumeRead) { Continuation = cont });
+                KeyValueRequestPool.RentResumeRead(cont));
         }, TaskScheduler.Default);
 
         actorContext.ByPassReply = true;

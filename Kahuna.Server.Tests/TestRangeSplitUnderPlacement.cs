@@ -226,7 +226,7 @@ public sealed class TestRangeSplitUnderPlacement : BaseCluster
             foreach (KahunaManager kahuna in kahunas)
             {
                 (KeyValueResponseType getType, ReadOnlyKeyValueEntry? entry) = await RetryKv(
-                    () => kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+                    () => kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask(),
                     r => r.Item1, ct);
                 Assert.Equal(KeyValueResponseType.Get, getType);
                 Assert.NotNull(entry);
@@ -249,7 +249,7 @@ public sealed class TestRangeSplitUnderPlacement : BaseCluster
             foreach (KahunaManager kahuna in kahunas)
             {
                 (KeyValueResponseType getType, ReadOnlyKeyValueEntry? entry) = await RetryKv(
-                    () => kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+                    () => kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask(),
                     r => r.Item1, ct);
                 Assert.Equal(KeyValueResponseType.Get, getType);
                 Assert.NotNull(entry);

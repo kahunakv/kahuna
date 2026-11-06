@@ -295,6 +295,132 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     }
 
     /// <summary>
+    /// Appends to <paramref name="destination"/> the pairs <see cref="GetByRange"/> yields for the same bounds and
+    /// limit, in the same order, and returns how many it appended. Only supported for BTree instances where TKey
+    /// is of type string.
+    /// <para>
+    /// The walk counts the range first and copies it second, so the destination grows once, to the exact size,
+    /// and no enumerator is created. A leaf that lies whole inside the range costs one comparison (its last key
+    /// against the end bound) in place of two per key; only the leaf the range starts in and the leaf it ends in
+    /// are searched.
+    /// </para>
+    /// </summary>
+    public int CopyRangeTo(
+        string start, bool startInclusive,
+        string? end, bool endInclusive,
+        int limit,
+        List<(string Key, TValue Value)> destination)
+    {
+        if (typeof(TKey) != typeof(string))
+            throw new InvalidOperationException("CopyRangeTo only supported for BTree<string, TValue>");
+
+        Node<TKey, TValue>? node = Root;
+        if (node is null || limit <= 0)
+            return 0;
+
+        while (!node.IsLeaf)
+            node = node.Children[node.FindChildIndex((TKey)(object)start)]!;
+
+        // The first position inside the start bound. The descent lands on the leaf that would hold the start
+        // key; when every key of that leaf is below the bound, the range starts in a later leaf.
+        Node<TKey, TValue>? first = node;
+        int firstIndex = 0;
+
+        while (first is not null)
+        {
+            firstIndex = FirstIndexAbove(first, 0, start, orEqual: startInclusive);
+            if (firstIndex < first.KeyCount)
+                break;
+
+            first = first.Next;
+        }
+
+        if (first is null)
+            return 0;
+
+        int total = 0;
+        Node<TKey, TValue>? cursor = first;
+        int from = firstIndex;
+
+        while (cursor is not null && total < limit)
+        {
+            int stop = cursor.KeyCount;
+            bool rangeEnded = false;
+
+            if (end is not null && stop > from)
+            {
+                // An exclusive end bound leaves out the key equal to it; an inclusive one keeps it.
+                stop = FirstIndexAbove(cursor, from, end, orEqual: !endInclusive);
+                rangeEnded = stop < cursor.KeyCount;
+            }
+
+            total += Math.Min(stop - from, limit - total);
+
+            if (rangeEnded)
+                break;
+
+            cursor = cursor.Next;
+            from = 0;
+        }
+
+        if (total == 0)
+            return 0;
+
+        destination.EnsureCapacity(destination.Count + total);
+
+        cursor = first;
+        from = firstIndex;
+
+        for (int remaining = total; remaining > 0;)
+        {
+            int take = Math.Min(cursor!.KeyCount - from, remaining);
+
+            for (int i = from; i < from + take; i++)
+                destination.Add(((string)(object)cursor.Keys[i]!, cursor.Values[i]!));
+
+            remaining -= take;
+            cursor = cursor.Next;
+            from = 0;
+        }
+
+        return total;
+    }
+
+    /// <summary>
+    /// The first index at or after <paramref name="from"/> in <paramref name="leaf"/> whose key sorts above
+    /// <paramref name="bound"/> in ordinal order, or at it when <paramref name="orEqual"/> is set; the leaf's key
+    /// count when no key does. The last key answers for the whole leaf in one comparison when the leaf lies
+    /// below the bound; otherwise a binary search over the sorted keys finds the position.
+    /// </summary>
+    private static int FirstIndexAbove(Node<TKey, TValue> leaf, int from, string bound, bool orEqual)
+    {
+        int count = leaf.KeyCount;
+        if (from >= count)
+            return count;
+
+        if (!IsAbove((string)(object)leaf.Keys[count - 1]!, bound, orEqual))
+            return count;
+
+        int lo = from, hi = count - 1;
+        while (lo < hi)
+        {
+            int mid = (lo + hi) >>> 1;
+            if (IsAbove((string)(object)leaf.Keys[mid]!, bound, orEqual))
+                hi = mid;
+            else
+                lo = mid + 1;
+        }
+
+        return lo;
+    }
+
+    private static bool IsAbove(string key, string bound, bool orEqual)
+    {
+        int cmp = string.CompareOrdinal(key, bound);
+        return cmp > 0 || (orEqual && cmp == 0);
+    }
+
+    /// <summary>
     /// Retrieves all key-value pairs from the B-Tree where the keys start with the specified prefix.
     /// This method is only supported for BTree instances where TKey is of type string.
     /// </summary>

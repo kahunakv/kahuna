@@ -535,7 +535,7 @@ internal sealed class RoutedWriteOperations
     internal Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> SystemGetKeyValue(string key, CancellationToken cancellationToken)
     {
         return locator.LocateAndTryGetValue(
-            HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, cancellationToken);
+            HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, cancellationToken).AsTask();
     }
 
     internal Task<(KeyValueResponseType, long, HLCTimestamp)> SystemDeleteKeyValue(string key, CancellationToken cancellationToken)

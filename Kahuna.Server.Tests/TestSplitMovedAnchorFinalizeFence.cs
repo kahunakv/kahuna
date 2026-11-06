@@ -198,13 +198,13 @@ public sealed class TestSplitMovedAnchorFinalizeFence : BaseCluster
     private static async Task<(string? Latest, string? Snapshot)> ReadBothWays(IRaft raft, KahunaManager kahuna, string key, CancellationToken ct)
     {
         (KeyValueResponseType latestType, ReadOnlyKeyValueEntry? latest) = await RetryOnMustRetryAsync(
-            () => kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+            () => kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask(),
             r => r.Item1);
 
         HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
         (KeyValueResponseType snapshotType, ReadOnlyKeyValueEntry? snapshot) = await RetryOnMustRetryAsync(
-            () => kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, now, KeyValueDurability.Persistent, ct, readMode: KeyValueReadMode.StatementSnapshot),
+            () => kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, now, KeyValueDurability.Persistent, ct, readMode: KeyValueReadMode.StatementSnapshot).AsTask(),
             r => r.Item1);
 
         return (

@@ -86,7 +86,7 @@ internal sealed class LocalKeyValueReadOperations
     /// <param name="key"></param>
     /// <param name="durability"></param>
     /// <returns></returns>
-    public async Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryGetValue(
+    public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryGetValue(
         HLCTimestamp transactionId,
         string key,
         long revision,
@@ -95,16 +95,34 @@ internal sealed class LocalKeyValueReadOperations
         KeyValueReadMode readMode = KeyValueReadMode.Default
     )
     {
-        LocalPointRead read = await TryGetValueLocal(transactionId, key, revision, readTimestamp, durability, readMode);
-        return (read.Type, read.Entry);
+        ValueTask<LocalPointRead> read = TryGetValueLocal(transactionId, key, revision, readTimestamp, durability, readMode);
+
+        if (!read.IsCompletedSuccessfully)
+            return Awaited(read);
+
+        LocalPointRead answer = read.Result;
+        return Task.FromResult((answer.Type, answer.Entry));
+
+        static async Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> Awaited(ValueTask<LocalPointRead> pending)
+        {
+            LocalPointRead answer = await pending;
+            return (answer.Type, answer.Entry);
+        }
     }
 
     /// <summary>
     /// <see cref="TryGetValue"/>, reporting whether the answer came from the owning actor's published head
     /// record (no actor message) or from a mailbox round trip. A read with a timestamp, so every statement
     /// read, always takes the actor path: the published record answers latest reads only.
+    /// <para>
+    /// A <see cref="ValueTask{TResult}"/>, and not an async method: the published record answers on the calling
+    /// thread, and that answer must not cost a task object here and another in every caller that forwards it.
+    /// Await the result exactly once. As with an async method, a failure is carried by the result and is never
+    /// thrown from the call itself, so a caller that starts several reads before it awaits any of them cannot
+    /// lose the ones it already started.
+    /// </para>
     /// </summary>
-    public async Task<LocalPointRead> TryGetValueLocal(
+    public ValueTask<LocalPointRead> TryGetValueLocal(
         HLCTimestamp transactionId,
         string key,
         long revision,
@@ -113,17 +131,23 @@ internal sealed class LocalKeyValueReadOperations
         KeyValueReadMode readMode = KeyValueReadMode.Default
     )
     {
-        if (IsGatedKey(key))
-            return new(KeyValueResponseType.MustRetry, null, false);
+        try
+        {
+            if (IsGatedKey(key))
+                return new(new LocalPointRead(KeyValueResponseType.MustRetry, null, false));
 
-        if (publishedHeads.TryRead(transactionId, key, revision, readTimestamp, durability, out ReadOnlyKeyValueEntry? published))
-            return new(KeyValueResponseType.Get, published, true);
+            if (publishedHeads.TryRead(transactionId, key, revision, readTimestamp, durability, out ReadOnlyKeyValueEntry? published))
+                return new(new LocalPointRead(KeyValueResponseType.Get, published, true));
+        }
+        catch (Exception ex)
+        {
+            return ValueTask.FromException<LocalPointRead>(ex);
+        }
 
-        (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await TryGetValueFromActor(transactionId, key, revision, readTimestamp, durability, readMode);
-        return new(type, entry, false);
+        return TryGetValueFromActor(transactionId, key, revision, readTimestamp, durability, readMode);
     }
 
-    private async Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryGetValueFromActor(
+    private async ValueTask<LocalPointRead> TryGetValueFromActor(
         HLCTimestamp transactionId,
         string key,
         long revision,
@@ -176,10 +200,10 @@ internal sealed class LocalKeyValueReadOperations
                     response = await AskKeyValueActor(persistentKeyValuesRouter, request);
 
                 if (response is null)
-                    return (KeyValueResponseType.Errored, null);
+                    return new(KeyValueResponseType.Errored, null, false);
 
                 if (response.Type != KeyValueResponseType.WaitingForReplication)
-                    return (response.Type, response.Entry);
+                    return new(response.Type, response.Entry, false);
 
                 // A wait caused by a foreign prepared intent whose canonical decision is not resolvable locally (a
                 // remote anchor) would otherwise spin until settlement propagates the decision here. Route the
@@ -193,7 +217,7 @@ internal sealed class LocalKeyValueReadOperations
                 }
 
                 if (Environment.TickCount64 >= deadline)
-                    return (KeyValueResponseType.MustRetry, null);
+                    return new(KeyValueResponseType.MustRetry, null, false);
 
                 Transactions.DurableTransactionMetrics.AddKvRetryWait("TryGetValue_4018");
                 await Task.Delay(ReadWaitBackoff.Next(ref backoffMs, deadline));
@@ -294,36 +318,76 @@ internal sealed class LocalKeyValueReadOperations
         }
     }
 
-    public async Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryGetManyValues(
+    /// <summary>
+    /// Reads many locally owned keys, each answered as a single <see cref="TryGetValue"/> of it is. Returns one
+    /// result per key, in input order.
+    /// <para>
+    /// Every read is started before any is awaited, so the keys that need their actor are asked together. A key
+    /// the published head record answers is answered in the starting pass, on the calling thread, and costs
+    /// nothing beyond its entry; a batch of such keys completes without suspending at all. Only the keys that
+    /// went to an actor are awaited, by one state machine for the batch.
+    /// </para>
+    /// </summary>
+    public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryGetManyValues(
         HLCTimestamp transactionId,
         HLCTimestamp readTimestamp,
         List<(string key, long revision, KeyValueDurability durability)> keys
     )
     {
-        Task<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>[] tasks = new Task<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>[keys.Count];
+        List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> results = new(keys.Count);
+        List<(int Index, ValueTask<LocalPointRead> Read)>? pending = null;
 
         for (int i = 0; i < keys.Count; i++)
         {
-            (string key, long revision, KeyValueDurability durability) item = keys[i];
-            tasks[i] = TryGetManyValue(item);
+            (string key, long revision, KeyValueDurability durability) = keys[i];
+
+            ValueTask<LocalPointRead> read = TryGetValueLocal(transactionId, key, revision, readTimestamp, durability);
+
+            if (read.IsCompletedSuccessfully)
+            {
+                LocalPointRead answer = read.Result;
+                results.Add((answer.Type, key, durability, answer.Entry));
+                continue;
+            }
+
+            // The slot is filled when the read completes; the placeholder keeps the results in input order.
+            results.Add((KeyValueResponseType.Errored, key, durability, null));
+            (pending ??= new(keys.Count - i)).Add((i, read));
         }
 
-        return [.. await Task.WhenAll(tasks)];
+        return pending is null ? Task.FromResult(results) : AwaitPendingReads(results, pending);
+    }
 
-        async Task<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> TryGetManyValue(
-            (string key, long revision, KeyValueDurability durability) item
-        )
+    /// <summary>
+    /// Completes a batched read whose starting pass left reads in flight. Every pending read is awaited, also
+    /// after one of them failed, so no started read is left unobserved; the first failure is thrown once all of
+    /// them have finished, which is when a wait on all of them at once reports it too.
+    /// </summary>
+    internal static async Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> AwaitPendingReads(
+        List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> results,
+        List<(int Index, ValueTask<LocalPointRead> Read)> pending)
+    {
+        System.Runtime.ExceptionServices.ExceptionDispatchInfo? failure = null;
+
+        for (int i = 0; i < pending.Count; i++)
         {
-            (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await TryGetValue(
-                transactionId,
-                item.key,
-                item.revision,
-                readTimestamp,
-                item.durability
-            );
+            (int index, ValueTask<LocalPointRead> read) = pending[i];
 
-            return (type, item.key, item.durability, entry);
+            try
+            {
+                LocalPointRead answer = await read;
+                (_, string key, KeyValueDurability durability, _) = results[index];
+                results[index] = (answer.Type, key, durability, answer.Entry);
+            }
+            catch (Exception ex)
+            {
+                failure ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex);
+            }
         }
+
+        failure?.Throw();
+
+        return results;
     }
 
     public async Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryExistsManyValues(
@@ -395,16 +459,20 @@ internal sealed class LocalKeyValueReadOperations
         KeyValueReadMode readMode = KeyValueReadMode.Default
     )
     {
-        KeyValueProbeResult[] results = new KeyValueProbeResult[keys.Count];
-
         if (keys.Count == 0)
-            return results;
+            return [];
+
+        // The first attempt usually answers every key, and the actor's array of answers is then the result as it
+        // is. This array exists only for a probe that is refused as a whole or that asks some keys again, where
+        // the answers of several attempts are merged.
+        KeyValueProbeResult[]? results = null;
 
         for (int i = 0; i < keys.Count; i++)
         {
             if (!IsGatedKey(keys[i]))
                 continue;
 
+            results = new KeyValueProbeResult[keys.Count];
             Array.Fill(results, KeyValueProbeResult.MustRetry);
             return results;
         }
@@ -447,6 +515,8 @@ internal sealed class LocalKeyValueReadOperations
                         ? KeyValueResponseType.Errored
                         : response.ProbeResults is null ? response.Type : KeyValueResponseType.Errored;
 
+                    results ??= new KeyValueProbeResult[keys.Count];
+
                     for (int j = 0; j < count; j++)
                     {
                         int index = pending is null ? j : pending[j];
@@ -454,6 +524,27 @@ internal sealed class LocalKeyValueReadOperations
                     }
 
                     return results;
+                }
+
+                if (results is null)
+                {
+                    // First attempt, one answer per key in input order. The actor writes nothing to the array
+                    // after it replied, so when no key waits it is handed to the caller without a copy.
+                    bool anyWaiting = false;
+
+                    for (int j = 0; j < count; j++)
+                    {
+                        if (answers[j].Type != KeyValueResponseType.WaitingForReplication)
+                            continue;
+
+                        anyWaiting = true;
+                        break;
+                    }
+
+                    if (!anyWaiting)
+                        return answers;
+
+                    results = new KeyValueProbeResult[keys.Count];
                 }
 
                 List<int>? waiting = null;

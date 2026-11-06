@@ -48,7 +48,7 @@ public class TestScriptAsOfReads : BaseCluster
             // Capture T1 from v1's LastModified.
             (KeyValueResponseType getType, ReadOnlyKeyValueEntry? entryV1) =
                 await RetryOnMustRetryAsync(() => kahuna2.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero,
-                    KeyValueDurability.Persistent, TestContext.Current.CancellationToken), r => r.Item1);
+                    KeyValueDurability.Persistent, TestContext.Current.CancellationToken).AsTask(), r => r.Item1);
             Assert.Equal(KeyValueResponseType.Get, getType);
             Assert.NotNull(entryV1);
             long snapshotMs = entryV1.LastModified.L;
@@ -164,7 +164,7 @@ public class TestScriptAsOfReads : BaseCluster
             // Capture T from key2's LastModified (written last, so >= key1's).
             (KeyValueResponseType getType, ReadOnlyKeyValueEntry? entry2) =
                 await RetryOnMustRetryAsync(() => kahuna2.LocateAndTryGetValue(HLCTimestamp.Zero, key2, -1, HLCTimestamp.Zero,
-                    KeyValueDurability.Persistent, TestContext.Current.CancellationToken), r => r.Item1);
+                    KeyValueDurability.Persistent, TestContext.Current.CancellationToken).AsTask(), r => r.Item1);
             Assert.Equal(KeyValueResponseType.Get, getType);
             Assert.NotNull(entry2);
             long snapshotMs = entry2.LastModified.L;
@@ -288,7 +288,7 @@ public class TestScriptAsOfReads : BaseCluster
             // Capture T from key2's LastModified.
             (KeyValueResponseType getType, ReadOnlyKeyValueEntry? entry2) =
                 await RetryOnMustRetryAsync(() => kahuna2.LocateAndTryGetValue(HLCTimestamp.Zero, key2, -1, HLCTimestamp.Zero,
-                    KeyValueDurability.Persistent, TestContext.Current.CancellationToken), r => r.Item1);
+                    KeyValueDurability.Persistent, TestContext.Current.CancellationToken).AsTask(), r => r.Item1);
             Assert.Equal(KeyValueResponseType.Get, getType);
             Assert.NotNull(entry2);
             long snapshotMs = entry2.LastModified.L;
@@ -343,7 +343,7 @@ public class TestScriptAsOfReads : BaseCluster
 
             (KeyValueResponseType getType, ReadOnlyKeyValueEntry? entryV1) =
                 await RetryOnMustRetryAsync(() => kahuna2.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero,
-                    KeyValueDurability.Persistent, TestContext.Current.CancellationToken), r => r.Item1);
+                    KeyValueDurability.Persistent, TestContext.Current.CancellationToken).AsTask(), r => r.Item1);
             Assert.Equal(KeyValueResponseType.Get, getType);
             Assert.NotNull(entryV1);
             long t1Ms = entryV1.LastModified.L;
@@ -361,7 +361,7 @@ public class TestScriptAsOfReads : BaseCluster
 
             (getType, ReadOnlyKeyValueEntry? entryV2) =
                 await RetryOnMustRetryAsync(() => kahuna2.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero,
-                    KeyValueDurability.Persistent, TestContext.Current.CancellationToken), r => r.Item1);
+                    KeyValueDurability.Persistent, TestContext.Current.CancellationToken).AsTask(), r => r.Item1);
             Assert.Equal(KeyValueResponseType.Get, getType);
             Assert.NotNull(entryV2);
             long t2Ms = entryV2.LastModified.L;
@@ -429,7 +429,7 @@ public class TestScriptAsOfReads : BaseCluster
             // Key must not exist.
             (KeyValueResponseType getType, _) = await RetryOnMustRetryAsync(() => kahuna2.LocateAndTryGetValue(
                 HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero,
-                KeyValueDurability.Persistent, TestContext.Current.CancellationToken), r => r.Item1);
+                KeyValueDurability.Persistent, TestContext.Current.CancellationToken).AsTask(), r => r.Item1);
             Assert.Equal(KeyValueResponseType.DoesNotExist, getType);
         }
         finally
@@ -499,7 +499,7 @@ public class TestScriptAsOfReads : BaseCluster
             // Capture T from key2's LastModified.
             (KeyValueResponseType getType, ReadOnlyKeyValueEntry? entry2) =
                 await RetryOnMustRetryAsync(() => kahuna2.LocateAndTryGetValue(HLCTimestamp.Zero, key2, -1, HLCTimestamp.Zero,
-                    KeyValueDurability.Persistent, TestContext.Current.CancellationToken), r => r.Item1);
+                    KeyValueDurability.Persistent, TestContext.Current.CancellationToken).AsTask(), r => r.Item1);
             Assert.Equal(KeyValueResponseType.Get, getType);
             Assert.NotNull(entry2);
             long snapshotMs = entry2.LastModified.L;

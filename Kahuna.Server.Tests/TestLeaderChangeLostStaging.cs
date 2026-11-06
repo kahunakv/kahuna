@@ -104,7 +104,7 @@ public sealed class TestLeaderChangeLostStaging : BaseCluster
         await RetryOnMustRetryAsync(
             () => session.LocateAndTryGetValue(
                 handle.TransactionId, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct,
-                coordinatorKey: handle.CoordinatorKey, operationId: TransactionOperationId.NewRandom()),
+                coordinatorKey: handle.CoordinatorKey, operationId: TransactionOperationId.NewRandom()).AsTask(),
             r => r.Item1);
 
     private static async Task<(KeyValueResponseType Type, long Revision)> Write(
@@ -146,7 +146,7 @@ public sealed class TestLeaderChangeLostStaging : BaseCluster
     private static async Task<(KeyValueResponseType Type, ReadOnlyKeyValueEntry? Entry)> Read(
         KahunaManager reader, string key, CancellationToken ct) =>
         await RetryOnMustRetryAsync(
-            () => reader.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+            () => reader.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask(),
             r => r.Item1);
 
     /// <param name="twoPhase">The transaction also writes a key on a third partition, which closes the one-phase

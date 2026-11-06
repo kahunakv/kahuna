@@ -279,7 +279,7 @@ public sealed class TestApplyDivergenceContainment : BaseCluster
                 Assert.Equal(KeyValueResponseType.MustRetry, batchType);
 
                 (KeyValueResponseType routedType, ReadOnlyKeyValueEntry? routed) = await RetryOnMustRetryAsync(
-                    () => managers[@short].LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+                    () => managers[@short].LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask(),
                     r => r.Item1);
                 Assert.Equal(KeyValueResponseType.Get, routedType);
                 Assert.Equal("v", Encoding.UTF8.GetString(routed!.Value!));
@@ -317,7 +317,7 @@ public sealed class TestApplyDivergenceContainment : BaseCluster
             foreach (string key in dropped)
             {
                 (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await RetryOnMustRetryAsync(
-                    () => managers[@short].LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+                    () => managers[@short].LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask(),
                     r => r.Item1);
                 Assert.Equal(KeyValueResponseType.Get, type);
                 Assert.Equal("v", Encoding.UTF8.GetString(entry!.Value!));
@@ -495,7 +495,7 @@ public sealed class TestApplyDivergenceContainment : BaseCluster
             await WaitUntilAsync(async () => await rafts[@short].AmILeaderIfHosted(Partition, ct), timeoutMs: 30_000);
 
             (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await RetryOnMustRetryAsync(
-                () => shortNode.LocateAndTryGetValue(HLCTimestamp.Zero, hole, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+                () => shortNode.LocateAndTryGetValue(HLCTimestamp.Zero, hole, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask(),
                 r => r.Item1);
             Assert.Equal(KeyValueResponseType.Get, type);
             Assert.Equal("second", Encoding.UTF8.GetString(entry!.Value!));
@@ -640,7 +640,7 @@ public sealed class TestApplyDivergenceContainment : BaseCluster
             foreach (string key in keys)
             {
                 (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await RetryOnMustRetryAsync(
-                    () => managers[@short].LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+                    () => managers[@short].LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask(),
                     r => r.Item1);
                 Assert.Equal(KeyValueResponseType.Get, type);
                 Assert.Equal("h", Encoding.UTF8.GetString(entry!.Value!));

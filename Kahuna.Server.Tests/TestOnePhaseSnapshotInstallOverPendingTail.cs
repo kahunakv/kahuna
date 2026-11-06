@@ -275,11 +275,11 @@ public sealed class TestOnePhaseSnapshotInstallOverPendingTail : BaseCluster
             foreach (string key in keys)
             {
                 (KeyValueResponseType controlType, ReadOnlyKeyValueEntry? controlEntry) = await RetryOnMustRetryAsync(
-                    () => neverInstalled.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+                    () => neverInstalled.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask(),
                     r => r.Item1);
 
                 (KeyValueResponseType installedType, ReadOnlyKeyValueEntry? installedEntry) = await RetryOnMustRetryAsync(
-                    () => installed.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+                    () => installed.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask(),
                     r => r.Item1);
 
                 Assert.Equal(controlType, installedType);

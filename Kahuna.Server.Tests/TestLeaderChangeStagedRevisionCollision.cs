@@ -151,7 +151,7 @@ public sealed class TestLeaderChangeStagedRevisionCollision : BaseCluster
     private static async Task<(KeyValueResponseType Type, ReadOnlyKeyValueEntry? Entry)> Read(
         KahunaManager reader, string key, CancellationToken ct) =>
         await RetryOnMustRetryAsync(
-            () => reader.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct),
+            () => reader.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask(),
             r => r.Item1);
 
     /// <param name="applyTimeValidation">The group's one-phase apply-time validation setting.</param>

@@ -148,7 +148,7 @@ internal sealed class ProbeRangesContinuation : ReadContinuation
                 SetFaulted(t.Exception);
             }
 
-            self.Send(new KeyValueRequest(KeyValueRequestType.ResumeRead) { Continuation = this });
+            self.Send(KeyValueRequestPool.RentResumeRead(this));
         }, TaskScheduler.Default);
 
         return true;

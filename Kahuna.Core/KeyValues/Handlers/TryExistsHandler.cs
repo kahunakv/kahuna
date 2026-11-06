@@ -322,7 +322,7 @@ internal sealed class TryExistsHandler : BaseHandler
                 if (!t.IsCompletedSuccessfully) cont.SetFaulted(t.Exception);
                 else cont.DiskResult = t.Result;
                 actorContext.Self.Send(
-                    new KeyValueRequest(KeyValueRequestType.ResumeRead) { Continuation = cont });
+                    KeyValueRequestPool.RentResumeRead(cont));
             }, TaskScheduler.Default);
 
             actorContext.ByPassReply = true;
@@ -441,7 +441,7 @@ internal sealed class TryExistsHandler : BaseHandler
             if (!t.IsCompletedSuccessfully) cont.SetFaulted(t.Exception);
             else cont.DiskResult = t.Result;
             actorContext.Self.Send(
-                new KeyValueRequest(KeyValueRequestType.ResumeRead) { Continuation = cont });
+                KeyValueRequestPool.RentResumeRead(cont));
         }, TaskScheduler.Default);
 
         actorContext.ByPassReply = true;

@@ -83,11 +83,11 @@ public sealed class TestPointReadGrpcWire
             result = (type, entry);
         }
 
-        public override Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
+        public override ValueTask<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
             HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp,
             KeyValueDurability durability, CancellationToken cancellationToken,
             string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default)
-            => Task.FromResult(result);
+            => ValueTask.FromResult(result);
 
         public override Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryExistsValue(
             HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp,

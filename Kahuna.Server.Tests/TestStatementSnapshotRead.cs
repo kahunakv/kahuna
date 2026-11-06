@@ -90,7 +90,7 @@ public sealed class TestStatementSnapshotRead
 
     private static Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> Read(
         IKahuna kahuna, HLCTimestamp transactionId, string key, HLCTimestamp readTimestamp, KeyValueReadMode mode, KeyValueDurability durability, CancellationToken ct) =>
-        kahuna.LocateAndTryGetValue(transactionId, key, -1, readTimestamp, durability, ct, readMode: mode);
+        kahuna.LocateAndTryGetValue(transactionId, key, -1, readTimestamp, durability, ct, readMode: mode).AsTask();
 
     private static string Text(ReadOnlyKeyValueEntry? entry) => Encoding.UTF8.GetString(entry!.Value!);
 
