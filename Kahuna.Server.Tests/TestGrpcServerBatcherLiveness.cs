@@ -41,6 +41,11 @@ public sealed class TestGrpcServerBatcherLiveness
             .GetField("streamings", BindingFlags.NonPublic | BindingFlags.Static)!
             .GetValue(null)!;
 
+    private static ConcurrentDictionary<string, PeerStreamEpisode> Episodes()
+        => (ConcurrentDictionary<string, PeerStreamEpisode>)BatcherType
+            .GetField("episodes", BindingFlags.NonPublic | BindingFlags.Static)!
+            .GetValue(null)!;
+
     private static TaskCompletionSource<GrpcServerBatcherResponse> SeedPending(int requestId, long streamId)
     {
         TaskCompletionSource<GrpcServerBatcherResponse> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -479,6 +484,9 @@ public sealed class TestGrpcServerBatcherLiveness
         finally
         {
             Streamings().TryRemove(url, out _);
+
+            // Each failed write also opened this URL's failure episode; drop it with the streams.
+            Episodes().TryRemove(url, out _);
         }
     }
 

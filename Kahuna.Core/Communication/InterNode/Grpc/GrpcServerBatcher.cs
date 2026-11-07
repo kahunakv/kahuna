@@ -31,10 +31,26 @@ namespace Kahuna.Server.Communication.Internode.Grpc;
 /// in the queue or behind a blocked write — not only requests already sent. Enqueue refuses new
 /// work retryably once the process-wide pending item or byte limit is reached: the deadline alone
 /// does not bound memory when the offered load stays above capacity.</para>
+///
+/// <para><b>Dead peer.</b> The registry is rebuilt by the first drain that finds it empty, and against
+/// a peer that refuses the connection every rebuild fails at once; a leader with reads to confirm and
+/// locks to forward to that peer drained often enough to re-open its streams 70–100 times a second for
+/// a whole outage, each attempt two duplex calls, two read loops and four Warning lines. One
+/// <see cref="PeerStreamEpisode"/> per peer spaces the re-opens with a doubling backoff — a drain that
+/// finds the registry empty while the backoff holds refuses its requests with the same retryable
+/// status a failed open gives them — and rate-limits the log to one line per episode, one summary per
+/// interval and one line on recovery.</para>
 /// </summary>
 internal sealed class GrpcServerBatcher
 {
     private static readonly ConcurrentDictionary<string, Lazy<List<GrpcServerSharedStreaming>>> streamings = new();
+
+    /// <summary>
+    /// Per peer URL, the record of its stream failures: the re-open backoff and the rate-limited log.
+    /// Keyed like <see cref="streamings"/>, because the failures that feed it surface in the static
+    /// read loops, which know the peer only by its URL.
+    /// </summary>
+    private static readonly ConcurrentDictionary<string, PeerStreamEpisode> episodes = new();
 
     private static readonly ConcurrentDictionary<int, GrpcServerBatcherItem> requestRefs = new();
 
@@ -105,6 +121,9 @@ internal sealed class GrpcServerBatcher
 
     private readonly ILogger logger;
 
+    /// <summary>This peer's failure record; the same instance every batcher and read loop of the URL reports to.</summary>
+    private readonly PeerStreamEpisode episode;
+
     private readonly ConcurrentQueue<GrpcServerBatcherItem> inbox = new();
 
     /// <summary>
@@ -158,10 +177,19 @@ internal sealed class GrpcServerBatcher
         this.url = url;
         this.transportSecurity = transportSecurity;
         this.logger = logger;
+        episode = EpisodeFor(url, logger);
     }
 
     /// <summary>The options this batcher's channels are built with.</summary>
     internal RaftTransportSecurityOptions TransportSecurity => transportSecurity;
+
+    /// <summary>
+    /// The failure record of <paramref name="streamUrl"/>, created on first use. Like the read loops,
+    /// the record logs through the logger of whichever caller first touched the URL; in production
+    /// there is one <c>GrpcInterNodeCommunication</c> and so one logger.
+    /// </summary>
+    private static PeerStreamEpisode EpisodeFor(string streamUrl, ILogger logger) =>
+        episodes.GetOrAdd(streamUrl, static (u, l) => new PeerStreamEpisode(l, u), logger);
     
     public Task<GrpcServerBatcherResponse> Enqueue(GrpcTryLockRequest message)
     {
@@ -816,7 +844,9 @@ internal sealed class GrpcServerBatcher
     /// for the process lifetime — would keep handing out dead call objects forever, which was half
     /// of the permanent-wedge failure mode. Disposal also unblocks any <c>WriteAsync</c> stuck on
     /// the stalled session and drives the read loops into their failure cleanup. Idempotent and
-    /// safe to race from the write path, both read loops, and sibling streams.
+    /// safe to race from the write path, both read loops, and sibling streams. An eviction that
+    /// happens is recorded once on the peer's <see cref="PeerStreamEpisode"/> with
+    /// <paramref name="cause"/>: it steps the re-open backoff and is logged at the episode's cadence.
     /// <para>
     /// When <paramref name="failingStreamId"/> is given, the eviction only happens if the current
     /// registry entry still contains that stream: a slow failure surfacing AFTER the URL was
@@ -825,7 +855,7 @@ internal sealed class GrpcServerBatcher
     /// nothing).
     /// </para>
     /// </summary>
-    private static void InvalidateStreamingsForUrl(string streamUrl, ILogger logger, string reason, long? failingStreamId = null)
+    private static void InvalidateStreamingsForUrl(string streamUrl, ILogger logger, string reason, Exception cause, long? failingStreamId = null)
     {
         if (!streamings.TryGetValue(streamUrl, out Lazy<List<GrpcServerSharedStreaming>>? current))
             return;
@@ -854,7 +884,7 @@ internal sealed class GrpcServerBatcher
         if (!streamings.TryRemove(new KeyValuePair<string, Lazy<List<GrpcServerSharedStreaming>>>(streamUrl, current)))
             return;
 
-        logger.LogWarning("GrpcServerBatcher evicting shared streams for {Url}: {Reason}", streamUrl, reason);
+        EpisodeFor(streamUrl, logger).NoteEviction(reason, cause);
 
         if (!current.IsValueCreated)
             return;
@@ -941,15 +971,13 @@ internal sealed class GrpcServerBatcher
     /// and byte caps; a lone item keeps the single-operation envelope. The caller keeps ownership
     /// of <paramref name="requests"/>: this method reads the list and never clears, reuses or
     /// releases it. The dispatch loop relies on that, because the list it passes is the buffer it
-    /// reuses for the next drain.
+    /// reuses for the next drain. A drain with no live item opens nothing; a drain that would have
+    /// to rebuild the peer's streams while their re-open backoff holds refuses its live items instead.
     /// </summary>
     private async Task RunBatch(List<GrpcServerBatcherItem> requests)
     {
         try
         {
-            List<GrpcServerSharedStreaming> nodeStreamings = GetSharedStreamingList();
-            int streamCount = nodeStreamings.Count;
-
             List<GrpcServerBatcherItem> lockItems = lockScratch ??= [];
             List<GrpcServerBatcherItem> keyValueItems = keyValueScratch ??= [];
             lockItems.Clear();
@@ -978,6 +1006,20 @@ internal sealed class GrpcServerBatcher
                         throw new KahunaServerException("Unknown request type: " + request.Type);
                 }
             }
+
+            // Nothing live: no stream is needed, so none is opened for it.
+            if (lockItems.Count == 0 && keyValueItems.Count == 0)
+                return;
+
+            List<GrpcServerSharedStreaming>? nodeStreamings = TryGetSharedStreamingList();
+
+            if (nodeStreamings is null)
+            {
+                RefuseWhileBackedOff(lockItems, keyValueItems);
+                return;
+            }
+
+            int streamCount = nodeStreamings.Count;
 
             bool coalesce = keyValueItems.Count > 1;
 
@@ -1051,6 +1093,39 @@ internal sealed class GrpcServerBatcher
     }
 
     /// <summary>
+    /// Fails every live item of a drain the re-open backoff refused with the same retryable status a
+    /// failed open would give it. The forward answers its operation's typed MustRetry either way;
+    /// the refusal only spares the open, the two read loops and the log lines behind a doomed attempt.
+    /// </summary>
+    private void RefuseWhileBackedOff(List<GrpcServerBatcherItem> lockItems, List<GrpcServerBatcherItem> keyValueItems)
+    {
+        RpcException refused = new(new(
+            StatusCode.Unavailable,
+            "The inter-node request was refused before dispatch: the peer's shared streams failed moments ago and their re-open is backed off."));
+
+        int refusedCount = Refuse(lockItems, refused) + Refuse(keyValueItems, refused);
+
+        episode.NoteRefused(refusedCount);
+    }
+
+    /// <summary>Settles the items the backoff refused; an item the reaper took first is left alone.</summary>
+    private static int Refuse(List<GrpcServerBatcherItem> items, RpcException refused)
+    {
+        int count = 0;
+
+        foreach (GrpcServerBatcherItem item in items)
+        {
+            if (!TryTakeRequest(item.RequestId, out _))
+                continue;
+
+            item.Promise.TrySetException(refused);
+            count++;
+        }
+
+        return count;
+    }
+
+    /// <summary>
     /// Returns how many items, from <paramref name="start"/>, the next coalesced envelope takes:
     /// at least one, at most <see cref="MaxOpsPerCoalescedEnvelope"/>, and never past the point
     /// where the summed payload bytes would exceed <see cref="MaxCoalescedEnvelopeBytes"/>. The
@@ -1091,7 +1166,7 @@ internal sealed class GrpcServerBatcher
         }
         catch (Exception ex)
         {
-            logger.LogWarning("GrpcServerBatcher key-value writer for stream {StreamId} failed: {ExType}: {Message}", sharedStreaming.Id, ex.GetType().Name, ex.Message);
+            episode.NoteFailure("key-value write failed", ex);
         }
     }
 
@@ -1108,7 +1183,7 @@ internal sealed class GrpcServerBatcher
         }
         catch (Exception ex)
         {
-            logger.LogWarning("GrpcServerBatcher lock writer for stream {StreamId} failed: {ExType}: {Message}", sharedStreaming.Id, ex.GetType().Name, ex.Message);
+            episode.NoteFailure("lock write failed", ex);
         }
     }
 
@@ -1164,7 +1239,7 @@ internal sealed class GrpcServerBatcher
         if (!await writeSemaphore.WaitAsync(WriteTimeout).ConfigureAwait(false))
         {
             RpcException stalled = new(new(StatusCode.Unavailable, "gRPC inter-node stream stalled: the write pipeline is blocked past the write timeout."));
-            InvalidateStreamingsForUrl(url, logger, "write semaphore held past the write timeout — a previous write is stuck on a stalled stream", sharedStreaming.Id);
+            InvalidateStreamingsForUrl(url, logger, "streams torn down: the write semaphore was held past the write timeout, a previous write is stuck on a stalled stream", stalled, sharedStreaming.Id);
             FailPendingRequests(sharedStreaming.Id, stalled);
             throw stalled;
         }
@@ -1178,7 +1253,7 @@ internal sealed class GrpcServerBatcher
             RpcException failure = ex is RpcException rpc
                 ? AsStreamFailure(rpc)
                 : new RpcException(new(StatusCode.Unavailable, $"gRPC inter-node stream write failed or timed out: {ex.GetType().Name}."));
-            InvalidateStreamingsForUrl(url, logger, $"write failed or timed out ({ex.GetType().Name})", sharedStreaming.Id);
+            InvalidateStreamingsForUrl(url, logger, "streams torn down: a write failed or timed out", ex, sharedStreaming.Id);
             FailPendingRequests(sharedStreaming.Id, failure);
             throw failure;
         }
@@ -1186,6 +1261,10 @@ internal sealed class GrpcServerBatcher
         {
             writeSemaphore.Release();
         }
+
+        // The write reached the peer: the connection is up and the request was accepted onto it,
+        // which closes any open failure episode and resets the re-open backoff.
+        episode.NoteSuccess();
     }
 
     /// <summary>
@@ -1572,25 +1651,25 @@ internal sealed class GrpcServerBatcher
             }
 
             RpcException streamClosed = new(new(StatusCode.Unavailable, "gRPC inter-node lock stream closed."));
-            InvalidateStreamingsForUrl(streamUrl, logger, "lock response stream ended", sharedStreamingId);
+            InvalidateStreamingsForUrl(streamUrl, logger, "streams torn down: the lock response stream ended", streamClosed, sharedStreamingId);
             FailPendingRequests(sharedStreamingId, streamClosed);
         }
         catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.Cancelled)
         {
-            logger.LogWarning("GrpcServerBatcher lock stream closed: {Status}", ex.Status);
-            InvalidateStreamingsForUrl(streamUrl, logger, "lock stream closed", sharedStreamingId);
+            EpisodeFor(streamUrl, logger).NoteFailure("lock stream closed", ex);
+            InvalidateStreamingsForUrl(streamUrl, logger, "streams torn down: the lock stream closed", ex, sharedStreamingId);
             FailPendingRequests(sharedStreamingId, ex);
         }
         catch (RpcException ex) when (IsPeerRefusal(ex))
         {
-            logger.LogWarning("GrpcServerBatcher lock stream refused by the peer before any request was served: {Status}", ex.Status);
-            InvalidateStreamingsForUrl(streamUrl, logger, "lock stream refused by the peer", sharedStreamingId);
+            EpisodeFor(streamUrl, logger).NoteFailure("lock stream refused by the peer before any request was served", ex);
+            InvalidateStreamingsForUrl(streamUrl, logger, "streams torn down: the peer refused the lock stream", ex, sharedStreamingId);
             FailPendingRequests(sharedStreamingId, AsStreamFailure(ex));
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "GrpcServerBatcher ReadLockMessages failed: {ExType}: {Message}", ex.GetType().Name, ex.Message);
-            InvalidateStreamingsForUrl(streamUrl, logger, "lock read loop faulted", sharedStreamingId);
+            InvalidateStreamingsForUrl(streamUrl, logger, "streams torn down: the lock read loop faulted", ex, sharedStreamingId);
             FailPendingRequests(sharedStreamingId, ex);
         }
     }
@@ -1613,25 +1692,25 @@ internal sealed class GrpcServerBatcher
             }
 
             RpcException streamClosed = new(new(StatusCode.Unavailable, "gRPC inter-node key-value stream closed."));
-            InvalidateStreamingsForUrl(streamUrl, logger, "key-value response stream ended", sharedStreamingId);
+            InvalidateStreamingsForUrl(streamUrl, logger, "streams torn down: the key-value response stream ended", streamClosed, sharedStreamingId);
             FailPendingRequests(sharedStreamingId, streamClosed);
         }
         catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.Cancelled)
         {
-            logger.LogWarning("GrpcServerBatcher key-value stream closed: {Status}", ex.Status);
-            InvalidateStreamingsForUrl(streamUrl, logger, "key-value stream closed", sharedStreamingId);
+            EpisodeFor(streamUrl, logger).NoteFailure("key-value stream closed", ex);
+            InvalidateStreamingsForUrl(streamUrl, logger, "streams torn down: the key-value stream closed", ex, sharedStreamingId);
             FailPendingRequests(sharedStreamingId, ex);
         }
         catch (RpcException ex) when (IsPeerRefusal(ex))
         {
-            logger.LogWarning("GrpcServerBatcher key-value stream refused by the peer before any request was served: {Status}", ex.Status);
-            InvalidateStreamingsForUrl(streamUrl, logger, "key-value stream refused by the peer", sharedStreamingId);
+            EpisodeFor(streamUrl, logger).NoteFailure("key-value stream refused by the peer before any request was served", ex);
+            InvalidateStreamingsForUrl(streamUrl, logger, "streams torn down: the peer refused the key-value stream", ex, sharedStreamingId);
             FailPendingRequests(sharedStreamingId, AsStreamFailure(ex));
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "GrpcServerBatcher ReadKeyValueMessages failed: {ExType}: {Message}", ex.GetType().Name, ex.Message);
-            InvalidateStreamingsForUrl(streamUrl, logger, "key-value read loop faulted", sharedStreamingId);
+            InvalidateStreamingsForUrl(streamUrl, logger, "streams torn down: the key-value read loop faulted", ex, sharedStreamingId);
             FailPendingRequests(sharedStreamingId, ex);
         }
     }
@@ -1891,9 +1970,21 @@ internal sealed class GrpcServerBatcher
     // streamings is process-global (static) keyed by URL; the background read loops and their
     // captured logger belong to whichever GrpcServerBatcher instance first touches a URL.
     // In production there is one GrpcInterNodeCommunication singleton so this is a non-issue.
-    private List<GrpcServerSharedStreaming> GetSharedStreamingList()
+    /// <summary>
+    /// The peer's shared streams, built on first use. Null when the registry has no entry for the
+    /// peer and the re-open backoff of an open failure episode still holds: the caller then refuses
+    /// its items instead of opening a set the peer refused moments ago. An entry that exists is
+    /// always handed out — the backoff spaces rebuilds, it never withholds live streams.
+    /// </summary>
+    private List<GrpcServerSharedStreaming>? TryGetSharedStreamingList()
     {
-        Lazy<List<GrpcServerSharedStreaming>> lazyStreamings = streamings.GetOrAdd(url, static (u, self) => self.GetSharedStreamings(), this);
+        if (!streamings.TryGetValue(url, out Lazy<List<GrpcServerSharedStreaming>>? lazyStreamings))
+        {
+            if (!episode.TryAllowOpen())
+                return null;
+
+            lazyStreamings = streamings.GetOrAdd(url, static (u, self) => self.GetSharedStreamings(), this);
+        }
 
         return lazyStreamings.Value;
     }
@@ -1924,6 +2015,8 @@ internal sealed class GrpcServerBatcher
 
             nodeStreamings.Add(new(id, locksStreaming, keyValueStreaming));
         }
+
+        episode.NoteOpened();
 
         return nodeStreamings;
     }
