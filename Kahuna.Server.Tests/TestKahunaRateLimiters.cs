@@ -413,7 +413,10 @@ public class TestKahunaRateLimiters : BaseCluster
             };
 
             KahunaConcurrencyLimiter holder = new(clients[0], options);
-            KahunaConcurrencyLimiter other = new(clients[1], options);
+
+            // Disposed before the cluster leaves: a limiter that still holds a lease renews it until
+            // disposal, so it would call the stopped nodes for the rest of the test process.
+            await using KahunaConcurrencyLimiter other = new(clients[1], options);
 
             RateLimitLease held = await holder.AcquireAsync(1, Token);
             Assert.True(held.IsAcquired);
@@ -428,7 +431,8 @@ public class TestKahunaRateLimiters : BaseCluster
 
             await Task.Delay(1200, Token);
 
-            Assert.True((await other.AcquireAsync(1, Token)).IsAcquired);
+            using RateLimitLease taken = await other.AcquireAsync(1, Token);
+            Assert.True(taken.IsAcquired);
 
             GC.KeepAlive(held);
         }

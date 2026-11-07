@@ -21,7 +21,9 @@ namespace Kahuna.Server.Tests;
 
 /// <summary>
 /// Runs alone: the activity source and the histogram are process-wide, so a client operation that runs
-/// in a parallel test would add spans and samples to the ones these tests count.
+/// in a parallel test would add spans and samples while these tests count. Running alone does not stop
+/// an operation that an earlier test left in the background, so each collector also keeps only the
+/// operations of its own test.
 /// </summary>
 [CollectionDefinition("KahunaClientTelemetry", DisableParallelization = true)]
 public sealed class KahunaClientTelemetryCollection;
@@ -85,15 +87,22 @@ public sealed class TestClientTelemetry
         public void Dispose() => listener.Dispose();
     }
 
-    /// <summary>Collects the duration samples of the client histogram.</summary>
+    /// <summary>
+    /// Collects the duration samples that the creating test's own async flow records, so a sample from
+    /// an operation on any other flow is ignored. The histogram call runs on the flow of the operation.
+    /// </summary>
     private sealed class DurationCollector : IDisposable
     {
+        private static readonly AsyncLocal<DurationCollector?> Owner = new();
+
         private readonly MeterListener listener = new();
 
         public ConcurrentQueue<(double Value, Dictionary<string, object?> Tags)> Samples { get; } = new();
 
         public DurationCollector()
         {
+            Owner.Value = this;
+
             listener.InstrumentPublished = (instrument, l) =>
             {
                 if (instrument.Meter.Name == KahunaClientTelemetry.MeterName &&
@@ -103,6 +112,9 @@ public sealed class TestClientTelemetry
 
             listener.SetMeasurementEventCallback<double>((_, value, tags, _) =>
             {
+                if (!ReferenceEquals(Owner.Value, this))
+                    return;
+
                 Dictionary<string, object?> copy = new(tags.Length);
 
                 foreach (KeyValuePair<string, object?> tag in tags)
