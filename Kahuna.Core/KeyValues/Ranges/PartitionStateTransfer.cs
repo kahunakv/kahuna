@@ -49,6 +49,16 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// </para>
 ///
 /// <para>
+/// <b>History.</b> The import purge removes every revision of every key, so the snapshot has to carry whatever a read
+/// below the current state still needs. On-disk history is kept without bound by default and the export is held in
+/// memory on the sender, so it does not carry all of it. For each key it adds to the current row the key's revision at
+/// each registered snapshot hold, and every revision above a complete-from timestamp sampled just before the drain,
+/// with the boundary revision below it. A revision applied after the drain is above the WAL boundary and is replayed
+/// on the receiver. The header names what was carried, and the receiver refuses a read at any other timestamp
+/// (<see cref="InstalledHistoryFence"/>).
+/// </para>
+///
+/// <para>
 /// <b>Import discipline.</b> The whole stream is read, checksum-verified and decoded <i>before anything
 /// is mutated</i>, so a truncated or corrupt snapshot is a clean no-op. That verification pass keeps
 /// nothing but counts and positions, and the apply pass then streams rows and durable-store entries
@@ -145,6 +155,23 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
     /// <summary>Registers a state-replaced observer; see <see cref="stateReplacedObservers"/>.</summary>
     internal void AddStateReplacedObserver(Action<int> observer) => stateReplacedObservers.Add(observer);
 
+    // What this node can answer for each installed partition; null until wired, which exports and records no history.
+    private InstalledHistoryFence? installedHistory;
+
+    // The timestamps of the registered snapshot holds, expired ones included: until a replicated purge removes a
+    // hold, its holder can still renew it, and reclamation protects it.
+    private Func<IEnumerable<HLCTimestamp>>? registeredHolds;
+
+    private Func<HLCTimestamp>? clock;
+
+    /// <summary>Wires the history an export carries and an install records (manager construction).</summary>
+    internal void AttachInstalledHistory(InstalledHistoryFence fence, Func<IEnumerable<HLCTimestamp>> holds, Func<HLCTimestamp> now)
+    {
+        installedHistory = fence;
+        registeredHolds = holds;
+        clock = now;
+    }
+
     private readonly PartitionDataEnumerator enumerator;
 
     private readonly IPersistenceBackend persistenceBackend;
@@ -215,6 +242,10 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
 
         try
         {
+            // Sampled before the drain: the walk below then reads every revision the sample could name, up to the
+            // ones above the WAL boundary, which the receiver replays.
+            HistoryExportPlan? history = PlanHistoryExport(partitionId);
+
             // The intent side (the pending intents plus the committed-head ledger) is captured FIRST, before
             // the drain and before the row scan, and that order is load-bearing for the by-reference
             // materialization of committed transactions. A by-reference record carries no value: the
@@ -240,18 +271,42 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
 
             HLCTimestamp ceiling = unboundedCeilingOf?.Invoke(partitionId) ?? HLCTimestamp.Zero;
 
-            new PartitionStateHeader
+            PartitionStateHeader header = new()
             {
                 PartitionId = partitionId,
                 UpToIndex = upToIndex,
                 UnboundedCeilingNode = ceiling.N,
                 UnboundedCeilingPhysical = ceiling.L,
                 UnboundedCeilingCounter = ceiling.C
-            }.WriteDelimitedTo(stream);
+            };
+
+            if (history is { } plan)
+            {
+                header.HistoryCompleteFromNode = plan.CompleteFrom.N;
+                header.HistoryCompleteFromPhysical = plan.CompleteFrom.L;
+                header.HistoryCompleteFromCounter = plan.CompleteFrom.C;
+
+                foreach (HLCTimestamp pin in plan.PinsNewestFirst)
+                    header.HistoryPins.Add(new PartitionStateHistoryPin { Node = pin.N, Physical = pin.L, Counter = pin.C });
+            }
+
+            header.WriteDelimitedTo(stream);
 
             await foreach (IReadOnlyList<(string Key, ReadOnlyKeyValueEntry Entry)> page in
                 enumerator.EnumerateKeyValuesAsync(partitionId, PageSize, ct).ConfigureAwait(false))
+            {
                 KvStateMachineTransfer.WritePage(stream, page, hasMore: true);
+
+                if (history is not { } pagePlan || !pagePlan.NeedsHistory(page))
+                    continue;
+
+                // Revision lookups are disk reads, and the walk of a key grows with the writes since its oldest hold.
+                List<(string, ReadOnlyKeyValueEntry)> rows =
+                    await Task.Run(() => ReadHistoryRows(page, pagePlan), ct).ConfigureAwait(false);
+
+                for (int offset = 0; offset < rows.Count; offset += PageSize)
+                    KvStateMachineTransfer.WritePage(stream, rows.GetRange(offset, Math.Min(PageSize, rows.Count - offset)), hasMore: true);
+            }
 
             KvStateMachineTransfer.WritePage(stream, [], hasMore: false);
 
@@ -278,6 +333,109 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
         logger.LogExportedPartitionState(partitionId, upToIndex, stream.Length);
 
         return stream;
+    }
+
+    /// <summary>What an export carries beyond the current rows.</summary>
+    /// <param name="CompleteFrom">Every revision at or above this is carried, with the boundary below it.</param>
+    /// <param name="PinsNewestFirst">Hold timestamps below <paramref name="CompleteFrom"/>, each answered exactly.</param>
+    private readonly record struct HistoryExportPlan(HLCTimestamp CompleteFrom, HLCTimestamp[] PinsNewestFirst)
+    {
+        private HLCTimestamp Oldest => PinsNewestFirst.Length > 0 ? PinsNewestFirst[^1] : CompleteFrom;
+
+        /// <summary>A key whose head is at or below every timestamp the plan names is answered by its head.</summary>
+        public bool NeedsHistory(IReadOnlyList<(string Key, ReadOnlyKeyValueEntry Entry)> page)
+        {
+            HLCTimestamp oldest = Oldest;
+
+            for (int i = 0; i < page.Count; i++)
+            {
+                if (page[i].Entry.LastModified.CompareTo(oldest) > 0)
+                    return true;
+            }
+
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Samples what this export carries. Complete-from lies below the current time by the bound on how far a commit
+    /// may lead its log entry, which also covers a hold whose timestamp was minted just before this sample and whose
+    /// registration applies here just after it. A hold this node cannot answer itself, because it received the
+    /// partition by install too, is not passed on.
+    /// </summary>
+    private HistoryExportPlan? PlanHistoryExport(int partitionId)
+    {
+        if (installedHistory is null || registeredHolds is null || clock is null)
+            return null;
+
+        HLCTimestamp now = clock();
+        HLCTimestamp completeFrom = new(now.N, now.L - CommitAdmission.MaxClockLeadMs, 0);
+
+        HLCTimestamp ownCompleteFrom = installedHistory.CompleteFromOf(partitionId);
+        if (ownCompleteFrom.CompareTo(completeFrom) > 0)
+            completeFrom = ownCompleteFrom;
+
+        HLCTimestamp[] pins =
+        [
+            .. registeredHolds()
+                .Where(hold => hold.CompareTo(completeFrom) < 0 && installedHistory.IsServable(partitionId, hold))
+                .Distinct()
+                .OrderDescending()
+        ];
+
+        return new(completeFrom, pins);
+    }
+
+    /// <summary>
+    /// The revisions below each key's head that the plan needs, newest first per key. Each lookup continues below the
+    /// last row found, so one key's walk reads its chain once however many holds there are, and a row that already
+    /// answers the next hold is not carried twice.
+    /// </summary>
+    private List<(string, ReadOnlyKeyValueEntry)> ReadHistoryRows(
+        IReadOnlyList<(string Key, ReadOnlyKeyValueEntry Entry)> page, HistoryExportPlan plan)
+    {
+        HLCTimestamp newest = new(int.MaxValue, long.MaxValue, uint.MaxValue);
+        List<(string, ReadOnlyKeyValueEntry)> rows = [];
+
+        foreach ((string key, ReadOnlyKeyValueEntry head) in page)
+        {
+            long ceiling = head.Revision - 1;
+            ReadOnlyKeyValueEntry answered = head;
+
+            // The complete run: down to and including the first revision at or below complete-from.
+            while (ceiling >= 0 && answered.LastModified.CompareTo(plan.CompleteFrom) > 0)
+            {
+                ReadOnlyKeyValueEntry? row = persistenceBackend.GetKeyValueRevisionAtOrBefore(key, ceiling, newest);
+                if (row is null)
+                {
+                    ceiling = -1;
+                    break;
+                }
+
+                rows.Add((key, row));
+                answered = row;
+                ceiling = row.Revision - 1;
+            }
+
+            foreach (HLCTimestamp pin in plan.PinsNewestFirst)
+            {
+                if (ceiling < 0)
+                    break;
+
+                if (answered.LastModified.CompareTo(pin) <= 0)
+                    continue;
+
+                ReadOnlyKeyValueEntry? row = persistenceBackend.GetKeyValueRevisionAtOrBefore(key, ceiling, pin);
+                if (row is null)
+                    break;
+
+                rows.Add((key, row));
+                answered = row;
+                ceiling = row.Revision - 1;
+            }
+        }
+
+        return rows;
     }
 
     /// <summary>
@@ -602,6 +760,8 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
                 header.UpToIndex,
                 new HLCTimestamp(header.UnboundedCeilingNode, header.UnboundedCeilingPhysical, header.UnboundedCeilingCounter));
 
+            RecordInstalledHistory(partitionId, header);
+
             hooksTicks = EndPhase(ref phaseStartedAt);
 
             // The installed state reflects every entry at or below the boundary, and all of it is durable now:
@@ -657,6 +817,30 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
                 keyValueCount, lockCount, recordCount, receiptCount, intentSection.Intents.Count, input.Length,
                 Ms(verifyTicks), Ms(gateTicks), Ms(drainTicks), Ms(purgeRowsTicks), purge.PurgedPages, purge.ScannedPages, purge.ScannedRows, Ms(purgeStoresTicks),
                 Ms(rowsTicks), Ms(storesTicks), Ms(snapshotsTicks), Ms(floorTicks), Ms(hooksTicks));
+    }
+
+    /// <summary>
+    /// Records which timestamps the installed rows answer, before the install can report success. A snapshot from an
+    /// exporter that names no history carries current rows only, so nothing below this node's clock can be answered.
+    /// </summary>
+    private void RecordInstalledHistory(int partitionId, PartitionStateHeader header)
+    {
+        if (installedHistory is null || clock is null)
+            return;
+
+        HLCTimestamp completeFrom = new(
+            header.HistoryCompleteFromNode, header.HistoryCompleteFromPhysical, header.HistoryCompleteFromCounter);
+
+        if (completeFrom == HLCTimestamp.Zero)
+        {
+            installedHistory.Record(partitionId, clock(), []);
+            return;
+        }
+
+        installedHistory.Record(
+            partitionId,
+            completeFrom,
+            header.HistoryPins.Select(pin => new HLCTimestamp(pin.Node, pin.Physical, pin.Counter)));
     }
 
     /// <summary>Elapsed ticks of the phase that began at <paramref name="phaseStartedAt"/>, which is moved to now.</summary>

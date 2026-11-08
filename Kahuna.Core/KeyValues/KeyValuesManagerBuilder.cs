@@ -4,6 +4,7 @@ using System.Diagnostics.CodeAnalysis;
 using Nixie;
 
 using Kommander;
+using Kommander.Time;
 using Kommander.WAL.IO;
 
 using Kahuna.Server.Communication.Internode;
@@ -558,6 +559,15 @@ internal sealed class KeyValuesManagerBuilder
         PartitionHistoryBounds historyBounds = new(configuration.StoragePath, configuration.StorageRevision, logger);
         historyBounds.AttachLogEnd(partitionId => raft.WalAdapter.GetMaxLog(partitionId));
         partitionStateTransfer.AttachHistoryBounds(historyBounds.RecordInstall, historyBounds.UnboundedCeiling);
+
+        // An install carries only part of a partition's revision history, so it records what it can answer, and every
+        // snapshot read honors that record. A partition an older build installed has no record: it carried no history.
+        InstalledHistoryFence installedHistory = snapshotFloorStore.InstalledHistory;
+        SnapshotFloorStore floorStore = snapshotFloorStore;
+        HLCTimestamp ClockNow() => raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+        partitionStateTransfer.AttachInstalledHistory(installedHistory, () => floorStore.Holds.Values.Select(hold => hold.Timestamp), ClockNow);
+        installedHistory.FenceAtStartup(historyBounds.PartitionsWithInstall(), ClockNow());
+
         replicator.HistoryBounds = historyBounds;
         restorer.HistoryBounds = historyBounds;
         preparedIntentStore.AttachCommitObserver(historyBounds.ObserveCommit);

@@ -17,7 +17,13 @@ compacted log is rebuilt by exactly this snapshot install — see the
 
 `PartitionStateTransfer` exports key/value rows, persistent lock state, completion receipts,
 transaction records, prepared intents and the committed-head/settled-transaction ledger for the
-partition. Ownership is derived from the range map or hash routing over the node-global backend.
+partition. The key/value rows are each key's current row, its revision at each registered snapshot hold,
+and every revision from five seconds before the export onward. Other history is not carried, and a read
+at a timestamp the snapshot did not carry is refused on the installed replica (see
+[reads on an installed replica](mvcc-snapshot-floor-guide.md#reads-on-a-replica-seeded-by-a-snapshot-install)).
+With `k` holds a key that moved past them costs up to `k + 1` rows, so a held partition's snapshot is
+larger, and it is held in memory on the sender. The walk that finds them grows with the revisions written
+since the oldest hold, so size memory and the live-replica retention window with long-lived holds in mind. Ownership is derived from the range map or hash routing over the node-global backend.
 Export first drains queued backend writes so the rows include state applied through the requested
 boundary. That drain is the writer's state-transfer flush (`BackgroundWriteType.FlushForStateTransfer`):
 a full drain and the durability floors, without the targeted revision cleanup an ordinary explicit

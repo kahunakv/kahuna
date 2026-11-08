@@ -459,7 +459,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
         // cannot cover is refused rather than served: an unfenced answer at T lets a commit that starts
         // after it land at or below T, and a later read at T then disagrees with it.
         if (!message.ReadTimestamp.IsNull() && IsSnapshotRead(message.Type)
-            && !FenceClockAtSnapshot(message.Key, message.ReadTimestamp))
+            && (!FenceClockAtSnapshot(message.Key, message.ReadTimestamp) || !InstalledHistoryCanAnswer(message)))
             return KeyValueStaticResponses.MustRetryResponse;
 
     return message.Type switch
@@ -604,6 +604,66 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
 
         clock.ReceiveEvent(nodeId, readTimestamp);
         return true;
+    }
+
+    /// <summary>
+    /// Whether this node holds the revisions a snapshot read needs, on every partition the request touches. An install
+    /// carries part of a partition's history, and a read at any other timestamp would find an older revision or none
+    /// and report it as the answer. The refusal covers the whole request, including a key whose head already answers,
+    /// so one check at the entry covers every read shape and every source: disk, the archive hydrated from it, and
+    /// the resident entry.
+    /// </summary>
+    private bool InstalledHistoryCanAnswer(KeyValueRequest message)
+    {
+        InstalledHistoryFence? fence = kvContext?.SnapshotFloorStore?.InstalledHistory;
+
+        if (fence is null || message.Durability != KeyValueDurability.Persistent || !fence.MayRefuse(message.ReadTimestamp))
+            return true;
+
+        if (message.ProbeKeys is { } probeKeys)
+        {
+            foreach (string key in probeKeys)
+            {
+                if (!ServableAt(fence, key, message.ReadTimestamp))
+                    return false;
+            }
+
+            return true;
+        }
+
+        if (message.ProbeRanges is { } seeks)
+        {
+            foreach (KeyValueProbeRange seek in seeks)
+            {
+                if (!ServableAt(fence, seek.StartKey ?? message.Key, message.ReadTimestamp))
+                    return false;
+            }
+
+            return true;
+        }
+
+        return ServableAt(fence, message.StartKey ?? message.Key, message.ReadTimestamp);
+    }
+
+    private bool ServableAt(InstalledHistoryFence fence, string key, HLCTimestamp readTimestamp)
+    {
+        KeyValueContext context = kvContext!;
+
+        (int partitionId, _) = RangeRouting.Locate(
+            context.KeySpaceRegistry, context.RangeMapStore.Current, new DataPartitionRouter(context.Raft), key);
+
+        if (fence.IsServable(partitionId, readTimestamp))
+            return true;
+
+        KeyValueSnapshotReadMetrics.InstalledHistoryFenceRefused.Add(1);
+
+        long tick = Environment.TickCount64;
+        long lastTick = Volatile.Read(ref lastSnapshotRefusalWarningTick);
+        if (tick - lastTick >= SnapshotRefusalWarningSpacingMs
+            && Interlocked.CompareExchange(ref lastSnapshotRefusalWarningTick, tick, lastTick) == lastTick)
+            context.Logger.LogSnapshotReadRefusedInstalledHistory(key, readTimestamp, partitionId);
+
+        return false;
     }
 
     /// <summary>

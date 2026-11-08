@@ -176,6 +176,36 @@ A read that finds no version at or before `T` correctly returns "does not exist"
 that is the right answer when the key didn't exist at `T` or its history below the floor was already
 reclaimed.
 
+### Reads on a replica seeded by a snapshot install
+
+A whole-partition snapshot install replaces a partition's rows and carries only part of its history,
+because on-disk history is kept forever by default and the export is held in memory on the sender. It
+carries each key's current row, its revision at each registered hold, and every revision from shortly
+before the export onward (the *complete-from* timestamp, five seconds below the export's start).
+
+So on an installed replica, a hold at `T` guarantees **exactly `T`**, and every timestamp at or above
+complete-from, but not the timestamps between them. A read at a timestamp the install did not carry
+would find an older revision or none, so the replica refuses the whole request with `MustRetry` and
+increments `kahuna.kv.snapshot_installed_history_refused_total`, even for a key whose head could answer.
+This covers point reads, exists, range, bucket and prefix scans, and batched probes. A replica that kept
+its history still answers the timestamp, so the read succeeds again if leadership moves to one.
+
+Consequences for clients:
+
+- Read at the hold's own timestamp, unchanged. CamusDB branches do this: a branch reads each ancestor at
+  its fork timestamp. A parent `AS OF` at an arbitrary timestamp above a fork is not covered.
+- The refusal lasts until the partition's next install, so a retry loop with no deadline does not end
+  while this replica leads. Bound it.
+- A hold registered with a timestamp below complete-from after the export sampled the registry cannot be
+  pinned. It is refused on that replica, never answered wrongly. The five-second margin covers a hold minted
+  just before the export. An export also passes on only the holds its own node can answer.
+- A partition installed by a build without this behaviour has lost its history and has no record of what it
+  carried. If the install is recorded, the first start on a build with this behaviour fences the partition at
+  that moment. Every older timestamp is refused on that replica, including one it could still answer. Drop and
+  recreate a branch that needs to read from it.
+- A snapshot from an exporter on an older build carries no history, so the importer fences the partition at
+  its own clock.
+
 ---
 
 ## 6. The public API
@@ -225,6 +255,7 @@ The subsystem publishes these instruments under the `Kahuna` meter scope:
 | `kahuna.snapshot_floor.effective_floor_ms` | gauge | Physical (millisecond) component of the effective floor, or 0 when no hold is live. |
 | `kahuna.snapshot_floor.prune_skipped_unconfirmed_total` | counter | Prune cycles skipped because local meta-partition catch-up could not be confirmed; work is retried later. |
 | `kahuna.snapshot_floor.prune_confirm_timed_out_total` | counter | Catch-up confirmations that ran out of `RevisionPruneConfirmTimeout` (default 1 s) before answering. Each is also a skipped prune cycle; a sustained rate means the node is not receiving the meta partition (not yet a roster member, or cut off from its leader). |
+| `kahuna.kv.snapshot_installed_history_refused_total` | counter | Snapshot reads refused because the install that seeded this replica did not carry their timestamp (§5). A burst of old statement reads can follow an install. A sustained rate means a client reads a timestamp no hold names, or a hold could not be pinned. |
 | `kahuna.snapshot_floor.missing_protected_version_total` | counter | **Must stay 0.** Increments if reclamation ever schedules a floor-protected version for deletion. |
 
 `missing_protected_version_total` is the **fault signal**. It is wired at both reclamation sites: the in-memory trim (if the

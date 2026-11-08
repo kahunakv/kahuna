@@ -15,6 +15,20 @@ message PartitionStateHeader {
   int32 unboundedCeilingNode = 3;
   int64 unboundedCeilingPhysical = 4;
   uint32 unboundedCeilingCounter = 5;
+  // The snapshot carries every revision at or above this timestamp, and otherwise each key's revision at each pin
+  // below. Zero when the exporter predates the field: the snapshot then carries current rows only, and the importer
+  // fences the partition at its own clock.
+  int32 historyCompleteFromNode = 6;
+  int64 historyCompleteFromPhysical = 7;
+  uint32 historyCompleteFromCounter = 8;
+  repeated PartitionStateHistoryPin historyPins = 9;
+}
+
+// A snapshot-hold timestamp a whole-partition snapshot answers exactly.
+message PartitionStateHistoryPin {
+  int32 node = 1;
+  int64 physical = 2;
+  uint32 counter = 3;
 }
 
 // One persistent lock in a whole-partition snapshot. Carries every field needed to reconstruct

@@ -45,6 +45,17 @@ internal static class KeyValueSnapshotReadMetrics
             description: "Snapshot reads refused because their timestamp was too far ahead of the serving node's clock to be fenced.");
 
     /// <summary>
+    /// Snapshot reads refused because this node received the partition by install and that install did not carry the
+    /// read's timestamp. A read there would find an older revision or none, so it is refused with MustRetry; a replica
+    /// that kept its history can still answer it. A burst of old statement reads can follow an install. A sustained
+    /// rate means a client reads an old timestamp no snapshot hold names, or holds a hold the install could not pin.
+    /// </summary>
+    internal static readonly Counter<long> InstalledHistoryFenceRefused =
+        Meter.CreateCounter<long>(
+            "kahuna.kv.snapshot_installed_history_refused_total",
+            description: "Snapshot reads refused because the install that seeded this replica did not carry their timestamp.");
+
+    /// <summary>
     /// Snapshot reads served the committed head over a foreign staged write whose commit could still be moved:
     /// the read raised the intent's commit floor to its own timestamp instead of waiting for the writer to decide,
     /// and the writer's commit is minted above that floor. One count per key the read stepped over. A steady rate

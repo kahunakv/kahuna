@@ -185,6 +185,8 @@ internal sealed class SnapshotFloorStore : IDisposable
         this.startupGraceWindow = startupGraceWindow;
         this.limits = limits;
 
+        InstalledHistory = new(storagePath, storageRevision, logger);
+
         snapshotPath = string.IsNullOrEmpty(storagePath)
             ? null
             : Path.Combine(storagePath, $"snapshotfloor_{storageRevision}.snapshot");
@@ -211,6 +213,9 @@ internal sealed class SnapshotFloorStore : IDisposable
 
     /// <summary>The committed hold set. Lock-free read.</summary>
     public IReadOnlyDictionary<string, SnapshotHold> Holds => holds;
+
+    /// <summary>The snapshot timestamps this node can answer for the partitions it received by install.</summary>
+    public InstalledHistoryFence InstalledHistory { get; }
 
     /// <summary>
     /// Returns the effective floor (minimum held timestamp among live holds) and the live hold

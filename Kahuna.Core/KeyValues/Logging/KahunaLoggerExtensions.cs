@@ -416,6 +416,9 @@ public static partial class KahunaLoggerExtensions
     [LoggerMessage(Level = LogLevel.Warning, Message = "Snapshot read of {Key} at {ReadTimestamp} refused: the timestamp leads this node's clock ({Now}) by {LeadMs} ms, past the {MaxLeadMs} ms clock-fence bound. Served unfenced it could disagree with a later read at the same timestamp; the caller retries once the clocks converge (a wall-clock jump on the node that minted it spreads with its next Raft message)")]
     public static partial void LogSnapshotReadRefusedClockLead(this ILogger<IKahuna> logger, string key, HLCTimestamp readTimestamp, HLCTimestamp now, long leadMs, long maxLeadMs);
 
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Snapshot read of {Key} at {ReadTimestamp} refused: partition #{PartitionId} was installed on this node by a snapshot that does not carry that timestamp. A replica that kept its history can answer it; a timestamp below the install that a client needs must be named by a snapshot hold before the install.")]
+    public static partial void LogSnapshotReadRefusedInstalledHistory(this ILogger<IKahuna> logger, string key, HLCTimestamp readTimestamp, int partitionId);
+
     [LoggerMessage(Level = LogLevel.Information, Message = "Transaction {TransactionId}: every mandatory lock release after the commit finalize was acknowledged on retry, after {Attempts} attempt(s) and {ElapsedMs} ms")]
     public static partial void LogLockReleasesAcknowledgedOnRetry(this ILogger<IKahuna> logger, HLCTimestamp transactionId, int attempts, long elapsedMs);
 

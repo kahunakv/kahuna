@@ -96,6 +96,13 @@ internal sealed class PartitionHistoryBounds
         }
     }
 
+    /// <summary>The partitions a recorded snapshot install replaced on this node.</summary>
+    public IReadOnlyList<int> PartitionsWithInstall()
+    {
+        lock (stateLock)
+            return [.. bounds.Where(entry => entry.Value.InstallBoundary > 0).Select(entry => entry.Key)];
+    }
+
     /// <summary>The unbounded commit ceiling of <paramref name="partitionId"/>, or zero when none was applied.</summary>
     public HLCTimestamp UnboundedCeiling(int partitionId)
     {
