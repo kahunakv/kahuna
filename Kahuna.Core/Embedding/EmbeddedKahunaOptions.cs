@@ -877,23 +877,19 @@ public sealed class EmbeddedKahunaOptions
     public string BackupDir { get; set; } = "";
 
     /// <summary>
-    /// Which storage target holds backups. <c>"local"</c> (the default) keeps them in
-    /// <see cref="BackupDir"/>. Any other value requires <see cref="BackupStorageProvider"/> to be set,
-    /// since object-storage targets ship as separate packages an embedding host opts into.
+    /// Which backup target holds backups, by the name of an <see cref="IBackupStorageProvider"/> in
+    /// <see cref="StorageProviders"/>. <c>"local"</c> (the default) keeps them in <see cref="BackupDir"/>. An
+    /// object-storage target ships in its own package: register its provider in <see cref="StorageProviders"/>
+    /// and give its name here.
     /// </summary>
-    public string BackupTarget { get; set; } = "local";
+    public string BackupTarget { get; set; } = LocalBackupStorageProvider.Name;
 
     /// <summary>
-    /// Local directory backup bytes transit when the target cannot be written to directly by the storage
-    /// engine. Mandatory for such a target; size it for one whole full backup.
+    /// Local directory backup bytes pass through on the way to a target whose provider sets
+    /// <see cref="IBackupStorageProvider.RequiresLocalScratch"/>. Mandatory for such a target; size it for one
+    /// whole full backup.
     /// </summary>
     public string BackupScratchDir { get; set; } = "";
-
-    /// <summary>
-    /// Installs an object-storage target. Null (the default) uses the local-directory implementations, so
-    /// an embedded node inherits no cloud SDK it did not ask for.
-    /// </summary>
-    public BackupStorageProvider? BackupStorageProvider { get; set; }
 
     /// <summary>
     /// Operator-assigned cluster identity stamped into every backup manifest; set the same value on

@@ -49,7 +49,6 @@ internal static partial class PitrBootstrapStartup
         {
             plan = await BackupFacade.PrepareBootstrapAsync(
                 configuration,
-                opts.PitrBackupDir,
                 leafBackupId,
                 targetTime,
                 TimeSpan.FromSeconds(opts.PitrWindowSeconds),

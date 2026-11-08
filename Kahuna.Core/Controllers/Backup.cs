@@ -14,7 +14,6 @@ public sealed partial class KahunaManager
 {
     /// <inheritdoc/>
     public Task BootstrapFromPitrBackupAsync(
-        string backupDir,
         Guid leafBackupId,
         HLCTimestamp targetTime,
         Kommander.WAL.IWAL walAdapter,
@@ -22,9 +21,12 @@ public sealed partial class KahunaManager
         TimeSpan baseSnapshotInterval) =>
         // Coverage, window, authentication and cluster checks all run before any backend/WAL mutation;
         // see BackupFacade.BootstrapAsync and BootstrapHelper.BootstrapNodeAsync.
-        BackupFacade.BootstrapAsync(
-            configuration, backupDir, leafBackupId, targetTime, persistenceBackend, walAdapter,
+        backups.BootstrapAsync(
+            configuration, leafBackupId, targetTime, persistenceBackend, walAdapter,
             pitrWindow, baseSnapshotInterval, FlushPersistenceAsync, logger, keyValues.RecordSeedBoundary);
+
+    /// <inheritdoc/>
+    public Task StartBackupsAsync(CancellationToken ct = default) => backups.StartAsync(ct);
 
     // ── Backup / PITR ──────────────────────────────────────────────────────────────────────
 

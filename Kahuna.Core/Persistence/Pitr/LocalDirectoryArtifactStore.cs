@@ -53,8 +53,7 @@ public sealed class LocalDirectoryArtifactStore : IBackupArtifactStore
 
     public BackupArtifactStoreCapabilities Capabilities { get; } = new(
         SupportsPosixHardening: true,
-        SupportsCheapRangeReads: true,
-        RequiresLocalScratch: false);
+        SupportsCheapRangeReads: true);
 
     public Task<bool> BackupExistsAsync(Guid backupId, CancellationToken ct = default) =>
         Task.FromResult(Directory.Exists(BackupPath(backupId)));

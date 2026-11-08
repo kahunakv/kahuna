@@ -9,6 +9,7 @@ namespace Kahuna.Server.Persistence.Pitr;
 /// implementations to block a thread per call inside an otherwise-async backup path. The local
 /// implementation is still I/O-bound on a disk, so it has real work to await too.
 /// </para>
+/// <para>See <see cref="IBackupStorageProvider"/> for the binary-contract rule.</para>
 /// </summary>
 public interface IBackupStorageTarget
 {

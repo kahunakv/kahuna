@@ -277,7 +277,8 @@ public class TestManyValuesReadTimestampGrpc
         public Task<bool> OnLeaderChanged(int partitionId, string node) => throw new NotImplementedException();
         public Task OnLeadershipLost(int partitionId, long term) => Task.CompletedTask;
         public Task FlushPersistenceAsync() => throw new NotImplementedException();
-        public Task BootstrapFromPitrBackupAsync(string backupDir, Guid leafBackupId, HLCTimestamp targetTime, IWAL walAdapter, TimeSpan pitrWindow, TimeSpan baseSnapshotInterval) => throw new NotImplementedException();
+        public Task BootstrapFromPitrBackupAsync(Guid leafBackupId, HLCTimestamp targetTime, IWAL walAdapter, TimeSpan pitrWindow, TimeSpan baseSnapshotInterval) => throw new NotImplementedException();
+        public Task StartBackupsAsync(CancellationToken ct = default) => Task.CompletedTask;
         public void RegisterKeyRange(string keySpace) => throw new NotImplementedException();
         public Task<bool> RegisterKeyRangeAsync(string keySpace, CancellationToken cancellationToken = default) => throw new NotImplementedException();
         public Task<bool> RemoveKeyRangeAsync(string keySpace, CancellationToken cancellationToken = default) => throw new NotImplementedException();

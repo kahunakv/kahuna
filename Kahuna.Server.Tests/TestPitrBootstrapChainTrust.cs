@@ -185,8 +185,9 @@ public sealed class TestPitrBootstrapChainTrust : IDisposable
 
     // ── the node entry point: configuration in, typed outcome out ───────────────────────────────────
 
-    private static EmbeddedKahunaNode Node(string macKeyFile = "", string clusterId = "") => new(new EmbeddedKahunaOptions
+    private static EmbeddedKahunaNode Node(string backupDir, string macKeyFile = "", string clusterId = "") => new(new EmbeddedKahunaOptions
     {
+        BackupDir = backupDir,
         NodeName = "boottrust-" + Guid.NewGuid().ToString("N")[..8],
         Storage = "memory",
         WalStorage = "memory",
@@ -209,9 +210,9 @@ public sealed class TestPitrBootstrapChainTrust : IDisposable
             await catalog.PutAsync(m, TestContext.Current.CancellationToken);
         }
 
-        await using EmbeddedKahunaNode node = Node(macKeyFile: keyFile);
+        await using EmbeddedKahunaNode node = Node(dir, macKeyFile: keyFile);
         await node.Kahuna.BootstrapFromPitrBackupAsync(
-            dir, chain[^1].BackupId, HLCTimestamp.Zero, node.Raft.WalAdapter, TimeSpan.FromHours(1), TimeSpan.FromMinutes(30));
+            chain[^1].BackupId, HLCTimestamp.Zero, node.Raft.WalAdapter, TimeSpan.FromHours(1), TimeSpan.FromMinutes(30));
 
         Assert.True(HasCheckpoint(node.Raft.WalAdapter, 1));
     }
@@ -222,9 +223,9 @@ public sealed class TestPitrBootstrapChainTrust : IDisposable
         string dir = BackupDir("node_unsigned");
         (IReadOnlyList<BackupManifest> chain, _, _) = await BuildChain(dir, null, NowMs());
 
-        await using EmbeddedKahunaNode node = Node(macKeyFile: WriteKeyFile("mac2.key"));
+        await using EmbeddedKahunaNode node = Node(dir, macKeyFile: WriteKeyFile("mac2.key"));
         KahunaBackupException ex = await Assert.ThrowsAsync<KahunaBackupException>(() => node.Kahuna.BootstrapFromPitrBackupAsync(
-            dir, chain[^1].BackupId, HLCTimestamp.Zero, node.Raft.WalAdapter, TimeSpan.FromHours(1), TimeSpan.FromMinutes(30)));
+            chain[^1].BackupId, HLCTimestamp.Zero, node.Raft.WalAdapter, TimeSpan.FromHours(1), TimeSpan.FromMinutes(30)));
 
         Assert.Equal(KahunaBackupOutcome.CorruptArtifact, ex.Outcome);
         Assert.False(HasCheckpoint(node.Raft.WalAdapter, 1));
@@ -236,9 +237,9 @@ public sealed class TestPitrBootstrapChainTrust : IDisposable
         string dir = BackupDir("node_foreign");
         (IReadOnlyList<BackupManifest> chain, _, _) = await BuildChain(dir, "cluster-a", NowMs());
 
-        await using EmbeddedKahunaNode node = Node(clusterId: "cluster-b");
+        await using EmbeddedKahunaNode node = Node(dir, clusterId: "cluster-b");
         KahunaBackupException ex = await Assert.ThrowsAsync<KahunaBackupException>(() => node.Kahuna.BootstrapFromPitrBackupAsync(
-            dir, chain[^1].BackupId, HLCTimestamp.Zero, node.Raft.WalAdapter, TimeSpan.FromHours(1), TimeSpan.FromMinutes(30)));
+            chain[^1].BackupId, HLCTimestamp.Zero, node.Raft.WalAdapter, TimeSpan.FromHours(1), TimeSpan.FromMinutes(30)));
 
         Assert.Equal(KahunaBackupOutcome.CorruptChain, ex.Outcome);
         Assert.False(HasCheckpoint(node.Raft.WalAdapter, 1));
@@ -250,9 +251,9 @@ public sealed class TestPitrBootstrapChainTrust : IDisposable
         string dir = BackupDir("node_unknown");
         Directory.CreateDirectory(dir);
 
-        await using EmbeddedKahunaNode node = Node();
+        await using EmbeddedKahunaNode node = Node(dir);
         KahunaBackupException ex = await Assert.ThrowsAsync<KahunaBackupException>(() => node.Kahuna.BootstrapFromPitrBackupAsync(
-            dir, Guid.NewGuid(), HLCTimestamp.Zero, node.Raft.WalAdapter, TimeSpan.FromHours(1), TimeSpan.FromMinutes(30)));
+            Guid.NewGuid(), HLCTimestamp.Zero, node.Raft.WalAdapter, TimeSpan.FromHours(1), TimeSpan.FromMinutes(30)));
 
         Assert.Equal(KahunaBackupOutcome.CorruptChain, ex.Outcome);
     }

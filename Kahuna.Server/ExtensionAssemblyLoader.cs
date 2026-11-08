@@ -5,27 +5,29 @@ using System.Security.Cryptography;
 using Microsoft.Extensions.Logging;
 
 using Kahuna.Extensibility;
+using Kahuna.Server.Persistence.Pitr;
 using Kahuna.Server.Persistence.Providers;
 
 namespace Kahuna;
 
 /// <summary>
 /// Loads extension assemblies named on the command line: user-defined script functions
-/// (<see cref="IKahunaFunctionProvider"/>) and storage engines (<see cref="IPersistenceBackendProvider"/>
-/// for <c>--storage</c>, <see cref="IWalProvider"/> for <c>--wal-storage</c>). One assembly may publish
+/// (<see cref="IKahunaFunctionProvider"/>), storage engines (<see cref="IPersistenceBackendProvider"/>
+/// for <c>--storage</c>, <see cref="IWalProvider"/> for <c>--wal-storage</c>) and backup targets
+/// (<see cref="IBackupStorageProvider"/> for <c>--pitr-backup-target</c>). One assembly may publish
 /// any of them.
 ///
 /// <para>An operator who runs the shipped binary cannot edit <c>Program.cs</c>, so this is the only
-/// way for them to add a function or a storage engine. Nothing is loaded unless
+/// way for them to add a function, a storage engine or a backup target. Nothing is loaded unless
 /// <c>--extension-assembly</c> is given: there is no plugin directory, no probing and no discovery,
 /// so a node that was not asked to load an extension runs none of this code.</para>
 ///
 /// <para>Every failure stops startup. A node that came up missing one function would answer scripts
 /// that call it with <c>Errored</c> while its peers answered normally — the exact intermittent,
 /// node-dependent failure this feature works hardest to make impossible. Refusing to start turns
-/// that into one clear message at the moment the operator can still fix it. A storage engine may
-/// not take a type name that is already registered, so an extension never replaces a built-in
-/// engine behind the operator's back.</para>
+/// that into one clear message at the moment the operator can still fix it. A storage engine or a
+/// backup target may not take a name that is already registered, so an extension never replaces a
+/// built-in one behind the operator's back.</para>
 ///
 /// <para>An extension assembly is fully trusted code. It runs in this process with the node's
 /// privileges, and nothing sandboxes it. Each loaded file is logged with its path and the SHA-256 of
@@ -35,12 +37,12 @@ public static partial class ExtensionAssemblyLoader
 {
     [LoggerMessage(
         Level = LogLevel.Information,
-        Message = "Loaded extension assembly {Path} (sha256 {Hash}): {Providers} provider(s), {Functions} function(s), storage engines [{StorageEngines}]. Every node of the cluster must load the same artifact")]
+        Message = "Loaded extension assembly {Path} (sha256 {Hash}): {Providers} provider(s), {Functions} function(s), storage engines and backup targets [{StorageEngines}]. Every node of the cluster must load the same artifact")]
     private static partial void LogExtensionAssemblyLoaded(this ILogger logger, string path, string hash, int providers, int functions, string storageEngines);
 
     /// <summary>
     /// Builds the node's function registry from the given assembly paths, and registers the storage
-    /// engines they publish in <paramref name="storageProviders"/>.
+    /// engines and backup targets they publish in <paramref name="storageProviders"/>.
     /// </summary>
     /// <param name="paths">
     /// Assembly paths from <c>--extension-assembly</c>. Null or empty returns an empty registry
@@ -48,8 +50,8 @@ public static partial class ExtensionAssemblyLoader
     /// </param>
     /// <param name="logger">Receives one line per loaded assembly.</param>
     /// <param name="storageProviders">
-    /// The node's storage engines. Null for a caller that accepts functions only: an assembly that
-    /// publishes a storage engine then fails.
+    /// The node's storage engines and backup targets. Null for a caller that accepts functions only: an
+    /// assembly that publishes a storage engine or a backup target then fails.
     /// </param>
     /// <exception cref="KahunaServerException">
     /// A path is unreadable, an assembly cannot be loaded, an assembly publishes no provider, a
@@ -90,22 +92,28 @@ public static partial class ExtensionAssemblyLoader
         }
         catch (Exception ex)
         {
-            throw new KahunaServerException($"--extension-assembly '{fullPath}' could not be loaded: {ex.GetType().Name}: {ex.Message}");
+            throw new KahunaServerException(
+                HostVersionMismatch(ex, fullPath)
+                ?? $"--extension-assembly '{fullPath}' could not be loaded: {ex.GetType().Name}: {ex.Message}");
         }
 
         Type[] types = LoadTypes(assembly, fullPath);
         Type[] functionProviderTypes = FindProviderTypes<IKahunaFunctionProvider>(types);
         Type[] backendProviderTypes = FindProviderTypes<IPersistenceBackendProvider>(types);
         Type[] walProviderTypes = FindProviderTypes<IWalProvider>(types);
+        Type[] backupProviderTypes = FindProviderTypes<IBackupStorageProvider>(types);
 
-        if (functionProviderTypes.Length == 0 && backendProviderTypes.Length == 0 && walProviderTypes.Length == 0)
+        bool publishesStorage = backendProviderTypes.Length > 0 || walProviderTypes.Length > 0 || backupProviderTypes.Length > 0;
+
+        if (functionProviderTypes.Length == 0 && !publishesStorage)
             throw new KahunaServerException(
                 $"--extension-assembly '{fullPath}' publishes nothing: it contains no public, non-abstract {nameof(IKahunaFunctionProvider)}, " +
-                $"{nameof(IPersistenceBackendProvider)} or {nameof(IWalProvider)} implementation with a parameterless constructor");
+                $"{nameof(IPersistenceBackendProvider)}, {nameof(IWalProvider)} or {nameof(IBackupStorageProvider)} implementation " +
+                "with a parameterless constructor");
 
-        if (storageProviders is null && (backendProviderTypes.Length > 0 || walProviderTypes.Length > 0))
+        if (storageProviders is null && publishesStorage)
             throw new KahunaServerException(
-                $"--extension-assembly '{fullPath}' publishes a storage engine, and this host does not take storage engines from extensions");
+                $"--extension-assembly '{fullPath}' publishes a storage engine or a backup target, and this host does not take them from extensions");
 
         int before = registry.Count;
 
@@ -159,6 +167,21 @@ public static partial class ExtensionAssemblyLoader
             storageEngines.Add("wal:" + storageType);
         }
 
+        foreach (Type providerType in backupProviderTypes)
+        {
+            IBackupStorageProvider provider = Create<IBackupStorageProvider>(providerType, fullPath);
+            string targetName = StorageTypeOf(provider.TargetName, providerType, fullPath);
+
+            // "local" is registered before any extension loads, so this also refuses an extension that
+            // tries to take over the built-in target.
+            if (storageProviders!.FindBackupStorage(targetName) is not null)
+                throw new KahunaServerException(
+                    $"--extension-assembly '{fullPath}': provider '{providerType.FullName}' registers backup target '{targetName}', which is already registered");
+
+            storageProviders.Register(provider);
+            storageEngines.Add("backup:" + targetName);
+        }
+
         if (logger.IsEnabled(LogLevel.Information))
             logger.LogExtensionAssemblyLoaded(fullPath, hash, functionProviderTypes.Length, registry.Count - before, string.Join(", ", storageEngines));
     }
@@ -200,8 +223,60 @@ public static partial class ExtensionAssemblyLoader
             Exception? cause = Array.Find(ex.LoaderExceptions, candidate => candidate is not null);
 
             throw new KahunaServerException(
-                $"--extension-assembly '{fullPath}': its types could not be loaded, which usually means a dependency is missing next to it. First cause: {cause?.Message ?? "unknown"}");
+                (cause is null ? null : HostVersionMismatch(cause, fullPath))
+                ?? $"--extension-assembly '{fullPath}': its types could not be loaded, which usually means a dependency is missing next to it. First cause: {cause?.Message ?? "unknown"}");
         }
+    }
+
+    /// <summary>
+    /// The message for an extension built against a newer version of an assembly the server provides, such
+    /// as <c>Kahuna.Core</c>, or null when <paramref name="ex"/> is another failure. The server's copy of such
+    /// an assembly always wins (see <see cref="ExtensionLoadContext"/>), and the runtime refuses to bind a
+    /// reference to an older version than the one the extension was compiled against. Without this message
+    /// the failure reads as a dependency missing next to the file, and the operator looks in the wrong place.
+    /// </summary>
+    public static string? HostVersionMismatch(Exception ex, string fullPath)
+    {
+        string? requested = ex switch
+        {
+            FileLoadException load => load.FileName,
+            FileNotFoundException notFound => notFound.FileName,
+            _ => null,
+        };
+
+        if (requested is null)
+            return null;
+
+        AssemblyName wanted;
+        try
+        {
+            wanted = new AssemblyName(requested);
+        }
+        catch (Exception parse) when (parse is ArgumentException or FileLoadException)
+        {
+            return null;
+        }
+
+        if (wanted.Name is null || wanted.Version is null || !ExtensionLoadContext.IsHostAssembly(wanted.Name))
+            return null;
+
+        Version? hostVersion = null;
+        foreach (Assembly loaded in AssemblyLoadContext.Default.Assemblies)
+        {
+            AssemblyName name = loaded.GetName();
+            if (string.Equals(name.Name, wanted.Name, StringComparison.OrdinalIgnoreCase))
+            {
+                hostVersion = name.Version;
+                break;
+            }
+        }
+
+        if (hostVersion is not null && hostVersion >= wanted.Version)
+            return null;
+
+        return $"--extension-assembly '{fullPath}' is built against {wanted.Name} {wanted.Version}, and this server has " +
+               $"{wanted.Name} {hostVersion?.ToString() ?? "unknown"}. Use a build of the extension for this server's version, " +
+               "or upgrade the server.";
     }
 
     /// <summary>
@@ -251,6 +326,9 @@ public static partial class ExtensionAssemblyLoader
         : AssemblyLoadContext(name: "kahuna-extension:" + Path.GetFileNameWithoutExtension(assemblyPath), isCollectible: false)
     {
         private static readonly HashSet<string> HostAssemblies = ReadHostAssemblies();
+
+        /// <summary>True when the server provides <paramref name="assemblyName"/>, so an extension always binds to the server's copy.</summary>
+        internal static bool IsHostAssembly(string assemblyName) => HostAssemblies.Contains(assemblyName);
 
         private readonly AssemblyDependencyResolver resolver = new(assemblyPath);
 

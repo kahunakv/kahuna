@@ -476,8 +476,8 @@ public interface IKahuna
     /// the node joins an existing cluster with <c>--join-existing</c>, the leader can catch it
     /// up via a small AppendEntries delta rather than a full <c>InstallSnapshot</c>.
     /// <para>
-    /// <paramref name="backupDir"/> is both the catalog root (where <c>.manifest</c> files live)
-    /// and the artifacts root (where per-backup subdirectories with checkpoint/WAL files live).
+    /// The chain is read from the node's backup storage: the target that <c>BackupTarget</c> names, under
+    /// <c>BackupDir</c>. A node with no backup directory refuses.
     /// <paramref name="leafBackupId"/> is the most-recent backup in the chain to restore from.
     /// When <paramref name="targetTime"/> is <see cref="HLCTimestamp.Zero"/> the restore uses
     /// the chain's natural maximum HLC (equivalent to "restore everything").
@@ -498,12 +498,19 @@ public interface IKahuna
     /// detail is logged against the operation id the message carries.</para>
     /// </summary>
     public Task BootstrapFromPitrBackupAsync(
-        string backupDir,
         Guid leafBackupId,
         HLCTimestamp targetTime,
         IWAL walAdapter,
         TimeSpan pitrWindow,
         TimeSpan baseSnapshotInterval);
+
+    /// <summary>
+    /// Starts the node's backup storage: connects to the backup target and checks it (credentials, bucket
+    /// protections, root permissions), then builds the backup service. A node calls it before it joins its
+    /// cluster, so a target that cannot work stops the start instead of failing at the first scheduled
+    /// backup. A node with no backup directory has nothing to start. Idempotent.
+    /// </summary>
+    public Task StartBackupsAsync(CancellationToken ct = default);
 
     /// <summary>
     /// Marks <paramref name="keySpace"/> as key-range routed on this node. Must be called on every

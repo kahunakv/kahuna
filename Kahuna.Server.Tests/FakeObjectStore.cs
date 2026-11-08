@@ -232,8 +232,7 @@ internal sealed class FakeObjectArtifactStore(FakeObjectStore store, string scra
 {
     public BackupArtifactStoreCapabilities Capabilities { get; } = new(
         SupportsPosixHardening: false,
-        SupportsCheapRangeReads: true,
-        RequiresLocalScratch: true);
+        SupportsCheapRangeReads: true);
 
     public Task<bool> BackupExistsAsync(Guid backupId, CancellationToken ct = default) =>
         Task.FromResult(store.List(FakeObjectStore.ArtifactPrefix(backupId)).Count > 0);

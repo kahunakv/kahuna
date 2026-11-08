@@ -21,6 +21,14 @@ namespace Kahuna.Server.Persistence.Pitr;
 /// <see cref="KahunaBackupException"/> callers classify by outcome.
 ///
 /// <para>
+/// The facade owns the node's one <see cref="IBackupStorage"/>. It opens it at construction, which does no
+/// I/O, and starts it in <see cref="StartAsync"/>, which the node calls before it joins its cluster: a target
+/// that cannot work stops the start. The backup service and the GC reaper are built once the storage has
+/// started, because both need its stores. A node assembled without the start step starts the storage at its
+/// first backup operation instead, and a start that failed is tried again at the next one.
+/// </para>
+///
+/// <para>
 /// A node without a configured backup directory gets a <see cref="Disabled"/> instance: it answers
 /// <see cref="IsConfigured"/> false and refuses every operation, so callers never have to test for a
 /// null service.
@@ -41,18 +49,51 @@ internal sealed class BackupFacade : IDisposable
 
     private const int SnapshotHoldRetryDelayMs = 50;
 
-    private readonly BackupService? service;
+    private const string NotConfiguredMessage =
+        "Backup is not configured on this node. Set BackupDir in configuration or --pitr-backup-dir.";
 
-    private BackupFacade(BackupService? service) => this.service = service;
+    private readonly IBackupStorage? storage;
 
-    internal bool IsConfigured => service is not null;
+    private readonly string target;
+
+    private readonly Func<IBackupStorage, BackupService>? createService;
+
+    private readonly Action<BackupService>? onServiceStarted;
+
+    private readonly ILogger? logger;
+
+    // Serializes the start, so two first operations never start the storage or build the service twice.
+    private readonly SemaphoreSlim startGate = new(1, 1);
+
+    // Guards the publication of the started service against Dispose.
+    private readonly Lock sync = new();
+
+    private BackupService? service;
+
+    private bool disposed;
+
+    private BackupFacade(
+        IBackupStorage? storage,
+        string target,
+        Func<IBackupStorage, BackupService>? createService,
+        Action<BackupService>? onServiceStarted,
+        ILogger? logger)
+    {
+        this.storage = storage;
+        this.target = target;
+        this.createService = createService;
+        this.onServiceStarted = onServiceStarted;
+        this.logger = logger;
+    }
+
+    internal bool IsConfigured => storage is not null;
 
     /// <summary>A node with no backup directory configured: every operation refuses.</summary>
-    internal static BackupFacade Disabled() => new(null);
+    internal static BackupFacade Disabled() => new(null, "", null, null, null);
 
     /// <summary>
-    /// Builds the backup service for a node that has a backup directory configured, and starts the
-    /// periodic GC reaper when one is enabled.
+    /// Opens the backup storage of a node that has a backup directory configured. The service, and the
+    /// periodic GC reaper when one is enabled, are built when the storage starts.
     /// </summary>
     /// <param name="flushPersistenceAsync">Flush barrier run before a checkpoint is captured.</param>
     /// <param name="appliedHlcProbe">
@@ -72,14 +113,85 @@ internal sealed class BackupFacade : IDisposable
         IInterNodeCommunication interNodeCommunication,
         ILogger<IKahuna> logger)
     {
-        BackupStoragePair backupStorage = CreateBackupStorage(configuration, configuration.BackupDir, logger);
+        IBackupStorage storage = OpenStorage(configuration, logger);
 
-        BackupService service = new(
+        return new BackupFacade(
+            storage,
+            configuration.BackupTarget,
+            started => CreateService(
+                started, raft, persistenceBackend, configuration, keyValues, flushPersistenceAsync, appliedHlcProbe,
+                interNodeCommunication, logger),
+            service =>
+            {
+                // Periodic backup GC: sweeps crash-orphaned/leftover artifacts (always) and enforces
+                // retention (when configured), including a startup sweep on its first tick. Disabled when
+                // the interval is non-positive; GC then runs only inline after each backup.
+                if (configuration.BackupGcInterval > TimeSpan.Zero)
+                    actorSystem.Spawn<BackupGcReaperActor, BackupGcReaperRequest>(
+                        "backup-gc-reaper",
+                        service,
+                        configuration,
+                        logger);
+            },
+            logger);
+    }
+
+    /// <summary>
+    /// Opens the backup storage that <see cref="KahunaConfiguration.BackupTarget"/> names. Before the provider
+    /// sees anything, the backup root is refused if it is unsafe, and the scratch root is refused if it is
+    /// unsafe and then created owner-only.
+    /// <para>
+    /// Backup bytes sit on local disk in cleartext while they pass through scratch, whatever the eventual
+    /// target is, so the scratch root gets the same treatment as a local backup root. Doing this here means a
+    /// provider cannot forget it, and cannot weaken it.
+    /// </para>
+    /// </summary>
+    private static IBackupStorage OpenStorage(KahunaConfiguration configuration, ILogger logger)
+    {
+        IBackupStorageProvider provider = configuration.StorageProviders.GetBackupStorage(configuration.BackupTarget);
+        string? scratch = string.IsNullOrWhiteSpace(configuration.BackupScratchDir) ? null : configuration.BackupScratchDir;
+
+        // Startup validation refuses this first; this is the backstop for a host that bypassed validation.
+        if (provider.RequiresLocalScratch && scratch is null)
+            throw new KahunaServerException(
+                $"Backup target '{provider.TargetName}' stages backups through a local directory, " +
+                "but no backup scratch directory is configured.");
+
+        BackupFilePermissions.EnsureRootSecure(configuration.BackupDir);
+
+        if (scratch is not null)
+        {
+            BackupFilePermissions.EnsureRootSecure(scratch);
+            BackupFilePermissions.CreateDirectory(scratch);
+        }
+
+        return provider.Open(new BackupStorageContext
+        {
+            BackupDir = configuration.BackupDir,
+            ScratchDir = scratch,
+            Configuration = configuration,
+            Logger = logger,
+            ExtensionOptions = configuration.ExtensionOptions,
+        });
+    }
+
+    private static BackupService CreateService(
+        IBackupStorage storage,
+        IRaft raft,
+        IPersistenceBackend persistenceBackend,
+        KahunaConfiguration configuration,
+        KeyValuesManager keyValues,
+        Func<Task> flushPersistenceAsync,
+        Func<int, HLCTimestamp> appliedHlcProbe,
+        IInterNodeCommunication interNodeCommunication,
+        ILogger<IKahuna> logger)
+    {
+        return new BackupService(
             raft,
             persistenceBackend,
             configuration.BackupDir,
-            backupStorage.Manifests,
-            backupStorage.Artifacts,
+            storage.Manifests,
+            storage.Artifacts,
             configuration.Storage,
             configuration.StorageRevision,
             flushPersistenceAsync,
@@ -174,41 +286,115 @@ internal sealed class BackupFacade : IDisposable
             // How long a capture waits for the committed writes of its partitions to be applied before it reports
             // them as not caught up; a non-positive value keeps the driver's default.
             applyBarrierTimeoutMs: (int)Math.Clamp(configuration.BackupApplyBarrierTimeout.TotalMilliseconds, 0, int.MaxValue));
-
-        // Periodic backup GC: sweeps crash-orphaned/leftover artifacts (always) and enforces
-        // retention (when configured), including a startup sweep on its first tick. Disabled when
-        // the interval is non-positive; GC then runs only inline after each backup.
-        if (configuration.BackupGcInterval > TimeSpan.Zero)
-            actorSystem.Spawn<BackupGcReaperActor, BackupGcReaperRequest>(
-                "backup-gc-reaper",
-                service,
-                configuration,
-                logger);
-
-        return new BackupFacade(service);
     }
+
+    /// <summary>
+    /// Starts the backup storage and builds the backup service on it. The node calls it before it joins its
+    /// cluster, so a target that cannot work (bad credentials, an unprotected bucket, an unsafe root) stops the
+    /// start. The failure passes through unmapped, because the operator reads it in the startup log. A node
+    /// with backups off has nothing to start.
+    /// </summary>
+    internal async Task StartAsync(CancellationToken ct = default)
+    {
+        if (storage is null)
+            return;
+
+        await StartCoreAsync(ct).ConfigureAwait(false);
+    }
+
+    private async Task<BackupService> StartCoreAsync(CancellationToken ct)
+    {
+        if (Volatile.Read(ref service) is { } started)
+            return started;
+
+        await startGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            lock (sync)
+            {
+                ObjectDisposedException.ThrowIf(disposed, this);
+
+                if (service is not null)
+                    return service;
+            }
+
+            await storage!.StartAsync(ct).ConfigureAwait(false);
+
+            BackupService created = createService!(storage);
+
+            // Before the publication, so a start that fails here leaves no service behind and the next
+            // operation tries the whole start again.
+            try
+            {
+                onServiceStarted!(created);
+            }
+            catch
+            {
+                created.Dispose();
+                throw;
+            }
+
+            lock (sync)
+            {
+                // A dispose that ran during the start already released the storage; the new service has no owner.
+                if (disposed)
+                {
+                    created.Dispose();
+                    throw new ObjectDisposedException(nameof(BackupFacade));
+                }
+
+                Volatile.Write(ref service, created);
+            }
+
+            return created;
+        }
+        finally
+        {
+            startGate.Release();
+        }
+    }
+
+    /// <summary>
+    /// The started backup service. Starts the storage when no start ran yet. A node with backups off refuses;
+    /// a start that fails is mapped like every other backup failure.
+    /// </summary>
+    private async Task<BackupService> RequireBackupServiceAsync(CancellationToken ct)
+    {
+        if (storage is null)
+            throw new InvalidOperationException(NotConfiguredMessage);
+
+        if (Volatile.Read(ref service) is { } started)
+            return started;
+
+        try
+        {
+            return await StartCoreAsync(ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ShouldMap(ex) && ex is not ObjectDisposedException)
+        {
+            throw MapAndLog(LogStartFailure, ex);
+        }
+    }
+
+    private void LogStartFailure(string operationId, Exception ex) =>
+        logger?.LogError(ex, "Backup storage '{Target}' could not start (operation {OperationId})", target, operationId);
 
     /// <summary>
     /// Seeds a node that is about to join a running cluster from the backup chain ending at
     /// <paramref name="leafBackupId"/>: replays the chain into <paramref name="persistenceBackend"/> and
     /// writes a committed checkpoint per partition into <paramref name="walAdapter"/>, so the node presents
-    /// to the leader at the restored index instead of at index 0. Runs before the node joins, so it cannot
-    /// use the node's <see cref="BackupService"/>, which may not exist (no backup directory configured) and
-    /// whose catalog is bound to the configured directory rather than <paramref name="backupDir"/>.
+    /// to the leader at the restored index instead of at index 0.
     ///
-    /// <para>It reads the chain exactly as a restore does: through the same storage target and artifact
-    /// store (a registered <see cref="KahunaConfiguration.BackupStorageProvider"/> included), from a root
-    /// that passes the same permission check, with every manifest authenticated against the configured
-    /// <see cref="KahunaConfiguration.BackupMacKeyFile"/>. It also refuses a chain stamped with another
-    /// <see cref="KahunaConfiguration.BackupClusterId"/>; see <see cref="BootstrapHelper"/> for why a seed
-    /// is stricter than a restore there.</para>
+    /// <para>It reads the chain exactly as a restore does: through the node's backup storage, with every
+    /// manifest authenticated against the configured <see cref="KahunaConfiguration.BackupMacKeyFile"/>. It
+    /// also refuses a chain stamped with another <see cref="KahunaConfiguration.BackupClusterId"/>; see
+    /// <see cref="BootstrapHelper"/> for why a seed is stricter than a restore there.</para>
     ///
     /// <para>Failures surface as a typed <see cref="KahunaBackupException"/>, as every other backup
     /// operation does. The full detail is logged against the operation id the message carries.</para>
     /// </summary>
-    internal static async Task BootstrapAsync(
+    internal async Task BootstrapAsync(
         KahunaConfiguration configuration,
-        string backupDir,
         Guid leafBackupId,
         HLCTimestamp targetTime,
         IPersistenceBackend persistenceBackend,
@@ -221,12 +407,11 @@ internal sealed class BackupFacade : IDisposable
     {
         try
         {
-            if (string.IsNullOrWhiteSpace(backupDir))
+            if (storage is null)
                 throw new BackupDriverException("A PITR bootstrap needs the backup directory that holds the chain.");
 
-            BackupFilePermissions.EnsureRootSecure(backupDir);
+            await StartCoreAsync(CancellationToken.None).ConfigureAwait(false);
 
-            BackupStoragePair storage = CreateBackupStorage(configuration, backupDir);
             byte[]? macKey = BackupService.LoadMacKey(configuration.BackupMacKeyFile);
 
             BackupCatalog catalog = new(storage.Manifests);
@@ -251,9 +436,9 @@ internal sealed class BackupFacade : IDisposable
     /// seed. See <see cref="BootstrapBaseImage"/> for the layout, the publish protocol and the restart rules.
     /// The returned plan tells the caller whether to run <see cref="BootstrapAsync"/> before the join.
     ///
-    /// <para>The chain is read through the same storage target and artifact store as every other backup
-    /// operation (a registered <see cref="KahunaConfiguration.BackupStorageProvider"/> included), so a bucket
-    /// target needs no tool outside the server. Every refusal leaves no backend data in the storage path.</para>
+    /// <para>The node does not exist yet, so this step opens, starts and releases a backup storage of its own,
+    /// from the same provider and the same settings as the node's. A bucket target therefore needs no tool
+    /// outside the server. Every refusal leaves no backend data in the storage path.</para>
     /// </summary>
     /// <param name="leafBackupId">The leaf to seed from, or null for the newest valid chain of this cluster.</param>
     /// <param name="fallbackToJoin">
@@ -262,7 +447,6 @@ internal sealed class BackupFacade : IDisposable
     /// </param>
     internal static async Task<PitrBootstrapPlan> PrepareBootstrapAsync(
         KahunaConfiguration configuration,
-        string backupDir,
         Guid? leafBackupId,
         HLCTimestamp targetTime,
         TimeSpan pitrWindow,
@@ -273,16 +457,18 @@ internal sealed class BackupFacade : IDisposable
     {
         try
         {
-            if (string.IsNullOrWhiteSpace(backupDir))
+            if (string.IsNullOrWhiteSpace(configuration.BackupDir))
                 throw new BackupDriverException("A PITR bootstrap needs the backup directory that holds the chain.");
 
-            BackupFilePermissions.EnsureRootSecure(backupDir);
+            using IBackupStorage storage = OpenStorage(configuration, logger);
+            await storage.StartAsync(ct).ConfigureAwait(false);
 
             return await BootstrapBaseImage.PrepareAsync(new BootstrapBaseImageRequest(
                 configuration.Storage,
                 configuration.StoragePath,
                 configuration.StorageRevision,
-                CreateBackupStorage(configuration, backupDir),
+                storage.Manifests,
+                storage.Artifacts,
                 leafBackupId,
                 targetTime,
                 pitrWindow,
@@ -316,98 +502,23 @@ internal sealed class BackupFacade : IDisposable
         }
     }
 
-    /// <summary>
-    /// Builds the backup storage pair rooted at <paramref name="backupDir"/>. A host that registered a
-    /// <see cref="KahunaConfiguration.BackupStorageProvider"/> gets whatever it returns; otherwise the
-    /// local-directory implementations are used, so an existing deployment behaves exactly as before.
-    /// <para>
-    /// A non-local target with no provider registered is a configuration error rather than a silent
-    /// fallback to local disk: writing backups to the wrong place is not a failure an operator would
-    /// notice until they needed a restore. Startup validation catches it first; this is the backstop for
-    /// a host that bypassed validation.
-    /// </para>
-    /// </summary>
-    private static BackupStoragePair CreateBackupStorage(KahunaConfiguration configuration, string backupDir, ILogger? logger = null)
-    {
-        string target = string.IsNullOrWhiteSpace(configuration.BackupTarget) ? "local" : configuration.BackupTarget;
-        string? scratch = string.IsNullOrWhiteSpace(configuration.BackupScratchDir) ? null : configuration.BackupScratchDir;
-
-        // Backup bytes sit on local disk in cleartext while they transit scratch, whatever the eventual
-        // target is, so the scratch root gets the same treatment as a local backup root: refuse it if it
-        // is symlinked or group/world-writable, then create it owner-only. Doing this centrally means a
-        // storage provider cannot forget it — and cannot weaken it, since a target that declares no POSIX
-        // hardening of its own still stages here.
-        if (scratch is not null)
-        {
-            BackupFilePermissions.EnsureRootSecure(scratch);
-            BackupFilePermissions.CreateDirectory(scratch);
-        }
-
-        if (configuration.BackupStorageProvider is not null)
-        {
-            BackupStoragePair pair = configuration.BackupStorageProvider(
-                new BackupStorageContext(target, backupDir, scratch));
-
-            if (pair.Artifacts.Capabilities.RequiresLocalScratch && scratch is null)
-                throw new KahunaServerException(
-                    $"The configured backup target '{target}' stages backups through a local directory, " +
-                    "but no backup scratch directory is configured.");
-
-            return pair;
-        }
-
-        if (!string.Equals(target, "local", StringComparison.OrdinalIgnoreCase))
-            throw new KahunaServerException(
-                $"Backup target '{target}' requires a backup storage provider to be registered by the host " +
-                "(object-storage targets ship as separate packages); only 'local' is built in.");
-
-        return new BackupStoragePair(
-            new LocalDirectoryStorageTarget(backupDir),
-            new LocalDirectoryArtifactStore(backupDir, CreateLiveCheckpointStaging(configuration, logger)));
-    }
-
-    /// <summary>
-    /// Staging on the store's filesystem for a local target, used when the backup directory is on another one.
-    /// Only an engine whose checkpoint links the live files benefits (RocksDB hard-links them where the
-    /// filesystem allows it); one that writes a full copy wherever the checkpoint goes would only move that
-    /// write onto the disk the commits use. The provider says which (<see cref="IPersistenceBackendProvider.StagesLiveCheckpointsInStore"/>).
-    /// <para>The staging root is under the storage path, which belongs to this one store. A directory that
-    /// several nodes can share, such as the scratch directory, is not used: each node's leftover sweep would
-    /// see the others' staging trees as debris.</para>
-    /// </summary>
-    private static LiveCheckpointStaging? CreateLiveCheckpointStaging(KahunaConfiguration configuration, ILogger? logger)
-    {
-        if (configuration.StorageProviders.FindBackend(configuration.Storage) is not { StagesLiveCheckpointsInStore: true } provider ||
-            string.IsNullOrWhiteSpace(configuration.StoragePath))
-            return null;
-
-        return new LiveCheckpointStaging(
-            configuration.StoragePath,
-            provider.DataDirectory(configuration.StoragePath, configuration.StorageRevision),
-            [Path.Combine(configuration.StoragePath, LiveCheckpointStagingDirectoryName)],
-            Math.Max(0, configuration.BackupCaptureThrottleBytesPerSec),
-            logger);
-    }
-
-    internal const string LiveCheckpointStagingDirectoryName = "backup-staging";
-
     internal async Task<KahunaBackupInfo> TakeFullAsync(CancellationToken ct = default)
     {
-        BackupService svc = RequireBackupService();
+        BackupService svc = await RequireBackupServiceAsync(ct);
         try { return await svc.TakeFullAsync(ct: ct); }
         catch (Exception ex) when (ShouldMap(ex)) { throw MapAndLog(svc, ex); }
     }
 
     internal async Task<KahunaBackupInfo> TakeIncrementalAsync(Guid parentBackupId, CancellationToken ct = default)
     {
-        BackupService svc = RequireBackupService();
+        BackupService svc = await RequireBackupServiceAsync(ct);
         try { return await svc.TakeIncrementalAsync(parentBackupId, ct: ct); }
         catch (Exception ex) when (ShouldMap(ex)) { throw MapAndLog(svc, ex); }
     }
 
     internal async Task<KahunaBackupInfo> TakeCoordinatedAsync(CancellationToken ct = default)
     {
-        BackupService svc = RequireBackupService();
+        BackupService svc = await RequireBackupServiceAsync(ct);
         try { return await svc.TakeCoordinatedBackupAsync(ct); }
         catch (Exception ex) when (ShouldMap(ex)) { throw MapAndLog(svc, ex); }
     }
@@ -416,14 +527,18 @@ internal sealed class BackupFacade : IDisposable
     /// This node's share of a cluster-wide backup another node composes. A node with no backup directory
     /// refuses, so the composing node can name it; every other refusal comes from the service.
     /// </summary>
-    internal Task<BackupPartResult> CaptureBackupPartAsync(BackupPartRequest request, IBackupPartSink sink, CancellationToken ct = default) =>
-        service is null
-            ? Task.FromResult(BackupPartResult.Refused(BackupPartOutcome.NotConfigured, "backup is not configured on that node"))
-            : service.CaptureBackupPartAsync(request, sink, ct);
+    internal async Task<BackupPartResult> CaptureBackupPartAsync(BackupPartRequest request, IBackupPartSink sink, CancellationToken ct = default)
+    {
+        if (storage is null)
+            return BackupPartResult.Refused(BackupPartOutcome.NotConfigured, "backup is not configured on that node");
+
+        BackupService svc = await RequireBackupServiceAsync(ct).ConfigureAwait(false);
+        return await svc.CaptureBackupPartAsync(request, sink, ct).ConfigureAwait(false);
+    }
 
     internal async Task<IReadOnlyList<KahunaBackupInfo>> ListAsync(CancellationToken ct = default)
     {
-        BackupService svc = RequireBackupService();
+        BackupService svc = await RequireBackupServiceAsync(ct);
         // Public listing runs the cheap structural check only; full artifact verification (hashing
         // every file of every backup) is opt-in at the service layer, not on the default network path.
         try { return await svc.ListBackupsAsync(verifyArtifacts: false, ct); }
@@ -432,7 +547,7 @@ internal sealed class BackupFacade : IDisposable
 
     internal async Task<IReadOnlyList<KahunaBackupInfo>> GetChainAsync(Guid leafBackupId, CancellationToken ct = default)
     {
-        BackupService svc = RequireBackupService();
+        BackupService svc = await RequireBackupServiceAsync(ct);
         try { return await svc.ResolveAndValidateAsync(leafBackupId, ct); }
         catch (Exception ex) when (ShouldMap(ex)) { throw MapAndLog(svc, ex); }
     }
@@ -443,7 +558,7 @@ internal sealed class BackupFacade : IDisposable
         long targetTimeMs,
         CancellationToken ct = default)
     {
-        BackupService svc = RequireBackupService();
+        BackupService svc = await RequireBackupServiceAsync(ct);
         // Shared resolver (identical to the bootstrap path): a millisecond target restores to the
         // inclusive END of that millisecond, so a same-millisecond commit with counter > 0 is included
         // rather than dropped. Zero (targetTimeMs <= 0) means "chain max".
@@ -454,7 +569,7 @@ internal sealed class BackupFacade : IDisposable
 
     internal async Task<KahunaBackupGcResult> RunGarbageCollectionAsync(bool dryRun, CancellationToken ct = default)
     {
-        BackupService svc = RequireBackupService();
+        BackupService svc = await RequireBackupServiceAsync(ct);
         try
         {
             BackupGcInventory inventory = dryRun
@@ -488,10 +603,6 @@ internal sealed class BackupFacade : IDisposable
         }
         catch (Exception ex) when (ShouldMap(ex)) { throw MapAndLog(svc, ex); }
     }
-
-    private BackupService RequireBackupService() =>
-        service ?? throw new InvalidOperationException(
-            "Backup is not configured on this node. Set BackupDir in configuration or --pitr-backup-dir.");
 
     /// <summary>
     /// True for internal backup failures that should be surfaced to API callers as a typed
@@ -590,5 +701,25 @@ internal sealed class BackupFacade : IDisposable
         _ => new(KahunaBackupOutcome.IoError, "The backup operation failed."),
     };
 
-    public void Dispose() => service?.Dispose();
+    /// <summary>
+    /// Releases the backup service, then the storage. A start in flight finds the facade disposed when it
+    /// completes and releases what it built.
+    /// </summary>
+    public void Dispose()
+    {
+        BackupService? started;
+
+        lock (sync)
+        {
+            if (disposed)
+                return;
+
+            disposed = true;
+            started = service;
+            service = null;
+        }
+
+        started?.Dispose();
+        storage?.Dispose();
+    }
 }

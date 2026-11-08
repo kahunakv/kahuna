@@ -779,7 +779,8 @@ public sealed class TestMembership : BaseCluster
         public Task<bool> OnLeaderChanged(int partitionId, string node) => Task.FromResult(true);
         public Task OnLeadershipLost(int partitionId, long term) => Task.CompletedTask;
         public Task FlushPersistenceAsync() => Task.CompletedTask;
-        public Task BootstrapFromPitrBackupAsync(string backupDir, Guid leafBackupId, HLCTimestamp targetTime, Kommander.WAL.IWAL walAdapter, TimeSpan pitrWindow, TimeSpan baseSnapshotInterval) => throw new NotImplementedException();
+        public Task BootstrapFromPitrBackupAsync(Guid leafBackupId, HLCTimestamp targetTime, Kommander.WAL.IWAL walAdapter, TimeSpan pitrWindow, TimeSpan baseSnapshotInterval) => throw new NotImplementedException();
+        public Task StartBackupsAsync(CancellationToken ct = default) => Task.CompletedTask;
         public void RegisterKeyRange(string keySpace) { }
         public Task<bool> RegisterKeyRangeAsync(string keySpace, CancellationToken cancellationToken = default) => Task.FromResult(false);
         public Task<bool> RemoveKeyRangeAsync(string keySpace, CancellationToken cancellationToken = default) => Task.FromResult(false);

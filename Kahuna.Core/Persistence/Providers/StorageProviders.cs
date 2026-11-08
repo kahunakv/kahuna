@@ -1,13 +1,14 @@
 
 using System.Collections.Concurrent;
+using Kahuna.Server.Persistence.Pitr;
 
 namespace Kahuna.Server.Persistence.Providers;
 
 /// <summary>
-/// The storage engines a node can use, by type name: the persistence backends (<c>--storage</c>) and the
-/// Raft WALs (<c>--wal-storage</c>). <see cref="CreateDefault"/> holds Kahuna's own engines; a host adds
-/// another with <see cref="Register(IPersistenceBackendProvider)"/> or <see cref="Register(IWalProvider)"/>
-/// before the node starts, and a registration under a name that exists replaces it.
+/// The storage a node can use, by name: the persistence backends (<c>--storage</c>), the Raft WALs
+/// (<c>--wal-storage</c>) and the backup targets (<c>--pitr-backup-target</c>). <see cref="CreateDefault"/>
+/// holds Kahuna's own; a host adds another with one of the <c>Register</c> overloads before the node starts,
+/// and a registration under a name that exists replaces it.
 /// </summary>
 public sealed class StorageProviders
 {
@@ -15,13 +16,16 @@ public sealed class StorageProviders
 
     private readonly ConcurrentDictionary<string, IWalProvider> wals = new(StringComparer.Ordinal);
 
+    private readonly ConcurrentDictionary<string, IBackupStorageProvider> backupStorages = new(StringComparer.Ordinal);
+
     /// <summary>
-    /// A registry with Kahuna's own engines: memory, and on platforms with native storage libraries
-    /// (every build but the thread-free browser one) RocksDB and SQLite.
+    /// A registry with Kahuna's own storage: the memory engine, the local backup target, and on platforms with
+    /// native storage libraries (every build but the thread-free browser one) RocksDB and SQLite.
     /// </summary>
     public static StorageProviders CreateDefault()
     {
         StorageProviders providers = new();
+        providers.Register(new LocalBackupStorageProvider());
         providers.Register(new MemoryPersistenceBackendProvider());
         providers.Register(new MemoryWalProvider());
 #if !KAHUNA_THREAD_FREE
@@ -39,6 +43,9 @@ public sealed class StorageProviders
     /// <summary>The registered WAL types.</summary>
     public IReadOnlyCollection<string> WalTypes => [.. wals.Keys.Order(StringComparer.Ordinal)];
 
+    /// <summary>The registered backup target names.</summary>
+    public IReadOnlyCollection<string> BackupStorageTypes => [.. backupStorages.Keys.Order(StringComparer.Ordinal)];
+
     /// <summary>Registers <paramref name="provider"/> under its type name, replacing one registered under the same name.</summary>
     public void Register(IPersistenceBackendProvider provider)
     {
@@ -53,6 +60,14 @@ public sealed class StorageProviders
         ArgumentNullException.ThrowIfNull(provider);
         ArgumentException.ThrowIfNullOrWhiteSpace(provider.StorageType);
         wals[provider.StorageType] = provider;
+    }
+
+    /// <summary>Registers <paramref name="provider"/> under its target name, replacing one registered under the same name.</summary>
+    public void Register(IBackupStorageProvider provider)
+    {
+        ArgumentNullException.ThrowIfNull(provider);
+        ArgumentException.ThrowIfNullOrWhiteSpace(provider.TargetName);
+        backupStorages[provider.TargetName] = provider;
     }
 
     /// <summary>
@@ -83,4 +98,18 @@ public sealed class StorageProviders
         FindWal(storageType)
         ?? throw new KahunaServerException(
             $"Invalid WAL storage type: '{storageType}'. Registered WAL storage types: {string.Join(", ", WalTypes)}.");
+
+    /// <summary>The backup target registered as <paramref name="targetName"/>, or null.</summary>
+    public IBackupStorageProvider? FindBackupStorage(string? targetName) =>
+        targetName is null ? null : backupStorages.GetValueOrDefault(targetName);
+
+    /// <summary>
+    /// The backup target registered as <paramref name="targetName"/>; throws <see cref="KahunaServerException"/>
+    /// naming the registered targets when there is none.
+    /// </summary>
+    public IBackupStorageProvider GetBackupStorage(string? targetName) =>
+        FindBackupStorage(targetName)
+        ?? throw new KahunaServerException(
+            $"Invalid backup target: '{targetName}'. Registered backup targets: {string.Join(", ", BackupStorageTypes)}. " +
+            "A target that is not built in comes from an --extension-assembly.");
 }

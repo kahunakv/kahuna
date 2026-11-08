@@ -240,6 +240,10 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         if (started)
             return;
 
+        // Before the join: a backup target that cannot work stops the start, instead of failing at the
+        // first scheduled backup.
+        await Kahuna.StartBackupsAsync(cancellationToken).ConfigureAwait(false);
+
         Raft.OnLogRestored += Kahuna.OnLogRestored;
         Raft.OnReplicationReceived += Kahuna.OnReplicationReceived;
         Raft.OnReplicationError += Kahuna.OnReplicationError;
@@ -643,7 +647,6 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             BackupDir = options.BackupDir,
             BackupTarget = options.BackupTarget,
             BackupScratchDir = options.BackupScratchDir,
-            BackupStorageProvider = options.BackupStorageProvider,
             BackupClusterId = options.BackupClusterId,
             BackupMacKeyFile = options.BackupMacKeyFile,
             RestoreRoot = options.RestoreRoot,

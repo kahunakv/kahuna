@@ -1,6 +1,8 @@
 
 using CommandLine;
 
+using Kahuna.Server.Persistence.Pitr;
+
 namespace Kahuna;
 
 /// <summary>
@@ -639,10 +641,10 @@ public sealed class KahunaCommandLineOptions
     // assembly runs in this process with the node's privileges and nothing sandboxes it, so loading
     // one is an explicit decision the operator makes on the command line, and the startup log records
     // the SHA-256 of every file loaded.
-    [Option("extension-assembly", Required = false, HelpText = "Path to an assembly publishing user-defined script functions through IKahunaFunctionProvider, or storage engines for --storage and --wal-storage through IPersistenceBackendProvider and IWalProvider. Repeatable. Every node of a cluster must load the same set, because the functions are not replicated. Dependencies are loaded from the assembly's directory. An extension assembly is fully trusted code: it runs in the server process with the server's privileges")]
+    [Option("extension-assembly", Required = false, HelpText = "Path to an assembly publishing user-defined script functions through IKahunaFunctionProvider, storage engines for --storage and --wal-storage through IPersistenceBackendProvider and IWalProvider, or backup targets for --pitr-backup-target through IBackupStorageProvider. Repeatable. Every node of a cluster must load the same set, because the functions are not replicated. Dependencies are loaded from the assembly's directory. An extension assembly is fully trusted code: it runs in the server process with the server's privileges")]
     public IEnumerable<string>? ExtensionAssemblies { get; set; }
 
-    [Option("extension-option", Required = false, HelpText = "Settings for the extensions loaded with --extension-assembly, as key=value, several after one flag: --extension-option a.x=1 b.y=2. The value is everything after the first '='; a key may appear once. Kahuna passes them to the storage engines' provider contexts without reading them; by convention a key starts with the extension's name, as solarium.environment=io_uring")]
+    [Option("extension-option", Required = false, HelpText = "Settings for the extensions loaded with --extension-assembly, as key=value, several after one flag: --extension-option a.x=1 b.y=2. The value is everything after the first '='; a key may appear once. Kahuna passes them to the contexts of the storage engines and the backup targets without reading them; by convention a key starts with the extension's name, as solarium.environment=io_uring")]
     public IEnumerable<string>? ExtensionOptions { get; set; }
 
     [Option("function-slow-warn-ms", Required = false, HelpText = "Log a warning when a user-defined script function takes longer than this many milliseconds. The call is synchronous and blocks a request path while the transaction holds its locks. 0 disables the warning", Default = 50)]
@@ -750,8 +752,8 @@ public sealed class KahunaCommandLineOptions
     [Option("pitr-backup-dir", Required = false, HelpText = "Root directory for PITR backup artifacts and catalog manifests. Required when --pitr-bootstrap-from is set; also used by the backup service to store new backups.", Default = "")]
     public string PitrBackupDir { get; set; } = "";
 
-    [Option("pitr-backup-target", Required = false, HelpText = "Which storage target holds backups. 'local' (the default) keeps them under --pitr-backup-dir on this host. Any other value requires the host to register a backup storage provider, since object-storage targets ship as separate packages.", Default = "local")]
-    public string PitrBackupTarget { get; set; } = "local";
+    [Option("pitr-backup-target", Required = false, HelpText = "Which backup target holds backups, by name. 'local' (the default) keeps them under --pitr-backup-dir on this host. Another target, such as an object store, comes from an --extension-assembly that publishes an IBackupStorageProvider; give its settings with --extension-option, as gcs.bucket=name. The node checks the target before it joins and does not start if the target cannot work.", Default = LocalBackupStorageProvider.Name)]
+    public string PitrBackupTarget { get; set; } = LocalBackupStorageProvider.Name;
 
     [Option("pitr-backup-scratch-dir", Required = false, HelpText = "Local directory backup bytes transit when the target cannot be written to directly by the storage engine. Mandatory for such a target: a checkpoint is written through the filesystem before upload. Size it for one whole full backup, which transits it in its entirety.", Default = "")]
     public string PitrBackupScratchDir { get; set; } = "";

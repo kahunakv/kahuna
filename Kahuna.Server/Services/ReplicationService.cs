@@ -55,6 +55,10 @@ public sealed partial class ReplicationService : BackgroundService //, IDisposab
         raft.OnLeadershipLost += kahuna.OnLeadershipLost;
         raft.OnMembershipChanged += OnMembershipChanged;
 
+        // Before the seed and the join: a backup target that cannot work stops the start, instead of failing
+        // at the first scheduled backup. The seed reads its chain through this same storage.
+        await kahuna.StartBackupsAsync(stoppingToken);
+
         // The base image step already ran, before the backend opened, and decided whether a seed is due. The
         // flag combination was validated there as well.
         if (bootstrapPlan is { Action: PitrBootstrapAction.Seed, LeafBackupId: { } leafId })
@@ -71,7 +75,7 @@ public sealed partial class ReplicationService : BackgroundService //, IDisposab
                 // into the same refusal. A seed below the leader's compaction floor is still correct; the
                 // leader catches the node up by snapshot.
                 await kahuna.BootstrapFromPitrBackupAsync(
-                    options.PitrBackupDir, leafId, targetTime, raft.WalAdapter, Timeout.InfiniteTimeSpan, baseSnapshotInterval);
+                    leafId, targetTime, raft.WalAdapter, Timeout.InfiniteTimeSpan, baseSnapshotInterval);
 
                 // Recorded only after the seed returned, so a crash before this line continues the seed on the
                 // next start instead of skipping it.

@@ -259,7 +259,7 @@ public sealed class TestCoordinatedBackupUnderReplicationFactor : BaseCluster, I
 
         PitrBootstrapPlan plan = await BootstrapBaseImage.PrepareAsync(new BootstrapBaseImageRequest(
             storage, storagePath, Revision,
-            new BackupStoragePair(new LocalDirectoryStorageTarget(backupDir), new LocalDirectoryArtifactStore(backupDir)),
+            new LocalDirectoryStorageTarget(backupDir), new LocalDirectoryArtifactStore(backupDir),
             null, HLCTimestamp.Zero, TimeSpan.FromHours(1), TimeSpan.FromMinutes(30), now,
             ManifestMacKey: null, null, false, ThrottleBytesPerSec: 0), ct);
 

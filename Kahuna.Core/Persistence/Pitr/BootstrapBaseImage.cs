@@ -95,7 +95,8 @@ internal sealed record BootstrapBaseImageRequest(
     string Storage,
     string StoragePath,
     string StorageRevision,
-    BackupStoragePair BackupStorage,
+    IBackupStorageTarget Manifests,
+    IBackupArtifactStore Artifacts,
     Guid? LeafBackupId,
     HLCTimestamp TargetTime,
     TimeSpan PitrWindow,
@@ -206,7 +207,7 @@ internal static class BootstrapBaseImage
             return new(PitrBootstrapAction.Skip, null, root, resumed: false,
                 "the store already holds data, so it belongs to a node that ran; it is never overwritten");
 
-        BackupCatalog catalog = new(request.BackupStorage.Manifests);
+        BackupCatalog catalog = new(request.Manifests);
 
         IReadOnlyList<BackupManifest>? chain;
         if (request.LeafBackupId is { } leafId)
@@ -257,7 +258,7 @@ internal static class BootstrapBaseImage
 
             // The backend can open only a filesystem path, so the checkpoint comes to local disk whether the
             // store is a local folder or a bucket.
-            await request.BackupStorage.Artifacts.MaterializeAsync(
+            await request.Artifacts.MaterializeAsync(
                 full.BackupId,
                 LocalDirectoryArtifactStore.CheckpointDirectoryName,
                 payload,

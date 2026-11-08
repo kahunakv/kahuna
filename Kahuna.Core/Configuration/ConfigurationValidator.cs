@@ -3,6 +3,7 @@ using System.Security.Cryptography.X509Certificates;
 using Microsoft.Extensions.Logging;
 
 using Kahuna.Server.KeyValues.Transactions;
+using Kahuna.Server.Persistence.Pitr;
 using Kommander.WAL;
 
 namespace Kahuna.Server.Configuration;
@@ -542,32 +543,22 @@ public static class ConfigurationValidator
     /// Refuses a backup target that cannot work, at startup rather than at the first backup. Both failures
     /// here are silent-data-loss shaped: a node that starts happily and only discovers at backup time that
     /// it has nowhere to write, or nowhere to stage, has been advertising a backup capability it never had.
+    /// The target itself is checked when the node starts its backup storage, before it joins.
     /// </summary>
     private static void ValidateBackupTarget(KahunaConfiguration configuration)
     {
         if (string.IsNullOrWhiteSpace(configuration.BackupDir))
             return; // backups disabled entirely
 
-        if (string.IsNullOrWhiteSpace(configuration.BackupTarget))
-            configuration.BackupTarget = "local";
+        IBackupStorageProvider provider = configuration.StorageProviders.GetBackupStorage(configuration.BackupTarget);
 
-        bool isLocal = string.Equals(configuration.BackupTarget, "local", StringComparison.OrdinalIgnoreCase);
-        if (isLocal)
-            return;
-
-        if (configuration.BackupStorageProvider is null)
-            throw new KahunaServerException(
-                $"Backup target '{configuration.BackupTarget}' has no storage provider registered. " +
-                "Object-storage targets ship as separate packages and the host must install one by setting " +
-                "KahunaConfiguration.BackupStorageProvider; only 'local' is built in.");
-
-        // A remote target always stages checkpoints locally, because a persistence backend can only write
-        // one through the filesystem. Requiring the path up front means the operator sizes the volume for
-        // it deliberately instead of discovering the requirement when a full backup fills the disk.
-        if (string.IsNullOrWhiteSpace(configuration.BackupScratchDir))
+        // A checkpoint is written through the filesystem before it goes to a remote target. Requiring the path
+        // up front means the operator sizes the volume for it deliberately instead of discovering the
+        // requirement when a full backup fills the disk.
+        if (provider.RequiresLocalScratch && string.IsNullOrWhiteSpace(configuration.BackupScratchDir))
             throw new KahunaServerException(
                 $"Backup target '{configuration.BackupTarget}' requires a local scratch directory " +
-                "(--backup-scratch-dir): a checkpoint is written through the filesystem before upload. " +
+                "(--pitr-backup-scratch-dir): a checkpoint is written through the filesystem before upload. " +
                 "Size it for one full backup, which transits it in its entirety.");
     }
 }

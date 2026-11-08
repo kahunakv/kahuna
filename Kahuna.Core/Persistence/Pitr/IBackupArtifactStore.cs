@@ -22,14 +22,9 @@ public readonly record struct BackupArtifactEntry(string RelativePath, long Leng
 /// HTTP range request). False when a partial read is not meaningfully cheaper than a full one, so a
 /// caller that would otherwise make several ranged passes should stream once instead.
 /// </param>
-/// <param name="RequiresLocalScratch">
-/// True when the store cannot be written to, or read from, directly by a persistence backend — every
-/// checkpoint must transit a local scratch directory. Object stores set this; the local store does not.
-/// </param>
 public sealed record BackupArtifactStoreCapabilities(
     bool SupportsPosixHardening,
-    bool SupportsCheapRangeReads,
-    bool RequiresLocalScratch);
+    bool SupportsCheapRangeReads);
 
 /// <summary>
 /// A local directory a persistence backend can write a checkpoint into, plus the means to publish it
@@ -68,6 +63,7 @@ public interface IBackupCheckpointStagingArea : IAsyncDisposable
 /// opposed to <see cref="IBackupStorageTarget"/>, which stores the manifests describing them. The two
 /// are separate contracts because manifest operations are small-object CRUD while artifact operations
 /// stream potentially multi-gigabyte objects, with different failure and cost models.
+/// <para>See <see cref="IBackupStorageProvider"/> for the binary-contract rule.</para>
 /// <para>
 /// Artifacts are addressed by <c>(backupId, relativePath)</c>. There is deliberately <b>no rename or
 /// move primitive</b>: no object store can implement one, so the publish protocol must not need it.

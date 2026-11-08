@@ -128,7 +128,7 @@ public sealed class TestPitrBootstrapBaseImage : IDisposable
         string storage, string storagePath, string backupDir, Guid? leaf,
         long nowMs = NowMs, string? clusterId = null, bool fallback = false, string revision = Revision) =>
         new(storage, storagePath, revision,
-            new BackupStoragePair(BackupTestStores.Manifests(backupDir), BackupTestStores.Artifacts(backupDir)),
+            BackupTestStores.Manifests(backupDir), BackupTestStores.Artifacts(backupDir),
             leaf, HLCTimestamp.Zero, TimeSpan.FromHours(1), TimeSpan.FromMinutes(30), NowUtc(nowMs),
             ManifestMacKey: null, clusterId, fallback, ThrottleBytesPerSec: 0);
 

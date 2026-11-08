@@ -566,7 +566,7 @@ accepted. Every check runs before the store or the WAL changes, and a failure su
 
 **The base image step.** The replay starts after the full backup, so the full's rows must already be in
 the store. The server reads the full's `checkpoint/` objects through the configured backup target (a
-registered storage provider included, so a bucket target needs no external copy tool) and puts them where
+target from an extension assembly included, so a bucket target needs no external copy tool) and puts them where
 the backend opens: `{storage-path}/{storage-revision}/` for RocksDB, the folder root for SQLite. The copy
 goes to a staging folder inside the storage path. Every file is checked against the full manifest's size and
 digest before anything is published, so a truncated or corrupt object stops the seed with nothing in the
@@ -738,6 +738,10 @@ to underscores):
 
 Add `--pitr-backup-dir <path>` to the server command line (or set `BackupDir` in the JSON config) to
 enable backups.  The same directory is used for catalog manifests and artifact subdirectories.
+
+`--pitr-backup-target` chooses where the manifests and artifacts go. The default, `local`, keeps them in
+the backup directory. Another target, such as a bucket, comes from an `--extension-assembly`; see the
+backup targets guide.
 
 Set `--pitr-backup-cluster-id <id>` (JSON `BackupClusterId`) to the **same value on every node** of a
 cluster. It is stamped into every manifest and gates chain resolution: a chain may not span manifests

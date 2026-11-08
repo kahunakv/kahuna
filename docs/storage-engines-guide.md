@@ -119,6 +119,9 @@ that type, so a node that restores a backup must have the same engine registered
 refuses the restore with the engine's name. The checkpoint itself is the engine's own format: the backend's
 `CreateCheckpoint` and `CreateCheckpointAsOf` write it, and only that engine reads it back.
 
+Where a backup goes is a separate choice, the backup target (`--pitr-backup-target`). A target is in the same
+registry and loads from an extension assembly in the same way. See the backup targets guide.
+
 ## 5. Pacing an engine's compactions
 
 Two options bound the background work of the key-value and lock store. They are 0 by default, and with
