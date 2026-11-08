@@ -283,9 +283,12 @@ internal sealed partial class PreparedIntentStore
         public readonly ConcurrentDictionary<string, CommittedHead> Heads = new();
 
         // Settled-identity memory: every (TransactionId, Epoch, Key) whose resolved intent was REMOVED through
-        // this partition's log, with the intent's commit timestamp as the time base of its retention. Fed and
-        // read only under applyGate (a prepare apply consults it before the state machine runs), so a plain
-        // map. See IsSettledIdentity for what it decides and why it must be part of the replicated slice.
+        // this partition's log, or whose settle applied through it while the intent was absent here (the key
+        // moved between its prepare and its settle, and this node applied the destination's log first), with
+        // the intent's commit timestamp as the time base of its retention (the log entry's time when a settle
+        // over an absent intent carries none). Fed and read only under applyGate (a prepare apply consults it
+        // before the state machine runs), so a plain map. See IsSettledIdentityOnThisNode for what it decides
+        // and why the slice of the carrying log is consulted first.
         public readonly Dictionary<SettledIdentity, HLCTimestamp> Settled = new();
 
         // The settled-memory prune bucket (Watermark.L / SettledIdentityPruneBucketMs) the last prune ran in.
@@ -1086,15 +1089,31 @@ internal sealed partial class PreparedIntentStore
             // again, and one the staged-base fence then judges against a head that already contains the
             // transaction's own commit, refusing it as stale and driving a veto that finds the commit and counts
             // it as an acknowledged stale-base commit. Rejecting it here installs nothing, judges nothing, and
-            // names the reason so the producer reads the decision from the record. The memory is a pure
-            // function of the partition's log (fed by the settlement's remove, persisted and installed with the
-            // slice), so every replica rejects the same entry — this is a replicated transition, not an
-            // advisory verdict, and it therefore applies on every path including history replay.
-            if (command is PrepareIntentCommand replayCandidate && IsSettledIdentity(partitionId, replayCandidate.Intent))
+            // names the reason so the producer reads the decision from the record. The memory is fed by the
+            // settlement's remove (or by a settle that found the intent absent, see below), persisted and
+            // installed with the slice, and it applies on every path including history replay.
+            //
+            // The identity is looked up in the slice of the log that carries the prepare FIRST, and then in
+            // every other slice this node applies. A range move splits one leg across two logs: the prepare was
+            // carried by the source partition's log, and the settle goes to the partition that owns the key at
+            // settlement time — the destination — because the finalizer re-resolves the key then. A node that
+            // applies the two logs in real time sees the prepare before the settle. A node that applies them
+            // with a skew — a restarted node catching up both, a follower lagging on one of them — can apply
+            // the destination's settle first (it finds no intent and records the identity below) and the
+            // source's prepare after it. Judged against the source slice alone, that prepare installed a live
+            // intent for a settled transaction: a phantom holder that made every later one-phase bundle of the
+            // key fail its bundled-prepare gate on this node only, so the node fell one revision behind its
+            // peers on the key and served the stale row once it led (CamusDB bank-split, 2026-11-08). Across
+            // slices the skewed node reaches the same end state as the live order: no intent. Every replica
+            // of a fully replicated partition applies the same logs, so they agree; a replica that hosts
+            // only one of the two logs could never see the settle at all, with or without this check.
+            if (command is PrepareIntentCommand replayCandidate && IsSettledIdentityOnThisNode(partitionId, replayCandidate.Intent, out int settledOnPartition))
             {
                 result = new PreparedIntentApplyResult(
                     TransactionApplyOutcome.Rejected, existing,
-                    "prepare of a transaction whose settlement already applied on this partition (re-driven duplicate)",
+                    settledOnPartition == partitionId
+                        ? "prepare of a transaction whose settlement already applied on this partition (re-driven duplicate)"
+                        : $"prepare of a transaction whose settlement already applied on this node through partition {settledOnPartition} (the key moved before it settled)",
                     SettledReplay: true);
 
                 if (judgeFence)
@@ -1103,8 +1122,8 @@ internal sealed partial class PreparedIntentStore
 
                     if (logger is not null && logger.IsEnabled(LogLevel.Information))
                         logger.LogInformation(
-                            "Prepare of transaction {TransactionId} (epoch {Epoch}) on key {Key} arrived after its settlement applied on partition {PartitionId}; rejected as a re-driven duplicate instead of re-installing a settled intent",
-                            replayCandidate.Intent.TransactionId, replayCandidate.Intent.Epoch, key, partitionId);
+                            "Prepare of transaction {TransactionId} (epoch {Epoch}) on key {Key} arrived on partition {PartitionId} after its settlement applied on partition {SettledOnPartition}; rejected as a re-driven duplicate instead of re-installing a settled intent",
+                            replayCandidate.Intent.TransactionId, replayCandidate.Intent.Epoch, key, partitionId, settledOnPartition);
                 }
 
                 return result;
@@ -1221,6 +1240,28 @@ internal sealed partial class PreparedIntentStore
                 if (removedCommitted)
                     RetainSettledIntentIfRowUnflushed(existing);
             }
+            else if (command is ResolveIntentCommand { Commit: true } absentResolve && absentResolve.CommitTimestamp != HLCTimestamp.Zero)
+            {
+                // A settle that finds no intent here is still this leg's settlement: the intent was removed by
+                // an earlier copy of the settle, or its prepare has not applied on this node yet because it is
+                // carried by another partition's log (a key that moved between its prepare and its settle). The
+                // identity is remembered either way, so a prepare of this leg that arrives later, on any log,
+                // installs nothing. The materializing resolve carries the commit timestamp, the same time base
+                // the removal of a present intent records, so a node that saw the settle first and a node that
+                // saw the prepare first keep identical memories.
+                RecordSettledIdentity(absentResolve.TransactionId, absentResolve.Epoch, absentResolve.Key, absentResolve.CommitTimestamp, partitionId, overwrite: true);
+            }
+            else if (command is RemoveIntentCommand absentRemove)
+            {
+                // The removal half of a settle over an absent intent: the resolve above recorded the identity when
+                // it carried the commit timestamp; a resolve without one (an abort, or a settle that does not
+                // materialize) leaves it to this removal, stamped with the log entry's time so the identity is
+                // retained at least as long as the slice's watermark keeps advancing from it. Never overwrites a
+                // record the resolve already made.
+                RecordSettledIdentity(
+                    absentRemove.TransactionId, absentRemove.Epoch, absentRemove.Key,
+                    entryTime != HLCTimestamp.Zero ? entryTime : absentRemove.TransactionId, partitionId, overwrite: false);
+            }
 
             // ── Staged-base fence, evaluated at the prepare's own apply position ──
             // A freshly installed prepare is checked against the committed-head memory. The pre-propose
@@ -1268,7 +1309,7 @@ internal sealed partial class PreparedIntentStore
                 }
                 else
                 {
-                    string? fenceConflict = EvaluateStagedBaseFence(fencedPrepare.Intent, out bool revisionCollision);
+                    string? fenceConflict = EvaluateStagedBaseFence(fencedPrepare.Intent, partitionId, out bool revisionCollision, out long judgedHeadRevision);
                     if (fenceConflict is not null)
                     {
                         DurableTransactionMetrics.StagedBasePrepareRejections.Add(1);
@@ -1278,13 +1319,14 @@ internal sealed partial class PreparedIntentStore
                         // The revision the refused write was built on: its validated base, or — for a revision
                         // collision — the entry it staged over, one below its staged revision.
                         wedgeBaseRevision = revisionCollision ? fencedPrepare.Intent.Revision - 1 : fencedPrepare.Intent.BaseRevision;
-                        wedgeRepairDue = TrackFenceRefusal(fencedPrepare.Intent.Key, wedgeBaseRevision, out wedgeHeadRevision);
+                        wedgeHeadRevision = judgedHeadRevision;
+                        wedgeRepairDue = TrackFenceRefusal(fencedPrepare.Intent.Key, wedgeBaseRevision, judgedHeadRevision);
 
                         logger?.LogWarning(
                             "Committed head for {Key} moved past the prepare of transaction {TransactionId} before it applied; refusing the prepare acknowledgement to prevent a lost update: {Reason}",
                             fencedPrepare.Intent.Key, fencedPrepare.Intent.TransactionId, fenceConflict);
 
-                        result = result with { StaleBase = true };
+                        result = result with { StaleBase = true, FenceHeadRevision = judgedHeadRevision };
                     }
                     else
                         fenceRefusalStreaks.TryRemove(key, out _);

@@ -376,17 +376,50 @@ internal sealed partial class PreparedIntentStore
 
     /// <summary>
     /// Whether <paramref name="intent"/>'s leg (its transaction identity on its key) settled on
-    /// <paramref name="partitionId"/>'s log within the settled-identity window — the verdict that rejects a
-    /// re-driven prepare of a decided transaction. Judged only against the slice of the log the prepare arrives on: a node's other slices are
-    /// node-local (a replica hosting a different partition set holds different ones), and this verdict changes
-    /// the replicated transition, so it may depend on nothing but this partition's own applied prefix.
-    /// Retention is logical, measured from the slice's watermark exactly as the committed heads' is, so the
-    /// timing of the physical prune is unobservable. Caller holds <see cref="applyGate"/>.
+    /// <paramref name="partitionId"/>'s log within the settled-identity window: the first half of the verdict
+    /// that rejects a re-driven prepare of a decided transaction, the slice of the log the prepare arrives on.
+    /// <see cref="IsSettledIdentityOnThisNode"/> adds the node's other slices for the leg a range move split
+    /// across two logs. Retention is logical, measured from the slice's watermark exactly as the committed
+    /// heads' is, so the timing of the physical prune is unobservable. Caller holds <see cref="applyGate"/>.
     /// </summary>
     private bool IsSettledIdentity(int partitionId, PreparedIntent intent) =>
         ledgers.TryGetValue(partitionId, out PartitionLedger? ledger)
         && ledger.Settled.TryGetValue(new SettledIdentity(intent.TransactionId, intent.Epoch, intent.Key), out HLCTimestamp settledAt)
         && IsSettledWithinRetention(settledAt, ledger.Watermark);
+
+    /// <summary>
+    /// Whether <paramref name="intent"/>'s leg settled through any log this node applies, within that slice's
+    /// settled-identity window: the slice of <paramref name="partitionId"/>, the log that carries the prepare
+    /// being judged, is consulted first, then every other slice. <paramref name="settledOnPartition"/> names the
+    /// slice that answered. The other slices matter for a key that moved between its prepare and its settle: the
+    /// prepare sits in the source partition's log and the settle in the destination's, and a node that applies
+    /// the destination's stream ahead of the source's would otherwise re-install the settled leg as a phantom
+    /// holder (see the settled-identity replay in <c>Apply</c>). Caller holds <see cref="applyGate"/>.
+    /// </summary>
+    private bool IsSettledIdentityOnThisNode(int partitionId, PreparedIntent intent, out int settledOnPartition)
+    {
+        settledOnPartition = partitionId;
+
+        if (IsSettledIdentity(partitionId, intent))
+            return true;
+
+        SettledIdentity identity = new(intent.TransactionId, intent.Epoch, intent.Key);
+
+        foreach (KeyValuePair<int, PartitionLedger> slice in ledgers)
+        {
+            if (slice.Key == partitionId)
+                continue;
+
+            if (slice.Value.Settled.TryGetValue(identity, out HLCTimestamp settledAt)
+                && IsSettledWithinRetention(settledAt, slice.Value.Watermark))
+            {
+                settledOnPartition = slice.Key;
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     private static bool IsSettledWithinRetention(HLCTimestamp settledAt, HLCTimestamp watermark) =>
         settledAt.L >= watermark.L - SettledIdentityRetentionMs;
@@ -395,15 +428,22 @@ internal sealed partial class PreparedIntentStore
     /// log delivered the removal. The intent's commit timestamp is the entry's time base; a replayed removal
     /// records the same value. Stamps the partition dirty: the memory is persisted with the slice. Caller holds
     /// <see cref="applyGate"/>.</summary>
-    private void RecordSettledIdentity(PreparedIntent intent, int partitionId)
+    private void RecordSettledIdentity(PreparedIntent intent, int partitionId) =>
+        RecordSettledIdentity(intent.TransactionId, intent.Epoch, intent.Key, intent.CommitTimestamp, partitionId, overwrite: true);
+
+    /// <summary>The field form of <see cref="RecordSettledIdentity(PreparedIntent, int)"/>, for a settle that
+    /// found no intent to take the identity from. <paramref name="settledAt"/> is the time base of the
+    /// identity's retention; with <paramref name="overwrite"/> false an identity already remembered keeps the
+    /// time base it has. Caller holds <see cref="applyGate"/>.</summary>
+    private void RecordSettledIdentity(HLCTimestamp transactionId, long epoch, string key, HLCTimestamp settledAt, int partitionId, bool overwrite)
     {
         PartitionLedger ledger = ledgers.GetOrAdd(partitionId, static _ => new PartitionLedger());
 
-        SettledIdentity identity = new(intent.TransactionId, intent.Epoch, intent.Key);
-        if (ledger.Settled.TryAdd(identity, intent.CommitTimestamp))
-            ledger.Bytes += SettledIdentityBytes(intent.Key);
-        else
-            ledger.Settled[identity] = intent.CommitTimestamp;
+        SettledIdentity identity = new(transactionId, epoch, key);
+        if (ledger.Settled.TryAdd(identity, settledAt))
+            ledger.Bytes += SettledIdentityBytes(key);
+        else if (overwrite)
+            ledger.Settled[identity] = settledAt;
 
         StampPartitionDirty(partitionId);
 

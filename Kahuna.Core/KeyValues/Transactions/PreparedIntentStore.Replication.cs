@@ -174,7 +174,7 @@ internal sealed partial class PreparedIntentStore
             commands = DecodeDelta(log.LogData);
 
         bool allPreparesAccepted = true;
-        List<PreparedIntent>? staleFlagged = null;
+        List<(PreparedIntent Intent, long HeadRevision)>? staleFlagged = null;
 
         // History below an installed snapshot's reflected position applies without the advisory fence: the
         // ledger is ahead of these entries by construction, so a verdict here could only be a false refusal and
@@ -192,7 +192,7 @@ internal sealed partial class PreparedIntentStore
             {
                 allPreparesAccepted = false;
                 if (result.StaleBase)
-                    (staleFlagged ??= []).Add(prepare.Intent);
+                    (staleFlagged ??= []).Add((prepare.Intent, result.FenceHeadRevision));
 
                 // A state-machine rejection means another transaction's live intent holds the key; a stale-base
                 // flag means the base moved; a settled replay means the transaction is already decided. The
@@ -216,18 +216,24 @@ internal sealed partial class PreparedIntentStore
         return allPreparesAccepted;
     }
 
-    /// <summary>Fires the veto hook for each stale-flagged prepare of one delta apply, with the head revision
-    /// re-read at invocation (a benign race with a concurrent settle can only raise it). No gate is held here;
-    /// the wiring schedules detached work.</summary>
-    private void FireStaleBaseVetoes(List<PreparedIntent>? staleFlagged)
+    /// <summary>Fires the veto hook for each stale-flagged prepare of one delta apply, with the head revision the
+    /// fence judged the prepare against (the one of the carrying slice; the node-wide head only when the fence
+    /// reported none). No gate is held here; the wiring schedules detached work.</summary>
+    private void FireStaleBaseVetoes(List<(PreparedIntent Intent, long HeadRevision)>? staleFlagged)
     {
         if (staleFlagged is null || onStaleBaseVeto is null)
             return;
 
-        foreach (PreparedIntent intent in staleFlagged)
+        foreach ((PreparedIntent intent, long judgedHead) in staleFlagged)
         {
-            TryFindHead(intent.Key, out CommittedHead head);
-            onStaleBaseVeto(intent, head.Revision);
+            long headRevision = judgedHead;
+            if (headRevision < 0)
+            {
+                TryFindHead(intent.Key, out CommittedHead head);
+                headRevision = head.Revision;
+            }
+
+            onStaleBaseVeto(intent, headRevision);
         }
     }
 

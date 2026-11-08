@@ -51,21 +51,19 @@ internal sealed partial class PreparedIntentStore
     /// refuses repeatedly at an unchanged (base, committed head) pair, and returns whether the convergence
     /// repair hook is due for this refusal (rate-limited by the streak). <paramref name="baseRevision"/> is the
     /// revision the refused write was built on: its validated base, or the entry a colliding revision was
-    /// staged over. <paramref name="headRevision"/> reports the remembered committed head the refusal was
-    /// judged against. Caller holds <see cref="applyGate"/>.</summary>
-    private bool TrackFenceRefusal(string key, long baseRevision, out long headRevision)
+    /// staged over. <paramref name="headRevision"/> is the committed head the refusal was judged against, so
+    /// the streak keys on the pair the fence saw and not on a head another slice happens to hold. Caller holds
+    /// <see cref="applyGate"/>.</summary>
+    private bool TrackFenceRefusal(string key, long baseRevision, long headRevision)
     {
-        TryFindHead(key, out CommittedHead head);
-        headRevision = head.Revision;
-
         if (!fenceRefusalStreaks.TryGetValue(key, out FenceRefusalStreak streak)
             || streak.BaseRevision != baseRevision
-            || streak.HeadRevision != head.Revision)
+            || streak.HeadRevision != headRevision)
         {
             if (fenceRefusalStreaks.Count >= FenceRefusalTrackerMaxKeys && !fenceRefusalStreaks.ContainsKey(key))
                 return false;
 
-            fenceRefusalStreaks[key] = new(baseRevision, head.Revision, 1);
+            fenceRefusalStreaks[key] = new(baseRevision, headRevision, 1);
             return false;
         }
 
@@ -78,7 +76,7 @@ internal sealed partial class PreparedIntentStore
 
             logger?.LogError(
                 "Key {Key} refused {Count} consecutive prepares at a frozen pair (base revision {BaseRevision}, committed head {HeadRevision}): the node's visible entry has stopped converging with its committed head and the key is effectively read-only until it reconciles",
-                key, count, baseRevision, head.Revision);
+                key, count, baseRevision, headRevision);
         }
 
         return count == FenceWedgeRepairThreshold
@@ -93,20 +91,33 @@ internal sealed partial class PreparedIntentStore
     /// <summary>
     /// Decides whether a freshly installed prepare deserves its acknowledgement, against the committed-head
     /// memory. Returns null to acknowledge, or the conflict reason; <paramref name="revisionCollision"/> tells
-    /// the staged-revision rule refused it rather than the validated-base rule. Caller holds
-    /// <see cref="applyGate"/>.
+    /// the staged-revision rule refused it rather than the validated-base rule, and
+    /// <paramref name="headRevision"/> is the head it was judged against (-1 when the memory held nothing).
+    /// <para>
+    /// The prepare is judged against the slice of <paramref name="partitionId"/>, the log that carries it, when
+    /// that slice remembers the key, and against the widest memory only when it does not. A head another slice
+    /// holds can be from a later point in time than this entry: a range move seeds the destination's slice with
+    /// the moved keys' heads as of the cutover, and a node that applies the destination's log ahead of the
+    /// source's — a restarted node catching up both — then judged the source's older prepares against those
+    /// seeds, refused thousands of valid prepares and fired as many false vetoes (CamusDB bank-split,
+    /// 2026-11-08: 11,401 refusals and 6,090 late vetoes on one node in 11 s). The carrying slice is ordered
+    /// with the entry; the fallback keeps the protection for a key whose heads live in another slice only (a
+    /// range moved on a build before the hand-off carried heads). Caller holds <see cref="applyGate"/>.
+    /// </para>
     /// </summary>
-    private string? EvaluateStagedBaseFence(PreparedIntent intent, out bool revisionCollision) =>
-        JudgeStagedBase(intent, countAbsentHeadAdmission: true, out _, out revisionCollision);
+    private string? EvaluateStagedBaseFence(PreparedIntent intent, int partitionId, out bool revisionCollision, out long headRevision) =>
+        JudgeStagedBase(
+            intent.Key, intent.TransactionId, intent.HasValidatedBase, intent.BaseRevision, intent.BaseState,
+            intent.NoRevision, intent.Revision, countAbsentHeadAdmission: true, out headRevision, out revisionCollision, sliceOf: partitionId);
 
-    /// <summary>The ADVISORY fence decision, shared by the apply-path acknowledgement and the replica verdict
-    /// read (<see cref="EvaluateReplicaFenceVerdicts"/>). Judges by key across every ledger slice this node
-    /// holds — the two-phase acknowledgement is per-node advice, so the widest memory is the most useful —
-    /// against the node-wide watermark. Returns null to admit, or the conflict reason.
-    /// <paramref name="headRevision"/> reports the remembered head the verdict was judged against (-1 when the
-    /// memory held nothing); <paramref name="revisionCollision"/> tells the staged-revision rule refused it.
-    /// Only the apply path counts the absent-head admission; a verdict read must not inflate that counter.
-    /// Caller holds <see cref="applyGate"/>.</summary>
+    /// <summary>The ADVISORY fence decision of the replica verdict read (<see cref="EvaluateReplicaFenceVerdicts"/>)
+    /// for an applied intent. Judges by key across every ledger slice this node holds — the two-phase
+    /// acknowledgement is per-node advice, so the widest memory is the most useful — against the node-wide
+    /// watermark. Returns null to admit, or the conflict reason. <paramref name="headRevision"/> reports the
+    /// remembered head the verdict was judged against (-1 when the memory held nothing);
+    /// <paramref name="revisionCollision"/> tells the staged-revision rule refused it. Only the apply path
+    /// counts the absent-head admission; a verdict read must not inflate that counter. Caller holds
+    /// <see cref="applyGate"/>.</summary>
     private string? JudgeStagedBase(PreparedIntent intent, bool countAbsentHeadAdmission, out long headRevision, out bool revisionCollision) =>
         JudgeStagedBase(
             intent.Key, intent.TransactionId, intent.HasValidatedBase, intent.BaseRevision, intent.BaseState,
@@ -114,10 +125,13 @@ internal sealed partial class PreparedIntentStore
 
     /// <summary>The field form of <see cref="JudgeStagedBase(PreparedIntent, bool, out long, out bool)"/>: the
     /// replica verdict read judges a prepare this node has not applied from the fields the ask carries, against
-    /// the same memory and the same rules. Caller holds <see cref="applyGate"/>.</summary>
+    /// the same memory and the same rules. With <paramref name="sliceOf"/> the head is read from that partition's
+    /// slice when it remembers the key, and from every slice otherwise (see
+    /// <see cref="EvaluateStagedBaseFence"/>). Caller holds <see cref="applyGate"/>.</summary>
     private string? JudgeStagedBase(
         string key, HLCTimestamp transactionId, bool hasValidatedBase, long baseRevision, KeyValueState baseState,
-        bool noRevision, long revision, bool countAbsentHeadAdmission, out long headRevision, out bool revisionCollision)
+        bool noRevision, long revision, bool countAbsentHeadAdmission, out long headRevision, out bool revisionCollision,
+        int? sliceOf = null)
     {
         headRevision = -1;
         revisionCollision = false;
@@ -131,7 +145,7 @@ internal sealed partial class PreparedIntentStore
         if (hasValidatedBase && IsOlderThanRetention(transactionId, ledgerWatermark))
             return $"transaction began before the staged-base fence retention horizon; its validated base for key {key} cannot be verified";
 
-        if (!TryFindHead(key, out CommittedHead head))
+        if (!TryFindHeadFor(sliceOf, key, out CommittedHead head))
         {
             // The only silent path around the fence: nothing to check is indistinguishable from "no commit
             // ever happened" — count it so a loss investigation can tell proof-of-currency from absence.
@@ -213,6 +227,19 @@ internal sealed partial class PreparedIntentStore
     /// logical presence the bundled commit gate judges by, independent of physical pruning.</summary>
     private bool IsWithinRetention(CommittedHead head, HLCTimestamp watermark) =>
         head.CommittedAt.L >= watermark.L - stagedBaseFenceRetentionMs;
+
+    /// <summary>The head the apply-time fence judges a prepare of <paramref name="sliceOf"/>'s log against: the
+    /// head that slice remembers for the key, or, when it remembers none (or no slice is named), the highest
+    /// head across every slice (<see cref="TryFindHead"/>). Lock-free, like the probes it serves.</summary>
+    private bool TryFindHeadFor(int? sliceOf, string key, out CommittedHead head)
+    {
+        if (sliceOf is int partitionId
+            && ledgers.TryGetValue(partitionId, out PartitionLedger? slice)
+            && slice.Heads.TryGetValue(key, out head))
+            return true;
+
+        return TryFindHead(key, out head);
+    }
 
     /// <summary>Finds a key's committed head across every ledger slice (the highest revision when several
     /// slices remember the key — a range that moved between partitions leaves its history behind). Lock-free;

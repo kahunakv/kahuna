@@ -30,7 +30,8 @@ internal readonly record struct PreparedIntentApplyResult(
     string? RejectReason,
     bool StaleBase = false,
     bool SettledReplay = false,
-    bool AdmissionRefused = false);
+    bool AdmissionRefused = false,
+    long FenceHeadRevision = -1);
 
 /// <summary>
 /// The pure, deterministic state machine for a single key's durable prepared intent. Enforces exactly one live

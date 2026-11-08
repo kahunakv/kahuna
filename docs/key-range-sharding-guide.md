@@ -532,6 +532,23 @@ before cutover, so every prepare the destination later judges for a moved key is
 every replica of the destination holds at the same log position. A source leader on a build without the
 kind answers no heads, and the destination then judges as it did before the handoff existed.
 
+**A moved leg lives in two logs, and a node may apply them out of order.** A transaction prepared on
+the source before the cutover settles after it on the partition that owns the key by then, the
+destination: the finalizer re-resolves the key at settlement time. A node that applies both logs in
+real time sees the prepare before the settle. A node that applies them with a skew sees the settle
+first: a restarted node that catches up the source and a destination created while it was down, or a
+follower that lags on one partition. Two rules keep such a node on the same state as its peers. The
+settle records the leg's settled identity even when it finds no intent, and a prepare is rejected as a
+settled replay when its identity is remembered on *any* slice of the node, not only on the slice of the
+log that carries it; without that the source's prepare re-installed the settled leg as a phantom holder,
+every later one-phase bundle of the key failed its bundled-prepare gate on that node alone, and the node
+served the key one revision behind its peers once it led. And the apply-time staged-base fence judges a
+prepare against the slice of the log that carries it when that slice remembers the key, falling back to
+the widest memory only when it does not; the destination's seeds reflect the cutover, a later point than
+the source's older entries, and judging those entries against the seeds refused valid prepares and fired
+vetoes that found their commits already recorded (`kahuna.durable_tx.stale_base_vetoes_late` with no
+loss behind it).
+
 ### Two things to know about the current implementation
 
 - **The persistence backend is node-global, keyed by the full key string** — *not* physically

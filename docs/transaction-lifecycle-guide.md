@@ -422,7 +422,11 @@ against its committed-head memory and answers `Clear` or `StaleBase` at once
 transaction's own intent is live, so the memory now is at or past the memory at the prepare's apply
 position, and a refusal from memory is one the apply-time fence gives too. The one head that is not a
 competitor's — the transaction's own settlement, already applied on that node — answers `Clear` through
-the settled-identity memory. So apply lag no longer leaves a commit unattested; only an unreachable
+the settled-identity memory. That memory is fed by the settle whether or not the intent is still present
+when the settle applies, and a prepare is rejected as a settled replay when any slice of the node
+remembers its identity: a key that moved between its prepare and its settle has the two in different
+logs, and a node that applies the destination's log first must not re-install the leg from the source's
+(see the [key-range sharding guide](key-range-sharding-guide.md)). So apply lag no longer leaves a commit unattested; only an unreachable
 replica (or one on a build that ignores the probes) still does, and the lag breaker still bounds how
 long such a replica can hold a commit. Under a range-split cascade, where replicas lag the prepares of
 freshly created partitions, this is what closes the window in which the detached stale-base veto raced

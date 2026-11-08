@@ -11,9 +11,10 @@ namespace Kahuna.Server.Tests;
 
 /// <summary>
 /// The settled-identity memory of the prepared-intent store: a prepare whose transaction already settled on
-/// the applying partition's log is a re-driven duplicate of a decided transaction (a proposal released as
+/// a log this node applies is a re-driven duplicate of a decided transaction (a proposal released as
 /// not-leader at a step-down and re-proposed to the successor after its first copy landed, committed and
-/// settled there). It must be rejected — never re-installed as a phantom pending intent, never judged by the
+/// settled there), or the source log's copy of a leg whose settle this node already applied through the
+/// destination's log after a range move. It must be rejected — never re-installed as a phantom pending intent, never judged by the
 /// staged-base fence against a head that already holds its own commit, never vetoed — and the rejection must
 /// be a replicated verdict: the same on a live replica, on restore, after a restart from the checkpoint, and
 /// on a replica seeded from a whole-partition snapshot.
@@ -221,21 +222,23 @@ public sealed class TestSettledPrepareReplay : IDisposable
     }
 
     [Fact]
-    public void Memory_IsScopedToTheApplyingPartitionsLog()
+    public void Memory_IsReadAcrossTheSlicesOfThisNode_ButWrittenOnlyToTheSettlingLog()
     {
-        // A settlement that applied through partition 3's log says nothing about a prepare arriving on
-        // partition 4's log: the verdict may depend only on the log it is judged on, because a node's other
-        // slices are node-local.
+        // A settlement that applied through partition 3's log is still this node's settlement of the leg when
+        // the prepare arrives on partition 4's log. That is the shape of a key that moved between its prepare
+        // and its settle: the prepare in the source's log, the settle in the destination's, and a node that
+        // applies the destination first. Installing the prepare would re-create a settled leg as a phantom
+        // holder on this node alone; the verdict reads every slice of the node and rejects it as settled.
         PreparedIntentStore store = new();
         PreparedIntent t = MakeIntent("s/scope", 1_000, revision: 6, baseRevision: 5);
         Replicate(store, Lifecycle(t), partitionId: 3);
 
-        // On partition 4 the state machine installs it, and only the ADVISORY fence (which reads every slice)
-        // refuses the acknowledgement as stale — the pre-existing behaviour, never the settled verdict.
         Assert.False(store.ApplyDeltaAckPrepares(4, Prepare(t)));
-        Assert.NotNull(store.Get("s/scope"));
+        Assert.Null(store.Get("s/scope"));
         Assert.True(store.TryTakePrepareRejection(t.TransactionId, t.Epoch, t.Key, out PrepareRejectionKind kind));
-        Assert.Equal(PrepareRejectionKind.StaleBase, kind);
+        Assert.Equal(PrepareRejectionKind.Settled, kind);
+
+        // The memory is written only by the log that carried the settle; the rejection records nothing on 4.
         Assert.Empty(store.SnapshotSettledIdentities(4));
         Assert.Single(store.SnapshotSettledIdentities(3));
     }
