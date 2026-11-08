@@ -2,6 +2,7 @@
 using Kommander;
 using Kommander.System;
 using Kommander.Time;
+using Kahuna.Server;
 using Kahuna.Server.Diagnostics;
 using Kahuna.Server.Persistence.Pitr;
 
@@ -28,22 +29,49 @@ public sealed partial class ReplicationService : BackgroundService //, IDisposab
 
     private readonly PitrBootstrapPlan? bootstrapPlan;
 
+    private readonly ServerStartFailure? startFailure;
+
     /// <param name="bootstrapPlan">
     /// The outcome of the base image step of a PITR bootstrap, which runs at startup before the persistence
     /// backend opens. Registered only when the node starts with <c>--pitr-bootstrap-from</c>.
     /// </param>
-    public ReplicationService(IKahuna kahuna, IRaft raft, KahunaCommandLineOptions options, ILogger<IRaft> logger, PitrBootstrapPlan? bootstrapPlan = null)
+    /// <param name="startFailure">
+    /// Where a failed start is recorded, so the server process exits with a failure code. The host only logs
+    /// the exception of a hosted service and stops, which looks like a requested stop to the process.
+    /// </param>
+    public ReplicationService(
+        IKahuna kahuna,
+        IRaft raft,
+        KahunaCommandLineOptions options,
+        ILogger<IRaft> logger,
+        PitrBootstrapPlan? bootstrapPlan = null,
+        ServerStartFailure? startFailure = null)
     {
         this.kahuna = kahuna;
         this.raft = raft;
         this.options = options;
         this.logger = logger;
         this.bootstrapPlan = bootstrapPlan;
+        this.startFailure = startFailure;
         this.statsLogger = new(logger);
         localEndpoint = raft.GetLocalEndpoint();
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        try
+        {
+            await StartNodeAsync(stoppingToken);
+        }
+        catch (Exception ex) when (!(ex is OperationCanceledException && stoppingToken.IsCancellationRequested))
+        {
+            // A cancellation from a requested stop is not a failed start.
+            startFailure?.Record(ex);
+            throw;
+        }
+    }
+
+    private async Task StartNodeAsync(CancellationToken stoppingToken)
     {
         if (raft.Configuration.Host == "*")
             return;

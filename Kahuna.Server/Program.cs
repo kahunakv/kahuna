@@ -34,400 +34,454 @@ ParserResult<KahunaCommandLineOptions> optsResult = ParseCommandLine(args);
 
 KahunaCommandLineOptions? opts = optsResult.Value;
 if (opts is null)
+{
+    // The parser already printed the help, the version, or what is wrong with the arguments. Only a
+    // request for the help or the version is a success.
+    if (!optsResult.Errors.All(static e => e is HelpRequestedError or HelpVerbRequestedError or VersionRequestedError))
+        Environment.ExitCode = ServerStartFailure.InvalidCommandLineExitCode;
+
     return;
-
-WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
-
-// Suppress noisy per-request ASP.NET Core infrastructure logs (request start/end,
-// endpoint routing). These fire on every Raft Ping and flood the console in a cluster.
-builder.Logging.AddFilter("Microsoft.AspNetCore.Hosting.Diagnostics", LogLevel.Warning);
-builder.Logging.AddFilter("Microsoft.AspNetCore.Routing.EndpointMiddleware", LogLevel.Warning);
-
-if (string.IsNullOrEmpty(opts.RaftNodeName))
-    opts.RaftNodeName = Environment.MachineName;
-
-// With no peers configured the node runs standalone: an in-process embedded engine backed by
-// phantom witness nodes for a clean single-node quorum (no real-peer election churn), exposed
-// over the same gRPC/REST surface as a clustered node.
-bool standalone = opts.InitialCluster is null || !opts.InitialCluster.Any();
-
-// The storage engines both node shapes open, by --storage and --wal-storage type.
-StorageProviders storageProviders = StorageProviders.CreateDefault();
-
-// Extension assemblies are loaded once, here, before either node shape is built and before the storage
-// paths are resolved, since an extension's storage engine decides whether its path is needed. Both shapes
-// then share the one function registry and the one set of storage engines, so a standalone node and a
-// clustered node cannot end up with different ones from the same command line. Any failure throws and
-// the node does not start: a node that came up missing one function would answer scripts that call it
-// with Errored while its peers answered normally, which is the hardest kind of failure to diagnose in a
-// cluster.
-Kahuna.Extensibility.KahunaFunctionRegistry extensionFunctions = ExtensionAssemblyLoader.Load(
-    opts.ExtensionAssemblies,
-    LoggerFactory.Create(logging => logging.AddConsole()).CreateLogger("Kahuna.Extensions"),
-    storageProviders);
-
-// An unset storage/WAL path would reach the backend as "", which composes to "/{revision}" — an
-// absolute path at the root of the filesystem rather than anything the user owns. Resolve both to a
-// concrete per-user directory here, once, before either the standalone or cluster branch reads them,
-// so the two branches cannot drift. An explicitly configured path is kept verbatim, so the container
-// entrypoint and the cluster run scripts are unaffected.
-if (storageProviders.FindBackend(opts.Storage)?.KeepsDataOnDisk ?? !DataPathResolver.IsInMemory(opts.Storage))
-    opts.StoragePath = DataPathResolver.ResolveStoragePath(opts.StoragePath);
-
-if (storageProviders.FindWal(opts.WalStorage)?.KeepsDataOnDisk ?? !DataPathResolver.IsInMemory(opts.WalStorage))
-    opts.WalPath = DataPathResolver.ResolveWalPath(opts.WalPath);
-
-// A server's storage identity must be stable across restarts. Left unset it reaches the embedded
-// node, which mints a per-boot GUID to give in-process test nodes an isolated keyspace — correct
-// there, silent data loss here.
-opts.StorageRevision = DataPathResolver.ResolveStorageRevision(opts.StorageRevision);
-
-
-bool httpsConfigured = ConfigurationValidator.ShouldBindHttps(opts.HttpsCertificate, opts.HttpsPorts);
-
-// One options object for Raft and Kahuna's inter-node traffic, built and validated before anything binds.
-RaftTransportSecurityOptions transportSecurity = NodeTransportSecurityPolicy.Build(opts);
-NodeTransportSecurityPolicy.Validate(opts, transportSecurity);
-
-if (!standalone)
-    NodeTransportSecurityPolicy.ValidateRaftPortListener(opts, httpsConfigured);
-
-bool bindPlaintextListeners = NodeTransportSecurityPolicy.ShouldBindPlaintextListeners(httpsConfigured, opts.AllowPlaintextListener);
-
-if (standalone)
-{
-    builder.Services.AddSingleton<EmbeddedKahunaNode>(services =>
-        new EmbeddedKahunaNode(EmbeddedOptionsFactory.CreateEmbeddedOptions(opts, transportSecurity, extensionFunctions, storageProviders), services.GetRequiredService<ILoggerFactory>()));
-
-    builder.Services.AddSingleton<IRaft>(services => services.GetRequiredService<EmbeddedKahunaNode>().Raft);
-    builder.Services.AddSingleton<IKahuna>(services => services.GetRequiredService<EmbeddedKahunaNode>().Kahuna);
-}
-else
-{
-    // The embedded node installs the process fault policy in its constructor; a clustered node is assembled
-    // from its parts below, so it installs it here, before the WAL exists. Without it an out-of-memory
-    // raised inside the WAL writer's catch-all is logged and swallowed, and --fail-fast-on-oom is ignored.
-    EmbeddedKahunaNode.InstallProcessFaultPolicy(EmbeddedOptionsFactory.CreateEmbeddedOptions(opts));
-
-    // Assemble a Kahuna cluster from static discovery.
-    //
-    // When RocksDB shared memory is enabled and both the WAL and the KV/locks backend are RocksDB, create
-    // one shared bundle (block cache + WriteBufferManager) so both databases draw from a single unified
-    // budget. Registered as a singleton FIRST in this branch so the DI container disposes it LAST — after
-    // the Raft/WAL and Kahuna singletons that borrow it. (Early disposal is safe anyway: each open DB holds
-    // its own native refcount, so this only affects budget accounting, not crash-safety.)
-    RocksDbSharedResources? sharedResources = EmbeddedKahunaNode.CreateSharedResources(EmbeddedOptionsFactory.CreateEmbeddedOptions(opts));
-
-    if (sharedResources is not null)
-        builder.Services.AddSingleton(sharedResources);
-
-    builder.Services.AddSingleton<IRaft>(services =>
-    {
-        ILogger<IRaft> logger = services.GetRequiredService<ILogger<IRaft>>();
-
-        RaftConfiguration configuration = CreateRaftConfiguration(opts, transportSecurity);
-
-        ConfigurationValidator.ValidateReplicaPlacement(
-            configuration.ReplicationFactor, opts.InitialCluster!.Count(), logger);
-
-        bool walSyncWrites = opts.GetWalSyncWrites();
-
-        // Routed through the embedded options object rather than read off the CLI here, so the
-        // command line reaches the WAL tuning through exactly one mapping. A second CLI-to-tuning
-        // mapping is how a flag ends up honoured in standalone mode and ignored in a cluster.
-        RocksDbWalTuning walTuning = RaftWalTuningFactory.Build(EmbeddedOptionsFactory.CreateEmbeddedOptions(opts));
-
-        IWAL walAdapter = storageProviders.GetWal(opts.WalStorage).Open(new WalContext
-        {
-            Path = opts.WalPath,
-            Revision = opts.WalRevision,
-            SyncWrites = walSyncWrites,
-            Logger = logger,
-            SharedResources = sharedResources,
-            // The node's configuration, the one its store opens from, so the two share one budget object.
-            SharedMemory = services.GetRequiredService<KahunaConfiguration>().SharedMemory,
-            ExtensionOptions = services.GetRequiredService<KahunaConfiguration>().ExtensionOptions,
-            RocksDbTuning = walTuning,
-        });
-
-        return new RaftManager(
-            configuration,
-            new StaticDiscovery([.. opts.InitialCluster!.Select(k => new RaftNode(k))]),
-            walAdapter,
-            new GrpcCommunication(),
-            new HybridLogicalClock(),
-            logger
-        );
-    });
-
-    builder.Services.AddSingleton<ActorSystem>(services => new(services, services.GetRequiredService<ILogger<IRaft>>()));
-    // Resolve KahunaManager through a factory so the (optional) shared bundle is injected when registered
-    // and null otherwise — GetService returns null for an unregistered service, preserving the default path.
-    builder.Services.AddSingleton<IKahuna>(services =>
-    {
-        IRaft raft = services.GetRequiredService<IRaft>();
-
-        KahunaManager manager = new(
-            services.GetRequiredService<ActorSystem>(),
-            raft,
-            services.GetRequiredService<KahunaConfiguration>(),
-            services.GetRequiredService<IInterNodeCommunication>(),
-            services.GetService<RocksDbSharedResources>(),
-            services.GetRequiredService<ILogger<IKahuna>>(),
-            services.GetRequiredService<ILogger<IRaft>>());
-
-        // Restart replay and WAL compaction consult Kahuna's application-durability floor. Wired
-        // here — before ReplicationService joins the cluster — and read lazily by Kommander, so
-        // the first partition restore already sees it.
-        raft.Configuration.ApplicationDurabilityProvider = manager.DurabilityProvider;
-
-        return manager;
-    });
-    // The inter-node transport must dial with the exact options Kommander uses; see GrpcInterNodeCommunication.
-    builder.Services.AddSingleton<IInterNodeCommunication>(services => new GrpcInterNodeCommunication(
-        services.GetRequiredService<KahunaConfiguration>(),
-        services.GetRequiredService<IRaft>().Configuration.GetTransportAuthenticator().Options,
-        services.GetRequiredService<ILogger<GrpcInterNodeCommunication>>()));
-    builder.Services.AddHostedService<ReplicationService>();
 }
 
-// Guards the node-only gRPC surfaces with the same trust policy Raft applies.
-builder.Services.AddNodeTransportGate();
+// Every way the server fails to start ends below, with a message and a non-zero exit code: a configuration
+// error found before the host exists, a node that cannot start, and a hosted service that stops the host.
+// An exception must not escape Main: the runtime then aborts (exit 134, and a crash dump in the Docker
+// images) for what is a configuration error. A failed hosted service must not exit 0 like a requested stop.
+ServerStartFailure startFailure = new();
+bool failureReported = false;
 
-// Registered outside both branches: the dashboard's summary endpoint reads the resolved storage
-// paths and the node name from here, and it answers on a standalone node as well as a clustered one.
-builder.Services.AddSingleton(opts);
-
-// Kahuna and Kommander publish their instruments whether or not anything listens, so without this
-// collector the node's own throughput, WAL batching, executor queue depth and commit latency are
-// readable only after someone wires up OpenTelemetry or Prometheus. Constructed by the container and
-// disposed with it, which stops the MeterListener at shutdown — a leaked listener observes forever.
-builder.Services.AddSingleton<EngineMetricsCollector>();
-
-// Off unless OTEL_EXPORTER_OTLP_ENDPOINT names a collector; the collector above serves the dashboard
-// either way, since both read the same instruments through their own listeners.
-bool otlpExport = OtlpTelemetry.AddIfConfigured(builder, opts.RaftNodeName);
-
-builder.Services.AddGrpc();
-builder.Services.AddGrpcReflection();
-
-// The REST handlers of Kahuna and of Kommander's Raft transport bind request bodies and write
-// responses through the minimal-API JSON options. Resolving their types from generated metadata keeps
-// those endpoints working in a trimmed build, where the reflection resolver cannot see members the
-// trimmer removed. The options themselves keep the web defaults, so the wire format does not change.
-builder.Services.ConfigureHttpJsonOptions(options =>
+try
 {
-    options.SerializerOptions.TypeInfoResolverChain.Insert(0, KahunaJsonContext.Default);
-    options.SerializerOptions.TypeInfoResolverChain.Insert(1, Kommander.Communication.RestJsonContext.Default);
-});
+    WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
-// Listen on all http/https ports in the configuration    
-builder.WebHost.ConfigureKestrel(options =>
-{
-    options.AllowSynchronousIO = false;
+    // Suppress noisy per-request ASP.NET Core infrastructure logs (request start/end,
+    // endpoint routing). These fire on every Raft Ping and flood the console in a cluster.
+    builder.Logging.AddFilter("Microsoft.AspNetCore.Hosting.Diagnostics", LogLevel.Warning);
+    builder.Logging.AddFilter("Microsoft.AspNetCore.Routing.EndpointMiddleware", LogLevel.Warning);
 
-    // A connection holds a file descriptor and, for a watch stream, a watch for as long as the client keeps it
-    // open. The bound covers every listener: Kestrel has no per-listener limit, and with the default ports
-    // --raft-port is also a client port. Already-open peer connections are kept, so only a peer that reconnects
-    // while clients hold every slot is refused.
-    options.Limits.MaxConcurrentConnections = opts.MaxConcurrentConnections > 0 ? opts.MaxConcurrentConnections : null;
+    if (string.IsNullOrEmpty(opts.RaftNodeName))
+        opts.RaftNodeName = Environment.MachineName;
 
-    // Cleartext listeners beside a configured certificate are an explicit opt-in.
-    if (bindPlaintextListeners)
+    // With no peers configured the node runs standalone: an in-process embedded engine backed by
+    // phantom witness nodes for a clean single-node quorum (no real-peer election churn), exposed
+    // over the same gRPC/REST surface as a clustered node.
+    bool standalone = opts.InitialCluster is null || !opts.InitialCluster.Any();
+
+    // The storage engines both node shapes open, by --storage and --wal-storage type.
+    StorageProviders storageProviders = StorageProviders.CreateDefault();
+
+    // Extension assemblies are loaded once, here, before either node shape is built and before the storage
+    // paths are resolved, since an extension's storage engine decides whether its path is needed. Both shapes
+    // then share the one function registry and the one set of storage engines, so a standalone node and a
+    // clustered node cannot end up with different ones from the same command line. Any failure throws and
+    // the node does not start: a node that came up missing one function would answer scripts that call it
+    // with Errored while its peers answered normally, which is the hardest kind of failure to diagnose in a
+    // cluster.
+    Kahuna.Extensibility.KahunaFunctionRegistry extensionFunctions = ExtensionAssemblyLoader.Load(
+        opts.ExtensionAssemblies,
+        LoggerFactory.Create(logging => logging.AddConsole()).CreateLogger("Kahuna.Extensions"),
+        storageProviders);
+
+    // An unset storage/WAL path would reach the backend as "", which composes to "/{revision}" — an
+    // absolute path at the root of the filesystem rather than anything the user owns. Resolve both to a
+    // concrete per-user directory here, once, before either the standalone or cluster branch reads them,
+    // so the two branches cannot drift. An explicitly configured path is kept verbatim, so the container
+    // entrypoint and the cluster run scripts are unaffected.
+    if (storageProviders.FindBackend(opts.Storage)?.KeepsDataOnDisk ?? !DataPathResolver.IsInMemory(opts.Storage))
+        opts.StoragePath = DataPathResolver.ResolveStoragePath(opts.StoragePath);
+
+    if (storageProviders.FindWal(opts.WalStorage)?.KeepsDataOnDisk ?? !DataPathResolver.IsInMemory(opts.WalStorage))
+        opts.WalPath = DataPathResolver.ResolveWalPath(opts.WalPath);
+
+    // A server's storage identity must be stable across restarts. Left unset it reaches the embedded
+    // node, which mints a per-boot GUID to give in-process test nodes an isolated keyspace — correct
+    // there, silent data loss here.
+    opts.StorageRevision = DataPathResolver.ResolveStorageRevision(opts.StorageRevision);
+
+
+    bool httpsConfigured = ConfigurationValidator.ShouldBindHttps(opts.HttpsCertificate, opts.HttpsPorts);
+
+    // One options object for Raft and Kahuna's inter-node traffic, built and validated before anything binds.
+    RaftTransportSecurityOptions transportSecurity = NodeTransportSecurityPolicy.Build(opts);
+    NodeTransportSecurityPolicy.Validate(opts, transportSecurity);
+
+    if (!standalone)
+        NodeTransportSecurityPolicy.ValidateRaftPortListener(opts, httpsConfigured);
+
+    bool bindPlaintextListeners = NodeTransportSecurityPolicy.ShouldBindPlaintextListeners(httpsConfigured, opts.AllowPlaintextListener);
+
+    if (standalone)
     {
-        foreach (int port in NodeTransportSecurityPolicy.GetHttpPorts(opts))
-            options.Listen(IPAddress.Any, port, listenOptions =>
-            {
-                listenOptions.Protocols = HttpProtocols.Http1AndHttp2AndHttp3;
-            });
+        builder.Services.AddSingleton<EmbeddedKahunaNode>(services =>
+            new EmbeddedKahunaNode(EmbeddedOptionsFactory.CreateEmbeddedOptions(opts, transportSecurity, extensionFunctions, storageProviders), services.GetRequiredService<ILoggerFactory>()));
 
-        // Cleartext HTTP/2 (h2c) for gRPC. Kestrel only accepts prior-knowledge HTTP/2 without
-        // TLS when the listener speaks HTTP/2 exclusively: with Http1AndHttp2 and no TLS there
-        // is no ALPN, so protocol selection falls back to HTTP/1.1 and gRPC calls fail.
+        builder.Services.AddSingleton<IRaft>(services => services.GetRequiredService<EmbeddedKahunaNode>().Raft);
+        builder.Services.AddSingleton<IKahuna>(services => services.GetRequiredService<EmbeddedKahunaNode>().Kahuna);
+    }
+    else
+    {
+        // The embedded node installs the process fault policy in its constructor; a clustered node is assembled
+        // from its parts below, so it installs it here, before the WAL exists. Without it an out-of-memory
+        // raised inside the WAL writer's catch-all is logged and swallowed, and --fail-fast-on-oom is ignored.
+        EmbeddedKahunaNode.InstallProcessFaultPolicy(EmbeddedOptionsFactory.CreateEmbeddedOptions(opts));
+
+        // Assemble a Kahuna cluster from static discovery.
         //
-        // A standalone node with no explicit ports binds 8083, so a gRPC client can reach it out of
-        // the box: HTTPS needs a certificate the node does not have by default, and the plain HTTP
-        // listener negotiates HTTP/1.1 without ALPN. A node joining a cluster keeps the listener off
-        // unless it is asked for — the port carries no TLS and no authentication.
-        IReadOnlyList<int> cleartextGrpcPorts = NodeTransportSecurityPolicy.ParsePorts(opts.GrpcCleartextPorts, "--grpc-cleartext-ports");
+        // When RocksDB shared memory is enabled and both the WAL and the KV/locks backend are RocksDB, create
+        // one shared bundle (block cache + WriteBufferManager) so both databases draw from a single unified
+        // budget. Registered as a singleton FIRST in this branch so the DI container disposes it LAST — after
+        // the Raft/WAL and Kahuna singletons that borrow it. (Early disposal is safe anyway: each open DB holds
+        // its own native refcount, so this only affects budget accounting, not crash-safety.)
+        RocksDbSharedResources? sharedResources = EmbeddedKahunaNode.CreateSharedResources(EmbeddedOptionsFactory.CreateEmbeddedOptions(opts));
 
-        if (cleartextGrpcPorts.Count == 0 && standalone)
-            cleartextGrpcPorts = [NodeTransportSecurityPolicy.DefaultStandaloneCleartextGrpcPort];
+        if (sharedResources is not null)
+            builder.Services.AddSingleton(sharedResources);
 
-        foreach (int port in cleartextGrpcPorts)
-            options.Listen(IPAddress.Any, port, listenOptions =>
-            {
-                listenOptions.Protocols = HttpProtocols.Http2;
-            });
-    }
-
-    if (!httpsConfigured)
-        return;
-
-    // Under mTLS the listener on --raft-port is the cluster listener: it demands a client certificate.
-    // The other HTTPS listeners stay server-TLS only for application clients.
-    foreach (int port in NodeTransportSecurityPolicy.GetHttpsPorts(opts))
-    {
-        bool clusterListener = NodeTransportSecurityPolicy.IsClusterListener(transportSecurity, port, opts.RaftPort);
-
-        options.Listen(IPAddress.Any, port, listenOptions =>
+        builder.Services.AddSingleton<IRaft>(services =>
         {
-            listenOptions.Protocols = NodeTransportSecurityPolicy.GetHttpsProtocols(clusterListener);
-            listenOptions.UseHttps(opts.HttpsCertificate, opts.HttpsCertificatePassword,
-                httpsOptions => NodeTransportSecurityPolicy.ConfigureClientCertificate(httpsOptions, clusterListener));
+            ILogger<IRaft> logger = services.GetRequiredService<ILogger<IRaft>>();
+
+            RaftConfiguration configuration = CreateRaftConfiguration(opts, transportSecurity);
+
+            ConfigurationValidator.ValidateReplicaPlacement(
+                configuration.ReplicationFactor, opts.InitialCluster!.Count(), logger);
+
+            bool walSyncWrites = opts.GetWalSyncWrites();
+
+            // Routed through the embedded options object rather than read off the CLI here, so the
+            // command line reaches the WAL tuning through exactly one mapping. A second CLI-to-tuning
+            // mapping is how a flag ends up honoured in standalone mode and ignored in a cluster.
+            RocksDbWalTuning walTuning = RaftWalTuningFactory.Build(EmbeddedOptionsFactory.CreateEmbeddedOptions(opts));
+
+            IWAL walAdapter = storageProviders.GetWal(opts.WalStorage).Open(new WalContext
+            {
+                Path = opts.WalPath,
+                Revision = opts.WalRevision,
+                SyncWrites = walSyncWrites,
+                Logger = logger,
+                SharedResources = sharedResources,
+                // The node's configuration, the one its store opens from, so the two share one budget object.
+                SharedMemory = services.GetRequiredService<KahunaConfiguration>().SharedMemory,
+                ExtensionOptions = services.GetRequiredService<KahunaConfiguration>().ExtensionOptions,
+                RocksDbTuning = walTuning,
+            });
+
+            return new RaftManager(
+                configuration,
+                new StaticDiscovery([.. opts.InitialCluster!.Select(k => new RaftNode(k))]),
+                walAdapter,
+                new GrpcCommunication(),
+                new HybridLogicalClock(),
+                logger
+            );
         });
+
+        builder.Services.AddSingleton<ActorSystem>(services => new(services, services.GetRequiredService<ILogger<IRaft>>()));
+        // Resolve KahunaManager through a factory so the (optional) shared bundle is injected when registered
+        // and null otherwise — GetService returns null for an unregistered service, preserving the default path.
+        builder.Services.AddSingleton<IKahuna>(services =>
+        {
+            IRaft raft = services.GetRequiredService<IRaft>();
+
+            KahunaManager manager = new(
+                services.GetRequiredService<ActorSystem>(),
+                raft,
+                services.GetRequiredService<KahunaConfiguration>(),
+                services.GetRequiredService<IInterNodeCommunication>(),
+                services.GetService<RocksDbSharedResources>(),
+                services.GetRequiredService<ILogger<IKahuna>>(),
+                services.GetRequiredService<ILogger<IRaft>>());
+
+            // Restart replay and WAL compaction consult Kahuna's application-durability floor. Wired
+            // here — before ReplicationService joins the cluster — and read lazily by Kommander, so
+            // the first partition restore already sees it.
+            raft.Configuration.ApplicationDurabilityProvider = manager.DurabilityProvider;
+
+            return manager;
+        });
+        // The inter-node transport must dial with the exact options Kommander uses; see GrpcInterNodeCommunication.
+        builder.Services.AddSingleton<IInterNodeCommunication>(services => new GrpcInterNodeCommunication(
+            services.GetRequiredService<KahunaConfiguration>(),
+            services.GetRequiredService<IRaft>().Configuration.GetTransportAuthenticator().Options,
+            services.GetRequiredService<ILogger<GrpcInterNodeCommunication>>()));
+        builder.Services.AddHostedService<ReplicationService>();
     }
-});
 
-ThreadPool.SetMinThreads(256, 128);
+    // Guards the node-only gRPC surfaces with the same trust policy Raft applies.
+    builder.Services.AddNodeTransportGate();
 
-// No process-wide certificate bypass: Kommander's cluster clients and Kahuna's inter-node channels take
-// their certificate policy from the transport-security options, so other HTTP clients validate normally.
+    // Registered outside both branches: the dashboard's summary endpoint reads the resolved storage
+    // paths and the node name from here, and it answers on a standalone node as well as a clustered one.
+    builder.Services.AddSingleton(opts);
 
-// One mapping for both node shapes: the clustered node runs on this configuration, and the standalone
-// node's embedded engine builds its own from the same mapping.
-KahunaConfiguration kahunaConfiguration = ServerConfigurationFactory.Create(opts, extensionFunctions, storageProviders);
+    // The hosted services record a start failure here, and the exit code below reads it.
+    builder.Services.AddSingleton(startFailure);
 
-// Process-wide, and this host runs exactly one node: with hints off a served request pays neither
-// the ambient write nor the capture object, so the switch actually removes the cost rather than
-// only blanking the field.
-Kahuna.Server.Routing.RouteCaptureScope.Enabled = kahunaConfiguration.RoutingHintsEnabled;
+    // Kahuna and Kommander publish their instruments whether or not anything listens, so without this
+    // collector the node's own throughput, WAL batching, executor queue depth and commit latency are
+    // readable only after someone wires up OpenTelemetry or Prometheus. Constructed by the container and
+    // disposed with it, which stops the MeterListener at shutdown — a leaked listener observes forever.
+    builder.Services.AddSingleton<EngineMetricsCollector>();
 
-ConfigurationValidator.ValidateSettleWindow(kahunaConfiguration, opts.RaftMinLeaderStabilityMs);
-ConfigurationValidator.ValidateValueBound(kahunaConfiguration, opts.RaftGrpcMaxMessageBytes);
-ConfigurationValidator.ValidateCollectionInterval(kahunaConfiguration);
+    // Off unless OTEL_EXPORTER_OTLP_ENDPOINT names a collector; the collector above serves the dashboard
+    // either way, since both read the same instruments through their own listeners.
+    bool otlpExport = OtlpTelemetry.AddIfConfigured(builder, opts.RaftNodeName);
 
-builder.Services.AddSingleton(kahunaConfiguration);
+    builder.Services.AddGrpc();
+    builder.Services.AddGrpcReflection();
 
-// Read before the build, so a key file that cannot be read or holds a weak key stops the node before it serves.
-IReadOnlyList<string> adminKeys = AdminGate.LoadKeys(kahunaConfiguration.AdminApiKeyFile);
-builder.Services.AddAdminGate(adminKeys);
-
-// The base image of a PITR bootstrap must be in the storage path before the persistence backend opens, and
-// the backend opens when the host resolves the node's services. So this step runs here, before the build.
-PitrBootstrapPlan? bootstrapPlan = await PitrBootstrapStartup.PrepareAsync(
-    opts,
-    kahunaConfiguration,
-    standalone,
-    LoggerFactory.Create(logging => logging.AddConsole()).CreateLogger("Kahuna.PitrBootstrap"));
-
-if (bootstrapPlan is not null)
-    builder.Services.AddSingleton(bootstrapPlan);
-
-// Start server
-WebApplication app = builder.Build();
-
-// "Where is my data?" and "am I actually on TLS?" must both be answerable from the console without
-// reconstructing the flag defaults — especially for a node started with no flags at all.
-if (app.Logger.IsEnabled(LogLevel.Information))
-{
-    app.Logger.LogInformation("Storage: {Storage} at {StoragePath}", opts.Storage, DataPathResolver.IsInMemory(opts.Storage) ? "(in-memory)" : opts.StoragePath);
-    app.Logger.LogInformation("WAL: {WalStorage} at {WalPath}", opts.WalStorage, DataPathResolver.IsInMemory(opts.WalStorage) ? "(in-memory)" : opts.WalPath);
-}
-
-if (otlpExport && app.Logger.IsEnabled(LogLevel.Information))
-    app.Logger.LogInformation("OpenTelemetry: exporting metrics, traces and logs to {OtlpEndpoint}", builder.Configuration[OtlpTelemetry.EndpointVariable]);
-
-if (!httpsConfigured)
-    app.Logger.LogInformation("HTTPS disabled: no certificate configured (pass --https-certificate to enable it)");
-
-if (!bindPlaintextListeners)
-    app.Logger.LogInformation("Cleartext HTTP and h2c listeners not bound: an HTTPS certificate is configured (pass --allow-plaintext-listener to bind them)");
-
-if (transportSecurity.NodeAuthenticationMode == RaftNodeAuthenticationMode.MutualTls && app.Logger.IsEnabled(LogLevel.Information))
-    app.Logger.LogInformation("MutualTls: port {RaftPort} requires a trusted client certificate and serves HTTP/1.1 and HTTP/2 only", opts.RaftPort);
-
-if (transportSecurity.NodeAuthenticationMode == RaftNodeAuthenticationMode.SharedSecret)
-    app.Logger.LogWarning("SharedSecret authenticates Raft only; Kahuna's inter-node gRPC stays unauthenticated. Use MutualTls to cover both");
-
-if (adminKeys.Count == 0)
-    app.Logger.LogWarning("No --admin-api-key-file: node removal, replication factor, range-map DDL, backups and restore are open to any caller of the client port");
-else if (app.Logger.IsEnabled(LogLevel.Information))
-    app.Logger.LogInformation("Admin operations require one of {AdminKeyCount} admin key(s)", adminKeys.Count);
-
-if (opts.RaftAllowInsecureCertificateValidation)
-    app.Logger.LogWarning("--raft-allow-insecure-certificate-validation is set: peer certificates are not validated on Raft or Kahuna inter-node connections. Other HTTP clients are unaffected. Development only");
-
-// Must wrap the pipeline before any route runs: maps retryable infrastructure exceptions
-// (Raft resolution, inter-node transport) escaping the kv/locks/sequences surfaces to a typed
-// MustRetry response instead of an unclassifiable HTTP 500.
-app.UseRetryableExceptionMapping();
-
-app.MapRestRaftRoutes();
-app.MapRestKahunaRoutes(opts);
-
-app.MapGrpcRaftRoutes();
-app.MapGrpcKahunaRoutes();
-app.MapGrpcReflectionService();
-
-// KAHUNA_WAL_INSTRUMENT=1 brackets a WAL double-fsync measurement window with the process lifetime:
-// reset + enable when the node finishes starting, snapshot + disable + log when it begins stopping.
-// The instrumentation is inert (a single volatile read per record) while the env var is unset.
-if (Environment.GetEnvironmentVariable("KAHUNA_WAL_INSTRUMENT") == "1")
-{
-    app.Lifetime.ApplicationStarted.Register(() =>
+    // The REST handlers of Kahuna and of Kommander's Raft transport bind request bodies and write
+    // responses through the minimal-API JSON options. Resolving their types from generated metadata keeps
+    // those endpoints working in a trimmed build, where the reflection resolver cannot see members the
+    // trimmer removed. The options themselves keep the web defaults, so the wire format does not change.
+    builder.Services.ConfigureHttpJsonOptions(options =>
     {
-        WalPhaseInstrumentation.Reset();
-        WalPhaseInstrumentation.Enabled = true;
-        app.Logger.LogInformation("WAL phase instrumentation enabled (KAHUNA_WAL_INSTRUMENT=1)");
+        options.SerializerOptions.TypeInfoResolverChain.Insert(0, KahunaJsonContext.Default);
+        options.SerializerOptions.TypeInfoResolverChain.Insert(1, Kommander.Communication.RestJsonContext.Default);
     });
 
-    app.Lifetime.ApplicationStopping.Register(() =>
+    // Listen on all http/https ports in the configuration    
+    builder.WebHost.ConfigureKestrel(options =>
     {
-        WalPhaseInstrumentation.Enabled = false;
-        if (app.Logger.IsEnabled(LogLevel.Information))
+        options.AllowSynchronousIO = false;
+
+        // A connection holds a file descriptor and, for a watch stream, a watch for as long as the client keeps it
+        // open. The bound covers every listener: Kestrel has no per-listener limit, and with the default ports
+        // --raft-port is also a client port. Already-open peer connections are kept, so only a peer that reconnects
+        // while clients hold every slot is refused.
+        options.Limits.MaxConcurrentConnections = opts.MaxConcurrentConnections > 0 ? opts.MaxConcurrentConnections : null;
+
+        // Cleartext listeners beside a configured certificate are an explicit opt-in.
+        if (bindPlaintextListeners)
         {
-            InstrumentationSnapshot snap = WalPhaseInstrumentation.Snapshot();
-            app.Logger.LogInformation(
-                "WAL phase instrumentation snapshot — " +
-                "propose[enq={ProposeEnq} dur={ProposeDur} p50={ProposeP50:F2}ms p99={ProposeP99:F2}ms] " +
-                "commit[enq={CommitEnq} dur={CommitDur} p50={CommitP50:F2}ms p99={CommitP99:F2}ms] " +
-                "followerAppend[enq={FollowerEnq} dur={FollowerDur} p50={FollowerP50:F2}ms p99={FollowerP99:F2}ms]",
-                snap.Propose.Enqueued, snap.Propose.Durable, snap.Propose.P50Ms, snap.Propose.P99Ms,
-                snap.Commit.Enqueued, snap.Commit.Durable, snap.Commit.P50Ms, snap.Commit.P99Ms,
-                snap.FollowerAppend.Enqueued, snap.FollowerAppend.Durable, snap.FollowerAppend.P50Ms, snap.FollowerAppend.P99Ms);
+            foreach (int port in NodeTransportSecurityPolicy.GetHttpPorts(opts))
+                options.Listen(IPAddress.Any, port, listenOptions =>
+                {
+                    listenOptions.Protocols = HttpProtocols.Http1AndHttp2AndHttp3;
+                });
+
+            // Cleartext HTTP/2 (h2c) for gRPC. Kestrel only accepts prior-knowledge HTTP/2 without
+            // TLS when the listener speaks HTTP/2 exclusively: with Http1AndHttp2 and no TLS there
+            // is no ALPN, so protocol selection falls back to HTTP/1.1 and gRPC calls fail.
+            //
+            // A standalone node with no explicit ports binds 8083, so a gRPC client can reach it out of
+            // the box: HTTPS needs a certificate the node does not have by default, and the plain HTTP
+            // listener negotiates HTTP/1.1 without ALPN. A node joining a cluster keeps the listener off
+            // unless it is asked for — the port carries no TLS and no authentication.
+            IReadOnlyList<int> cleartextGrpcPorts = NodeTransportSecurityPolicy.ParsePorts(opts.GrpcCleartextPorts, "--grpc-cleartext-ports");
+
+            if (cleartextGrpcPorts.Count == 0 && standalone)
+                cleartextGrpcPorts = [NodeTransportSecurityPolicy.DefaultStandaloneCleartextGrpcPort];
+
+            foreach (int port in cleartextGrpcPorts)
+                options.Listen(IPAddress.Any, port, listenOptions =>
+                {
+                    listenOptions.Protocols = HttpProtocols.Http2;
+                });
         }
 
-        // fsyncs-per-committed-write: TotalSyncBatchesWritten (real fsyncs) drops toward ~1× with the
-        // single-fsync fast path on, while TotalBatchesWritten (Write-call count) stays ~2×. The ratio
-        // is the deterministic fsync-count assertion the double-fsync spec asks for, alongside p50.
-        if (app.Services.GetRequiredService<IRaft>().WalScheduler is FairWalScheduler wal
-            && app.Logger.IsEnabled(LogLevel.Information))
-            app.Logger.LogInformation(
-                "WAL fsync counters — totalBatches={TotalBatches} totalSyncBatches={TotalSyncBatches} (sync/total={Ratio:F3})",
-                wal.TotalBatchesWritten, wal.TotalSyncBatchesWritten,
-                wal.TotalBatchesWritten > 0 ? (double)wal.TotalSyncBatchesWritten / wal.TotalBatchesWritten : 0.0);
+        if (!httpsConfigured)
+            return;
+
+        // Under mTLS the listener on --raft-port is the cluster listener: it demands a client certificate.
+        // The other HTTPS listeners stay server-TLS only for application clients.
+        foreach (int port in NodeTransportSecurityPolicy.GetHttpsPorts(opts))
+        {
+            bool clusterListener = NodeTransportSecurityPolicy.IsClusterListener(transportSecurity, port, opts.RaftPort);
+
+            options.Listen(IPAddress.Any, port, listenOptions =>
+            {
+                listenOptions.Protocols = NodeTransportSecurityPolicy.GetHttpsProtocols(clusterListener);
+                listenOptions.UseHttps(opts.HttpsCertificate, opts.HttpsCertificatePassword,
+                    httpsOptions => NodeTransportSecurityPolicy.ConfigureClientCertificate(httpsOptions, clusterListener));
+            });
+        }
     });
+
+    ThreadPool.SetMinThreads(256, 128);
+
+    // No process-wide certificate bypass: Kommander's cluster clients and Kahuna's inter-node channels take
+    // their certificate policy from the transport-security options, so other HTTP clients validate normally.
+
+    // One mapping for both node shapes: the clustered node runs on this configuration, and the standalone
+    // node's embedded engine builds its own from the same mapping.
+    KahunaConfiguration kahunaConfiguration = ServerConfigurationFactory.Create(opts, extensionFunctions, storageProviders);
+
+    // Process-wide, and this host runs exactly one node: with hints off a served request pays neither
+    // the ambient write nor the capture object, so the switch actually removes the cost rather than
+    // only blanking the field.
+    Kahuna.Server.Routing.RouteCaptureScope.Enabled = kahunaConfiguration.RoutingHintsEnabled;
+
+    ConfigurationValidator.ValidateSettleWindow(kahunaConfiguration, opts.RaftMinLeaderStabilityMs);
+    ConfigurationValidator.ValidateValueBound(kahunaConfiguration, opts.RaftGrpcMaxMessageBytes);
+    ConfigurationValidator.ValidateCollectionInterval(kahunaConfiguration);
+
+    builder.Services.AddSingleton(kahunaConfiguration);
+
+    // Read before the build, so a key file that cannot be read or holds a weak key stops the node before it serves.
+    IReadOnlyList<string> adminKeys = AdminGate.LoadKeys(kahunaConfiguration.AdminApiKeyFile);
+    builder.Services.AddAdminGate(adminKeys);
+
+    // The base image of a PITR bootstrap must be in the storage path before the persistence backend opens, and
+    // the backend opens when the host resolves the node's services. So this step runs here, before the build.
+    PitrBootstrapPlan? bootstrapPlan = await PitrBootstrapStartup.PrepareAsync(
+        opts,
+        kahunaConfiguration,
+        standalone,
+        LoggerFactory.Create(logging => logging.AddConsole()).CreateLogger("Kahuna.PitrBootstrap"));
+
+    if (bootstrapPlan is not null)
+        builder.Services.AddSingleton(bootstrapPlan);
+
+    // Start server
+    WebApplication app = builder.Build();
+
+    // "Where is my data?" and "am I actually on TLS?" must both be answerable from the console without
+    // reconstructing the flag defaults — especially for a node started with no flags at all.
+    if (app.Logger.IsEnabled(LogLevel.Information))
+    {
+        app.Logger.LogInformation("Storage: {Storage} at {StoragePath}", opts.Storage, DataPathResolver.IsInMemory(opts.Storage) ? "(in-memory)" : opts.StoragePath);
+        app.Logger.LogInformation("WAL: {WalStorage} at {WalPath}", opts.WalStorage, DataPathResolver.IsInMemory(opts.WalStorage) ? "(in-memory)" : opts.WalPath);
+    }
+
+    if (otlpExport && app.Logger.IsEnabled(LogLevel.Information))
+        app.Logger.LogInformation("OpenTelemetry: exporting metrics, traces and logs to {OtlpEndpoint}", builder.Configuration[OtlpTelemetry.EndpointVariable]);
+
+    if (!httpsConfigured)
+        app.Logger.LogInformation("HTTPS disabled: no certificate configured (pass --https-certificate to enable it)");
+
+    if (!bindPlaintextListeners)
+        app.Logger.LogInformation("Cleartext HTTP and h2c listeners not bound: an HTTPS certificate is configured (pass --allow-plaintext-listener to bind them)");
+
+    if (transportSecurity.NodeAuthenticationMode == RaftNodeAuthenticationMode.MutualTls && app.Logger.IsEnabled(LogLevel.Information))
+        app.Logger.LogInformation("MutualTls: port {RaftPort} requires a trusted client certificate and serves HTTP/1.1 and HTTP/2 only", opts.RaftPort);
+
+    if (transportSecurity.NodeAuthenticationMode == RaftNodeAuthenticationMode.SharedSecret)
+        app.Logger.LogWarning("SharedSecret authenticates Raft only; Kahuna's inter-node gRPC stays unauthenticated. Use MutualTls to cover both");
+
+    if (adminKeys.Count == 0)
+        app.Logger.LogWarning("No --admin-api-key-file: node removal, replication factor, range-map DDL, backups and restore are open to any caller of the client port");
+    else if (app.Logger.IsEnabled(LogLevel.Information))
+        app.Logger.LogInformation("Admin operations require one of {AdminKeyCount} admin key(s)", adminKeys.Count);
+
+    if (opts.RaftAllowInsecureCertificateValidation)
+        app.Logger.LogWarning("--raft-allow-insecure-certificate-validation is set: peer certificates are not validated on Raft or Kahuna inter-node connections. Other HTTP clients are unaffected. Development only");
+
+    // Must wrap the pipeline before any route runs: maps retryable infrastructure exceptions
+    // (Raft resolution, inter-node transport) escaping the kv/locks/sequences surfaces to a typed
+    // MustRetry response instead of an unclassifiable HTTP 500.
+    app.UseRetryableExceptionMapping();
+
+    app.MapRestRaftRoutes();
+    app.MapRestKahunaRoutes(opts);
+
+    app.MapGrpcRaftRoutes();
+    app.MapGrpcKahunaRoutes();
+    app.MapGrpcReflectionService();
+
+    // KAHUNA_WAL_INSTRUMENT=1 brackets a WAL double-fsync measurement window with the process lifetime:
+    // reset + enable when the node finishes starting, snapshot + disable + log when it begins stopping.
+    // The instrumentation is inert (a single volatile read per record) while the env var is unset.
+    if (Environment.GetEnvironmentVariable("KAHUNA_WAL_INSTRUMENT") == "1")
+    {
+        app.Lifetime.ApplicationStarted.Register(() =>
+        {
+            WalPhaseInstrumentation.Reset();
+            WalPhaseInstrumentation.Enabled = true;
+            app.Logger.LogInformation("WAL phase instrumentation enabled (KAHUNA_WAL_INSTRUMENT=1)");
+        });
+
+        app.Lifetime.ApplicationStopping.Register(() =>
+        {
+            WalPhaseInstrumentation.Enabled = false;
+            if (app.Logger.IsEnabled(LogLevel.Information))
+            {
+                InstrumentationSnapshot snap = WalPhaseInstrumentation.Snapshot();
+                app.Logger.LogInformation(
+                    "WAL phase instrumentation snapshot — " +
+                    "propose[enq={ProposeEnq} dur={ProposeDur} p50={ProposeP50:F2}ms p99={ProposeP99:F2}ms] " +
+                    "commit[enq={CommitEnq} dur={CommitDur} p50={CommitP50:F2}ms p99={CommitP99:F2}ms] " +
+                    "followerAppend[enq={FollowerEnq} dur={FollowerDur} p50={FollowerP50:F2}ms p99={FollowerP99:F2}ms]",
+                    snap.Propose.Enqueued, snap.Propose.Durable, snap.Propose.P50Ms, snap.Propose.P99Ms,
+                    snap.Commit.Enqueued, snap.Commit.Durable, snap.Commit.P50Ms, snap.Commit.P99Ms,
+                    snap.FollowerAppend.Enqueued, snap.FollowerAppend.Durable, snap.FollowerAppend.P50Ms, snap.FollowerAppend.P99Ms);
+            }
+
+            // fsyncs-per-committed-write: TotalSyncBatchesWritten (real fsyncs) drops toward ~1× with the
+            // single-fsync fast path on, while TotalBatchesWritten (Write-call count) stays ~2×. The ratio
+            // is the deterministic fsync-count assertion the double-fsync spec asks for, alongside p50.
+            if (app.Services.GetRequiredService<IRaft>().WalScheduler is FairWalScheduler wal
+                && app.Logger.IsEnabled(LogLevel.Information))
+                app.Logger.LogInformation(
+                    "WAL fsync counters — totalBatches={TotalBatches} totalSyncBatches={TotalSyncBatches} (sync/total={Ratio:F3})",
+                    wal.TotalBatchesWritten, wal.TotalSyncBatchesWritten,
+                    wal.TotalBatchesWritten > 0 ? (double)wal.TotalSyncBatchesWritten / wal.TotalBatchesWritten : 0.0);
+        });
+    }
+
+    if (standalone)
+    {
+        // Bind Kestrel first, then boot the embedded engine (join + leader election), then block
+        // until shutdown and dispose the node so its actor system drains cleanly. A node that cannot
+        // start stops the host at once instead of waiting for a shutdown signal.
+        await app.StartAsync();
+
+        EmbeddedKahunaNode? node = null;
+        try
+        {
+            node = app.Services.GetRequiredService<EmbeddedKahunaNode>();
+            await node.StartAsync();
+        }
+        catch (Exception ex)
+        {
+            startFailure.Record(ex);
+            app.Logger.LogCritical(ex, "The node could not start");
+        }
+
+        if (startFailure.Failure is null)
+            await app.WaitForShutdownAsync();
+        else
+            await app.StopAsync();
+
+        if (node is not null)
+            await node.DisposeAsync();
+    }
+    else
+    {
+        await app.StartAsync();
+        await app.WaitForShutdownAsync();
+
+        // Ordered teardown mirroring EmbeddedKahunaNode: drain the key/value write aggregator and the actor
+        // system while Raft and the actors are still alive, THEN dispose KahunaManager (which stops the backend
+        // I/O schedulers) so no actor enqueues backend work onto an already-stopped scheduler, THEN dispose Raft.
+        // KahunaManager.Dispose is idempotent, so the later DI container teardown is a no-op.
+        IKahuna kahuna = app.Services.GetRequiredService<IKahuna>();
+        ActorSystem actorSystem = app.Services.GetRequiredService<ActorSystem>();
+
+        if (kahuna is KahunaManager kahunaManager)
+            await kahunaManager.DrainKeyValueWritesAsync(TimeSpan.FromSeconds(5));
+
+        await actorSystem.GracefulShutdownAll(TimeSpan.FromSeconds(5));
+
+        (kahuna as IDisposable)?.Dispose();
+        (app.Services.GetRequiredService<IRaft>() as IDisposable)?.Dispose();
+    }
+}
+catch (Exception ex)
+{
+    // There may be no logger yet: most configuration errors are found before the host is built.
+    startFailure.Record(ex);
+    failureReported = true;
+    Console.Error.WriteLine($"Kahuna stopped because of an error: {ex}");
 }
 
-if (standalone)
+if (startFailure.Failure is { } startError)
 {
-    // Bind Kestrel first, then boot the embedded engine (join + leader election), then block
-    // until shutdown and dispose the node so its actor system drains cleanly.
-    await app.StartAsync();
-    await app.Services.GetRequiredService<EmbeddedKahunaNode>().StartAsync();
-    await app.WaitForShutdownAsync();
-    await app.Services.GetRequiredService<EmbeddedKahunaNode>().DisposeAsync();
-}
-else
-{
-    await app.StartAsync();
-    await app.WaitForShutdownAsync();
+    // A failure recorded by the node start or by a hosted service is already in the log with its stack.
+    if (!failureReported)
+        Console.Error.WriteLine($"Kahuna stopped because the node could not start: {startError.Message}");
 
-    // Ordered teardown mirroring EmbeddedKahunaNode: drain the key/value write aggregator and the actor
-    // system while Raft and the actors are still alive, THEN dispose KahunaManager (which stops the backend
-    // I/O schedulers) so no actor enqueues backend work onto an already-stopped scheduler, THEN dispose Raft.
-    // KahunaManager.Dispose is idempotent, so the later DI container teardown is a no-op.
-    IKahuna kahuna = app.Services.GetRequiredService<IKahuna>();
-    ActorSystem actorSystem = app.Services.GetRequiredService<ActorSystem>();
-
-    if (kahuna is KahunaManager kahunaManager)
-        await kahunaManager.DrainKeyValueWritesAsync(TimeSpan.FromSeconds(5));
-
-    await actorSystem.GracefulShutdownAll(TimeSpan.FromSeconds(5));
-
-    (kahuna as IDisposable)?.Dispose();
-    (app.Services.GetRequiredService<IRaft>() as IDisposable)?.Dispose();
+    Environment.ExitCode = ServerStartFailure.ExitCode;
 }
 
 static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts, RaftTransportSecurityOptions transportSecurity)

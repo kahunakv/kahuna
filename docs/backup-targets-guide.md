@@ -54,6 +54,21 @@ Before a provider opens the storage, Kahuna checks two directories:
 
 Kahuna does these checks itself, so a provider cannot skip them.
 
+### Exit codes of the server
+
+A supervisor reads only the exit code. For example, systemd restarts a unit with `Restart=on-failure` only
+after a non-zero exit, and a Kubernetes Job counts a zero exit as a success. So `Kahuna.Server` exits with
+these codes, as a standalone node and as a cluster node:
+
+| Exit code | When |
+| --- | --- |
+| 0 | The server stopped after a stop request (SIGTERM or Ctrl+C), or it printed `--help` or `--version`. |
+| 1 | The server could not start: a configuration error such as an unknown backup target, or a failure of the backup storage start. The last line on stderr starts with `Kahuna stopped because`. |
+| 2 | The command line does not parse. The parser prints what is wrong. |
+
+A start failure is an ordinary exit with its message in the log. It is not an unhandled exception, so the
+runtime does not abort, and the Docker images do not write a crash dump for it.
+
 ## 3. Loading a target from the command line
 
 An operator who runs the shipped server adds a target with `--extension-assembly`. This is the same flag
