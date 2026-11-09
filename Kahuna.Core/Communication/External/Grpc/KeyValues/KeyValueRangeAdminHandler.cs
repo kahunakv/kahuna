@@ -18,6 +18,7 @@ using Kahuna.Server.Communication;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.KeyValues;
+using Kahuna.Server.KeyValues.Ranges;
 using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.KeyValues.Writes;
@@ -139,8 +140,40 @@ internal sealed class KeyValueRangeAdminHandler
         return new GrpcReplicateKeyValueRangePageResponse { Success = committed };
     }
 
+    private async Task<GrpcGetRangeTransactionStateResponse> GetRangeHeldHistoryPageInternal(GrpcGetRangeTransactionStateRequest request, ServerCallContext context)
+    {
+        RangeHeldHistoryPage page = await keyValues.GetRangeHeldHistoryPageLocal(
+            request.PartitionId,
+            request.KeySpace,
+            request.HasStartKey ? request.StartKey : null,
+            request.HasEndKey ? request.EndKey : null,
+            [.. request.Pins.Select(static pin => new HLCTimestamp(pin.Node, pin.Physical, pin.Counter))],
+            request.TombstonesSince is { } since ? new HLCTimestamp(since.Node, since.Physical, since.Counter) : HLCTimestamp.Zero,
+            request.HasCursor ? request.Cursor : null,
+            context.CancellationToken);
+
+        GrpcGetRangeTransactionStateResponse response = new()
+        {
+            Success = page.Ok,
+            HeldHistoryServed = page.Served,
+            HeldHistory = page.Rows.Length > 0 ? UnsafeByteOperations.UnsafeWrap(page.Rows) : ByteString.Empty,
+            HasMore = page.HasMore
+        };
+
+        if (page.NextCursor is not null)
+            response.NextCursor = page.NextCursor;
+
+        foreach (HLCTimestamp pin in page.RefusedPins)
+            response.RefusedPins.Add(new GrpcHistoryPin { Node = pin.N, Physical = pin.L, Counter = pin.C });
+
+        return response;
+    }
+
     internal async Task<GrpcGetRangeTransactionStateResponse> GetRangeTransactionStateInternal(GrpcGetRangeTransactionStateRequest request, ServerCallContext context)
     {
+        if (request.Kinds == (int)KeyValueRangeStateKinds.HeldHistory)
+            return await GetRangeHeldHistoryPageInternal(request, context);
+
         (bool ok, List<CompletionReceiptRecord> receipts, byte[] records, byte[] intents, byte[] heads, bool hasMore, string? nextCursor) =
             await keyValues.GetRangeTransactionStateLocal(
                 request.PartitionId,

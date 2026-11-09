@@ -219,6 +219,13 @@ public interface IInterNodeCommunication
     /// </summary>
     public Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents, byte[] CommittedHeads, bool HasMore, string? NextCursor)> GetRangeTransactionState(string node, int partitionId, string? startKey, string? endKey, KeyValueRangeStateKinds kinds, string? cursor, int maxItems, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Reads one page of what a moving range must carry beyond its current rows from <paramref name="node"/>, the source
+    /// partition's leader. A peer that predates the walk answers with <c>Served</c> false.
+    /// </summary>
+    public Task<Kahuna.Server.KeyValues.Ranges.RangeHeldHistoryPage> GetRangeHeldHistoryPage(
+        string node, int partitionId, string keySpace, string? startKey, string? endKey, IReadOnlyList<HLCTimestamp> pins, HLCTimestamp tombstonesSince, string? cursor, CancellationToken cancellationToken);
+
 
     /// <summary>
     /// Asks <paramref name="node"/> — any replica of <paramref name="partitionId"/>, never routed to a

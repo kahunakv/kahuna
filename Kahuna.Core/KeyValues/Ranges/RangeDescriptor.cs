@@ -74,6 +74,28 @@ internal sealed record RangeDescriptor
     public string? QuiesceEndKey { get; init; }
 
     /// <summary>
+    /// The lowest timestamp at or above which this range has every revision on every replica, when it received its rows
+    /// through a split or merge copy. <see cref="HLCTimestamp.Zero"/> means its whole history.
+    ///
+    /// <para>
+    /// A copy carries each key's current row and its revision at each snapshot hold, so a read at any other older
+    /// timestamp would find an older revision or none, and report it as the answer. A replica that also hosted the source
+    /// could still answer it from rows left behind, so a replica's answer would depend on where it had been. This rides
+    /// the range map because the map is replicated, durable and changes atomically with the routing that sends reads
+    /// here, and every replica of the range then answers alike.
+    /// </para>
+    /// </summary>
+    public HLCTimestamp HistoryCompleteFrom { get; init; }
+
+    /// <summary>The hold timestamps below <see cref="HistoryCompleteFrom"/> this range can answer, ascending. Each covers
+    /// that exact timestamp only: the revisions between two of them were not carried.</summary>
+    public HLCTimestamp[] HistoryPins { get; init; } = [];
+
+    /// <summary>Whether a read of this range at <paramref name="timestamp"/> can be answered from what it holds.</summary>
+    public bool IsHistoryServable(HLCTimestamp timestamp) =>
+        timestamp.CompareTo(HistoryCompleteFrom) >= 0 || Array.BinarySearch(HistoryPins, timestamp) >= 0;
+
+    /// <summary>
     /// True when any part of this range is still refusing writes at <paramref name="now"/>. A lapsed
     /// deadline reads as open — the quiesce needs no one to clear it.
     /// </summary>

@@ -218,6 +218,11 @@ public interface IKahuna
     /// ceiling and an unpaged answer can exceed the transport's message limit.</summary>
     public Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents, byte[] CommittedHeads, bool HasMore, string? NextCursor)> GetRangeTransactionStateLocal(int partitionId, string? startKey, string? endKey, KeyValueRangeStateKinds kinds, string? cursor, int maxItems, CancellationToken cancellationToken);
 
+    /// <summary>One page of what a moving range must carry beyond its current rows, answered by this node when it holds
+    /// confirmed leadership of the source partition (see <see cref="Kahuna.Server.KeyValues.Ranges.RangeHeldHistoryPage"/>).</summary>
+    public Task<Kahuna.Server.KeyValues.Ranges.RangeHeldHistoryPage> GetRangeHeldHistoryPageLocal(
+        int partitionId, string keySpace, string? startKey, string? endKey, IReadOnlyList<HLCTimestamp> pins, HLCTimestamp tombstonesSince, string? cursor, CancellationToken cancellationToken);
+
     /// <summary>Answers THIS node's staged-base fence verdict for each of one transaction's validated-base
     /// prepares — the replica half of the pre-decision fence confirmation. Deliberately not leader-gated: the
     /// verdict is about this node's own applied intent and committed-head memory, and a follower's refusal is

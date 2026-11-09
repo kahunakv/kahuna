@@ -488,6 +488,14 @@ Step by step:
    to the split's own transaction id, so a straggling release cannot reopen a *later* split's
    window, and a successful cutover clears the quiesce atomically by replacing the descriptor.
 
+   A move also carries what its copies cannot: each key's revision at each snapshot hold, walked on
+   the source leader ahead of the quiesce, and inside the quiesce the holds registered since and the
+   tombstones of keys deleted since the first copy. A snapshot scan shows neither a deleted key nor its
+   tombstone, so without that walk a key deleted between the bulk and the catch-up copies would come
+   back to life at the cutover. The moved range's descriptor records what it can answer, so every
+   replica refuses a read at any other timestamp below the move: see the
+   [MVCC snapshot floor guide](mvcc-snapshot-floor-guide.md#reads-of-a-range-moved-by-a-split-or-merge).
+
    The deadline cuts both ways: once it passes, the range lock and the descriptor quiesce admit
    writes into `[K,E)` again, on P, after the catch-up copy. A split that is still running at that
    point must not cut over, because every such write would become unreachable the moment the range

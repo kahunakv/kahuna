@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+
 using Nixie;
 using Nixie.Routers;
 
@@ -835,6 +837,180 @@ internal sealed class RangeStateTransferService
 
             cursorKey = page.Items[^1].Item1;   // resume strictly after the last key
             cursorInclusive = false;
+        }
+    }
+
+    // Keys per page of a held-history walk, and the row bytes at which a page stops taking more keys. A page is replicated
+    // whole, so it has to stay well under the transport's message limit.
+    private const int HeldHistoryPageKeys = 256;
+
+    private const long HeldHistoryPageBytes = 1024 * 1024;
+
+    // The term under which this node last landed its applied rows for a walk of each partition (see GetRangeHeldHistoryPageLocal).
+    private readonly ConcurrentDictionary<int, long> heldHistoryDrainedTerm = new();
+
+    /// <summary>The snapshot holds a range move must answer for, newest first. Expired ones count too: until a replicated
+    /// purge removes a hold, its holder can still renew it.</summary>
+    internal HLCTimestamp[] SampleSnapshotHolds() =>
+        [.. snapshotFloorStore.Holds.Values.Select(static hold => hold.Timestamp).Distinct().OrderDescending()];
+
+    /// <summary>
+    /// Answers one page of what a moving range must carry beyond its current rows, when this node holds confirmed leadership
+    /// of the source partition: each key's revision at each of <paramref name="pins"/>, and the tombstone of each key deleted
+    /// after <paramref name="tombstonesSince"/>. The walk needs the physical rows: a snapshot scan answers neither a key
+    /// deleted since the hold nor its tombstone, and a copied revision of a deleted key would otherwise become that key's
+    /// head on the destination and bring it back to life.
+    /// </summary>
+    public async Task<RangeHeldHistoryPage> GetRangeHeldHistoryPageLocal(
+        int partitionId, string keySpace, string? startKey, string? endKey, IReadOnlyList<HLCTimestamp> pins, HLCTimestamp tombstonesSince, string? cursor, CancellationToken cancellationToken)
+    {
+        if (!await raft.ConfirmLeadershipIfHosted(partitionId, cancellationToken).ConfigureAwait(false))
+            return RangeHeldHistoryPage.NotLeader;
+
+        // A revision below a key's head can still be queued for the writer, where a walk of the history cannot see it. New
+        // rows of an old timestamp stop arriving once applied, so one drain per leadership covers the walk: the first
+        // page drains, and so does the first page a new leader answers.
+        long term = raft.GetPartitionTerm(partitionId);
+        if (cursor is null || !heldHistoryDrainedTerm.TryGetValue(partitionId, out long drainedTerm) || drainedTerm != term)
+        {
+            await runtime.PartitionStateTransfer.DrainPersistenceAsync().ConfigureAwait(false);
+            heldHistoryDrainedTerm[partitionId] = term;
+        }
+
+        // A hold this node cannot answer itself is not passed on: it received the partition, or this range, without it.
+        InstalledHistoryFence fence = snapshotFloorStore.InstalledHistory;
+        RangeDescriptor? source = rangeMapStore.Current.Find(keySpace, startKey ?? keySpace);
+        HLCTimestamp[] refused = [.. pins.Where(pin => !fence.IsServable(partitionId, pin) || source?.IsHistoryServable(pin) == false)];
+        HLCTimestamp[] servable = [.. pins.Except(refused).Distinct().OrderDescending()];
+
+        return await Task.Run(() =>
+        {
+            KeyValueScanTally tally = default;
+            string? scanFrom = cursor ?? startKey;
+            List<(string Key, ReadOnlyKeyValueEntry Entry)> heads = persistenceBackend.GetKeyValueByRange(
+                keySpace, scanFrom, endKey, false, HeldHistoryPageKeys + 2, ref tally);
+
+            List<(string, ReadOnlyKeyValueEntry)> rows = [];
+            long bytes = 0;
+            string? last = null;
+            bool hasMore = false;
+
+            foreach ((string key, ReadOnlyKeyValueEntry head) in heads)
+            {
+                // The scan start is inclusive, and the cursor is the last key already answered.
+                if (cursor is not null && string.CompareOrdinal(key, cursor) <= 0)
+                    continue;
+
+                if (last is not null && (rows.Count >= HeldHistoryPageKeys || bytes >= HeldHistoryPageBytes))
+                {
+                    hasMore = true;
+                    break;
+                }
+
+                int before = rows.Count;
+
+                if (head.State == KeyValueState.Deleted && head.LastModified.CompareTo(tombstonesSince) > 0)
+                    rows.Add((key, head));
+
+                PartitionStateTransfer.AppendRevisionsAtPins(persistenceBackend, key, head, head.Revision - 1, servable, rows);
+
+                for (int i = before; i < rows.Count; i++)
+                    bytes += rows[i].Item2.Value?.Length ?? 0;
+
+                last = key;
+            }
+
+            // A raw page as long as asked was cut by the limit, so more keys may follow its last.
+            hasMore |= heads.Count >= HeldHistoryPageKeys + 2;
+
+            byte[] page = [];
+            if (rows.Count > 0)
+            {
+                using MemoryStream frame = new();
+                KvStateMachineTransfer.WritePage(frame, rows, hasMore: false);
+                page = frame.ToArray();
+            }
+
+            return new RangeHeldHistoryPage(true, true, page, refused, hasMore, last);
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Replicates onto <paramref name="destinationPartitionId"/> what the moving range <c>[startKey, endKey)</c> must carry
+    /// beyond its current rows (see <see cref="GetRangeHeldHistoryPageLocal"/>), walking the source leader's history one page
+    /// at a time. Applies are newest-wins by revision, so a row may land after its key's head, and a re-driven walk converges.
+    /// Returns the asked pins the destination can then answer; null means the walk did not complete and the caller must
+    /// abort before cutover. A peer that predates the walk carries nothing, so it answers for none of them, and the range's
+    /// history bound then refuses reads at those timestamps rather than answering them wrongly.
+    /// </summary>
+    internal async Task<HashSet<HLCTimestamp>?> CarryHeldHistoryAsync(
+        string keySpace, string? startKey, string? endKey, int sourcePartitionId, int destinationPartitionId,
+        IReadOnlyCollection<HLCTimestamp> pins, HLCTimestamp tombstonesSince, CancellationToken cancellationToken)
+    {
+        HashSet<HLCTimestamp> carried = [.. pins];
+        HLCTimestamp[] asked = [.. pins];
+        string? cursor = null;
+
+        while (true)
+        {
+            RangeHeldHistoryPage? page = await GetRangeHeldHistoryPageAsync(
+                sourcePartitionId, keySpace, startKey, endKey, asked, tombstonesSince, cursor, cancellationToken).ConfigureAwait(false);
+
+            if (page is null)
+                return null;
+
+            if (!page.Served)
+                return [];
+
+            carried.ExceptWith(page.RefusedPins);
+
+            if (page.Rows.Length > 0
+                && !await ReplicateKeyValueRangePageToPartitionLeaderAsync(destinationPartitionId, page.Rows, cancellationToken).ConfigureAwait(false))
+                return null;
+
+            if (!page.HasMore || page.NextCursor is null)
+                return carried;
+
+            cursor = page.NextCursor;
+        }
+    }
+
+    // One page from the source partition's confirmed leader, local or remote, with bounded retries across leader changes.
+    private async Task<RangeHeldHistoryPage?> GetRangeHeldHistoryPageAsync(
+        int sourcePartitionId, string keySpace, string? startKey, string? endKey, HLCTimestamp[] pins, HLCTimestamp tombstonesSince, string? cursor, CancellationToken cancellationToken)
+    {
+        long deadline = Environment.TickCount64 + RangeCopyOpenDeadlineMs;
+
+        while (true)
+        {
+            try
+            {
+                RangeHeldHistoryPage page = await GetRangeHeldHistoryPageLocal(
+                    sourcePartitionId, keySpace, startKey, endKey, pins, tombstonesSince, cursor, cancellationToken).ConfigureAwait(false);
+
+                if (!page.Ok)
+                {
+                    string? leader = await raft.TryResolveLeader(sourcePartitionId, cancellationToken).ConfigureAwait(false);
+
+                    if (leader is not null && leader != raft.GetLocalEndpoint())
+                        page = await interNodeCommunication.GetRangeHeldHistoryPage(
+                            leader, sourcePartitionId, keySpace, startKey, endKey, pins, tombstonesSince, cursor, cancellationToken).ConfigureAwait(false);
+                }
+
+                if (page.Ok)
+                    return page;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // A leader lost mid-walk answers with a transport error until its group re-elects.
+                logger.LogWarning(
+                    "Range held-history walk attempt failed Partition={Partition}: {Message}", sourcePartitionId, ex.Message);
+            }
+
+            if (Environment.TickCount64 >= deadline)
+                return null;
+
+            await Task.Delay(RangeCopyRetryDelayMs, cancellationToken).ConfigureAwait(false);
         }
     }
 

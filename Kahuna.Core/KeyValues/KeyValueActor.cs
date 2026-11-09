@@ -617,7 +617,11 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
     {
         InstalledHistoryFence? fence = kvContext?.SnapshotFloorStore?.InstalledHistory;
 
-        if (fence is null || message.Durability != KeyValueDurability.Persistent || !fence.MayRefuse(message.ReadTimestamp))
+        if (fence is null || message.Durability != KeyValueDurability.Persistent)
+            return true;
+
+        // A range moved by a split or merge is bounded the same way, on every replica (see RangeDescriptor.HistoryCompleteFrom).
+        if (!fence.MayRefuse(message.ReadTimestamp) && message.ReadTimestamp.CompareTo(kvContext!.RangeMapStore.Current.HighestHistoryBound) >= 0)
             return true;
 
         if (message.ProbeKeys is { } probeKeys)
@@ -648,20 +652,28 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
     private bool ServableAt(InstalledHistoryFence fence, string key, HLCTimestamp readTimestamp)
     {
         KeyValueContext context = kvContext!;
+        RangeMap map = context.RangeMapStore.Current;
 
-        (int partitionId, _) = RangeRouting.Locate(
-            context.KeySpaceRegistry, context.RangeMapStore.Current, new DataPartitionRouter(context.Raft), key);
+        (int partitionId, _) = RangeRouting.Locate(context.KeySpaceRegistry, map, new DataPartitionRouter(context.Raft), key);
 
-        if (fence.IsServable(partitionId, readTimestamp))
+        bool installHasIt = fence.IsServable(partitionId, readTimestamp);
+        bool rangeHasIt = map.FindCovering(key) is not { } range || range.IsHistoryServable(readTimestamp);
+
+        if (installHasIt && rangeHasIt)
             return true;
 
-        KeyValueSnapshotReadMetrics.InstalledHistoryFenceRefused.Add(1);
+        (installHasIt ? KeyValueSnapshotReadMetrics.RangeHistoryFenceRefused : KeyValueSnapshotReadMetrics.InstalledHistoryFenceRefused).Add(1);
 
         long tick = Environment.TickCount64;
         long lastTick = Volatile.Read(ref lastSnapshotRefusalWarningTick);
         if (tick - lastTick >= SnapshotRefusalWarningSpacingMs
             && Interlocked.CompareExchange(ref lastSnapshotRefusalWarningTick, tick, lastTick) == lastTick)
-            context.Logger.LogSnapshotReadRefusedInstalledHistory(key, readTimestamp, partitionId);
+        {
+            if (installHasIt)
+                context.Logger.LogSnapshotReadRefusedRangeHistory(key, readTimestamp, partitionId);
+            else
+                context.Logger.LogSnapshotReadRefusedInstalledHistory(key, readTimestamp, partitionId);
+        }
 
         return false;
     }

@@ -112,6 +112,9 @@ internal sealed class RangeSplitter
         quiesceTtlMs = RangeMoveQuiesce.TtlMsOf(configuration);
     }
 
+    /// <summary>Test seam, invoked between the bulk copy and the quiesce. Never set in production paths.</summary>
+    internal Func<Task>? AfterBulkCopy { get; set; }
+
     /// <summary>
     /// Executes the full split transaction for <paramref name="keySpace"/> at <paramref name="splitKey"/>,
     /// moving <c>[K,E)</c> to the pre-created partition <paramref name="newPartitionId"/>.
@@ -266,6 +269,39 @@ internal sealed class RangeSplitter
 
         // ── 4. (Partition already created by caller) ─────────────────────────────
 
+        // ── 4b. Carry the revisions the snapshot holds read ─────────────────────
+        // The copies below carry one revision per key. A replica of P' that never hosted P has no other, so a
+        // read at a hold would report a key changed since as missing. The walk runs ahead of the quiesce because
+        // its cost grows with the holds, and the revisions it reads are below the holds' timestamps and stop changing.
+        // Under legacy full replication every node holds every revision, and none of this is needed.
+        bool placedMove = placedSource || raft.GetPartitionReplicas(newPartitionId).Count > 0;
+        HLCTimestamp[] askedHolds = placedMove ? manager.SampleSnapshotHolds() : [];
+        HashSet<HLCTimestamp> carriedHolds = [];
+
+        if (askedHolds.Length > 0)
+        {
+            try
+            {
+                HashSet<HLCTimestamp>? carried = await manager.CarryHeldHistoryAsync(
+                    keySpace, splitKey, descriptor.EndKey, descriptor.PartitionId, newPartitionId, askedHolds, askedHolds[^1], ct);
+
+                if (carried is null)
+                {
+                    logger.LogError("RangeSplitter: held history did not reach P{New} for {Space} [{Key},{End})",
+                        newPartitionId, keySpace, splitKey, descriptor.EndKey ?? "+inf");
+                    return SplitOutcome.TransferFailedAt("the held-history copy did not complete");
+                }
+
+                carriedHolds = carried;
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "RangeSplitter: held history did not reach P{New} for {Space} [{Key},{End})",
+                    newPartitionId, keySpace, splitKey, descriptor.EndKey ?? "+inf");
+                return SplitOutcome.TransferFailedAt("the held-history copy did not complete");
+            }
+        }
+
         // ── 5. Bulk copy [K,E) at snapshotTs → P' ───────────────────────────────
         // Routed through partition leaders: the source is paged via the locator and every page is
         // replicated onto P''s Raft log, so the copy is correct even when this node hosts neither
@@ -292,6 +328,10 @@ internal sealed class RangeSplitter
                 keySpace, splitKey, descriptor.EndKey ?? "+inf");
             return SplitOutcome.TransferFailedAt("the bulk copy did not complete");
         }
+
+        // Test seam: let the caller write into the range between the bulk copy and the quiesce.
+        if (AfterBulkCopy is not null)
+            await AfterBulkCopy();
 
         // ── 6. Quiesce: write-fence range lock on [K,E) ──────────────────────────
         // Uses the internal split HLC as the transaction id for the range lock.
@@ -431,6 +471,39 @@ internal sealed class RangeSplitter
                 return SplitOutcome.TransferFailedAt("the catch-up copy did not complete");
             }
 
+            // ── 7a. Carry what the copies cannot see ─────────────────────────────
+            // A snapshot scan does not answer a deleted key, so a key the bulk copy or the walk above carried and that
+            // was deleted since would keep that row as its head on P' and come back to life at the cutover. The range
+            // no longer changes, so this walk finds every such tombstone, along with the revisions of any hold
+            // registered after the first walk. A hold still unseen here can only be younger than this walk by the time
+            // its registration takes to arrive; reads at it are refused below rather than answered wrongly.
+            if (placedMove)
+            {
+                HLCTimestamp[] newHolds = [.. manager.SampleSnapshotHolds().Where(hold => hold.CompareTo(catchupTs) < 0).Except(askedHolds)];
+                HLCTimestamp oldest = newHolds.Concat(askedHolds).Append(snapshotTs).Min();
+
+                try
+                {
+                    HashSet<HLCTimestamp>? carried = await manager.CarryHeldHistoryAsync(
+                        keySpace, splitKey, descriptor.EndKey, descriptor.PartitionId, newPartitionId, newHolds, oldest, windowCt);
+
+                    if (carried is null)
+                    {
+                        logger.LogError("RangeSplitter: tombstones and new holds did not reach P{New} for {Space} [{Key},{End})",
+                            newPartitionId, keySpace, splitKey, descriptor.EndKey ?? "+inf");
+                        return SplitOutcome.TransferFailedAt("the held-history copy did not complete");
+                    }
+
+                    carriedHolds.UnionWith(carried);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError(ex, "RangeSplitter: tombstones and new holds did not reach P{New} for {Space} [{Key},{End})",
+                        newPartitionId, keySpace, splitKey, descriptor.EndKey ?? "+inf");
+                    return SplitOutcome.TransferFailedAt("the held-history copy did not complete");
+                }
+            }
+
             // ── 7b. Transfer range locks: clamp P's live locks to [K,E), inject into P' ──
             // Locks are actor-local (not Raft-replicated), so they must be read from the
             // source partition leader and injected into the destination partition leader via
@@ -549,7 +622,12 @@ internal sealed class RangeSplitter
                         StartKey = splitKey,
                         EndKey = descriptor.EndKey,
                         PartitionId = newPartitionId,
-                        Generation = newGeneration
+                        Generation = newGeneration,
+                        // What the copies gave P'. Every replica then answers alike, whether or not it also held P.
+                        HistoryCompleteFrom = placedMove ? catchupTs : live.HistoryCompleteFrom,
+                        HistoryPins = placedMove
+                            ? [.. carriedHolds.Where(hold => hold.CompareTo(catchupTs) < 0).Order()]
+                            : live.HistoryPins
                     });
 
                     return next;

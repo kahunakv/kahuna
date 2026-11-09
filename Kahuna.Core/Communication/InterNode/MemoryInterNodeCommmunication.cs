@@ -1407,6 +1407,19 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         throw Unreachable(node);
     }
 
+    public async Task<Kahuna.Server.KeyValues.Ranges.RangeHeldHistoryPage> GetRangeHeldHistoryPage(
+        string node, int partitionId, string keySpace, string? startKey, string? endKey, IReadOnlyList<HLCTimestamp> pins, HLCTimestamp tombstonesSince, string? cursor, CancellationToken cancellationToken)
+    {
+        if (TryGetNode(node, out IKahuna? kahunaNode))
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.GetRangeHeldHistoryPageLocal(partitionId, keySpace, startKey, endKey, pins, tombstonesSince, cursor, cancellationToken);
+        }
+
+        throw Unreachable(node);
+    }
+
     public async Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents, byte[] CommittedHeads, bool HasMore, string? NextCursor)> GetRangeTransactionState(string node, int partitionId, string? startKey, string? endKey, KeyValueRangeStateKinds kinds, string? cursor, int maxItems, CancellationToken cancellationToken)
     {
         if (TryGetNode(node, out IKahuna? kahunaNode))

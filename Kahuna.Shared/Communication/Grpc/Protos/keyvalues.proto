@@ -1646,6 +1646,17 @@ message GrpcGetRangeTransactionStateRequest {
   // (the resume is strictly-after by key), so a page can exceed the cap by that key's items.
   // 0 means unbounded (the pre-paging behaviour).
   int32 MaxItems = 6;
+  // Kind 16 only: the range's key space, the snapshot holds to carry each key's revision at, and the time since which
+  // a key's tombstone must be carried because the copy could have seen the key live.
+  optional string KeySpace = 7;
+  repeated GrpcHistoryPin Pins = 8;
+  GrpcHistoryPin TombstonesSince = 9;
+}
+
+message GrpcHistoryPin {
+  int32 Node = 1;
+  int64 Physical = 2;
+  uint32 Counter = 3;
 }
 
 message GrpcGetRangeTransactionStateResponse {
@@ -1661,6 +1672,11 @@ message GrpcGetRangeTransactionStateResponse {
   // Serialized CommittedHeadLedgerPageMessage blob (kind 8: the committed heads the staged-base fence remembers
   // for the range's keys), empty when none or when the peer predates the kind.
   bytes CommittedHeads = 7;
+  // Kind 16: a checksummed key-value page in the range-copy format, empty when it carries no rows. Served is set by every
+  // peer that knows the kind, and RefusedPins names the asked holds that peer cannot answer itself.
+  bytes HeldHistory = 8;
+  bool HeldHistoryServed = 9;
+  repeated GrpcHistoryPin RefusedPins = 10;
 }
 
 // A batch of coordinator decision records serialized as one CoordinatorDecisionSnapshotMessage blob.

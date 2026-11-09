@@ -1,3 +1,5 @@
+using Kommander.Time;
+
 namespace Kahuna.Server.KeyValues.Ranges;
 
 /// <summary>
@@ -44,6 +46,12 @@ internal sealed class RangeMap
 
         _descriptors = [.. bySpace.Values.SelectMany(static r => r)];
 
+        foreach (RangeDescriptor descriptor in _descriptors)
+        {
+            if (descriptor.HistoryCompleteFrom.CompareTo(HighestHistoryBound) > 0)
+                HighestHistoryBound = descriptor.HistoryCompleteFrom;
+        }
+
         if (retiredPartitionIds is null)
         {
             this.retiredPartitionIds = [];
@@ -55,6 +63,10 @@ internal sealed class RangeMap
             this.retiredPartitionIds = retired;
         }
     }
+
+    /// <summary>The newest <see cref="RangeDescriptor.HistoryCompleteFrom"/> in the map. A snapshot read at or above it
+    /// is servable on every range, so reads check this before looking a range up.</summary>
+    public HLCTimestamp HighestHistoryBound { get; }
 
     /// <summary>An empty map (no ranges registered for any key space).</summary>
     public static RangeMap Empty { get; } = new(Array.Empty<RangeDescriptor>());

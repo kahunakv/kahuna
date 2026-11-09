@@ -2280,6 +2280,45 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         return batchResponse.ReplicateKeyValueRangePage?.Success ?? false;
     }
 
+    public async Task<Kahuna.Server.KeyValues.Ranges.RangeHeldHistoryPage> GetRangeHeldHistoryPage(
+        string node, int partitionId, string keySpace, string? startKey, string? endKey, IReadOnlyList<HLCTimestamp> pins, HLCTimestamp tombstonesSince, string? cursor, CancellationToken cancellationToken)
+    {
+        GrpcServerBatcher batcher = GetSharedBatcher(node);
+
+        GrpcGetRangeTransactionStateRequest request = new()
+        {
+            PartitionId = partitionId,
+            Kinds = (int)KeyValueRangeStateKinds.HeldHistory,
+            KeySpace = keySpace,
+            TombstonesSince = new GrpcHistoryPin { Node = tombstonesSince.N, Physical = tombstonesSince.L, Counter = tombstonesSince.C }
+        };
+
+        if (startKey is not null)
+            request.StartKey = startKey;
+        if (endKey is not null)
+            request.EndKey = endKey;
+        if (cursor is not null)
+            request.Cursor = cursor;
+
+        foreach (HLCTimestamp pin in pins)
+            request.Pins.Add(new GrpcHistoryPin { Node = pin.N, Physical = pin.L, Counter = pin.C });
+
+        GrpcServerBatcherResponse batchResponse = await batcher.Enqueue(request).WaitAsync(cancellationToken).ConfigureAwait(false);
+
+        GrpcGetRangeTransactionStateResponse? response = batchResponse.GetRangeTransactionState;
+
+        if (response is null || !response.Success)
+            return Kahuna.Server.KeyValues.Ranges.RangeHeldHistoryPage.NotLeader;
+
+        return new Kahuna.Server.KeyValues.Ranges.RangeHeldHistoryPage(
+            true,
+            response.HeldHistoryServed,
+            response.HeldHistory.ToByteArray(),
+            [.. response.RefusedPins.Select(static pin => new HLCTimestamp(pin.Node, pin.Physical, pin.Counter))],
+            response.HasMore,
+            response.HasNextCursor ? response.NextCursor : null);
+    }
+
     public async Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents, byte[] CommittedHeads, bool HasMore, string? NextCursor)> GetRangeTransactionState(string node, int partitionId, string? startKey, string? endKey, KeyValueRangeStateKinds kinds, string? cursor, int maxItems, CancellationToken cancellationToken)
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);

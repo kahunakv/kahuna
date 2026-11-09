@@ -165,6 +165,29 @@ internal sealed class RangeMerger
             return MergeOutcome.ConcurrentMove;
         }
 
+        // -- 1b'. Carry the revisions the snapshot holds read -----------------------
+        // The copy carries one revision per key, and a replica of the survivor that never hosted the retiring
+        // partition has no other. The walk runs ahead of the quiesce because its cost grows with the holds, and the
+        // revisions it reads are below the holds' timestamps and stop changing.
+        bool placedMove = raft.GetPartitionReplicas(right.PartitionId).Count > 0 || raft.GetPartitionReplicas(left.PartitionId).Count > 0;
+        HLCTimestamp[] askedHolds = placedMove ? manager.SampleSnapshotHolds() : [];
+        HashSet<HLCTimestamp> carriedHolds = [];
+
+        if (askedHolds.Length > 0)
+        {
+            HashSet<HLCTimestamp>? carried = await manager.CarryHeldHistoryAsync(
+                keySpace, right.StartKey, right.EndKey, right.PartitionId, left.PartitionId, askedHolds, askedHolds[^1], ct);
+
+            if (carried is null)
+            {
+                logger.LogError("RangeMerger: held history did not reach P{Left} for {Space} [{Start},{End})",
+                    left.PartitionId, keySpace, right.StartKey, right.EndKey ?? "+inf");
+                return MergeOutcome.TransferFailed;
+            }
+
+            carriedHolds = carried;
+        }
+
         // -- 1c. Quiesce: write-fence range lock on [B,C) -------------------------
         // Route to the DATA partition leader (not the local actor) so the lock is recorded where the
         // writes and 2PC handlers for [B,C) run. Uses the merge's own HLC as the lock's transaction
@@ -220,7 +243,7 @@ internal sealed class RangeMerger
 
         try
         {
-            return await MergeUnderQuiesceAsync(keySpace, left, right, mergeTxId, quiescedUntil, duringQuiesce, ct);
+            return await MergeUnderQuiesceAsync(keySpace, left, right, mergeTxId, quiescedUntil, placedMove, askedHolds, carriedHolds, duringQuiesce, ct);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
@@ -252,6 +275,8 @@ internal sealed class RangeMerger
         }
     }
 
+    private static HLCTimestamp Max(HLCTimestamp a, HLCTimestamp b) => a.CompareTo(b) >= 0 ? a : b;
+
     /// <summary>
     /// The part of the merge that runs with <c>[B,C)</c> quiesced: settle, copy, hand off the
     /// range's transaction state, and cut over. Split out so the caller's <c>finally</c> owns
@@ -263,6 +288,9 @@ internal sealed class RangeMerger
         RangeDescriptor right,
         HLCTimestamp mergeTxId,
         HLCTimestamp quiescedUntil,
+        bool placedMove,
+        HLCTimestamp[] askedHolds,
+        HashSet<HLCTimestamp> carriedHolds,
         Func<Task>? duringQuiesce,
         CancellationToken ct)
     {
@@ -350,6 +378,31 @@ internal sealed class RangeMerger
                 "RangeMerger: bulk copy failed for {Space} [{Start},{End})",
                 keySpace, right.StartKey, right.EndKey ?? "+inf");
             return MergeOutcome.TransferFailed;
+        }
+
+        // -- 3a'. Carry what the copy cannot see -----------------------------------
+        // A snapshot scan does not answer a deleted key, so a key the walk above carried and that was deleted since would
+        // keep that row as its head on the survivor. The range no longer changes, so this walk finds every such tombstone,
+        // along with the revisions of any hold registered after the first walk. With no hold there is nothing to
+        // bring back to life: the copy ran inside the quiesce. A hold still unseen here is refused, not answered wrongly.
+        if (placedMove)
+        {
+            HLCTimestamp[] newHolds = [.. manager.SampleSnapshotHolds().Where(hold => hold.CompareTo(snapshotTs) < 0).Except(askedHolds)];
+
+            if (newHolds.Length > 0 || askedHolds.Length > 0)
+            {
+                HashSet<HLCTimestamp>? carried = await manager.CarryHeldHistoryAsync(
+                    keySpace, right.StartKey, right.EndKey, right.PartitionId, left.PartitionId, newHolds, newHolds.Concat(askedHolds).Min(), windowCt);
+
+                if (carried is null)
+                {
+                    logger.LogError("RangeMerger: tombstones and new holds did not reach P{Left} for {Space} [{Start},{End})",
+                        left.PartitionId, keySpace, right.StartKey, right.EndKey ?? "+inf");
+                    return MergeOutcome.TransferFailed;
+                }
+
+                carriedHolds.UnionWith(carried);
+            }
         }
 
         // -- 3b. Transfer range locks: clamp right's live locks, inject into left leader --
@@ -499,7 +552,13 @@ internal sealed class RangeMerger
                     StartKey    = left.StartKey,
                     EndKey      = right.EndKey,
                     PartitionId = left.PartitionId,
-                    Generation  = newGeneration
+                    Generation  = newGeneration,
+                    // What the copy gave the moved keys, and so what every replica can answer for the whole merged
+                    // range: the map has one bound per range. A hold must also be one the survivor's own range answers.
+                    HistoryCompleteFrom = placedMove ? snapshotTs : Max(left.HistoryCompleteFrom, right.HistoryCompleteFrom),
+                    HistoryPins = placedMove
+                        ? [.. carriedHolds.Where(hold => hold.CompareTo(snapshotTs) < 0 && liveLeft.IsHistoryServable(hold)).Order()]
+                        : [.. left.HistoryPins.Intersect(right.HistoryPins).Order()]
                 });
 
                 // The vacated partition is recorded as retired in this same entry. Its Raft group is

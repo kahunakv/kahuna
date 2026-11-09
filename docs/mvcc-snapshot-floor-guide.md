@@ -217,6 +217,36 @@ Consequences for clients:
 
 ---
 
+### Reads of a range moved by a split or merge
+
+A split or merge copies a moving range onto another partition. A replica of the destination that never hosted the
+source has only what the move carried, so a move carries each key's current row, its revision at each registered
+hold, and the tombstones of keys deleted since a copied row. The source partition's leader walks the range and
+answers those rows, because a snapshot scan shows neither a deleted key nor its tombstone. The walk runs once before
+the first copy, and once inside the quiesce for holds registered since and for keys deleted since.
+
+The move records what it carried on the range's descriptor (`HistoryCompleteFrom` and `HistoryPins`), so every node
+learns it atomically with the routing change. As on an installed replica, a hold at `T` guarantees **exactly `T`**, and
+every timestamp at or above the move, but not the timestamps between them. A read at any other older timestamp is
+refused with `MustRetry` and increments `kahuna.kv.snapshot_range_history_refused_total`. Unlike an install, this holds on
+**every** replica of the range, including one that also hosted the source and still has the rows, so an answer does
+not depend on which replica leads.
+
+Consequences for clients:
+
+- Read at the hold's own timestamp, unchanged. A parent `AS OF` at an arbitrary timestamp below the move is refused for
+  the moved keys. So is a read at a transaction's own snapshot taken before the move, even when the key did not change:
+  the refusal is decided from the timestamp, before the key is looked at. Retry with a newer snapshot.
+- A merge keeps one bound for the whole merged range, so the keys that did not move are refused below the merge too.
+- A hold the source cannot answer itself is not carried, and is refused on the range. A source node on a build without
+  the walk carries none, so every hold is refused on the moved range rather than answered wrongly.
+- A hold whose registration reaches the driving node only after the last walk is refused on the range, never answered wrongly.
+- A walk costs one read per distinct revision a hold needs, like an export's. Its pages are replicated whole, so a
+  single key's revisions must fit one message. A key with very large values at many holds fails the move's attempt, and the
+  range stays on its source.
+- The pins stay on the descriptor after their holds are gone. They cost a few bytes per hold in every range map entry,
+  and a later move of the range drops the ones no longer registered.
+
 ## 6. The public API
 
 Four operations, exposed over gRPC and REST and on the in-process client:
@@ -264,6 +294,7 @@ The subsystem publishes these instruments under the `Kahuna` meter scope:
 | `kahuna.snapshot_floor.effective_floor_ms` | gauge | Physical (millisecond) component of the effective floor, or 0 when no hold is live. |
 | `kahuna.snapshot_floor.prune_skipped_unconfirmed_total` | counter | Prune cycles skipped because local meta-partition catch-up could not be confirmed; work is retried later. |
 | `kahuna.snapshot_floor.prune_confirm_timed_out_total` | counter | Catch-up confirmations that ran out of `RevisionPruneConfirmTimeout` (default 1 s) before answering. Each is also a skipped prune cycle; a sustained rate means the node is not receiving the meta partition (not yet a roster member, or cut off from its leader). |
+| `kahuna.kv.snapshot_range_history_refused_total` | counter | Snapshot reads refused because the split or merge that moved the key's range did not carry their timestamp. A burst can follow a move; a sustained rate means a client reads an old timestamp no hold names. |
 | `kahuna.kv.snapshot_installed_history_refused_total` | counter | Snapshot reads refused because the install that seeded this replica did not carry their timestamp (§5). A burst of old statement reads can follow an install. A sustained rate means a client reads a timestamp no hold names, or a hold could not be pinned. |
 | `kahuna.snapshot_floor.missing_protected_version_total` | counter | **Must stay 0.** Increments if reclamation ever schedules a floor-protected version for deletion. |
 

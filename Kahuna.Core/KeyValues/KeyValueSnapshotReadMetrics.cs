@@ -56,6 +56,15 @@ internal static class KeyValueSnapshotReadMetrics
             description: "Snapshot reads refused because the install that seeded this replica did not carry their timestamp.");
 
     /// <summary>
+    /// Snapshot reads refused because the split or merge that moved the key's range did not carry their timestamp. A
+    /// burst of old reads can follow a move. A sustained rate means a client reads an old timestamp no snapshot hold names.
+    /// </summary>
+    internal static readonly Counter<long> RangeHistoryFenceRefused =
+        Meter.CreateCounter<long>(
+            "kahuna.kv.snapshot_range_history_refused_total",
+            description: "Snapshot reads refused because the split or merge that moved the key's range did not carry their timestamp.");
+
+    /// <summary>
     /// Snapshot reads served the committed head over a foreign staged write whose commit could still be moved:
     /// the read raised the intent's commit floor to its own timestamp instead of waiting for the writer to decide,
     /// and the writer's commit is minted above that floor. One count per key the read stepped over. A steady rate

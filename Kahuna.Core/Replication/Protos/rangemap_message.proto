@@ -20,6 +20,18 @@ message RangeDescriptorMessage {
   uint32 quiesceOwnerCounter   = 11;
   optional string quiesceStartKey = 12;  // absent = -inf; only the moving sub-range is quiesced
   optional string quiesceEndKey   = 13;  // absent = +inf
+  // What a range received through a split or merge copy can answer: every revision at or above historyCompleteFrom, and
+  // exactly the listed hold timestamps below it. Absent/zero = its whole history, on any replica.
+  int32  historyCompleteFromNode     = 14;
+  int64  historyCompleteFromPhysical = 15;
+  uint32 historyCompleteFromCounter  = 16;
+  repeated RangeHistoryPinMessage historyPins = 17;
+}
+
+message RangeHistoryPinMessage {
+  int32  node     = 1;
+  int64  physical = 2;
+  uint32 counter  = 3;
 }
 
 // A full snapshot of the range-descriptor map, replicated on the meta partition.

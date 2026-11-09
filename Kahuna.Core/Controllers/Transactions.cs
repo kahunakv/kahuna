@@ -38,6 +38,10 @@ public sealed partial class KahunaManager
     public Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents, byte[] CommittedHeads, bool HasMore, string? NextCursor)> GetRangeTransactionStateLocal(int partitionId, string? startKey, string? endKey, KeyValueRangeStateKinds kinds, string? cursor, int maxItems, CancellationToken cancellationToken) =>
         keyValues.GetRangeTransactionStateLocal(partitionId, startKey, endKey, kinds, cursor, maxItems, cancellationToken);
 
+    public Task<Kahuna.Server.KeyValues.Ranges.RangeHeldHistoryPage> GetRangeHeldHistoryPageLocal(
+        int partitionId, string keySpace, string? startKey, string? endKey, IReadOnlyList<HLCTimestamp> pins, HLCTimestamp tombstonesSince, string? cursor, CancellationToken cancellationToken) =>
+        keyValues.GetRangeHeldHistoryPageLocal(partitionId, keySpace, startKey, endKey, pins, tombstonesSince, cursor, cancellationToken);
+
     public Task<(bool Serviced, IReadOnlyList<KeyValueStagedBaseVerdictEntry> Verdicts)> GetStagedBaseVerdictsLocal(int partitionId, HLCTimestamp transactionId, long epoch, IReadOnlyList<string> keys, IReadOnlyList<KeyValueStagedBaseProbe>? probes, int waitMs, CancellationToken cancellationToken) =>
         keyValues.GetStagedBaseVerdictsLocal(partitionId, transactionId, epoch, keys, probes, waitMs, cancellationToken);
 

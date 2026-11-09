@@ -979,6 +979,13 @@ internal sealed class RangeMapStore : IDisposable
             if (descriptor.QuiesceEndKey is not null)
                 descriptorMessage.QuiesceEndKey = descriptor.QuiesceEndKey;
 
+            descriptorMessage.HistoryCompleteFromNode = descriptor.HistoryCompleteFrom.N;
+            descriptorMessage.HistoryCompleteFromPhysical = descriptor.HistoryCompleteFrom.L;
+            descriptorMessage.HistoryCompleteFromCounter = descriptor.HistoryCompleteFrom.C;
+
+            foreach (HLCTimestamp pin in descriptor.HistoryPins)
+                descriptorMessage.HistoryPins.Add(new RangeHistoryPinMessage { Node = pin.N, Physical = pin.L, Counter = pin.C });
+
             message.Descriptors.Add(descriptorMessage);
         }
 
@@ -1008,7 +1015,14 @@ internal sealed class RangeMapStore : IDisposable
                     descriptorMessage.QuiesceOwnerPhysical,
                     descriptorMessage.QuiesceOwnerCounter),
                 QuiesceStartKey = descriptorMessage.HasQuiesceStartKey ? descriptorMessage.QuiesceStartKey : null,
-                QuiesceEndKey = descriptorMessage.HasQuiesceEndKey ? descriptorMessage.QuiesceEndKey : null
+                QuiesceEndKey = descriptorMessage.HasQuiesceEndKey ? descriptorMessage.QuiesceEndKey : null,
+                HistoryCompleteFrom = new(
+                    descriptorMessage.HistoryCompleteFromNode,
+                    descriptorMessage.HistoryCompleteFromPhysical,
+                    descriptorMessage.HistoryCompleteFromCounter),
+                HistoryPins = descriptorMessage.HistoryPins.Count == 0
+                    ? []
+                    : [.. descriptorMessage.HistoryPins.Select(static pin => new HLCTimestamp(pin.Node, pin.Physical, pin.Counter))]
             };
         }
     }

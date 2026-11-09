@@ -170,6 +170,17 @@ internal sealed partial class KeyValuesManager
         int pageDeadlineMs = RangeStateTransferService.RangeCopyOpenDeadlineMs) =>
         rangeStateTransfer.CopyRangeToPartitionAsync(keySpace, startKey, endKey, snapshotTs, sourcePartitionId, destinationPartitionId, readerTransactionId, cancellationToken, pageDeadlineMs);
 
+    internal HLCTimestamp[] SampleSnapshotHolds() => rangeStateTransfer.SampleSnapshotHolds();
+
+    public Task<RangeHeldHistoryPage> GetRangeHeldHistoryPageLocal(
+        int partitionId, string keySpace, string? startKey, string? endKey, IReadOnlyList<HLCTimestamp> pins, HLCTimestamp tombstonesSince, string? cursor, CancellationToken cancellationToken) =>
+        rangeStateTransfer.GetRangeHeldHistoryPageLocal(partitionId, keySpace, startKey, endKey, pins, tombstonesSince, cursor, cancellationToken);
+
+    internal Task<HashSet<HLCTimestamp>?> CarryHeldHistoryAsync(
+        string keySpace, string? startKey, string? endKey, int sourcePartitionId, int destinationPartitionId,
+        IReadOnlyCollection<HLCTimestamp> pins, HLCTimestamp tombstonesSince, CancellationToken cancellationToken) =>
+        rangeStateTransfer.CarryHeldHistoryAsync(keySpace, startKey, endKey, sourcePartitionId, destinationPartitionId, pins, tombstonesSince, cancellationToken);
+
     internal Task<bool> ReplicateKeyValueRangePageToPartitionLeaderAsync(
         int partitionId, byte[] page, CancellationToken cancellationToken) =>
         rangeStateTransfer.ReplicateKeyValueRangePageToPartitionLeaderAsync(partitionId, page, cancellationToken);

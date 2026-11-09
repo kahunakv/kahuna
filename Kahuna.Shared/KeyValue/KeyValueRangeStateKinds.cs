@@ -17,5 +17,9 @@ public enum KeyValueRangeStateKinds
     /// <summary>The committed-head ledger entries of the range's keys. Not part of <see cref="All"/>: an
     /// unset mask (an older caller) keeps meaning the three original kinds.</summary>
     CommittedHeads = 8,
+    /// <summary>The revisions a range's keys hold at snapshot holds, and its tombstones. Answered on its own, never in a
+    /// mask with another kind. A peer that predates it answers an empty success, which the caller tells apart by the
+    /// response's served flag.</summary>
+    HeldHistory = 16,
     All = Receipts | Records | Intents,
 }
