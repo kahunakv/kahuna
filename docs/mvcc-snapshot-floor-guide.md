@@ -105,6 +105,15 @@ the boundary and now lives on disk.** Reads reach that deep run through the disk
 section. When the registry is empty the protective floor is unset. An expired but still registered hold
 continues protecting history until its removal commits.
 
+**Deleted keys.** The current row of a deleted key is its delete record. On the RocksDB backend, when
+age retention has passed the delete record, the prune removes every other row of the key: the older
+revisions, the delete record's own history row and the no-revision marker. The floor decides this for
+the key as a whole. A hold **older** than the delete record reads the value from before the delete, so
+the key keeps its rows by the boundary rule above until the hold is released. A hold **at or after**
+the delete record reads the delete record, which is the current row and is never removed, so the key
+is released. The storage engines guide (section 8) has the whole path from the delete to the freed
+space.
+
 ---
 
 ## 5. Reading history back: as-of reads and disk fallback
@@ -275,6 +284,8 @@ background writer with the flush and must never starve it:
 | `kahuna.persistence.revision_prune.keys_skipped_total` | counter | Keys answered from the RocksDB prune memo without a scan (nothing deletable yet). On a hot key-set inside its retention window this should dominate `keys_walked_total`. |
 | `kahuna.persistence.revision_prune.keys_floor_blocked_total` | counter | Of the skipped keys, those whose deletable rows the snapshot floor (a hold registry entry) protects. Skips with this at zero are retention waiting on the clock or the row count — the configured policy, not a hold, is what keeps history on disk. |
 | `kahuna.persistence.revision_prune.revisions_deleted_total` | counter | Revision rows the prune (targeted or sweep) deleted. |
+| `kahuna.persistence.revision_prune.delete_records_released_total` | counter | Deleted keys of which the prune removed every row except the current row (RocksDB). A deleted key space that stays on disk shows as a count that does not move: its delete records are inside the retention age, or a hold is older than them (then `keys_floor_blocked_total` moves). |
+| `kahuna.persistence.revision_prune.sweep_catch_up_passes_total` | counter | Sweep passes the writer ran between flush cycles because the pass before deleted rows, stopped on its budget, and no write was queued. A long run of them is a large prune on an idle writer. |
 | `kahuna.persistence.revision_prune.budget_exhausted_total` | counter | Flush cycles whose targeted prune stopped on `PersistentRevisionCleanupTimeBudget` with keys still queued. A sustained rate means retention lags the write rate; the flush is unaffected. |
 | `kahuna.persistence.revision_prune.cycle_duration` | histogram (ms) | Time the targeted prune took per flush cycle; bounded by the time budget plus one key (the backend checks the budget before every key). |
 | `kahuna.persistence.revision_prune.sweep_budget_exhausted_total` | counter | Backend-wide sweep passes that paused on their share of the time budget; the sweep resumes from its cursor next cycle. A large store pauses often and still completes; a sweep that pauses forever without wrapping is the signal to look at. |

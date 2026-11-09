@@ -421,6 +421,163 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     }
 
     /// <summary>
+    /// Write options for the prune's deletes: not synced. A prune delete promises nothing to anyone. If
+    /// a crash loses an unsynced batch, it loses the deletes and the pruned-history floor together (one
+    /// batch is atomic in the engine's log), the rows are still there, and the next pass deletes them
+    /// again. Synced, each batch cost one fsync, and the prune wrote one batch per key: a pass bought
+    /// tens of deleted rows with its whole time budget, so a deleted key space of millions of keys
+    /// took days to leave the store.
+    /// </summary>
+    private static readonly WriteOptions PruneWriteOptions = new WriteOptions().SetSync(false);
+
+    /// <summary>Rows the prune buffers before it writes them; bounds the batch and what a failed write repeats.</summary>
+    private const int PruneWriteBatchRows = 2048;
+
+    /// <summary>What a walk learned about a key whose deletes are still buffered; recorded once they land.</summary>
+    private readonly record struct PendingPruneMemo(
+        string Key,
+        int HistoryRows,
+        long OldestNonCurrentPhysical,
+        long OldestUnprotectedPhysical,
+        bool FloorBlocked,
+        HLCTimestamp FloorTimestamp,
+        long WalkGeneration,
+        bool AdmitWhenFull);
+
+    /// <summary>
+    /// The deletes of one prune call, written in bounded batches shared by every key the call visits.
+    /// All rows a key loses in one visit stay in one batch (the buffer is only written between keys),
+    /// so a key is never left with part of a visit's deletes. The pruned-history floor those deletes
+    /// need travels in the same batch, and the in-memory floor and the memos of the keys in the batch
+    /// move only after the batch lands: a failed write leaves the store, the floor and the memos
+    /// describing the same rows, and the keys walk again on the next pass.
+    /// </summary>
+    private sealed class PruneWriteBuffer(RocksDbPersistenceBackend owner) : IDisposable
+    {
+        private readonly WriteBatch batch = new();
+
+        private readonly List<PendingPruneMemo> memos = [];
+
+        private int rows;
+
+        private HLCTimestamp floorCandidate = HLCTimestamp.Zero;
+
+        public void Delete(byte[] rawKey)
+        {
+            batch.Delete(rawKey, cf: owner.columnFamilyKeys);
+            rows++;
+        }
+
+        /// <summary>Raises the pruned-history floor the buffered deletes need to at least <paramref name="candidate"/>.</summary>
+        public void RaiseFloor(HLCTimestamp candidate)
+        {
+            if (candidate.CompareTo(floorCandidate) > 0)
+                floorCandidate = candidate;
+        }
+
+        public void Remember(in PendingPruneMemo memo) => memos.Add(memo);
+
+        /// <summary>Called between keys: writes the buffer once it holds a full batch.</summary>
+        public void WriteIfFull()
+        {
+            if (rows >= PruneWriteBatchRows)
+                Write();
+        }
+
+        public void Write()
+        {
+            if (rows > 0)
+            {
+                HLCTimestamp stagedFloor = floorCandidate != HLCTimestamp.Zero
+                    ? owner.StagePrunedFloor(batch, floorCandidate)
+                    : HLCTimestamp.Zero;
+
+                owner.db.Write(batch, PruneWriteOptions);
+
+                // Commit the floor to the in-memory cache only after it is written with its deletes.
+                if (stagedFloor != HLCTimestamp.Zero)
+                    owner.CommitPrunedFloor(stagedFloor);
+
+                owner.prunedRowsAwaitingFlush += rows;
+                owner.pruneWriteBatches++;
+
+                batch.Clear();
+                rows = 0;
+                floorCandidate = HLCTimestamp.Zero;
+            }
+
+            foreach (PendingPruneMemo memo in memos)
+                owner.RememberPruneWalk(
+                    memo.Key, memo.HistoryRows, memo.OldestNonCurrentPhysical, memo.OldestUnprotectedPhysical,
+                    memo.FloorBlocked, memo.FloorTimestamp, memo.WalkGeneration, memo.AdmitWhenFull);
+
+            memos.Clear();
+        }
+
+        public void Dispose() => batch.Dispose();
+    }
+
+    /// <summary>
+    /// Rows the prune deleted since it last asked the engine to flush the memtable. Touched only by the
+    /// prune, which runs on the single background writer under the read side of the swap fence.
+    /// </summary>
+    private long prunedRowsAwaitingFlush;
+
+    private long pruneWriteBatches;
+
+    /// <summary>Write batches the prune has issued (diagnostics/tests): a few per pass, never one per key.</summary>
+    internal long PruneWriteBatches => Volatile.Read(ref pruneWriteBatches);
+
+    /// <summary>A flush request that does not wait for the flush: the writer's turn must not park on it.</summary>
+    private static readonly FlushOptions BackgroundFlushOptions = CreateBackgroundFlushOptions();
+
+    private static FlushOptions CreateBackgroundFlushOptions()
+    {
+        FlushOptions flushOptions = new();
+        Native.Instance.rocksdb_flushoptions_set_wait(flushOptions.Handle, 0);
+        return flushOptions;
+    }
+
+    /// <summary>
+    /// Asks the engine to flush the memtable that holds the prune's deletes. A delete frees nothing
+    /// while it sits in the memtable: only a compaction that carries it down to the rows it covers
+    /// does, and a compaction starts from table files. A store with no other writes never fills its
+    /// memtable, so without this request the deletes of a finished prune stayed there for good (a
+    /// dropped key space measured two hours later had not given back one byte). Called when a sweep
+    /// cycle ends, which is also when a large prune has nothing more to add.
+    /// </summary>
+    private void FlushPrunedRows()
+    {
+        if (prunedRowsAwaitingFlush == 0)
+            return;
+
+        try
+        {
+            Native.Instance.rocksdb_flush_cf(db.Handle, BackgroundFlushOptions.Handle, columnFamilyKeys.Handle);
+            prunedRowsAwaitingFlush = 0;
+        }
+        catch (Exception ex) when (!IsCorruption(ex))
+        {
+            // The deletes are written; only their way to a table file is late. The count stays, so the
+            // next cycle asks again, and a store that refuses writes is found by the flush path, which
+            // owns that recovery. Damage is not caught here: the caller fail-stops on it.
+            logger.LogWarning(ex, "RocksDb store at {Path}/{Revision} refused the flush request for {Rows} pruned rows; it is retried on the next sweep cycle",
+                path, dbRevision, prunedRowsAwaitingFlush);
+        }
+    }
+
+    /// <summary>
+    /// Entries in the window the deletion collector slides over each table file it writes, and the
+    /// deletes inside one window that mark the file for compaction: half of them. The same share of a
+    /// whole file marks it too (<see cref="DeletionCompactionRatio"/>).
+    /// </summary>
+    private const int DeletionCompactionWindow = 4096;
+
+    private const int DeletionCompactionTrigger = DeletionCompactionWindow / 2;
+
+    private const double DeletionCompactionRatio = 0.5;
+
+    /// <summary>
     /// RocksDbPersistenceBackend is a persistence backend implementation based on RocksDB.
     /// It provides methods for storing and retrieving key-value pairs and locks, categorized
     /// into distinct column families for better organization and efficiency.
@@ -660,7 +817,22 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             .SetWriteBufferSize(KvWriteBufferSize)
             .SetMaxWriteBufferNumber(3)
             .SetMinWriteBufferNumberToMerge(1);
-        
+
+        // Compaction that starts from deletes. Leveled compaction picks a level by its size, and a delete
+        // adds almost nothing to a level, so a table file full of deletes sat above the rows it covers
+        // until unrelated writes pushed it down: with nearly all data in the bottom level and no write
+        // load, that is the engine's 30-day file age limit. The collector marks a file whose entries are
+        // half deletes (in any window of DeletionCompactionWindow entries, or over the whole file), and
+        // the engine compacts a marked file into the next level even when no level is over its size. The
+        // output is marked again while the deletes still dominate it, so they travel down until they meet
+        // the rows they cover, in the bottom level at the latest, where both are dropped. A key's rows are
+        // adjacent in the key order, so a superseded current value leaves in the same compaction.
+        //
+        // Half, not less: a key under steady overwrite sheds one delete per two rows it writes (the new
+        // history row and the current row), a third of its entries, and must not keep marking files.
+        Native.Instance.rocksdb_options_add_compact_on_deletion_collector_factory_del_ratio(
+            kvOptions.Handle, DeletionCompactionWindow, DeletionCompactionTrigger, DeletionCompactionRatio);
+
         // Locks are small (~hundreds of bytes), short-lived, and written at a fraction of kv volume,
         // so their memtables get a much smaller ceiling: 8 MB x 2 (16 MB worst case) instead of the
         // kv family's 64 MB x 3 (192 MB). Memtable arenas grow lazily, so this bounds the standalone
@@ -808,6 +980,34 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         catch (Exception ex) when (IsCorruption(ex))
         {
             throw FailStop(ex.Message, ex);
+        }
+        finally
+        {
+            ExitDbFence();
+        }
+    }
+
+    /// <summary>Test seam: compacts the whole key-value family into its bottom level and waits.</summary>
+    internal void CompactKeyValuesForTesting()
+    {
+        EnterDbFence();
+        try
+        {
+            db.CompactRange((byte[]?)null, (byte[]?)null, columnFamilyKeys);
+        }
+        finally
+        {
+            ExitDbFence();
+        }
+    }
+
+    /// <summary>Test seam: bytes of the table files that hold the key-value family's current version.</summary>
+    internal long GetKeyValueTableBytesForTesting()
+    {
+        EnterDbFence();
+        try
+        {
+            return long.Parse(db.GetProperty("rocksdb.live-sst-files-size", columnFamilyKeys), System.Globalization.CultureInfo.InvariantCulture);
         }
         finally
         {
@@ -2141,16 +2341,15 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         return buf;
     }
 
-    private static bool TryUnpackNoRev(byte[]? data, out HLCTimestamp earliest, out HLCTimestamp latest)
+    // A missing marker arrives as an empty span (a null array converts to one).
+    private static bool TryUnpackNoRev(ReadOnlySpan<byte> s, out HLCTimestamp earliest, out HLCTimestamp latest)
     {
         earliest = HLCTimestamp.Zero;
         latest = HLCTimestamp.Zero;
-        
-        if (data is null || data.Length < NoRevProvenanceSize)
+
+        if (s.Length < NoRevProvenanceSize)
             return false;
 
-        ReadOnlySpan<byte> s = data;
-        
         earliest = new(
             (int)BinaryPrimitives.ReadInt64LittleEndian(s[..8]),
             BinaryPrimitives.ReadInt64LittleEndian(s[8..16]),
@@ -3750,7 +3949,8 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
 
     /// <summary>
     /// The ordering fields of a stored key-value row: the revision plus the commit HLC.
-    /// Rows are compared on these fields alone in the head-advance and prune paths.
+    /// Rows are compared on these fields alone in the head-advance and prune paths. The state rides
+    /// along so the prune can tell a delete record from a live value without the payload.
     /// </summary>
     internal readonly struct StoredKeyValueOrdering
     {
@@ -3758,6 +3958,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         public int LastModifiedNode { get; init; }
         public long LastModifiedPhysical { get; init; }
         public uint LastModifiedCounter { get; init; }
+        public int State { get; init; }
     }
 
     /// <summary>
@@ -3803,13 +4004,14 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             LastModifiedNode = message.LastModifiedNode,
             LastModifiedPhysical = message.LastModifiedPhysical,
             LastModifiedCounter = message.LastModifiedCounter,
+            State = message.State,
         };
     }
 
     /// <summary>
     /// Allocation-free wire-format walk over a serialized <see cref="RocksDbKeyValueMessage"/>.
-    /// Extracts fields 9–12 (commit HLC and revision) and skips every other field, including the
-    /// value payload. Returns false on any malformed or unsupported wire shape; the caller then
+    /// Extracts fields 9–13 (commit HLC, revision and state) and skips every other field, including
+    /// the value payload. Returns false on any malformed or unsupported wire shape; the caller then
     /// falls back to the full parser. A later field occurrence overrides an earlier one, which
     /// matches protobuf merge semantics.
     /// </summary>
@@ -3819,6 +4021,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         int lastModifiedNode = 0;
         long lastModifiedPhysical = 0;
         uint lastModifiedCounter = 0;
+        int state = 0;
 
         int pos = 0;
 
@@ -3854,6 +4057,9 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                             break;
                         case 12:
                             revision = (long)value;
+                            break;
+                        case 13:
+                            state = (int)(long)value;
                             break;
                     }
                     break;
@@ -3897,6 +4103,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             LastModifiedNode = lastModifiedNode,
             LastModifiedPhysical = lastModifiedPhysical,
             LastModifiedCounter = lastModifiedCounter,
+            State = state,
         };
         return true;
     }
@@ -3983,6 +4190,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         int keysFloorBlocked = 0;
         int deleted = 0;
         int floorViolations = 0;
+        int deleteRecordsReleased = 0;
         bool batchLimitReached = false;
         bool timeBudgetExhausted = false;
         List<string>? remaining = null;
@@ -3997,6 +4205,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         bool BudgetExhausted() => budgeted && Stopwatch.GetElapsedTime(budgetStart) >= timeBudget;
 
         using PruneWalkCursor walk = new(this);
+        using PruneWriteBuffer writes = new(this);
 
         if (keys is not null)
         {
@@ -4017,8 +4226,9 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 }
 
                 string key = keyList[i];
-                PruneRevisionsForKey(key, retentionCount, retentionAge, batchSize, floorTimestamp, walk, fromSweep: false, ref deleted, ref floorViolations, ref keysSkipped, ref keysFloorBlocked, out bool keyLimitReached, out _);
+                PruneRevisionsForKey(key, retentionCount, retentionAge, batchSize, floorTimestamp, walk, writes, fromSweep: false, ref deleted, ref floorViolations, ref keysSkipped, ref keysFloorBlocked, ref deleteRecordsReleased, out bool keyLimitReached, out _);
                 keysVisited++;
+                writes.WriteIfFull();
 
                 if (keyLimitReached)
                 {
@@ -4030,6 +4240,9 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                     break;
                 }
             }
+
+            // A write that fails throws from here: the caller re-queues every key it handed over.
+            writes.Write();
         }
         else
         {
@@ -4049,6 +4262,8 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             {
                 if (SweepStillQuiescent(retentionCount, retentionAge, floorTimestamp))
                 {
+                    // Deletes of a targeted prune since the last cycle have no cycle end to flush them.
+                    FlushPrunedRows();
                     result = new(0, 0, false, SweepIdle: true);
                     return true;
                 }
@@ -4076,6 +4291,11 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             int nonCurrentRun = 0;
             int rowsSinceBudgetCheck = 0;
 
+            // Where the next pass resumes when this one pauses. The cursor field itself moves only
+            // after the pass's deletes are written (below), so a pass whose write fails is repeated
+            // from where it began instead of leaving the rows it meant to delete behind the cursor.
+            byte[]? pauseCursor = null;
+
             using Iterator iterator = db.NewIterator(readOptions: MaintenanceScanReadOptions, cf: columnFamilyKeys);
 
             if (sweepCursor is null)
@@ -4088,7 +4308,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 if (deleted >= batchSize || keysVisited >= keyBudget)
                 {
                     // Pause here; resume from the current (unprocessed) entry next pass.
-                    sweepCursor = iterator.GetKeySpan().ToArray();
+                    pauseCursor = iterator.GetKeySpan().ToArray();
                     batchLimitReached = true;
                     paused = true;
                     break;
@@ -4102,7 +4322,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
 
                     if (BudgetExhausted())
                     {
-                        sweepCursor = iterator.GetKeySpan().ToArray();
+                        pauseCursor = iterator.GetKeySpan().ToArray();
                         batchLimitReached = true;
                         timeBudgetExhausted = true;
                         paused = true;
@@ -4121,7 +4341,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                     // Time budget on key progress; the first key of a pass always runs.
                     if (keysVisited > 0 && BudgetExhausted())
                     {
-                        sweepCursor = rawKeySpan.ToArray();
+                        pauseCursor = rawKeySpan.ToArray();
                         batchLimitReached = true;
                         timeBudgetExhausted = true;
                         paused = true;
@@ -4129,7 +4349,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                     }
 
                     string logicalKey = Encoding.UTF8.GetString(rawKeySpan[..^CurrentMarkerUtf8.Length]);
-                    PruneRevisionsForKey(logicalKey, retentionCount, retentionAge, batchSize, floorTimestamp, walk, fromSweep: true, ref deleted, ref floorViolations, ref keysSkipped, ref keysFloorBlocked, out bool keyLimitReached, out long keyAgeFrontier);
+                    PruneRevisionsForKey(logicalKey, retentionCount, retentionAge, batchSize, floorTimestamp, walk, writes, fromSweep: true, ref deleted, ref floorViolations, ref keysSkipped, ref keysFloorBlocked, ref deleteRecordsReleased, out bool keyLimitReached, out long keyAgeFrontier);
                     keysVisited++;
 
                     if (keyAgeFrontier < sweepCycleAgeFrontier)
@@ -4139,11 +4359,15 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                     {
                         sweepCycleClean = false;
                         // Key only partially pruned — resume at this same key next pass.
-                        sweepCursor = rawKeySpan.ToArray(); // ToArray only on pause path
+                        pauseCursor = rawKeySpan.ToArray(); // ToArray only on pause path
                         batchLimitReached = true;
                         paused = true;
                         break;
                     }
+
+                    // Between keys, so no key's deletes are split across two batches. The sweep
+                    // iterator is a snapshot and keeps its position across the write.
+                    writes.WriteIfFull();
                 }
                 else if (++nonCurrentRun == RevisionRunSeekThreshold && TrySeekPastRevisionRun(iterator, rawKeySpan))
                 {
@@ -4158,17 +4382,31 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 iterator.Next();
             }
 
-            // Reached the end of the column family without pausing: full scan complete, wrap around.
-            if (!paused)
+            // A write that fails throws from here, before the cursor or the cycle's proof moves.
+            writes.Write();
+
+            if (paused)
             {
+                sweepCursor = pauseCursor;
+            }
+            else
+            {
+                // Reached the end of the column family without pausing: full scan complete, wrap around.
                 sweepCursor = null;
 
                 if (sweepCycleClean && Volatile.Read(ref keyRowsGeneration) == sweepCycleGeneration)
                     sweepQuiescence = new(sweepCycleGeneration, sweepCycleFloor, sweepCycleRetentionCount, sweepCycleRetentionAge, sweepCycleAgeFrontier);
+
+                // The cycle has nothing more to delete: hand what it (and any targeted prune since
+                // the last cycle) deleted to compaction now instead of when the memtable fills.
+                FlushPrunedRows();
             }
         }
 
-        result = new(keysVisited, deleted, batchLimitReached, remaining, floorViolations, keysSkipped, timeBudgetExhausted, keysFloorBlocked);
+        result = new(keysVisited, deleted, batchLimitReached, remaining, floorViolations, keysSkipped, timeBudgetExhausted, keysFloorBlocked)
+        {
+            DeleteRecordsReleased = deleteRecordsReleased
+        };
         return true;
     }
 
@@ -4204,10 +4442,24 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// (the highest revision whose LastModified ≤ floorTimestamp) and everything newer
     /// are also protected from deletion.
     /// <para>
+    /// A deleted key is released once nothing can read below its delete. Its current row is a delete
+    /// record; when age retention has passed that record and no registered hold is older than it, every
+    /// read the store still answers (at or after the delete) is answered by the current row alone. So
+    /// every other row of the key goes, in one batch: the older revisions whatever their own age or
+    /// count, the delete record's own history row, and the no-revision provenance marker. The current
+    /// row stays. It carries the key's revision, and every replica orders the records of a key by
+    /// revision first: a key that is created again must continue above its delete on every node, and no
+    /// node can tell whether the others dropped their row too.
+    /// </para>
+    /// <para>
+    /// The deletes go to <paramref name="writes"/>, which the caller writes between keys.
+    /// </para>
+    /// <para>
     /// <paramref name="ageFrontierPhysical"/> receives the commit time at which the key's memo verdict
     /// turns back to "walk" once age retention reaches it — the oldest non-current row, or, when the
-    /// floor blocked the walk, the oldest row below the floor boundary — or <see cref="long.MaxValue"/>
-    /// when there is none. It is meaningless when <paramref name="batchLimitReached"/> is set.
+    /// floor blocked the walk, the oldest row below the floor boundary; a delete record that waits on
+    /// the retention age counts as such a row — or <see cref="long.MaxValue"/> when there is none. It
+    /// is meaningless when <paramref name="batchLimitReached"/> is set.
     /// </para>
     /// </summary>
     private void PruneRevisionsForKey(
@@ -4217,11 +4469,13 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         int batchSize,
         HLCTimestamp floorTimestamp,
         PruneWalkCursor walk,
+        PruneWriteBuffer writes,
         bool fromSweep,
         ref int deleted,
         ref int floorViolations,
         ref int keysSkipped,
         ref int keysFloorBlocked,
+        ref int deleteRecordsReleased,
         out bool batchLimitReached,
         out long ageFrontierPhysical)
     {
@@ -4262,8 +4516,11 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             // "<key>~CURRENT" sorts inside the "<key>~" range, so the walk reads the current revision
             // from the same snapshot as the history rows instead of paying a separate point lookup.
             int currentKeyLength = keyLen + CurrentMarkerUtf8.Length;
+            int noRevKeyLength = keyLen + NoRevMarkerUtf8.Length;
             bool hasCurrent = false;
+            bool hasNoRevMarker = false;
             StoredKeyValueOrdering currentOrdering = default;
+            HLCTimestamp noRevLatest = HLCTimestamp.Zero;
 
             List<(long Revision, long LastModifiedPhysical, HLCTimestamp LastModified, byte[] RawKeyBytes)> revisions = [];
 
@@ -4273,7 +4530,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             while (!IteratorEnded(iterator))
             {
                 // Filter on the native key span — no per-row string decode. Only rows we keep are
-                // materialised (their key bytes are retained below for the later batch.Delete).
+                // materialised (their key bytes are retained below for the later delete).
                 ReadOnlySpan<byte> entryKey = iterator.GetKeySpan();
 
                 if (!entryKey.StartsWith(prefixBytes))
@@ -4294,6 +4551,16 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                     continue;
                 }
 
+                // This key's own no-revision provenance marker (a longer one belongs to another key
+                // that shares the prefix). It leaves with a released delete record.
+                if (entryKey.Length == noRevKeyLength && entryKey.EndsWith(NoRevMarkerUtf8))
+                {
+                    hasNoRevMarker = true;
+                    TryUnpackNoRev(iterator.GetValueSpan(), out _, out noRevLatest);
+                    iterator.Next();
+                    continue;
+                }
+
                 // The suffix after "<key>~" must be a numeric revision; reject any trailing junk
                 // so "<key>~123abc" is ignored exactly as long.TryParse would.
                 ReadOnlySpan<byte> suffix = entryKey[prefixBytes.Length..];
@@ -4310,7 +4577,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 long lastModifiedPhysical = rowOrdering.LastModifiedPhysical;
                 HLCTimestamp lastModified = new(rowOrdering.LastModifiedNode, rowOrdering.LastModifiedPhysical, rowOrdering.LastModifiedCounter);
 
-                // Copy the key out of native memory: it must outlive the iterator for batch.Delete.
+                // Copy the key out of native memory: it must outlive the iterator for the delete.
                 revisions.Add((revisionNum, lastModifiedPhysical, lastModified, entryKey.ToArray()));
                 iterator.Next();
             }
@@ -4320,13 +4587,23 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 return;
 
             long currentRevision = currentOrdering.Revision;
+            HLCTimestamp currentLastModified = new(
+                currentOrdering.LastModifiedNode, currentOrdering.LastModifiedPhysical, currentOrdering.LastModifiedCounter);
 
-            if (revisions.Count == 0)
-            {
-                // No history rows at all (a no-revision key): nothing to prune until one is written.
-                RememberPruneWalk(key, 0, long.MaxValue, long.MaxValue, floorBlocked: false, floorTimestamp, walk.Generation, admitWhenFull: !fromSweep);
-                return;
-            }
+            // A deleted key with rows besides its current row. Age retention is what says how far back
+            // the store answers, so without it nothing is ever released. A no-revision write stamped
+            // after the delete record cannot be the record's past; such a key is left alone.
+            bool releasable = needAge
+                && currentOrdering.State == (int)KeyValueState.Deleted
+                && (revisions.Count > 0 || hasNoRevMarker)
+                && noRevLatest.CompareTo(currentLastModified) <= 0;
+
+            bool aged = releasable && currentOrdering.LastModifiedPhysical < cutoffPhysical;
+
+            // A registered hold older than the delete still reads the key's value from before it.
+            bool heldByFloor = releasable && needFloor && currentLastModified.CompareTo(floorTimestamp) > 0;
+
+            bool released = aged && !heldByFloor;
 
             // Sort descending so index 0 is the newest revision.
             revisions.Sort(static (a, b) => b.Revision.CompareTo(a.Revision));
@@ -4343,112 +4620,173 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 }
             }
 
-            using WriteBatch batch = new();
-            int deletedInBatch = 0;
+            int deletedForKey = 0;
             int floorBlockedCandidates = 0;
+            int currentRowIndex = -1;
             HashSet<long>? deletedRevNums = null;
+
+            // An aged delete record that a hold still reads below keeps its rows until the floor moves:
+            // counted, so the memo knows only a moved floor (or new history) makes the key worth a walk.
+            if (aged && heldByFloor)
+                floorBlockedCandidates++;
 
             for (int i = 0; i < revisions.Count; i++)
             {
                 (long revNum, long lastModifiedPhysical, _, byte[] rawKeyBytes) = revisions[i];
 
-                // Always protect the current revision's historical record.
+                // The current revision's own row is not judged here. It stays for a live key; for a
+                // released delete record it goes last, below, once every older row is in the batch.
                 if (revNum == currentRevision)
-                    continue;
-
-                bool deleteByCount = retentionCount > 0 && i >= retentionCount;
-                bool deleteByAge = needAge && lastModifiedPhysical < cutoffPhysical;
-
-                if (!deleteByCount && !deleteByAge)
-                    continue;
-
-                // Floor protection: when a floor is active, protect the boundary revision and
-                // everything newer.  When no revision exists at-or-before the floor (floorRevision
-                // < 0), the key was created entirely after the floor — all its revisions are
-                // protected by skipping this key entirely. Counted so the memo knows this key holds
-                // deletable rows that only a moved floor (or new history) can release.
-                if (needFloor && (floorRevision < 0 || revNum >= floorRevision))
                 {
-                    floorBlockedCandidates++;
+                    currentRowIndex = i;
                     continue;
                 }
 
-                if (deleted + deletedInBatch >= batchSize)
+                if (!released)
+                {
+                    bool deleteByCount = retentionCount > 0 && i >= retentionCount;
+                    bool deleteByAge = needAge && lastModifiedPhysical < cutoffPhysical;
+
+                    if (!deleteByCount && !deleteByAge)
+                        continue;
+
+                    // Floor protection: when a floor is active, protect the boundary revision and
+                    // everything newer.  When no revision exists at-or-before the floor (floorRevision
+                    // < 0), the key was created entirely after the floor — all its revisions are
+                    // protected by skipping this key entirely. Counted so the memo knows this key holds
+                    // deletable rows that only a moved floor (or new history) can release.
+                    if (needFloor && (floorRevision < 0 || revNum >= floorRevision))
+                    {
+                        floorBlockedCandidates++;
+                        continue;
+                    }
+                }
+
+                if (deleted + deletedForKey >= batchSize)
                 {
                     batchLimitReached = true;
                     break;
                 }
 
-                // Independent floor-protection audit: the floor clamp above (the `continue` guarding
-                // revNum >= floorRevision / floorRevision < 0) must prevent any floor-protected
-                // revision from reaching this delete. Re-deriving the protected condition here, at
-                // the delete site, catches a regression in that clamp — a correct clamp keeps this
-                // at 0; observing one means a protected revision is being deleted.
-                if (needFloor && (floorRevision < 0 || revNum >= floorRevision))
+                // Independent floor-protection audit: the clamps above must prevent any floor-protected
+                // revision from reaching this delete. Re-deriving the protected condition here, at the
+                // delete site, catches a regression in them — correct clamps keep this at 0; observing
+                // one means a protected revision is being deleted. Below a released delete record a row
+                // is protected exactly when a hold is older than the record.
+                bool floorProtected = released
+                    ? currentLastModified.CompareTo(floorTimestamp) > 0
+                    : floorRevision < 0 || revNum >= floorRevision;
+
+                if (needFloor && floorProtected)
                     floorViolations++;
 
-                batch.Delete(rawKeyBytes, cf: columnFamilyKeys);
-                deletedInBatch++;
+                writes.Delete(rawKeyBytes);
+                deletedForKey++;
                 (deletedRevNums ??= []).Add(revNum);
             }
 
+            if (released && !batchLimitReached)
+            {
+                // Every older row is in the batch. The record's own rows follow as one unit, so the key
+                // never keeps its delete record's history row without the rest or the reverse. A unit
+                // that does not fit in what is left of the pass's delete budget waits for the next pass;
+                // a pass that has deleted nothing yet always takes it, so a budget of one row still
+                // makes progress.
+                int ownRows = (currentRowIndex >= 0 ? 1 : 0) + (hasNoRevMarker ? 1 : 0);
+                int queued = deleted + deletedForKey;
+
+                if (queued > 0 && queued + ownRows > batchSize)
+                {
+                    batchLimitReached = true;
+                }
+                else
+                {
+                    if (hasNoRevMarker)
+                    {
+                        writes.Delete(BuildNoRevKey(key));
+                        deletedForKey++;
+                    }
+
+                    if (currentRowIndex >= 0)
+                    {
+                        if (needFloor && currentLastModified.CompareTo(floorTimestamp) > 0)
+                            floorViolations++;
+
+                        writes.Delete(revisions[currentRowIndex].RawKeyBytes);
+                        deletedForKey++;
+                        (deletedRevNums ??= []).Add(currentRevision);
+                    }
+
+                    deleteRecordsReleased++;
+                }
+            }
+
             // This key lost history: raise the durable pruned-history floor to its oldest surviving
-            // revision (or the current no-revision row's HLC when none survives), staging the floor
-            // Put into the SAME batch as the deletes so a crash cannot leave the floor trailing the
-            // deleted history. As-of reads at a cut below it can no longer find the key's boundary.
-            HLCTimestamp stagedFloor = HLCTimestamp.Zero;
-            if (deletedRevNums is not null)
+            // revision, or to the current row's HLC when none survives (a no-revision value, or a
+            // released delete record). The floor travels in the same batch as the deletes, so a crash
+            // cannot leave the floor trailing the deleted history. As-of reads at a cut below it can
+            // no longer find the key's boundary.
+            if (deletedForKey > 0)
             {
                 HLCTimestamp oldestSurviving = HLCTimestamp.Zero;
                 foreach ((long revNum, _, HLCTimestamp lastModified, _) in revisions)
                 {
-                    if (deletedRevNums.Contains(revNum))
+                    if (deletedRevNums is not null && deletedRevNums.Contains(revNum))
                         continue;
                     if (oldestSurviving == HLCTimestamp.Zero || lastModified.CompareTo(oldestSurviving) < 0)
                         oldestSurviving = lastModified;
                 }
 
-                // No revision row survives — the current value is a SetNoRevision write with no history
-                // row of its own, so a cut below its timestamp cannot reconstruct the deleted boundary.
                 if (oldestSurviving == HLCTimestamp.Zero)
-                    oldestSurviving = new HLCTimestamp(
-                        currentOrdering.LastModifiedNode, currentOrdering.LastModifiedPhysical, currentOrdering.LastModifiedCounter);
+                    oldestSurviving = currentLastModified;
 
-                stagedFloor = StagePrunedFloor(batch, oldestSurviving);
+                writes.RaiseFloor(oldestSurviving);
             }
 
-            if (deletedInBatch > 0 || stagedFloor != HLCTimestamp.Zero)
-                db.Write(batch, DefaultWriteOptions);
-
-            // Commit the floor to the in-memory cache only after it is durably written with its deletes.
-            if (stagedFloor != HLCTimestamp.Zero)
-                CommitPrunedFloor(stagedFloor);
-
-            deleted += deletedInBatch;
+            deleted += deletedForKey;
 
             if (batchLimitReached)
             {
                 // Deletable rows remain: no memo, so the next visit walks again.
                 ForgetPruneMemo(key);
+                return;
             }
-            else
-            {
-                long oldestNonCurrent = long.MaxValue;
-                long oldestUnprotected = long.MaxValue;
-                foreach ((long revNum, long lastModifiedPhysical, _, _) in revisions)
-                {
-                    if (revNum == currentRevision || (deletedRevNums is not null && deletedRevNums.Contains(revNum)))
-                        continue;
-                    if (lastModifiedPhysical < oldestNonCurrent)
-                        oldestNonCurrent = lastModifiedPhysical;
-                    bool protectedByFloor = needFloor && (floorRevision < 0 || revNum >= floorRevision);
-                    if (!protectedByFloor && lastModifiedPhysical < oldestUnprotected)
-                        oldestUnprotected = lastModifiedPhysical;
-                }
 
-                RememberPruneWalk(key, revisions.Count - deletedInBatch, oldestNonCurrent, oldestUnprotected, floorBlockedCandidates > 0, floorTimestamp, walk.Generation, admitWhenFull: !fromSweep);
-                ageFrontierPhysical = floorBlockedCandidates > 0 ? oldestUnprotected : oldestNonCurrent;
+            long oldestNonCurrent = long.MaxValue;
+            long oldestUnprotected = long.MaxValue;
+            foreach ((long revNum, long lastModifiedPhysical, _, _) in revisions)
+            {
+                if (revNum == currentRevision || (deletedRevNums is not null && deletedRevNums.Contains(revNum)))
+                    continue;
+                if (lastModifiedPhysical < oldestNonCurrent)
+                    oldestNonCurrent = lastModifiedPhysical;
+                bool protectedByFloor = needFloor && (floorRevision < 0 || revNum >= floorRevision);
+                if (!protectedByFloor && lastModifiedPhysical < oldestUnprotected)
+                    oldestUnprotected = lastModifiedPhysical;
             }
+
+            // A delete record still inside the retention age holds rows that fall to the prune the
+            // moment the age passes it, so it is the row whose age reopens the verdict, exactly like a
+            // non-current row. One a hold protects is released by a moved floor instead.
+            if (releasable && !aged)
+            {
+                long releasePhysical = currentOrdering.LastModifiedPhysical;
+                if (releasePhysical < oldestNonCurrent)
+                    oldestNonCurrent = releasePhysical;
+                if (!heldByFloor && releasePhysical < oldestUnprotected)
+                    oldestUnprotected = releasePhysical;
+            }
+
+            int historyRowsLeft = revisions.Count - (deletedRevNums?.Count ?? 0);
+            bool floorBlocked = floorBlockedCandidates > 0;
+
+            // A memo that counts on buffered deletes is recorded when they land.
+            if (deletedForKey > 0)
+                writes.Remember(new(key, historyRowsLeft, oldestNonCurrent, oldestUnprotected, floorBlocked, floorTimestamp, walk.Generation, AdmitWhenFull: !fromSweep));
+            else
+                RememberPruneWalk(key, historyRowsLeft, oldestNonCurrent, oldestUnprotected, floorBlocked, floorTimestamp, walk.Generation, admitWhenFull: !fromSweep);
+
+            ageFrontierPhysical = floorBlocked ? oldestUnprotected : oldestNonCurrent;
         }
         finally
         {
@@ -4761,7 +5099,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                     // handle it before any attempt to deserialize a RocksDbKeyValueMessage.
                     if (suffix.SequenceEqual(NoRevMarkerUtf8[1..]))
                     {
-                        if (TryUnpackNoRev(it.GetValueSpan().ToArray(), out HLCTimestamp e, out HLCTimestamp l))
+                        if (TryUnpackNoRev(it.GetValueSpan(), out HLCTimestamp e, out HLCTimestamp l))
                         {
                             st.NoRevEarliest = e;
                             st.NoRevLatest = l;

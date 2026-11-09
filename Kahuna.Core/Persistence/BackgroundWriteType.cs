@@ -24,5 +24,13 @@ public enum BackgroundWriteType
     /// replaces its stores next and the exporter reads them directly.
     /// </summary>
     FlushForStateTransfer,
-    ForgetUnhostedPartitions
+    ForgetUnhostedPartitions,
+    /// <summary>
+    /// One more pass of the backend-wide revision sweep, sent by the writer to itself when a pass
+    /// deleted rows, stopped on its budget, and nothing is queued for the flush. A flush cycle runs
+    /// one pass, so a sweep with millions of rows to delete moved at one pass per flush period on a
+    /// writer that had nothing else to do. The pass is skipped when writes are queued: the next flush
+    /// cycle runs the flush first and then the sweep, as before.
+    /// </summary>
+    RevisionSweepCatchUp
 }

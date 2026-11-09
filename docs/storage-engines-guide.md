@@ -238,6 +238,72 @@ Backup images carry no stamp: a checkpoint is trimmed of the identity row, and a
 merges one, so a node that restores or bootstraps from an image stamps its own and is never refused as
 foreign.
 
+## 8. How deleted keys give their space back
+
+A delete does not remove rows. It writes a delete record: a new revision of the key with no value. The
+`rocksdb` store keeps three kinds of row for a key: the current row, one history row for each retained
+revision, and a marker when the key had writes that keep no revision. So a key that was written once and
+then deleted has a current row (the delete record), the history row of its value, and the history row of
+the delete record. The space comes back in three steps, and each one has a condition.
+
+**1. Revision retention removes the rows.** Nothing is removed while persistent revision retention is off
+(`PersistentRevisionRetentionCount` and `PersistentRevisionRetentionAge` both unset), which is the
+default. With an age set:
+
+- The history row of the old value goes when it is older than the age. A value written long before its
+  delete goes on the first prune after the delete.
+- The rest of a deleted key goes when the **delete record** is older than the age and no snapshot hold
+  is older than the delete record. At that moment every read the store still answers for the key, at
+  the delete or later, is answered by the current row alone, so every other row is removed in one
+  batch: older revisions of any age, the delete record's own history row, and the no-revision marker.
+  The counter `kahuna.persistence.revision_prune.delete_records_released_total` counts those keys.
+- A count without an age never releases a deleted key: without an age, nothing says how far back the
+  store answers.
+
+**The current row of a deleted key stays.** It is one small row for each deleted key, and it is not
+removed by any setting. It holds the revision the key's next write continues from. Every node orders
+the records of a key by revision first, and each node prunes by its own clock, so a node that dropped
+the row would start the key again at revision 0 while another node still held the delete record at a
+higher revision, and that node would refuse the new value as stale. A restore that replays the log over
+an older image would refuse it in the same way. To remove the row, the removal must be an entry in the
+replicated log, applied by every replica at the same point. The store does not have that operation.
+
+**2. The prune reaches every key.** The prune runs on the store's single writer, between flushes. A
+flush cycle gives it `PersistentRevisionCleanupTimeBudget` (250 ms) and at most
+`PersistentRevisionCleanupBatchSize` (10,000) rows. Its deletes are written in batches of about 2,000
+rows that many keys share, and the batches are not synced: a crash loses a batch whole, the rows are
+still there, and the next pass deletes them again. When a sweep pass deletes rows and stops with more
+left, and no write is queued for the flush, the writer runs the next pass at once and does not wait
+for the next flush cycle (`kahuna.persistence.revision_prune.sweep_catch_up_passes_total`). With writes
+queued, the flush goes first and the sweep gets one pass in each cycle, as before. A pass that deletes
+nothing also waits for the next cycle, so a large store with nothing to prune is walked at the old
+pace. So the time to prune a deleted key space depends on its size, not on the flush period.
+
+**3. Compaction drops the rows.** A delete in RocksDB is itself an entry. It frees space only when a
+compaction carries it down to the rows it covers. Two things make that happen without other writes:
+
+- When a sweep cycle ends, the store asks the engine to flush the memtable that holds the prune's
+  deletes. An idle store never fills its memtable, and a delete that stays there frees nothing.
+- The key-value family is opened with RocksDB's delete-driven compaction (`CompactOnDeletionCollector`):
+  a table file is marked when half of its entries are deletes, in any run of 4,096 entries or over the
+  whole file. The engine compacts a marked file into the next level even when no level is over its size.
+  The output is marked again while deletes are most of it, so the deletes go down to the bottom level,
+  where they and the rows they cover are dropped. The rows of one key are next to each other in the key
+  order, so the old value in a key's current row, which the delete record replaced, leaves in the same
+  compaction.
+
+Half is on purpose. A key that is written again and again sheds one delete for each two rows it writes,
+a third of its entries, and must not mark every file it touches.
+
+`--storage-compaction-rate-mbps` (section 5) paces these compactions with all the others.
+
+**What to expect.** With `PersistentRevisionRetentionAge` set to one hour, a key space deleted as a
+whole gives back the values written more than an hour before the delete within minutes, and the rest
+one hour after the delete plus one `PersistentRevisionCleanupInterval`. A snapshot hold older than the
+deletes keeps their rows until the hold is released (`kahuna.persistence.revision_prune.keys_floor_blocked_total`).
+The `sqlite` store removes the old revisions by the same age rule and keeps the delete record's history
+row; it does not compact, and its file does not shrink. The `memory` store does not prune revisions.
+
 An engine added by an extension takes part through the same members: `GetFailStopReason` for the fail-stop,
 `KeepsDurabilityFloors` for the empty-store floor, and `SupportsStoreIdentity` / `GetStoreIdentity` /
 `WriteStoreIdentity` / `HoldsDurableState` for the identity check. The defaults opt an engine out of all of

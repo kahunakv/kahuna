@@ -72,6 +72,19 @@ internal static class PersistenceMetrics
         Meter.CreateCounter<long>("kahuna.persistence.revision_prune.revisions_deleted_total",
             description: "Historical revision rows deleted by the revision prune (targeted or sweep).");
 
+    /// <summary>Deleted keys the prune released: every retained row of the key except its current row (the
+    /// delete record) is gone. A deleted key space that stays on disk shows here as a count that does not
+    /// move: its delete records are still inside the retention age, or a snapshot hold is older than them.</summary>
+    internal static readonly Counter<long> PruneDeleteRecordsReleased =
+        Meter.CreateCounter<long>("kahuna.persistence.revision_prune.delete_records_released_total",
+            description: "Deleted keys whose retained rows the revision prune removed, leaving only the key's current row.");
+
+    /// <summary>Sweep passes the writer ran back to back, outside its flush cycle, because the previous pass
+    /// deleted rows, stopped on its budget, and nothing was queued for the flush.</summary>
+    internal static readonly Counter<long> SweepCatchUpPasses =
+        Meter.CreateCounter<long>("kahuna.persistence.revision_prune.sweep_catch_up_passes_total",
+            description: "Backend-wide revision sweep passes run between flush cycles while the sweep had a backlog and the writer was idle.");
+
     /// <summary>Backend-wide sweep passes that paused on their share of the cycle's time budget. The
     /// sweep resumes from its cursor next cycle, so a steady rate only means the store is large; a
     /// pass that keeps pausing without the cursor wrapping means the sweep never completes.</summary>

@@ -100,6 +100,7 @@ public sealed class TestTargetedRevisionCleanupBudget
         public readonly List<TimeSpan> TargetedBudgets = [];
         public readonly List<TimeSpan> SweepBudgets = [];
         public int SweepPausesLeft = 1;
+        public int SweepRowsDeletedPerPass;
         public int UnbudgetedCalls;
 
         public bool StoreKeyValues(List<PersistenceRequestItem> items) => inner.StoreKeyValues(items);
@@ -130,7 +131,7 @@ public sealed class TestTargetedRevisionCleanupBudget
             {
                 SweepBudgets.Add(timeBudget);
                 bool paused = SweepPausesLeft-- > 0;
-                result = new(1, 0, BatchLimitReached: paused, TimeBudgetExhausted: paused);
+                result = new(1, SweepRowsDeletedPerPass, BatchLimitReached: paused, TimeBudgetExhausted: paused);
                 return true;
             }
 
@@ -244,6 +245,23 @@ public sealed class TestTargetedRevisionCleanupBudget
         Assert.Equal(0, harness.Writer.QueuedBytes);
     }
 
+    /// <summary>
+    /// Waits until the writer has finished <paramref name="passes"/> catch-up turns. A catch-up turn
+    /// runs on the actor's own mailbox, so a test that drives <c>Receive</c> itself must not touch the
+    /// writer again before the turn is over.
+    /// </summary>
+    private static async Task WaitForCatchUpPasses(BackgroundWriterActor writer, int passes)
+    {
+        Stopwatch waited = Stopwatch.StartNew();
+
+        while (writer.SweepCatchUpPasses < passes)
+        {
+            Assert.True(waited.Elapsed < TimeSpan.FromSeconds(10),
+                $"the writer finished {writer.SweepCatchUpPasses} catch-up pass(es), expected {passes}");
+            await Task.Delay(2, TestContext.Current.CancellationToken);
+        }
+    }
+
     [Fact]
     public async Task SweepSharesTheCycleBudget_KeepsAQuarterAtLeast_AndResumesWithoutWaitingForTheInterval()
     {
@@ -258,7 +276,7 @@ public sealed class TestTargetedRevisionCleanupBudget
         await Task.Delay(5, TestContext.Current.CancellationToken);
 
         // Nothing queued: the targeted prune costs nothing, the sweep gets the whole cycle budget and
-        // reports a pause.
+        // reports a pause. The pass deleted nothing, so no pass follows it before the next tick.
         await harness.Writer.Receive(new(BackgroundWriteType.Flush));
         Assert.Single(backend.SweepBudgets);
         Assert.Equal(budget, backend.SweepBudgets[0]);
@@ -282,6 +300,84 @@ public sealed class TestTargetedRevisionCleanupBudget
 
         // The writer never falls back to the unbudgeted call.
         Assert.Equal(0, backend.UnbudgetedCalls);
+    }
+
+    /// <summary>
+    /// A flush cycle runs one sweep pass. A sweep with millions of rows to delete used to move at one
+    /// pass per flush period on a writer that had nothing else to do. A pass that deletes rows and
+    /// stops with work left is now followed by the next one at once, for as long as the backlog lasts
+    /// and no write is queued.
+    /// </summary>
+    [Fact]
+    public async Task SweepBacklogOnAnIdleWriter_RunsPassAfterPassWithoutWaitingForATick()
+    {
+        TimeSpan budget = TimeSpan.FromMilliseconds(60);
+
+        BudgetRecordingBackend backend = new(new MemoryPersistenceBackend(), TimeSpan.Zero) { SweepPausesLeft = 4, SweepRowsDeletedPerPass = 100 };
+        using WriterHarness harness = new(MakeLeaderRaft(1), Config(budget, sweepInterval: TimeSpan.FromMilliseconds(1)), backend);
+
+        await Task.Delay(5, TestContext.Current.CancellationToken);
+
+        // One tick. Four passes pause; the fifth ends the backlog and the chain with it.
+        await harness.Writer.Receive(new(BackgroundWriteType.Flush));
+        await WaitForCatchUpPasses(harness.Writer, 4);
+
+        Assert.Equal(5, backend.SweepBudgets.Count);
+        Assert.All(backend.SweepBudgets, b => Assert.Equal(budget, b));
+
+        // No backlog is left, so no further pass runs until a tick asks for one.
+        await Task.Delay(100, TestContext.Current.CancellationToken);
+        Assert.Equal(4, harness.Writer.SweepCatchUpPasses);
+        Assert.Equal(5, backend.SweepBudgets.Count);
+    }
+
+    /// <summary>
+    /// A paused pass that deleted nothing only walked keys. On a large store with nothing to prune,
+    /// passes run back to back would keep the writer and the disk busy for the whole cycle; such a
+    /// sweep stays at one pass per flush cycle.
+    /// </summary>
+    [Fact]
+    public async Task SweepPassThatDeletedNothing_WaitsForTheNextFlushCycle()
+    {
+        BudgetRecordingBackend backend = new(new MemoryPersistenceBackend(), TimeSpan.Zero) { SweepPausesLeft = 3 };
+        using WriterHarness harness = new(MakeLeaderRaft(1), Config(TimeSpan.FromMilliseconds(60), sweepInterval: TimeSpan.FromMilliseconds(1)), backend);
+
+        await Task.Delay(5, TestContext.Current.CancellationToken);
+
+        await harness.Writer.Receive(new(BackgroundWriteType.Flush));
+        await Task.Delay(100, TestContext.Current.CancellationToken);
+
+        Assert.Single(backend.SweepBudgets);
+        Assert.Equal(0, harness.Writer.SweepCatchUpPasses);
+
+        // The backlog is not forgotten: the next cycle resumes the sweep.
+        await harness.Writer.Receive(new(BackgroundWriteType.Flush));
+        Assert.Equal(2, backend.SweepBudgets.Count);
+    }
+
+    /// <summary>
+    /// The catch-up pass must never take the writer from a flush that has work: with a write queued it
+    /// does nothing, and the next flush cycle flushes first and runs the sweep after.
+    /// </summary>
+    [Fact]
+    public async Task SweepCatchUp_WithAWriteQueued_LeavesThePassToTheNextFlushCycle()
+    {
+        BudgetRecordingBackend backend = new(new MemoryPersistenceBackend(), TimeSpan.Zero) { SweepPausesLeft = 0 };
+        using WriterHarness harness = new(MakeLeaderRaft(1), Config(TimeSpan.FromMilliseconds(60), sweepInterval: TimeSpan.FromMilliseconds(1)), backend);
+
+        await Task.Delay(5, TestContext.Current.CancellationToken);
+
+        await harness.Writer.Receive(KeyValueWrite(1, "catch-up/queued", logIndex: 1));
+        await harness.Writer.Receive(new(BackgroundWriteType.RevisionSweepCatchUp));
+
+        Assert.Empty(backend.SweepBudgets);
+        Assert.Equal(0, harness.Writer.SweepCatchUpPasses);
+        Assert.Equal(1, harness.Writer.QueuedItems);
+
+        await harness.Writer.Receive(new(BackgroundWriteType.Flush));
+
+        Assert.Equal(0, harness.Writer.QueuedItems);
+        Assert.Single(backend.SweepBudgets);
     }
 
     [Fact]

@@ -392,6 +392,20 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     private bool fullSweepBacklogPending;
 
     /// <summary>
+    /// True while a <see cref="BackgroundWriteType.RevisionSweepCatchUp"/> message is in the mailbox, so
+    /// the writer never has more than one: each would run a pass ahead of the writes queued behind it.
+    /// </summary>
+    private bool sweepCatchUpScheduled;
+
+    private int sweepCatchUpPasses;
+
+    /// <summary>
+    /// Catch-up turns that ran a sweep pass and are finished, since the writer started. Read from
+    /// other threads by tests, which wait on it before they drive the writer again.
+    /// </summary>
+    internal int SweepCatchUpPasses => Volatile.Read(ref sweepCatchUpPasses);
+
+    /// <summary>
     /// Wall-clock timestamp of the last completed (or attempted) full backend-wide sweep,
     /// used to enforce <see cref="KahunaConfiguration.PersistentRevisionCleanupInterval"/>.
     /// Initialised to <see cref="DateTime.UtcNow"/> so the first sweep is not triggered until
@@ -641,7 +655,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 await AdvanceDurabilityFloors(forceSnapshotCapture: false);
                 await CheckpointPartitions();
                 await RunTargetedRevisionCleanup();
-                await RunFullRevisionSweep();
+                bool sweepLeftBacklog = await RunFullRevisionSweep();
                 UpdatePitrHorizon();
                 // Periodic backstop for the event-driven teardown below: a write applied just
                 // before the partition was un-hosted can re-create bookkeeping after the explicit
@@ -651,6 +665,23 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 // instead of waiting for the next periodic timer tick.
                 if (dirtyLocks.Count > 0 || dirtyKeyValues.Count > 0)
                     self.Send(new(BackgroundWriteType.Flush));
+                else if (sweepLeftBacklog)
+                    ScheduleSweepCatchUp();
+                break;
+
+            case BackgroundWriteType.RevisionSweepCatchUp:
+                sweepCatchUpScheduled = false;
+                // Only an idle writer catches up. With writes queued, the pass is left to the next
+                // flush cycle, which flushes first: the sweep must never take the writer from a flush
+                // that has work.
+                if (dirtyLocks.Count > 0 || dirtyKeyValues.Count > 0)
+                    break;
+                // No targeted prune ran in this turn, so the pass gets the whole cycle budget.
+                targetedPruneElapsedThisCycle = TimeSpan.Zero;
+                PersistenceMetrics.SweepCatchUpPasses.Add(1);
+                if (await RunFullRevisionSweep())
+                    ScheduleSweepCatchUp();
+                Interlocked.Increment(ref sweepCatchUpPasses);
                 break;
 
             case BackgroundWriteType.ForgetUnhostedPartitions:
@@ -1636,6 +1667,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         int keysSkipped = 0;
         int keysFloorBlocked = 0;
         int revisionsDeleted = 0;
+        int deleteRecordsReleased = 0;
         int floorViolations = 0;
         bool batchLimitReached = false;
         bool budgetExhausted = false;
@@ -1720,6 +1752,7 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 keysSkipped += pruneResult.KeysSkipped;
                 keysFloorBlocked += pruneResult.KeysFloorBlocked;
                 revisionsDeleted += pruneResult.RevisionsDeleted;
+                deleteRecordsReleased += pruneResult.DeleteRecordsReleased;
                 floorViolations += pruneResult.FloorViolations;
                 offset += chunkLength;
 
@@ -1756,6 +1789,8 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         if (keysFloorBlocked > 0)
             PersistenceMetrics.PruneKeysFloorBlocked.Add(keysFloorBlocked);
         PersistenceMetrics.PruneRevisionsDeleted.Add(revisionsDeleted);
+        if (deleteRecordsReleased > 0)
+            PersistenceMetrics.PruneDeleteRecordsReleased.Add(deleteRecordsReleased);
         PersistenceMetrics.PruneCycleMs.Record(elapsedMs);
 
         if (budgetExhausted)
@@ -1812,18 +1847,24 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     /// budget and resumes next cycle.
     /// </para>
     /// Sweep failure is logged as a warning and never propagates to the caller.
+    /// <para>
+    /// Returns true when a pass ran, deleted rows, and stopped with work left. The caller then asks for
+    /// another pass at once if the writer is idle (<see cref="ScheduleSweepCatchUp"/>). A pass that did
+    /// not run, that failed, or that deleted nothing returns false: the sweep goes on at one pass per
+    /// flush cycle, never in a tight loop.
+    /// </para>
     /// </summary>
-    private async ValueTask RunFullRevisionSweep()
+    private async ValueTask<bool> RunFullRevisionSweep()
     {
         if (!ConfigurationValidator.IsPersistentRevisionRetentionEnabled(configuration))
-            return;
+            return false;
 
         DateTime now = DateTime.UtcNow;
 
         bool intervalElapsed = (now - lastFullSweepUtc) >= configuration.PersistentRevisionCleanupInterval;
 
         if (!intervalElapsed && !fullSweepBacklogPending)
-            return;
+            return false;
 
         if (!await ConfirmFloorRegistryFreshness())
         {
@@ -1833,11 +1874,12 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             logger.LogWarning(
                 "Skipping full revision sweep: meta-partition catch-up could not be confirmed, the local hold registry may be stale. backend={Backend}",
                 configuration.Storage);
-            return;
+            return false;
         }
 
         lastFullSweepUtc = now;
         fullSweepBacklogPending = false;
+        bool ranWithBacklog = false;
 
         TimeSpan cycleBudget = configuration.PersistentRevisionCleanupTimeBudget;
         TimeSpan sweepBudget = cycleBudget - targetedPruneElapsedThisCycle;
@@ -1900,6 +1942,8 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 if (pruneResult.KeysFloorBlocked > 0)
                     PersistenceMetrics.PruneKeysFloorBlocked.Add(pruneResult.KeysFloorBlocked);
                 PersistenceMetrics.PruneRevisionsDeleted.Add(pruneResult.RevisionsDeleted);
+                if (pruneResult.DeleteRecordsReleased > 0)
+                    PersistenceMetrics.PruneDeleteRecordsReleased.Add(pruneResult.DeleteRecordsReleased);
                 PersistenceMetrics.SweepPassMs.Record(stopwatch.Elapsed.TotalMilliseconds);
                 if (pruneResult.TimeBudgetExhausted)
                     PersistenceMetrics.SweepBudgetExhausted.Add(1);
@@ -1925,6 +1969,11 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
                 }
 
                 fullSweepBacklogPending = pruneResult.BatchLimitReached;
+                // Only a pass that deleted rows asks for the next one at once. A pass that only walked
+                // keys has no space to give back sooner: on a large store with nothing to prune it
+                // would keep the writer and the disk busy for the whole cycle, every interval, where
+                // one pass per flush cycle spreads the same walk out.
+                ranWithBacklog = pruneResult.BatchLimitReached && pruneResult.RevisionsDeleted > 0;
             }
             else
             {
@@ -1940,6 +1989,22 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             logger.LogWarning(ex, "Exception during full revision sweep; will retry after next interval. backend={Backend}", configuration.Storage);
             fullSweepBacklogPending = true;
         }
+
+        return ranWithBacklog;
+    }
+
+    /// <summary>
+    /// Asks for one more sweep pass ahead of the next flush tick, when the writer has nothing to flush
+    /// and no such request is already in the mailbox. The request goes to the back of the mailbox, so
+    /// every write and flush that arrived during the last pass runs before the next one.
+    /// </summary>
+    private void ScheduleSweepCatchUp()
+    {
+        if (sweepCatchUpScheduled || dirtyLocks.Count > 0 || dirtyKeyValues.Count > 0)
+            return;
+
+        sweepCatchUpScheduled = true;
+        self.Send(new(BackgroundWriteType.RevisionSweepCatchUp));
     }
 
     /// <summary>

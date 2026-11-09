@@ -54,4 +54,16 @@ public readonly record struct RevisionPruneResult(
     bool TimeBudgetExhausted = false,
     int KeysFloorBlocked = 0,
     bool SweepIdle = false
-);
+)
+{
+    /// <summary>
+    /// Deleted keys whose last retained rows the pass removed, so that only the key's current row (the
+    /// delete record itself) is left. The rows are counted in <see cref="RevisionsDeleted"/> as well.
+    /// Backends that keep a deleted key's rows report 0.
+    /// <para>
+    /// A property, not a constructor parameter: a storage engine in an extension assembly constructs
+    /// this result, and a new parameter would change the constructor it was compiled against.
+    /// </para>
+    /// </summary>
+    public int DeleteRecordsReleased { get; init; }
+}

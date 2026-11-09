@@ -354,8 +354,18 @@ public interface IPersistenceBackend
     public bool DeleteLocks(IReadOnlyList<string> resources) =>
         throw new NotSupportedException("This persistence backend does not support physical key removal.");
 
-/// <summary>
+    /// <summary>
     /// Prunes persisted key/value revision history according to retention policy.
+    /// <para>
+    /// A key's current row is never removed, deleted keys included: it holds the revision the key's
+    /// next write continues from, and the nodes of a cluster order the records of a key by revision
+    /// first. A backend may remove every other row of a deleted key (older revisions, the delete
+    /// record's own history row, no-revision provenance) once age retention has passed the delete
+    /// record and <paramref name="floorTimestamp"/> does not lie below it, because from then on the
+    /// current row alone answers every read the store still serves. It reports those keys in
+    /// <see cref="RevisionPruneResult.DeleteRecordsReleased"/>. The RocksDB backend does this; the
+    /// SQLite backend keeps the delete record's history row.
+    /// </para>
     /// </summary>
     /// <param name="keys">Target keys to prune, or <c>null</c> for a backend-wide sweep.</param>
     /// <param name="retentionCount">Maximum revisions to keep per key; <c>0</c> disables count-based pruning.</param>
