@@ -31,8 +31,10 @@ flush runs afterwards, because the cleanup begins with a meta-partition catch-up
 replica outside the committed roster cannot obtain (an install's drain parked on it for 174 s). This is an **at-least boundary**, not an exact point-in-time image: pages and store slices
 can include later applies, and the receiver replays the retained tail idempotently. It is unsuitable
 as an operator backup cut. It writes paged,
-checksummed rows and store payloads into pooled segments rather than a growing contiguous array.
-The complete exported snapshot still occupies memory on the sender: this is not a zero-buffer export.
+checksummed rows and store payloads into pooled segments rather than a growing contiguous array, and
+moves to a file past a memory budget (see [Receive staging and deadlines](#receive-staging-and-deadlines)).
+The complete exported snapshot still exists on the sender before the first chunk leaves: this is not a
+streaming export.
 
 Partition 0 uses `MetaSystemStateTransfer` instead: it transfers the range map and snapshot-floor hold
 registry together. The data-partition streaming-install description below does not apply to that
@@ -110,12 +112,12 @@ underlying default unchanged unless set:
 
 | Server flag | Embedded option | Default | Meaning |
 |---|---|---|---|
-| `--raft-snapshot-max-pending-bytes` | `RaftSnapshotMaxPendingBytes` | 512 MiB | Total staged bytes across receive sessions, on disk and in memory together. |
+| `--raft-snapshot-max-pending-bytes` | `RaftSnapshotMaxPendingBytes` | 512 MiB; 64 GiB on an embedded node that stages on disk | Total staged bytes across receive sessions, on disk and in memory together. |
 | `--raft-snapshot-max-pending-sessions` | `RaftSnapshotMaxPendingSessions` | 8 | Concurrent receive sessions. |
 | `--raft-snapshot-staging-directory` | `RaftSnapshotStagingDirectory` | See below | Private directory for spilling received bytes. |
 | `--raft-snapshot-staging-memory-bytes` | `RaftSnapshotStagingMemoryBytes` | 64 MiB | Resident staged-byte budget with a staging directory; zero stages entirely on disk. Ignored without a directory. |
 | `--raft-snapshot-chunk-ack-timeout` | `RaftSnapshotChunkAckTimeout` | 15 s | Wait for a chunk acknowledgement, including the final chunk's install. |
-| `--raft-snapshot-transfer-step-timeout` | `RaftSnapshotTransferStepTimeout` | 120 s | No-progress bound for an export, stream read or chunk send, not a total transfer deadline. |
+| `--raft-snapshot-transfer-step-timeout` | `RaftSnapshotTransferStepTimeout` | 120 s; 15 min on an embedded node that stages on disk | No-progress bound for an export, stream read or chunk send, not a total transfer deadline. The whole export is one step, however steadily it advances. An export of 30 s or more logs a Warning with its time and size. |
 | `--raft-reseed-request-timeout` | No corresponding option | 180 s | Bounds a requested repair's apply hold and the leader's pending checkpoint request. |
 | `--raft-lost-acknowledged-entries-policy` | `RaftLostAcknowledgedEntriesPolicy` | `Quarantine` | What a partition does when its restore finds the log shorter than what the node had acknowledged: `Quarantine` (neither votes nor campaigns until repaired by the leader or a snapshot) or `AcceptAndLog` (accept the loss, log it at Critical, run normally). |
 
@@ -131,8 +133,14 @@ directory gets a fresh GUID on each construction; use a stable revision when reo
 
 Directories must be private to one node: Kommander deletes spill files there at startup. Distinct
 storage revisions provide distinct automatic directories when hosts share a storage path. Spill-to-disk
-limits staged-byte residency, not the decoded stores, export buffers, backend caches or total heap.
+limits staged-byte residency, not the decoded stores, backend caches or total heap.
 A spill-file write failure fails that receive session and causes sender retries. Size the pending cap above the largest expected partition snapshot even when staging on disk.
+
+An embedded node that stages on disk defaults the pending cap to 64 GiB, room for one retry of a 32 GiB snapshot while an install of it runs, because the cap there bounds disk rather than memory. The staging volume needs that room as well as the room for the installed rows. Every other node keeps Kommander's 512 MiB, where the cap is also the memory bound.
+
+A receiver over its cap refuses the chunk without a reason, and the leader retries without end. An exporting node therefore compares each export with its own cap and logs a Warning naming both sizes when the export is larger. The cap should be the same on every node for that comparison to speak for the receiver.
+
+An export keeps up to 64 MiB per buffer in memory, then moves to a file in `{StoragePath}/snapshot-export_{StorageRevision}`. Files there are deleted when the export is released, and any left by a crash are deleted at startup. A write failure there fails the export, and the leader retries. A node with no storage path, or one where that directory cannot be created, keeps exports in memory and logs a Warning in the second case.
 
 The final chunk is acknowledged after installation finishes. An install longer than the acknowledgement
 budget can cause a new export/transfer while the earlier import still runs. The effective chunk deadline

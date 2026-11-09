@@ -78,6 +78,8 @@ internal sealed partial class PreparedIntentStore
             {
                 string tmp = path + ".tmp";
 
+                List<PreparedIntent> pendingBeforeCapture = OwnedIntentsBeforeCapture(key => resolvePartition(key) == partitionId);
+
                 LedgerCapture? ledger = CaptureLedger(partitionId);
 
                 // The position the file certifies as fully reflected: what the caller certified, never below
@@ -121,6 +123,7 @@ internal sealed partial class PreparedIntentStore
                     // this store by the end of the walk as reflected. Entries between the two are the walk's tear
                     // window: an intent prepared there may be missing from the file, so its replayed prepare must
                     // still install, while the advisory fence stays silent on it.
+                    AddHeadsSettledDuringCapture(partitionId, ledger, pendingBeforeCapture);
                     long reflected = Math.Max(fullyReflected, Math.Max(AppliedLogIndexOf(partitionId), ledger?.ReflectedThroughIndex ?? 0));
                     WriteLedgerSection(output, partitionId, ledger, reflected, fullyReflected);
                 }
@@ -387,14 +390,21 @@ internal sealed partial class PreparedIntentStore
     /// </summary>
     public int WritePartitionSection(Stream output, int partitionId, Func<string, bool> isOwnedKey)
     {
+        // Read BEFORE the ledger capture and the walk: every head recorded and every intent prepared at or below this
+        // position is in the maps when both start, so the section holds them unless a removal took an intent out, and
+        // that removal is replayed (and its head added below). Entries at or below it are therefore fully reflected on
+        // the receiver (see IsFullyReflectedApply), where a replayed prepare that finds no intent installs nothing.
+        // Read any later, an entry applied during the capture of a large ledger could prepare and settle a transaction
+        // on a key the capture had already passed: the section would hold neither its head nor its intent, and its replay
+        // would restore neither. The entries between this position and the one read after the walk are the tear window,
+        // where a missed intent must still install on replay.
+        long fullyReflected = Math.Max(AppliedLogIndexOf(partitionId), GetLedgerReflectedThroughIndex(partitionId));
+
+        List<PreparedIntent> pendingBeforeCapture = OwnedIntentsBeforeCapture(isOwnedKey);
+
         LedgerCapture? ledger = CaptureLedger(partitionId);
 
-        // Read BEFORE the walk: every intent prepared at or below this position is in the map when the walk
-        // starts, so the section holds it unless a removal during the walk took it out — and that removal is
-        // replayed. Entries at or below it are therefore fully reflected on the receiver (see
-        // IsFullyReflectedApply); the ones between it and the position read after the walk are the tear window,
-        // where a missed intent must still install on replay.
-        long fullyReflected = ReflectedPositionForExport(partitionId, ledger);
+        AfterLedgerCaptureForTesting?.Invoke();
 
         int written = 0;
 
@@ -417,9 +427,63 @@ internal sealed partial class PreparedIntentStore
         // entries as history (see IsHistoricalApply). An entry applied during the walk may or may not be in the
         // captured ledger or intents; either way its replay folds idempotently, and the only thing withheld
         // from it on the receiver is an advisory verdict on a decision that predates the transfer.
+        AddHeadsSettledDuringCapture(partitionId, ledger, pendingBeforeCapture);
         WriteLedgerSection(coded, partitionId, ledger, ReflectedPositionForExport(partitionId, ledger), fullyReflected);
 
         return written;
+    }
+
+    /// <summary>Test seam, invoked between a section's ledger capture and its intent walk. Never set in production.</summary>
+    internal Action? AfterLedgerCaptureForTesting { get; set; }
+
+    private List<PreparedIntent> OwnedIntentsBeforeCapture(Func<string, bool> isOwnedKey)
+    {
+        List<PreparedIntent> owned = [];
+
+        foreach (KeyValuePair<string, PreparedIntent> kv in intents)
+        {
+            if (isOwnedKey(kv.Key))
+                owned.Add(kv.Value);
+        }
+
+        return owned;
+    }
+
+    /// <summary>
+    /// Closes the tear between the ledger capture and the intent walk. A transaction settled between the two records
+    /// its head after the capture read that key and removes its intent before the walk reaches it, so the section
+    /// would hold neither, and its settle, replayed on a replica with no intent to act on, would record nothing: the
+    /// replica would be short of that head for as long as the key does not change, and its fence would admit a prepare
+    /// against the base it replaced. The capture of a large ledger takes long enough for this to happen under load.
+    ///
+    /// <para>The capture must stay ahead of the walk (a replayed bundled commit is exact only against a ledger no later
+    /// than the intent set), so the heads of exactly those transactions are added to it. Each of those keys had a
+    /// pending intent from before the capture until its settle, so no other commit of the key lies between the capture's
+    /// position and that head, and no replayed entry is judged against a head from its future.</para>
+    /// </summary>
+    private void AddHeadsSettledDuringCapture(int partitionId, LedgerCapture? ledger, List<PreparedIntent> pendingBeforeCapture)
+    {
+        if (ledger is not { } captured || !ledgers.TryGetValue(partitionId, out PartitionLedger? slice))
+            return;
+
+        Dictionary<string, CommittedHead>? settled = null;
+
+        foreach (PreparedIntent intent in pendingBeforeCapture)
+        {
+            if (intents.TryGetValue(intent.Key, out PreparedIntent? current)
+                && current.TransactionId == intent.TransactionId
+                && current.Epoch == intent.Epoch)
+                continue;
+
+            if (slice.Heads.TryGetValue(intent.Key, out CommittedHead head))
+                (settled ??= new(StringComparer.Ordinal))[intent.Key] = head;
+        }
+
+        if (settled is null)
+            return;
+
+        captured.Heads.RemoveAll(entry => settled.ContainsKey(entry.Key));
+        captured.Heads.AddRange(settled);
     }
 
     /// <summary>The reflected position a whole-partition section advertises: the highest log index applied through

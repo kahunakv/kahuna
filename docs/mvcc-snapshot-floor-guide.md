@@ -188,7 +188,7 @@ reclaimed.
 ### Reads on a replica seeded by a snapshot install
 
 A whole-partition snapshot install replaces a partition's rows and carries only part of its history,
-because on-disk history is kept forever by default and the export is held in memory on the sender. It
+because on-disk history is kept forever by default and the whole export is built on the sender first. It
 carries each key's current row, its revision at each registered hold, and every revision from shortly
 before the export onward (the *complete-from* timestamp, five seconds below the export's start).
 

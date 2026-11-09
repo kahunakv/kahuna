@@ -565,6 +565,7 @@ internal sealed class KeyValuesManagerBuilder
         InstalledHistoryFence installedHistory = snapshotFloorStore.InstalledHistory;
         SnapshotFloorStore floorStore = snapshotFloorStore;
         HLCTimestamp ClockNow() => raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+        partitionStateTransfer.AttachReceiveCap(raft.Configuration.SnapshotMaxPendingBytes);
         partitionStateTransfer.AttachInstalledHistory(installedHistory, () => floorStore.Holds.Values.Select(hold => hold.Timestamp), ClockNow);
         installedHistory.FenceAtStartup(historyBounds.PartitionsWithInstall(), ClockNow());
 

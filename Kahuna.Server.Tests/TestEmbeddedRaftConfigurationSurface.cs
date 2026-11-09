@@ -114,6 +114,50 @@ public sealed class TestEmbeddedRaftConfigurationSurface
     }
 
     [Fact]
+    public void TestSnapshotReceiveCapIsRaisedWhereSnapshotsStageOnDisk()
+    {
+        RaftConfiguration onDisk = EmbeddedKahunaNode.CreateRaftConfiguration(new EmbeddedKahunaOptions
+        {
+            RaftSnapshotStagingDirectory = "/tmp/staging"
+        });
+
+        Assert.Equal(EmbeddedKahunaNode.DiskStagedSnapshotMaxPendingBytes, onDisk.SnapshotMaxPendingBytes);
+        Assert.Equal(EmbeddedKahunaNode.DiskStagedSnapshotTransferStepTimeout, onDisk.SnapshotTransferStepTimeout);
+        onDisk.Validate();
+
+        RaftConfiguration persistent = EmbeddedKahunaNode.CreateRaftConfiguration(new EmbeddedKahunaOptions
+        {
+            Storage = "sqlite",
+            StoragePath = "/tmp/data",
+            StorageRevision = "node-a"
+        });
+
+        Assert.Equal(EmbeddedKahunaNode.DiskStagedSnapshotMaxPendingBytes, persistent.SnapshotMaxPendingBytes);
+    }
+
+    [Fact]
+    public void TestSnapshotReceiveCapSetByTheHostWinsOverTheDiskDefault()
+    {
+        RaftConfiguration configuration = EmbeddedKahunaNode.CreateRaftConfiguration(new EmbeddedKahunaOptions
+        {
+            RaftSnapshotStagingDirectory = "/tmp/staging",
+            RaftSnapshotMaxPendingBytes = 192L * 1024 * 1024,
+            RaftSnapshotTransferStepTimeout = TimeSpan.FromMinutes(3)
+        });
+
+        Assert.Equal(192L * 1024 * 1024, configuration.SnapshotMaxPendingBytes);
+        Assert.Equal(TimeSpan.FromMinutes(3), configuration.SnapshotTransferStepTimeout);
+    }
+
+    [Fact]
+    public void TestSnapshotTransferStepTimeoutStaysKommandersWhereSnapshotsStageInMemory()
+    {
+        RaftConfiguration configuration = EmbeddedKahunaNode.CreateRaftConfiguration(new EmbeddedKahunaOptions());
+
+        Assert.Equal(new RaftConfiguration().SnapshotTransferStepTimeout, configuration.SnapshotTransferStepTimeout);
+    }
+
+    [Fact]
     public void TestSnapshotReceiveCapsThreadThroughRaftConfiguration()
     {
         EmbeddedKahunaOptions options = new()

@@ -629,7 +629,9 @@ public sealed class EmbeddedKahunaOptions
     /// <summary>
     /// Cap on the snapshot bytes this node stages in memory across every snapshot it is receiving — the sessions
     /// still arriving plus the ones whose install is running. Mirrors <c>RaftConfiguration.SnapshotMaxPendingBytes</c>
-    /// (<c>--raft-snapshot-max-pending-bytes</c> on <c>Kahuna.Server</c>); null keeps Kommander's default (512 MB).
+    /// (<c>--raft-snapshot-max-pending-bytes</c> on <c>Kahuna.Server</c>). Null keeps Kommander's default (512 MiB) on a
+    /// node that stages in memory, and means 64 GiB on a node that stages on disk (see
+    /// <see cref="RaftSnapshotStagingDirectory"/>), where the cap bounds disk rather than memory.
     /// <para>
     /// A snapshot is staged whole before it installs, and a leader that retries a slow transfer opens a new
     /// session while the old one is still staged, so this is the receive path's memory bound: size it against the
@@ -693,7 +695,9 @@ public sealed class EmbeddedKahunaOptions
     /// <summary>
     /// Upper bound on one step of an outbound snapshot transfer that makes no progress: the export, one read of it,
     /// or one chunk send. Mirrors <c>RaftConfiguration.SnapshotTransferStepTimeout</c>
-    /// (<c>--raft-snapshot-transfer-step-timeout</c> on <c>Kahuna.Server</c>); null keeps Kommander's default (2 min).
+    /// (<c>--raft-snapshot-transfer-step-timeout</c> on <c>Kahuna.Server</c>). Null keeps Kommander's default (2 min) on a
+    /// node that stages in memory, and means 15 min on a node that stages on disk, because the whole export is one step
+    /// and its length follows the partition's size and the revisions its snapshot holds read.
     /// A chunk's acknowledgement is bounded by the smaller of this and <see cref="RaftSnapshotChunkAckTimeout"/>,
     /// so a chunk-ack timeout raised above 2 min needs this raised with it.
     /// </summary>

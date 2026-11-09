@@ -15,6 +15,15 @@ public static partial class KahunaLoggerExtensions
     [LoggerMessage(Level = LogLevel.Information, Message = "Exported whole-partition state of partition #{PartitionId} at index {UpToIndex} ({Bytes} bytes)")]
     public static partial void LogExportedPartitionState(this ILogger<IKahuna> logger, int partitionId, long upToIndex, long bytes);
 
+    [LoggerMessage(Level = LogLevel.Warning, Message = "The whole-partition snapshot of partition #{PartitionId} is {Bytes} bytes, above this node's snapshot receive cap of {CapBytes} bytes: a replica with the same cap refuses it partway, whatever the number of retries, and cannot be seeded. Raise RaftSnapshotMaxPendingBytes (--raft-snapshot-max-pending-bytes) on every node, to about twice the size of the largest snapshot")]
+    public static partial void LogExportAboveReceiveCap(this ILogger<IKahuna> logger, int partitionId, long bytes, long capBytes);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "The whole-partition export of partition #{PartitionId} at index {UpToIndex} took {ElapsedMs} ms for {Bytes} bytes (on disk: {Spilled}). The sender counts the export as one step of RaftSnapshotTransferStepTimeout")]
+    public static partial void LogSlowPartitionExport(this ILogger<IKahuna> logger, int partitionId, long upToIndex, long bytes, long elapsedMs, bool spilled);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Snapshot exports cannot spill to {Directory}, so they stay in memory: {Reason}")]
+    public static partial void LogExportSpillDirectoryUnusable(this ILogger<IKahuna> logger, string directory, string reason);
+
     [LoggerMessage(Level = LogLevel.Information, Message = "Imported whole-partition state of partition #{PartitionId} at index {UpToIndex} in {TotalMs} ms: {KeyValues} key-values, {Locks} locks, {Records} records, {Receipts} receipts, {Intents} intents ({Bytes} snapshot bytes); verify {VerifyMs} ms, gate {GateMs} ms, drain {DrainMs} ms, purge rows {PurgeRowsMs} ms ({PurgedPages} owned pages deleted of {ScannedPages} scanned, {ScannedRows} rows), purge stores {PurgeStoresMs} ms, rows {RowsMs} ms, stores {StoresMs} ms, snapshots {SnapshotsMs} ms, floor {FloorMs} ms, hooks {HooksMs} ms")]
     public static partial void LogImportedPartitionState(this ILogger<IKahuna> logger, int partitionId, long upToIndex, long totalMs, int keyValues, int locks, int records, int receipts, int intents, long bytes, long verifyMs, long gateMs, long drainMs, long purgeRowsMs, int purgedPages, int scannedPages, long scannedRows, long purgeStoresMs, long rowsMs, long storesMs, long snapshotsMs, long floorMs, long hooksMs);
 

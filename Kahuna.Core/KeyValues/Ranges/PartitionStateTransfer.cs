@@ -196,6 +196,31 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
 
     private readonly ILogger<IKahuna> logger;
 
+    /// <summary>
+    /// Export bytes kept on the heap per buffer before the buffer moves to a file. A snapshot's size follows the data,
+    /// so the export must not need that much memory on top of a node's steady state: one that did ran two of a
+    /// partition's three replicas out of memory on a 900,000-row table at 4 GiB per node.
+    /// </summary>
+    internal const long DefaultExportMemoryBudgetBytes = 64L * 1024 * 1024;
+
+    // An export this long is reported, since the sender's transfer step timeout counts the whole export as one step.
+    private static readonly TimeSpan SlowExportThreshold = TimeSpan.FromSeconds(30);
+
+    internal long ExportMemoryBudgetBytes { get; set; } = DefaultExportMemoryBudgetBytes;
+
+    // Null when this node has no place to write to, and exports stay in memory.
+    private readonly string? exportSpillDirectory;
+
+    // The largest snapshot this node would accept, which is what an export is compared with (see AttachReceiveCap).
+    private long? receiveCapBytes;
+
+    /// <summary>
+    /// Wires the receive cap of this node (manager construction). A sender cannot learn a receiver's cap, and a receiver
+    /// over its cap only refuses a chunk with no reason attached, so the export is where a snapshot too large to
+    /// install can be named. The cap should be the same on every node, so this node's stands in for the receiver's.
+    /// </summary>
+    internal void AttachReceiveCap(long capBytes) => receiveCapBytes = capBytes;
+
     // Whether an installed partition snapshot must carry the committed-head ledger (see ImportPartitionState).
     private readonly bool requireLedgerOnInstall;
 
@@ -225,20 +250,54 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
         this.storagePath = storagePath;
         this.storageRevision = storageRevision;
         this.logger = logger;
+        this.exportSpillDirectory = PrepareExportSpillDirectory();
     }
+
+    /// <summary>
+    /// The directory exports spill to, named after the storage revision because hosts and test clusters put several
+    /// nodes under one storage path. Any file already there belongs to an export that died with its process and can
+    /// never be resumed, so it is removed here rather than waiting for the next export. A directory that cannot be
+    /// used leaves exports in memory, as on a node with no storage path.
+    /// </summary>
+    private string? PrepareExportSpillDirectory()
+    {
+        if (string.IsNullOrWhiteSpace(storagePath))
+            return null;
+
+        string directory = Path.Combine(storagePath, $"snapshot-export_{storageRevision}");
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+
+            foreach (string leftover in Directory.EnumerateFiles(directory, "*" + SpillableBufferStream.SpillFileExtension))
+                File.Delete(leftover);
+
+            return directory;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            logger.LogExportSpillDirectoryUnusable(directory, ex.Message);
+            return null;
+        }
+    }
+
+    private SpillableBufferStream NewExportBuffer() => new(exportSpillDirectory, ExportMemoryBudgetBytes);
 
     // ── export ───────────────────────────────────────────────────────────────────
 
     public async Task<Stream> ExportPartitionState(int partitionId, long upToIndex, CancellationToken ct)
     {
+        long startedAt = Stopwatch.GetTimestamp();
         RangeMap map = currentMap();
         Func<string, bool> isOwned = OwnedKeyPredicate(map, partitionId);
 
-        // Segmented and pooled: the snapshot grows one 64 KB segment at a time, so an export of any size
-        // allocates no doubling-growth ladder of ever-larger large-object-heap buffers, and an export that
-        // repeats on a cadence (a rescue loop re-seeding a follower) reuses the segments it returned.
-        SegmentedBufferStream stream = new();
-        SegmentedBufferStream intents = new();
+        // Segmented and pooled while it fits the memory budget: the snapshot grows one 64 KB segment at a time, so
+        // an export allocates no doubling-growth ladder of ever-larger large-object-heap buffers, and an export that
+        // repeats on a cadence (a rescue loop re-seeding a follower) reuses the segments it returned. Past the
+        // budget it moves to a file, so the export's memory does not grow with the partition.
+        SpillableBufferStream stream = NewExportBuffer();
+        SpillableBufferStream intents = NewExportBuffer();
 
         try
         {
@@ -332,6 +391,13 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
 
         logger.LogExportedPartitionState(partitionId, upToIndex, stream.Length);
 
+        TimeSpan elapsed = Stopwatch.GetElapsedTime(startedAt);
+        if (elapsed >= SlowExportThreshold)
+            logger.LogSlowPartitionExport(partitionId, upToIndex, stream.Length, (long)elapsed.TotalMilliseconds, stream.IsSpilled);
+
+        if (receiveCapBytes is { } cap && stream.Length > cap)
+            logger.LogExportAboveReceiveCap(partitionId, stream.Length, cap);
+
         return stream;
     }
 
@@ -417,33 +483,49 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
                 ceiling = row.Revision - 1;
             }
 
-            foreach (HLCTimestamp pin in plan.PinsNewestFirst)
-            {
-                if (ceiling < 0)
-                    break;
-
-                if (answered.LastModified.CompareTo(pin) <= 0)
-                    continue;
-
-                ReadOnlyKeyValueEntry? row = persistenceBackend.GetKeyValueRevisionAtOrBefore(key, ceiling, pin);
-                if (row is null)
-                    break;
-
-                rows.Add((key, row));
-                answered = row;
-                ceiling = row.Revision - 1;
-            }
+            if (ceiling >= 0)
+                AppendRevisionsAtPins(persistenceBackend, key, answered, ceiling, plan.PinsNewestFirst, rows);
         }
 
         return rows;
     }
 
     /// <summary>
+    /// Appends <paramref name="key"/>'s revision at each pin, newest first, walking below <paramref name="answered"/>, the
+    /// newest row already carried. Each lookup continues below the last row found, so a key's chain is read once however
+    /// many pins there are, and a row that already answers the next pin is not carried twice.
+    /// </summary>
+    internal static void AppendRevisionsAtPins(
+        IPersistenceBackend backend, string key, ReadOnlyKeyValueEntry answered, long ceiling,
+        HLCTimestamp[] pinsNewestFirst, List<(string, ReadOnlyKeyValueEntry)> rows)
+    {
+        foreach (HLCTimestamp pin in pinsNewestFirst)
+        {
+            if (ceiling < 0)
+                return;
+
+            if (answered.LastModified.CompareTo(pin) <= 0)
+                continue;
+
+            ReadOnlyKeyValueEntry? row = backend.GetKeyValueRevisionAtOrBefore(key, ceiling, pin);
+            if (row is null)
+                return;
+
+            rows.Add((key, row));
+            answered = row;
+            ceiling = row.Revision - 1;
+        }
+    }
+
+    /// <summary>Lands every applied entry's row, so a walk of revision history below it sees them all.</summary>
+    internal Task DrainPersistenceAsync() => drainPersistence();
+
+    /// <summary>
     /// Captures the record and receipt slices and writes the store section over them and the
     /// <paramref name="intents"/> payload the export captured before its drain and row scan (see
     /// <see cref="ExportPartitionState"/> for why the intent side comes first).
     /// </summary>
-    private void WriteStoreSection(Stream stream, int partitionId, SegmentedBufferStream intents, Func<string, bool> isOwned)
+    private void WriteStoreSection(Stream stream, int partitionId, SpillableBufferStream intents, Func<string, bool> isOwned)
     {
         // Each store streams its owned slice straight into a pooled payload buffer through one reused entry
         // message, with the ownership filter inside the walk: an export reads every entry the node holds
@@ -461,8 +543,8 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
         // walks are not point-in-time cuts (see each store's writer); the argument holds per key because every
         // entry above the boundary — which precedes every walk — is replayed in order on top of what was
         // captured.
-        using SegmentedBufferStream records = new();
-        using SegmentedBufferStream receipts = new();
+        using SpillableBufferStream records = NewExportBuffer();
+        using SpillableBufferStream receipts = NewExportBuffer();
 
         int recordCount = transactionRecordStore.WritePartitionRecords(records, isOwned);
         int receiptCount = completionReceiptStore.WritePartitionReceipts(receipts, partitionId, isOwned);
@@ -483,7 +565,7 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
     /// ever holding a payload in one contiguous array.
     /// </summary>
     private static void WriteDelimitedStoreSection(
-        Stream stream, SegmentedBufferStream? receipts, SegmentedBufferStream? records, SegmentedBufferStream intents)
+        Stream stream, SpillableBufferStream? receipts, SpillableBufferStream? records, SpillableBufferStream intents)
     {
         KvStateMachineTransfer.FnvHashStream hasher = new();
         HashPayload(hasher, receipts);
@@ -508,16 +590,28 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
         output.WriteUInt64(checksum);
     }
 
-    private static void HashPayload(KvStateMachineTransfer.FnvHashStream hasher, SegmentedBufferStream? payload)
+    private static void HashPayload(KvStateMachineTransfer.FnvHashStream hasher, SpillableBufferStream? payload)
     {
         if (payload is null)
             return;
 
-        for (int i = 0; i < payload.SegmentCount; i++)
-            hasher.Write(payload.GetSegment(i).AsSpan());
+        payload.Position = 0;
+
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(SegmentedBufferStream.SegmentSize);
+
+        try
+        {
+            int read;
+            while ((read = payload.Read(buffer, 0, buffer.Length)) > 0)
+                hasher.Write(buffer, 0, read);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
     }
 
-    private static int PayloadLength(SegmentedBufferStream payload)
+    private static int PayloadLength(SpillableBufferStream payload)
     {
         if (payload.Length > int.MaxValue)
             throw new KahunaServerException($"ExportPartitionState: a store payload of {payload.Length} bytes exceeds the protobuf field limit.");
@@ -525,7 +619,7 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
         return (int)payload.Length;
     }
 
-    private static int PayloadFieldSize(int fieldNumber, SegmentedBufferStream? payload)
+    private static int PayloadFieldSize(int fieldNumber, SpillableBufferStream? payload)
     {
         if (payload is null)
             return 0;
@@ -534,9 +628,9 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
         return CodedOutputStream.ComputeTagSize(fieldNumber) + CodedOutputStream.ComputeLengthSize(length) + length;
     }
 
-    // Writes the field's tag and length through the encoder, then hands the payload segments to the
-    // underlying stream directly: the encoder is flushed first so the two writers never interleave.
-    private static void WritePayloadField(CodedOutputStream output, Stream stream, int fieldNumber, SegmentedBufferStream? payload)
+    // Writes the field's tag and length through the encoder, then copies the payload to the underlying
+    // stream directly: the encoder is flushed first so the two writers never interleave.
+    private static void WritePayloadField(CodedOutputStream output, Stream stream, int fieldNumber, SpillableBufferStream? payload)
     {
         if (payload is null)
             return;

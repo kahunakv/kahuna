@@ -778,14 +778,17 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
 #endif
         };
 
-        // Unset keeps Kommander's own default, so a host that sets neither gets exactly the shipped receive caps.
+        configuration.SnapshotStagingDirectory = ResolveSnapshotStagingDirectory(options);
+
+        // Unset keeps Kommander's own default where the cap is also the memory bound. Where snapshots stage on disk
+        // the cap bounds disk instead, and it must not be what stops a partition from ever being re-seeded.
         if (options.RaftSnapshotMaxPendingBytes is long maxPendingBytes)
             configuration.SnapshotMaxPendingBytes = maxPendingBytes;
+        else if (configuration.SnapshotStagingDirectory is not null)
+            configuration.SnapshotMaxPendingBytes = DiskStagedSnapshotMaxPendingBytes;
 
         if (options.RaftSnapshotMaxPendingSessions is int maxPendingSessions)
             configuration.SnapshotMaxPendingSessions = maxPendingSessions;
-
-        configuration.SnapshotStagingDirectory = ResolveSnapshotStagingDirectory(options);
 
         if (options.RaftSnapshotStagingMemoryBytes is long stagingMemoryBytes)
             configuration.SnapshotStagingMemoryBytes = stagingMemoryBytes;
@@ -793,8 +796,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         if (options.RaftSnapshotChunkAckTimeout is TimeSpan chunkAckTimeout)
             configuration.SnapshotChunkAckTimeout = chunkAckTimeout;
 
-        if (options.RaftSnapshotTransferStepTimeout is TimeSpan stepTimeout)
-            configuration.SnapshotTransferStepTimeout = stepTimeout;
+        configuration.SnapshotTransferStepTimeout = EffectiveSnapshotTransferStepTimeout(options, configuration.SnapshotTransferStepTimeout);
 
         if (options.RaftDeadMemberEvictionGrace is TimeSpan evictionGrace)
             configuration.DeadMemberEvictionGrace = evictionGrace;
@@ -804,6 +806,25 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
 
         return configuration;
     }
+
+    /// <summary>
+    /// The transfer step timeout of a node that stages snapshots on disk, unless
+    /// <see cref="EmbeddedKahunaOptions.RaftSnapshotTransferStepTimeout"/> says otherwise. The whole export is one step to
+    /// the sender, however steadily it advances, and an export's length follows the partition's size and the revisions its
+    /// snapshot holds read: exports past Kommander's 2 minutes kept a partition with 100 spread-out holds from ever seeding
+    /// a replica. A chunk's wait stays bounded by the much shorter chunk-ack timeout.
+    /// </summary>
+    internal static readonly TimeSpan DiskStagedSnapshotTransferStepTimeout = TimeSpan.FromMinutes(15);
+
+    private static TimeSpan EffectiveSnapshotTransferStepTimeout(EmbeddedKahunaOptions options, TimeSpan kommanderDefault) =>
+        options.RaftSnapshotTransferStepTimeout
+        ?? (ResolveSnapshotStagingDirectory(options) is not null ? DiskStagedSnapshotTransferStepTimeout : kommanderDefault);
+
+    /// <summary>
+    /// The receive cap of a node that stages snapshots on disk, unless <see cref="EmbeddedKahunaOptions.RaftSnapshotMaxPendingBytes"/>
+    /// says otherwise: room for one retry of a 32 GiB partition snapshot while an install of it runs.
+    /// </summary>
+    internal const long DiskStagedSnapshotMaxPendingBytes = 64L * 1024 * 1024 * 1024;
 
     /// <summary>
     /// The directory received snapshots spill to: the configured one, or else one under the data directory of a
@@ -898,7 +919,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         // timeout would be cut back silently, and the slow install it was raised for would still be abandoned.
         if (options.RaftSnapshotChunkAckTimeout is { } requestedAck)
         {
-            TimeSpan effectiveStep = options.RaftSnapshotTransferStepTimeout ?? new RaftConfiguration().SnapshotTransferStepTimeout;
+            TimeSpan effectiveStep = EffectiveSnapshotTransferStepTimeout(options, new RaftConfiguration().SnapshotTransferStepTimeout);
             if (requestedAck > effectiveStep)
                 throw new ArgumentException(
                     $"RaftSnapshotChunkAckTimeout ({requestedAck}) exceeds the snapshot transfer step timeout ({effectiveStep}), which caps it; " +

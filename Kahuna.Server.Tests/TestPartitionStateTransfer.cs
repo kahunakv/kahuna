@@ -1093,7 +1093,7 @@ public sealed class TestPartitionStateTransfer : IDisposable
 
         // Structural proof that no buffer of the snapshot's size exists: the stream is segmented and every
         // segment is a small-object-heap array.
-        SegmentedBufferStream segmented = Assert.IsType<SegmentedBufferStream>(stream);
+        SegmentedBufferStream segmented = Assert.IsType<SpillableBufferStream>(stream).Memory!;
         Assert.True(segmented.Length > 4 * 1024 * 1024);
         Assert.True(segmented.SegmentCount > 60);
         for (int i = 0; i < segmented.SegmentCount; i++)

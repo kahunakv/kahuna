@@ -99,7 +99,7 @@ public sealed class TestPartitionStateExportAllocation
             await using Stream stream = await transfer.ExportPartitionState(2, 42, ct);
             allocatedPerAttempt[attempt] = GC.GetTotalAllocatedBytes(precise: true) - before;
 
-            Assert.IsType<SegmentedBufferStream>(stream);
+            Assert.IsType<SpillableBufferStream>(stream);
             length = stream.Length;
         }
 

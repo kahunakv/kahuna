@@ -233,7 +233,7 @@ restart limitations, and the new replication/retention settings.
 **Snapshot staging memory.** A node receiving a whole-partition snapshot stages all of it before
 installing it, and a leader that retries a slow transfer can open a fresh session while the old one is
 still staged. `--raft-snapshot-max-pending-bytes` (embedded: `RaftSnapshotMaxPendingBytes`; default
-512 MB) caps those staged bytes across all sessions. Size it **above** the largest whole-partition
+512 MB, or 64 GiB on an embedded node that stages on disk) caps those staged bytes across all sessions. Size it **above** the largest whole-partition
 snapshot this node will receive (key-value rows and locks plus the partition's retained transaction
 records, receipts and intents), ideally about twice that, so a retry can stage while an install runs. A
 snapshot larger than the cap can never be staged, and a replica that falls below the leader's

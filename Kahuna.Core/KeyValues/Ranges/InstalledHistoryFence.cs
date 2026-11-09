@@ -9,7 +9,7 @@ namespace Kahuna.Server.KeyValues.Ranges;
 /// Which snapshot timestamps this node can answer for each partition it received through a whole-partition install.
 ///
 /// <para>An install replaces a partition's rows, and the snapshot carries only part of the partition's revision
-/// history: on-disk history is kept without bound by default and the export is held in memory on the sender, so it
+/// history: on-disk history is kept without bound by default and the whole export is built on the sender first, so it
 /// carries each key's current row, its revision at each registered snapshot hold, and its revisions from just before
 /// the export onward (see <see cref="PartitionStateTransfer"/>). A read at any other timestamp would find an older
 /// revision than the true one, or none, and an as-of read reports a missing revision as "did not exist". This fence
