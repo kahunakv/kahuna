@@ -479,10 +479,12 @@ internal sealed class KeyValueReadHandler
     }
 
     /// <summary>
-    /// Probes a group of keys this node leads for concurrent write intents. The sender already grouped the keys
-    /// by owning node, so — as with the batched many-key reads — this serves them locally rather than routing
-    /// each one again, after confirming this node's leadership of the keys' partitions. The leadership terms
-    /// the held staged intents were confirmed under travel back on the response, as lock grants' terms do.
+    /// Probes a group of keys the sender believes this node leads for concurrent write intents. The sender
+    /// already grouped the keys by owning node, so this serves them locally rather than routing each one again,
+    /// after confirming this node's leadership of the keys' partitions. Keys of a partition this node turns out
+    /// only to follow (the sender's target was a guess) are asked of the leader it knows, once. The leadership
+    /// terms the held staged intents were confirmed under, including those of the leader asked on that hop,
+    /// travel back on the response, as lock grants' terms do.
     /// </summary>
     internal async Task<GrpcTryCheckManyWriteIntentsResponse> TryCheckManyWriteIntentsCore(GrpcTryCheckManyWriteIntentsRequest request, ServerCallContext context)
     {

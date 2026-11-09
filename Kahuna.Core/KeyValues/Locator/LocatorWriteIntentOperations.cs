@@ -145,11 +145,14 @@ internal sealed class LocatorWriteIntentOperations
 
     /// <summary>
     /// Serves a batched conflict probe for keys grouped to this node, after confirming this node's leadership
-    /// (read-index) of every partition the keys route to; the keys of a partition that does not confirm answer
-    /// <see cref="KeyValueResponseType.MustRetry"/>. This is the local leg of
+    /// (read-index) of every partition the keys route to. This is the local leg of
     /// <see cref="LocateAndTryCheckManyWriteIntents"/> and the entry for a probe that arrived over the wire
     /// already grouped: the confirmation has to run on the node that answers, because a follower that has not
-    /// yet heard of a newer term would otherwise vouch for staged state of a leadership that ended.
+    /// yet heard of a newer term would otherwise vouch for staged state of a leadership that ended. The keys of
+    /// a partition that does not confirm here, and leader-term probes this node cannot vouch for, are asked of
+    /// the leader this node's own Raft names, once, within the forward budget (see
+    /// <see cref="ForwardUnansweredToLeaders"/>); a key with no such leader answers
+    /// <see cref="KeyValueResponseType.MustRetry"/>.
     ///
     /// <para>A key whose own staged intent the probe found held (<see cref="KeyValueConflictChecks.OwnStagedIntent"/>)
     /// reports the leadership term it was confirmed under into the open <see cref="LockGrantScope"/>, as a lock
@@ -209,6 +212,10 @@ internal sealed class LocatorWriteIntentOperations
         List<KeyValueConflictProbe>? confirmedProbes = null;
         int[]? confirmedPartitions = null;
 
+        // Keys this node could not answer for and that its own Raft may place with another leader: (probe,
+        // partition, whether the partition failed this node's confirmation).
+        List<(KeyValueConflictProbe Probe, int PartitionId, bool Unconfirmed)>? unanswered = null;
+
         for (int i = 0; i < keys.Count; i++)
         {
             KeyValueConflictProbe item = keys[i];
@@ -221,7 +228,7 @@ internal sealed class LocatorWriteIntentOperations
 
             if ((item.Checks & KeyValueConflictChecks.LeaderTerm) == 0 && termByPartition[partitionOf[i]] is null)
             {
-                responses.Add((KeyValueResponseType.MustRetry, item.Key, item.Durability));
+                (unanswered ??= []).Add((item, partitionOf[i], true));
                 continue;
             }
 
@@ -231,36 +238,124 @@ internal sealed class LocatorWriteIntentOperations
             confirmedProbes.Add(item);
         }
 
-        if (confirmedProbes is null)
-            return responses;
-
-        List<(KeyValueResponseType type, string key, KeyValueDurability durability)> answers =
-            await manager.TryCheckManyWriteIntentValues(transactionId, confirmedProbes);
-
-        // The answers come back one per probe, in probe order. A held own staged intent is the answer that
-        // passed every check the probe asked for; any refusal (lost intent, foreign range lock, a gated key)
-        // reports no term, because nothing was proven about the key.
-        for (int i = 0; i < answers.Count; i++)
+        if (confirmedProbes is not null)
         {
-            (KeyValueResponseType type, string key, KeyValueDurability durability) answer = answers[i];
-            responses.Add(answer);
+            List<(KeyValueResponseType type, string key, KeyValueDurability durability)> answers =
+                await manager.TryCheckManyWriteIntentValues(transactionId, confirmedProbes);
 
-            if (!captureTerms || i >= confirmedProbes.Count)
-                continue;
+            // The answers come back one per probe, in probe order. A held own staged intent is the answer that
+            // passed every check the probe asked for; any refusal (lost intent, foreign range lock, a gated key)
+            // reports no term, because nothing was proven about the key.
+            for (int i = 0; i < answers.Count; i++)
+            {
+                (KeyValueResponseType type, string key, KeyValueDurability durability) answer = answers[i];
 
-            KeyValueConflictProbe probe = confirmedProbes[i];
+                // A leader-term probe a follower cannot vouch for (its term equals the grant's, and only the
+                // leader can confirm that) is asked of the leader instead, like a key that failed confirmation.
+                if (answer.type == KeyValueResponseType.MustRetry
+                    && i < confirmedProbes.Count
+                    && (confirmedProbes[i].Checks & KeyValueConflictChecks.LeaderTerm) != 0
+                    && string.Equals(answer.key, confirmedProbes[i].Key, StringComparison.Ordinal))
+                {
+                    (unanswered ??= []).Add((confirmedProbes[i], confirmedPartitions![i], false));
+                    continue;
+                }
 
-            if ((probe.Checks & KeyValueConflictChecks.OwnStagedIntent) == 0
-                || answer.type != KeyValueResponseType.DoesNotExist
-                || !string.Equals(answer.key, probe.Key, StringComparison.Ordinal))
-                continue;
+                responses.Add(answer);
 
-            int partitionId = confirmedPartitions![i];
-            if (termByPartition.TryGetValue(partitionId, out long? confirmedTerm) && confirmedTerm is { } term && term > 0)
-                LockGrantScope.Record(partitionId, term, probe.Key);
+                if (!captureTerms || i >= confirmedProbes.Count)
+                    continue;
+
+                KeyValueConflictProbe probe = confirmedProbes[i];
+
+                if ((probe.Checks & KeyValueConflictChecks.OwnStagedIntent) == 0
+                    || answer.type != KeyValueResponseType.DoesNotExist
+                    || !string.Equals(answer.key, probe.Key, StringComparison.Ordinal))
+                    continue;
+
+                int partitionId = confirmedPartitions![i];
+                if (termByPartition.TryGetValue(partitionId, out long? confirmedTerm) && confirmedTerm is { } term && term > 0)
+                    LockGrantScope.Record(partitionId, term, probe.Key);
+            }
         }
 
+        if (unanswered is not null)
+            await ForwardUnansweredToLeaders(transactionId, unanswered, responses, cancellationToken);
+
         return responses;
+    }
+
+    /// <summary>
+    /// The second hop of a grouped probe that reached a node which cannot answer part of it. A sender that does
+    /// not host a partition targets a guess, either the gossiped leader hint or the first voter of the committed
+    /// map, and a guess can name a follower. Every retry of the sender then lands on that same follower, which can
+    /// neither confirm a leadership it does not hold nor vouch for a leader term it only follows. The commit's
+    /// probe would answer MustRetry until the coordinator gives up.
+    ///
+    /// <para>This node hosts the partition, so its own Raft names the leader with better knowledge than the
+    /// sender's guess, which is the one extra hop <see cref="ForwardedRequestScope.MaxForwardHops"/> budgets for.
+    /// The keys go there as one grouped probe per leader. That leader confirms its own leadership. The terms
+    /// it confirmed the caller's staged intents under, and their commit floor, come back on its response and are
+    /// replayed into the capture open here, so they reach the original sender as if it had asked the leader
+    /// directly. A key whose leader this node cannot name past itself, or past the hop budget, still answers
+    /// <see cref="KeyValueResponseType.MustRetry"/>.</para>
+    /// </summary>
+    private async Task ForwardUnansweredToLeaders(
+        HLCTimestamp transactionId,
+        List<(KeyValueConflictProbe Probe, int PartitionId, bool Unconfirmed)> unanswered,
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses,
+        CancellationToken cancellationToken
+    )
+    {
+        string localNode = raft.GetLocalEndpoint();
+        Dictionary<int, string?> leaderByPartition = [];
+        Dictionary<string, List<KeyValueConflictProbe>>? forwardPlan = null;
+        HashSet<int>? refusedUnconfirmed = null;
+
+        foreach ((KeyValueConflictProbe probe, int partitionId, bool unconfirmed) in unanswered)
+        {
+            if (!leaderByPartition.TryGetValue(partitionId, out string? leader))
+            {
+                leader = await routing.TryWaitForLeader(partitionId, cancellationToken);
+                if (string.Equals(leader, localNode, StringComparison.Ordinal))
+                    leader = null;
+
+                leaderByPartition[partitionId] = leader;
+            }
+
+            if (leader is null)
+            {
+                responses.Add((KeyValueResponseType.MustRetry, probe.Key, probe.Durability));
+
+                if (unconfirmed)
+                    (refusedUnconfirmed ??= []).Add(partitionId);
+
+                continue;
+            }
+
+            forwardPlan ??= [];
+            if (forwardPlan.TryGetValue(leader, out List<KeyValueConflictProbe>? group))
+                group.Add(probe);
+            else
+                forwardPlan[leader] = [probe];
+        }
+
+        if (refusedUnconfirmed is not null)
+        {
+            foreach (int partitionId in refusedUnconfirmed)
+                logger.LogCommitProbeLeadershipUnconfirmed(transactionId, partitionId, raft.GetPartitionTerm(partitionId));
+        }
+
+        if (forwardPlan is null)
+            return;
+
+        Lock lockSync = new();
+        List<Task> tasks = new(forwardPlan.Count);
+
+        foreach ((string leader, List<KeyValueConflictProbe> group) in forwardPlan)
+            tasks.Add(TryCheckManyWriteIntentsOnNode(transactionId, leader, localNode, group, lockSync, responses, cancellationToken));
+
+        await Task.WhenAll(tasks);
     }
 
     /// <summary>

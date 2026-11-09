@@ -256,7 +256,9 @@ public sealed class TestLockGrantTermWire : BaseCluster
     /// <summary>
     /// A probe that arrives over the wire is served by the node it was sent to, on the sender's belief of who
     /// leads. A follower shares the leader's term, so the term alone would let it vouch for a leadership it
-    /// does not hold: only the confirmed leader may answer that the term stands.
+    /// does not hold: only the confirmed leader may answer that the term stands. The follower therefore never
+    /// answers that by itself. It asks the leader its own Raft names, within the forward budget, and relays
+    /// that leader's confirmed answer; with the budget spent it answers MustRetry.
     /// </summary>
     [Fact]
     public async Task LeaderTermProbeServedOverTheWire_IsAnsweredOnlyByTheConfirmedLeader()
@@ -297,8 +299,13 @@ public sealed class TestLockGrantTermWire : BaseCluster
             Assert.Equal(GrpcKeyValueResponseType.TypeDoesNotExist, await Serve(leader, term));
             Assert.Equal(GrpcKeyValueResponseType.TypeAborted, await Serve(leader, term - 1));
 
-            // The follower is in the same term and does not lead: it cannot say.
-            Assert.Equal(GrpcKeyValueResponseType.TypeMustRetry, await Serve(follower, term));
+            // The follower is in the same term and does not lead: it cannot say by itself, and with no hop left
+            // to ask the leader it answers MustRetry.
+            using (ForwardedRequestScope.EnterAt(ForwardedRequestScope.MaxForwardHops))
+                Assert.Equal(GrpcKeyValueResponseType.TypeMustRetry, await Serve(follower, term));
+
+            // With a hop left, the follower asks the leader, and the answer is the confirmed leader's.
+            Assert.Equal(GrpcKeyValueResponseType.TypeDoesNotExist, await Serve(follower, term));
 
             // A term the partition is already past is proof on any node.
             Assert.Equal(GrpcKeyValueResponseType.TypeAborted, await Serve(follower, term - 1));

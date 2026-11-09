@@ -893,7 +893,9 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
 
             using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
 
-            return await kahunaNode.LocateAndTryCheckManyWriteIntents(transactionId, keys, cancellationToken);
+            // The entry the gRPC receiver serves a grouped probe through, so the in-process cluster answers a
+            // probe sent to a follower the way a networked one does.
+            return await kahunaNode.TryCheckManyWriteIntentValuesConfirmed(transactionId, keys, cancellationToken);
         }
 
         throw Unreachable(node);

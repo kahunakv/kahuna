@@ -4,6 +4,7 @@ using Nixie.Routers;
 using Kommander;
 using Kommander.Time;
 
+using Kahuna.Server.KeyValues.Logging;
 using Kahuna.Utils;
 using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.Persistence;
@@ -711,7 +712,10 @@ internal sealed class LocalKeyValueReadOperations
     )
     {
         if (IsGatedKey(key))
+        {
+            logger.LogCommitProbeGated(transactionId, key);
             return KeyValueResponseType.MustRetry;
+        }
 
         // The leader-term check asks about the partition, not the key: the key only routed the probe here. No
         // actor holds the answer, so the locator gives it from the Raft term, after it confirmed that this
@@ -766,6 +770,9 @@ internal sealed class LocalKeyValueReadOperations
 
             if (response is null)
                 return KeyValueResponseType.Errored;
+
+            if (response.Type == KeyValueResponseType.MustRetry)
+                logger.LogCommitProbeActorRefused(transactionId, key, checks);
 
             // The commit floor a held own staged intent carries travels to the coordinator the way a lock grant's
             // leadership term does: into the capture the probing request opened, which a transport that crossed a

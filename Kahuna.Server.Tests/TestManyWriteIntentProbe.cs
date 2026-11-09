@@ -329,6 +329,171 @@ public sealed class TestManyWriteIntentProbe : BaseCluster
     }
 
     /// <summary>
+    /// A grouped probe can reach a follower: a sender that does not host the partition targets a guess (the
+    /// gossiped leader hint, else the first voter of the committed map), and it repeats the same guess on every
+    /// retry. The follower cannot confirm a leadership it does not hold, so before it asked the leader its own
+    /// Raft names, every key answered MustRetry and the commit's outcome stayed unresolved until the coordinator
+    /// gave up. The follower now asks the leader once. The answers are the leader's, a foreign writer is still
+    /// found, and the term the leader confirmed the caller's staged intent under reaches the caller's capture.
+    /// </summary>
+    [Fact]
+    public async Task Probe_SentToAFollower_IsAnsweredByTheLeader()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft raft1, IRaft raft2, IRaft raft3,
+         IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3,
+         MemoryInterNodeCommmunication transport) =
+            await AssembleThreNodeClusterWithTransport("memory", 8, raftLogger, kahunaLogger);
+
+        try
+        {
+            // One key space, so every key routes to one partition.
+            string prefix = "probe/follower/" + Guid.NewGuid().ToString("N")[..8];
+            string staged = $"{prefix}/staged";
+            string conflicted = $"{prefix}/conflicted";
+            string clean = $"{prefix}/clean";
+
+            (IKahuna follower, IRaft leaderRaft, int partitionId) =
+                await FollowerOf(staged, [(raft1, kahuna1), (raft2, kahuna2), (raft3, kahuna3)], ct);
+
+            TransactionHandle tx = await StageWrite(kahuna1, staged, ct);
+
+            foreach (IKahuna node in new[] { kahuna1, kahuna2, kahuna3 })
+                ((KahunaManager)node).DurablePreparedIntentStore.Apply(new PrepareIntentCommand(UndecidedIntent(conflicted)));
+
+            List<KeyValueConflictProbe> keys =
+            [
+                new(staged, KeyValueDurability.Persistent, KeyValueConflictChecks.ForeignRangeLock | KeyValueConflictChecks.OwnStagedIntent),
+                new(conflicted, KeyValueDurability.Persistent, KeyValueConflictChecks.WriteIntent),
+                new(clean, KeyValueDurability.Persistent, KeyValueConflictChecks.WriteIntent)
+            ];
+
+            int callsBefore = transport.CheckManyWriteIntentsCallCount;
+            Dictionary<string, KeyValueResponseType> byKey;
+            List<LockGrantTerm>? grants;
+
+            // Served as the receiver of a probe another node sent here: one hop of the budget already spent.
+            using (ForwardedRequestScope.EnterAt(1))
+            using (LockGrantScope.Begin(out LockGrantCapture capture))
+            {
+                byKey = ByKey(await follower.TryCheckManyWriteIntentValuesConfirmed(tx.TransactionId, keys, ct));
+                grants = capture.Take();
+            }
+
+            Assert.Equal(3, byKey.Count);
+            Assert.Equal(KeyValueResponseType.DoesNotExist, byKey[staged]);
+            Assert.Equal(KeyValueResponseType.Aborted, byKey[conflicted]);
+            Assert.Equal(KeyValueResponseType.DoesNotExist, byKey[clean]);
+
+            LockGrantTerm grant = Assert.Single(grants!);
+            Assert.Equal(partitionId, grant.PartitionId);
+            Assert.Equal(staged, grant.RoutingKey);
+            Assert.Equal(leaderRaft.GetPartitionTerm(partitionId), grant.Term);
+
+            // One grouped call to the leader for the whole set.
+            Assert.Equal(1, transport.CheckManyWriteIntentsCallCount - callsBefore);
+
+            await kahuna1.LocateAndRollbackTransaction(tx, ct);
+        }
+        finally
+        {
+            await LeaveCluster(raft1, raft2, raft3);
+        }
+    }
+
+    /// <summary>
+    /// A lock-grant proof (the leader-term check) sent to a follower: a term the partition is already past is
+    /// proof of a leader change on any node and is answered there, while the current term can only be vouched
+    /// for by the leader that holds it, so the follower asks that leader instead of answering MustRetry.
+    /// </summary>
+    [Fact]
+    public async Task LeaderTermProbe_SentToAFollower_IsAnsweredByTheLeader()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft raft1, IRaft raft2, IRaft raft3,
+         IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3,
+         MemoryInterNodeCommmunication transport) =
+            await AssembleThreNodeClusterWithTransport("memory", 8, raftLogger, kahunaLogger);
+
+        try
+        {
+            string prefix = "probe/follower-term/" + Guid.NewGuid().ToString("N")[..8];
+            string current = $"{prefix}/current";
+            string past = $"{prefix}/past";
+
+            (IKahuna follower, IRaft leaderRaft, int partitionId) =
+                await FollowerOf(current, [(raft1, kahuna1), (raft2, kahuna2), (raft3, kahuna3)], ct);
+
+            long term = leaderRaft.GetPartitionTerm(partitionId);
+            Assert.True(term > 0);
+
+            List<KeyValueConflictProbe> keys =
+            [
+                new(current, KeyValueDurability.Persistent, KeyValueConflictChecks.LeaderTerm, term),
+                new(past, KeyValueDurability.Persistent, KeyValueConflictChecks.LeaderTerm, term - 1)
+            ];
+
+            int callsBefore = transport.CheckManyWriteIntentsCallCount;
+            Dictionary<string, KeyValueResponseType> byKey;
+
+            using (ForwardedRequestScope.EnterAt(1))
+                byKey = ByKey(await follower.TryCheckManyWriteIntentValuesConfirmed(new HLCTimestamp(0, 500, 0), keys, ct));
+
+            Assert.Equal(KeyValueResponseType.DoesNotExist, byKey[current]);
+            Assert.Equal(KeyValueResponseType.Aborted, byKey[past]);
+
+            // Only the current-term key needed the leader.
+            Assert.Equal(1, transport.CheckManyWriteIntentsCallCount - callsBefore);
+        }
+        finally
+        {
+            await LeaveCluster(raft1, raft2, raft3);
+        }
+    }
+
+    /// <summary>
+    /// The follower's hop to the leader is the last one the forward budget allows. A probe that arrives with the
+    /// budget already spent is not sent on: it answers MustRetry, which proves nothing and is retried, and no
+    /// chain of forwards can form between nodes whose beliefs disagree.
+    /// </summary>
+    [Fact]
+    public async Task Probe_SentToAFollower_PastTheForwardBudget_AnswersMustRetry()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft raft1, IRaft raft2, IRaft raft3,
+         IKahuna kahuna1, IKahuna kahuna2, IKahuna kahuna3,
+         MemoryInterNodeCommmunication transport) =
+            await AssembleThreNodeClusterWithTransport("memory", 8, raftLogger, kahunaLogger);
+
+        try
+        {
+            string prefix = "probe/follower-budget/" + Guid.NewGuid().ToString("N")[..8];
+            string key = $"{prefix}/k";
+
+            (IKahuna follower, _, _) =
+                await FollowerOf(key, [(raft1, kahuna1), (raft2, kahuna2), (raft3, kahuna3)], ct);
+
+            List<KeyValueConflictProbe> keys = [new(key, KeyValueDurability.Persistent, KeyValueConflictChecks.WriteIntent)];
+
+            int callsBefore = transport.CheckManyWriteIntentsCallCount;
+            Dictionary<string, KeyValueResponseType> byKey;
+
+            using (ForwardedRequestScope.EnterAt(ForwardedRequestScope.MaxForwardHops))
+                byKey = ByKey(await follower.TryCheckManyWriteIntentValuesConfirmed(new HLCTimestamp(0, 500, 0), keys, ct));
+
+            Assert.Equal(KeyValueResponseType.MustRetry, byKey[key]);
+            Assert.Equal(0, transport.CheckManyWriteIntentsCallCount - callsBefore);
+        }
+        finally
+        {
+            await LeaveCluster(raft1, raft2, raft3);
+        }
+    }
+
+    /// <summary>
     /// A real optimistic commit whose read set is large finds the one key in it that acquired a concurrent
     /// writer after the read, and aborts. This is the coordinator's own use of the grouped probe: it exercises
     /// correlating one flagged answer back to its key inside a set where every other answer is clean — the part
@@ -465,17 +630,82 @@ public sealed class TestManyWriteIntentProbe : BaseCluster
         IKahuna kahuna,
         HLCTimestamp transactionId,
         List<KeyValueConflictProbe> keys,
-        CancellationToken cancellationToken)
-    {
-        List<(KeyValueResponseType type, string key, KeyValueDurability durability)> results =
-            await kahuna.LocateAndTryCheckManyWriteIntents(transactionId, keys, cancellationToken);
+        CancellationToken cancellationToken) =>
+        ByKey(await kahuna.LocateAndTryCheckManyWriteIntents(transactionId, keys, cancellationToken));
 
+    private static Dictionary<string, KeyValueResponseType> ByKey(
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability)> results)
+    {
         Dictionary<string, KeyValueResponseType> byKey = new(results.Count, StringComparer.Ordinal);
 
         foreach ((KeyValueResponseType type, string key, KeyValueDurability _) in results)
             byKey[key] = type;
 
         return byKey;
+    }
+
+    /// <summary>
+    /// A node that hosts <paramref name="key"/>'s partition without leading it, with the leader's Raft and the
+    /// partition, so a probe can be served on the follower and checked against the leader.
+    /// </summary>
+    private static async Task<(IKahuna Follower, IRaft LeaderRaft, int PartitionId)> FollowerOf(
+        string key,
+        (IRaft Raft, IKahuna Kahuna)[] nodes,
+        CancellationToken cancellationToken)
+    {
+        int partitionId = ((KahunaManager)nodes[0].Kahuna).LocateRange(key).PartitionId;
+        string leader = await nodes[0].Raft.WaitForLeader(partitionId, cancellationToken);
+
+        IRaft leaderRaft = nodes.First(node => node.Raft.GetLocalEndpoint() == leader).Raft;
+        (IRaft followerRaft, IKahuna follower) = nodes.First(node => node.Raft.GetLocalEndpoint() != leader);
+
+        Assert.True(followerRaft.HostsPartition(partitionId));
+        Assert.Equal(leader, await followerRaft.WaitForLeader(partitionId, cancellationToken));
+
+        return (follower, leaderRaft, partitionId);
+    }
+
+    /// <summary>
+    /// Opens an optimistic transaction coordinated at <paramref name="key"/> and stages a write on it, retrying
+    /// the MustRetry a freshly assembled cluster can answer while leadership settles.
+    /// </summary>
+    private static async Task<TransactionHandle> StageWrite(IKahuna kahuna, string key, CancellationToken cancellationToken)
+    {
+        for (int attempt = 0; ; attempt++)
+        {
+            (KeyValueResponseType startType, TransactionHandle tx) = await kahuna.LocateAndStartTransaction(
+                new KeyValueTransactionOptions
+                {
+                    CoordinatorKey = key,
+                    Locking = KeyValueTransactionLocking.Optimistic,
+                    AsyncRelease = true,
+                    Timeout = 60_000
+                }, cancellationToken);
+
+            if (startType == KeyValueResponseType.MustRetry && attempt < 20)
+            {
+                await Task.Delay(25, cancellationToken);
+                continue;
+            }
+
+            Assert.Equal(KeyValueResponseType.Set, startType);
+
+            (KeyValueResponseType writeType, _, _) = await kahuna.LocateAndTrySetKeyValue(
+                tx.TransactionId, key, "V"u8.ToArray(), null, -1, KeyValueFlags.None, 0,
+                KeyValueDurability.Persistent, cancellationToken,
+                coordinatorKey: tx.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
+
+            if (writeType == KeyValueResponseType.MustRetry && attempt < 20)
+            {
+                await kahuna.LocateAndRollbackTransaction(tx, cancellationToken);
+                await Task.Delay(25, cancellationToken);
+                continue;
+            }
+
+            Assert.Equal(KeyValueResponseType.Set, writeType);
+
+            return tx;
+        }
     }
 
     /// <summary>

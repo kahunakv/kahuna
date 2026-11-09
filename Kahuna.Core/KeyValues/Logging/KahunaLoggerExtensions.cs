@@ -21,6 +21,15 @@ public static partial class KahunaLoggerExtensions
     [LoggerMessage(Level = LogLevel.Warning, Message = "The whole-partition export of partition #{PartitionId} at index {UpToIndex} took {ElapsedMs} ms for {Bytes} bytes (on disk: {Spilled}). The sender counts the export as one step of RaftSnapshotTransferStepTimeout")]
     public static partial void LogSlowPartitionExport(this ILogger<IKahuna> logger, int partitionId, long upToIndex, long bytes, long elapsedMs, bool spilled);
 
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Commit probe of transaction {TransactionId} refused on this node: it could not confirm its leadership of partition #{PartitionId} at term {Term}")]
+    public static partial void LogCommitProbeLeadershipUnconfirmed(this ILogger<IKahuna> logger, HLCTimestamp transactionId, int partitionId, long term);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Commit probe of transaction {TransactionId} refused on this node: the partition of key {Key} is gated")]
+    public static partial void LogCommitProbeGated(this ILogger<IKahuna> logger, HLCTimestamp transactionId, string key);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Commit probe of transaction {TransactionId} refused on this node: the actor of key {Key} answered MustRetry to checks {Checks}")]
+    public static partial void LogCommitProbeActorRefused(this ILogger<IKahuna> logger, HLCTimestamp transactionId, string key, KeyValueConflictChecks checks);
+
     [LoggerMessage(Level = LogLevel.Warning, Message = "Snapshot exports cannot spill to {Directory}, so they stay in memory: {Reason}")]
     public static partial void LogExportSpillDirectoryUnusable(this ILogger<IKahuna> logger, string directory, string reason);
 
