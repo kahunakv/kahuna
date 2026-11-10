@@ -49,7 +49,9 @@ internal sealed class LocalKeyValueReadOperations
             (runtime.PersistenceBackend as UnflushedOverlayPersistenceBackend)?.UnflushedWrites,
             runtime.PreparedIntentStore,
             runtime.Raft,
-            runtime.Configuration.PublishedHeadReads);
+            runtime.Configuration.PublishedHeadReads,
+            runtime.SnapshotFloorStore?.InstalledHistory,
+            runtime.RangeMapStore);
     }
 
     // Aliases matching the field names the moved bodies use, so those bodies stay byte-for-byte as they were.
@@ -113,8 +115,8 @@ internal sealed class LocalKeyValueReadOperations
 
     /// <summary>
     /// <see cref="TryGetValue"/>, reporting whether the answer came from the owning actor's published head
-    /// record (no actor message) or from a mailbox round trip. A read with a timestamp, so every statement
-    /// read, always takes the actor path: the published record answers latest reads only.
+    /// record (no actor message) or from a mailbox round trip. A read with a timestamp is answered from the
+    /// record only when the head was committed at or before that timestamp (see <see cref="PublishedHeadReader"/>).
     /// <para>
     /// A <see cref="ValueTask{TResult}"/>, and not an async method: the published record answers on the calling
     /// thread, and that answer must not cost a task object here and another in every caller that forwards it.
@@ -137,7 +139,7 @@ internal sealed class LocalKeyValueReadOperations
             if (IsGatedKey(key))
                 return new(new LocalPointRead(KeyValueResponseType.MustRetry, null, false));
 
-            if (publishedHeads.TryRead(transactionId, key, revision, readTimestamp, durability, out ReadOnlyKeyValueEntry? published))
+            if (publishedHeads.TryRead(transactionId, key, revision, readTimestamp, durability, readMode, out ReadOnlyKeyValueEntry? published))
                 return new(new LocalPointRead(KeyValueResponseType.Get, published, true));
         }
         catch (Exception ex)
@@ -485,6 +487,34 @@ internal sealed class LocalKeyValueReadOperations
 
         // Indexes (into keys) still to ask, in input order. Null means every key.
         List<int>? pending = null;
+
+        // A probe that takes no lock answers each key by the rules of a single read, so a key whose published
+        // head record can answer a single read is answered from it here, and only the others go to the actor.
+        // The keys are then read at slightly different instants instead of in one actor turn, as a sequence of
+        // single reads would be; a probe that locks keeps the grant and the read in one turn and is not served
+        // here.
+        if (lockMode == KeyValueProbeLock.None)
+        {
+            for (int i = 0; i < keys.Count; i++)
+            {
+                if (publishedHeads.TryRead(transactionId, keys[i], -1, readTimestamp, durability, readMode, out ReadOnlyKeyValueEntry? published))
+                {
+                    if (results is null)
+                    {
+                        results = new KeyValueProbeResult[keys.Count];
+                        for (int j = 0; j < i; j++)
+                            (pending ??= []).Add(j);
+                    }
+
+                    results[i] = new KeyValueProbeResult(KeyValueResponseType.Get, published, HLCTimestamp.Zero, false);
+                }
+                else if (results is not null)
+                    (pending ??= []).Add(i);
+            }
+
+            if (results is not null && pending is null)
+                return results;
+        }
         Transactions.Data.ForeignDecisionHint[]? hints = null;
         bool[]? routed = null;
 

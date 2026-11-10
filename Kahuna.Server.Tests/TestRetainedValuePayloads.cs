@@ -66,7 +66,7 @@ public sealed class TestRetainedValuePayloads : RaftTrackingTest
         Assert.Equal(KeyValueResponseType.Get, viaActor!.Type);
         Assert.Same(stored, viaActor.Entry!.Value);
 
-        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, out ReadOnlyKeyValueEntry? published));
+        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out ReadOnlyKeyValueEntry? published));
         Assert.Same(stored, published!.Value);
     }
 

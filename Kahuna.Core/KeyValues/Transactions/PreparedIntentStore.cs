@@ -50,7 +50,19 @@ internal sealed partial class PreparedIntentStore
     /// transaction on that partition (tracked only while the commit admission window is on).</summary>
     private bool InstallLive(string key, PreparedIntent intent, int partitionId)
     {
-        intents[key] = intent;
+        // Add or replace, counting only an add: the live count is kept beside the map so that reading it does not
+        // take the map's bucket locks.
+        while (true)
+        {
+            if (intents.TryAdd(key, intent))
+            {
+                Interlocked.Increment(ref liveCount);
+                break;
+            }
+
+            if (intents.TryGetValue(key, out PreparedIntent? existing) && intents.TryUpdate(key, intent, existing))
+                break;
+        }
 
         lock (orderedKeysGate)
             orderedKeys.Add(key);
@@ -63,6 +75,9 @@ internal sealed partial class PreparedIntentStore
     private bool RemoveLive(string key, out PreparedIntent? removed)
     {
         bool found = intents.TryRemove(key, out removed);
+
+        if (found)
+            Interlocked.Decrement(ref liveCount);
 
         lock (orderedKeysGate)
             orderedKeys.Remove(key);
@@ -1497,7 +1512,13 @@ internal sealed partial class PreparedIntentStore
             open[i].Observe(intent);
     }
 
-    public int Count => intents.Count;
+    // Entries in the live map, moved by every add and every removal that found its key.
+    private int liveCount;
+
+    /// <summary>Live intent count, from a counter kept in step with the map. The map's own Count takes every one of
+    /// its bucket locks, which the commit path's admission check paid once per transaction while stalling every
+    /// concurrent install and removal.</summary>
+    public int Count => Volatile.Read(ref liveCount);
 
     // Running sum of resident intent value bytes, maintained on every install/update/remove across Apply and the
     // load/import merge, so durable admission can bound resident prepared-intent memory without an O(n) scan.

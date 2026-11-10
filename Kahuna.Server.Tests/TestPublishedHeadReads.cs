@@ -50,7 +50,7 @@ public sealed class TestPublishedHeadReads : RaftTrackingTest
         KeyValueEntry resident = rig.Context.Store.Get(key)!;
         HLCTimestamp lastUsedBefore = resident.LastUsed;
 
-        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, out ReadOnlyKeyValueEntry? published));
+        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out ReadOnlyKeyValueEntry? published));
         Assert.Equal("v1", Encoding.UTF8.GetString(published!.Value!));
 
         // The actor was not involved: its own entry was not touched.
@@ -66,13 +66,147 @@ public sealed class TestPublishedHeadReads : RaftTrackingTest
     {
         await using ActorRig rig = await ActorRig.CreateAsync(this);
         const string key = "pub/kinds";
+        HLCTimestamp before = rig.Now();
         await rig.AskAsync(Set(key, "v1"));
         HLCTimestamp now = rig.Now();
 
-        Assert.False(rig.Reader.TryRead(HLCTimestamp.Zero, key, 0, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, out _), "by revision");
-        Assert.False(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, now, KeyValueDurability.Ephemeral, out _), "snapshot");
-        Assert.False(rig.Reader.TryRead(HLCTimestamp.Zero, "pub/absent", -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, out _), "absent");
-        Assert.False(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, out _), "other ring");
+        Assert.False(rig.Reader.TryRead(HLCTimestamp.Zero, key, 0, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out _), "by revision");
+        Assert.False(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, before, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out _), "snapshot below the head");
+        Assert.False(rig.Reader.TryRead(rig.Now(), key, -1, now, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out _), "transactional snapshot in the default mode");
+        Assert.False(rig.Reader.TryRead(HLCTimestamp.Zero, "pub/absent", -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out _), "absent");
+        Assert.False(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, KeyValueReadMode.Default, out _), "other ring");
+    }
+
+    [Fact]
+    public async Task SnapshotReadAtOrAboveTheHead_IsServedFromTheRecord_AndEqualsTheActorAnswer()
+    {
+        await using ActorRig rig = await ActorRig.CreateAsync(this);
+        const string key = "pub/snapshot";
+        await rig.AskAsync(Set(key, "v1"));
+        HLCTimestamp afterFirst = rig.Now();
+
+        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, afterFirst, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out ReadOnlyKeyValueEntry? published));
+        Assert.Equal("v1", Encoding.UTF8.GetString(published!.Value!));
+
+        KeyValueResponse? viaActor = await rig.AskAsync(SnapshotGet(key, afterFirst));
+        Assert.Equal(KeyValueResponseType.Get, viaActor!.Type);
+        AssertSameHead(viaActor.Entry!, published);
+
+        // A snapshot exactly at the head's commit time reads the head.
+        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, published.LastModified, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out ReadOnlyKeyValueEntry? atHead));
+        AssertSameHead(published, atHead!);
+
+        // Once the head moves past the snapshot the record no longer holds the answer: the archive does.
+        await rig.AskAsync(Set(key, "v2"));
+        Assert.False(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, afterFirst, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out _), "snapshot below the new head");
+
+        KeyValueResponse? archived = await rig.AskAsync(SnapshotGet(key, afterFirst));
+        Assert.Equal(KeyValueResponseType.Get, archived!.Type);
+        Assert.Equal("v1", Encoding.UTF8.GetString(archived.Entry!.Value!));
+
+        HLCTimestamp afterSecond = rig.Now();
+        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, afterSecond, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out ReadOnlyKeyValueEntry? second));
+        Assert.Equal("v2", Encoding.UTF8.GetString(second!.Value!));
+    }
+
+    [Fact]
+    public async Task SnapshotRead_UnderAWriteIntent_GoesToTheActor()
+    {
+        await using ActorRig rig = await ActorRig.CreateAsync(this);
+        const string key = "pub/snapshot-intent";
+        await rig.AskAsync(Set(key, "v1"));
+        HLCTimestamp writer = rig.Now();
+
+        KeyValueResponse? locked = await rig.AskAsync(Request(KeyValueRequestType.TryAcquireExclusiveLock, key, writer, expiresMs: 60_000));
+        Assert.Equal(KeyValueResponseType.Locked, locked!.Type);
+
+        // The actor decides what a snapshot above a staged write does (wait, or push the commit above it).
+        Assert.False(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, rig.Now(), KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out _));
+
+        await rig.AskAsync(Request(KeyValueRequestType.TryReleaseExclusiveLock, key, writer));
+        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, rig.Now(), KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out _));
+    }
+
+    [Fact]
+    public async Task SnapshotRead_AtOrAheadOfTheNodeClock_GoesToTheActor_AndLeavesTheClockBehindIt()
+    {
+        await using ActorRig rig = await ActorRig.CreateAsync(this);
+        const string key = "pub/snapshot-clock";
+        await rig.AskAsync(Set(key, "v1"));
+
+        // A timestamp minted on a node whose clock runs ahead of this one. Serving it here would let a commit
+        // staged afterwards be stamped below a snapshot that has already been answered, so the record declines
+        // and the actor, which folds the timestamp into the clock or refuses it, decides.
+        HLCTimestamp ahead = rig.Now() + 60_000;
+        Assert.False(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, ahead, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out _), "snapshot ahead of the clock");
+
+        // Declining did not move the clock up to the timestamp: that is the actor's call, not the record's.
+        Assert.True(rig.Now().CompareTo(ahead) < 0);
+
+        // A timestamp the clock has passed is served.
+        HLCTimestamp passed = rig.Now();
+        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, passed, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out ReadOnlyKeyValueEntry? served));
+        Assert.Equal("v1", Encoding.UTF8.GetString(served!.Value!));
+    }
+
+    [Fact]
+    public async Task PersistentSnapshotRead_BelowInstalledHistory_GoesToTheActor()
+    {
+        InstalledHistoryFence installed = new(null, null, NullLogger<IKahuna>.Instance);
+        await using ActorRig rig = await ActorRig.CreateAsync(this, persistent: true, installedHistory: installed);
+        const string key = "pub/snapshot-installed";
+        HLCTimestamp written = rig.Now();
+        rig.InsertResident(key, "v1", 1, written);
+
+        // No install on this node: a snapshot above the head is served.
+        HLCTimestamp beforeInstall = rig.Now();
+        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, beforeInstall, KeyValueDurability.Persistent, KeyValueReadMode.Default, out _));
+
+        // An install leaves a partition complete only from its own timestamp on. A snapshot below that bound may
+        // need history this node does not hold, and only the actor knows the key's partition, so it decides.
+        HLCTimestamp completeFrom = rig.Now();
+        installed.Record(1, completeFrom, []);
+        Assert.False(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, beforeInstall, KeyValueDurability.Persistent, KeyValueReadMode.Default, out _), "snapshot below the installed bound");
+
+        // At or above the bound the node holds every revision, and the record answers again.
+        HLCTimestamp afterInstall = rig.Now();
+        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, afterInstall, KeyValueDurability.Persistent, KeyValueReadMode.Default, out ReadOnlyKeyValueEntry? served));
+        Assert.Equal(1L, served!.Revision);
+
+        // A latest read asks for no history and is not held back by the bound.
+        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, KeyValueReadMode.Default, out _));
+    }
+
+    [Fact]
+    public async Task StatementRead_IsServedFromTheRecord_LeavesNoPin_AndYieldsToAnMvccHolder()
+    {
+        await using ActorRig rig = await ActorRig.CreateAsync(this);
+        const string key = "pub/statement";
+        await rig.AskAsync(Set(key, "v1"));
+        HLCTimestamp tx = rig.Now();
+        HLCTimestamp statement = rig.Now();
+
+        Assert.True(rig.Reader.TryRead(tx, key, -1, statement, KeyValueDurability.Ephemeral, KeyValueReadMode.StatementSnapshot, out ReadOnlyKeyValueEntry? published));
+        Assert.Equal("v1", Encoding.UTF8.GetString(published!.Value!));
+
+        KeyValueRequest viaActorRequest = SnapshotGet(key, statement, tx);
+        viaActorRequest.ReadMode = KeyValueReadMode.StatementSnapshot;
+        KeyValueResponse? viaActor = await rig.AskAsync(viaActorRequest);
+        Assert.Equal(KeyValueResponseType.Get, viaActor!.Type);
+        AssertSameHead(viaActor.Entry!, published);
+
+        // Neither path left a pin: the entry has no MVCC dictionary and the record still says so.
+        KeyValueEntry resident = rig.Context.Store.Get(key)!;
+        Assert.Null(resident.MvccEntries);
+        Assert.True(rig.Context.PublishedHeads.TryGet(key, out PublishedHead live) && !live.IsRetracted && !live.MvccHeld);
+
+        // A transaction that pins the key flags the record; a statement read then goes to the actor, which
+        // alone can tell a pin from a staged write of the reading transaction.
+        HLCTimestamp pinner = rig.Now();
+        Assert.True(rig.Reader.TryRead(pinner, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out _));
+        await WaitUntil(() => rig.Context.PublishedHeads.TryGet(key, out PublishedHead h) && !h.IsRetracted && h.MvccHeld);
+        Assert.False(rig.Reader.TryRead(tx, key, -1, rig.Now(), KeyValueDurability.Ephemeral, KeyValueReadMode.StatementSnapshot, out _), "MVCC held");
+        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, rig.Now(), KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out _), "plain snapshot read");
     }
 
     [Fact]
@@ -83,23 +217,23 @@ public sealed class TestPublishedHeadReads : RaftTrackingTest
         await rig.AskAsync(Set(key, "v1"));
         HLCTimestamp tx = rig.Now();
 
-        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, out _));
+        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out _));
 
         KeyValueResponse? locked = await rig.AskAsync(Request(KeyValueRequestType.TryAcquireExclusiveLock, key, tx, expiresMs: 60_000));
         Assert.Equal(KeyValueResponseType.Locked, locked!.Type);
-        Assert.False(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, out _), "write intent");
+        Assert.False(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out _), "write intent");
 
         await rig.AskAsync(Request(KeyValueRequestType.TryReleaseExclusiveLock, key, tx));
-        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, out _), "released");
+        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out _), "released");
 
         KeyValueResponse? prefixLocked = await rig.AskAsync(Request(KeyValueRequestType.TryAcquireExclusivePrefixLock, "lk", tx, expiresMs: 60_000));
         Assert.Equal(KeyValueResponseType.Locked, prefixLocked!.Type);
         Assert.True(rig.Context.PublishedHeads.PrefixLocksHeld);
-        Assert.False(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, out _), "prefix lock");
+        Assert.False(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out _), "prefix lock");
 
         await rig.AskAsync(Request(KeyValueRequestType.TryReleaseExclusivePrefixLock, "lk", tx));
         Assert.False(rig.Context.PublishedHeads.PrefixLocksHeld);
-        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, out _), "prefix lock released");
+        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out _), "prefix lock released");
     }
 
     [Fact]
@@ -109,15 +243,15 @@ public sealed class TestPublishedHeadReads : RaftTrackingTest
 
         await rig.AskAsync(Set("exp/key", "v1", expiresMs: 1));
         await Task.Delay(30, TestContext.Current.CancellationToken);
-        Assert.False(rig.Reader.TryRead(HLCTimestamp.Zero, "exp/key", -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, out _), "expired");
+        Assert.False(rig.Reader.TryRead(HLCTimestamp.Zero, "exp/key", -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out _), "expired");
         KeyValueResponse? expired = await rig.AskAsync(Get("exp/key"));
         Assert.Equal(KeyValueResponseType.DoesNotExist, expired!.Type);
 
         await rig.AskAsync(Set("del/key", "v1"));
-        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, "del/key", -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, out _));
+        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, "del/key", -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out _));
         KeyValueResponse? deleted = await rig.AskAsync(Request(KeyValueRequestType.TryDelete, "del/key", HLCTimestamp.Zero));
         Assert.Equal(KeyValueResponseType.Deleted, deleted!.Type);
-        Assert.False(rig.Reader.TryRead(HLCTimestamp.Zero, "del/key", -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, out _), "tombstone");
+        Assert.False(rig.Reader.TryRead(HLCTimestamp.Zero, "del/key", -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out _), "tombstone");
         Assert.False(rig.Context.PublishedHeads.TryGet("del/key", out _));
     }
 
@@ -130,7 +264,7 @@ public sealed class TestPublishedHeadReads : RaftTrackingTest
         HLCTimestamp tx = rig.Now();
         HLCTimestamp otherTx = rig.Now();
 
-        Assert.True(rig.Reader.TryRead(tx, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, out ReadOnlyKeyValueEntry? first));
+        Assert.True(rig.Reader.TryRead(tx, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out ReadOnlyKeyValueEntry? first));
         Assert.Equal("v1", Encoding.UTF8.GetString(first!.Value!));
 
         // The pin lands on the actor as a control message and flags the record as held.
@@ -140,9 +274,9 @@ public sealed class TestPublishedHeadReads : RaftTrackingTest
         Assert.Equal(first.Revision, resident.MvccEntries[tx].Revision);
 
         // Transactional reads now go to the actor; non-transactional reads keep the record.
-        Assert.False(rig.Reader.TryRead(tx, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, out _), "own repeat read");
-        Assert.False(rig.Reader.TryRead(otherTx, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, out _), "other transaction");
-        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, out _), "plain read");
+        Assert.False(rig.Reader.TryRead(tx, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out _), "own repeat read");
+        Assert.False(rig.Reader.TryRead(otherTx, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out _), "other transaction");
+        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out _), "plain read");
 
         KeyValueResponse? repeat = await rig.AskAsync(Get(key, tx));
         Assert.Equal(KeyValueResponseType.Get, repeat!.Type);
@@ -163,23 +297,23 @@ public sealed class TestPublishedHeadReads : RaftTrackingTest
         HLCTimestamp now = rig.Now();
         rig.InsertResident(key, "v1", 1, now);
 
-        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, out ReadOnlyKeyValueEntry? e));
+        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, KeyValueReadMode.Default, out ReadOnlyKeyValueEntry? e));
         Assert.Equal(1L, e!.Revision);
 
         // An older or equal head in the overlay is not newer than the record.
         rig.Unflushed.Record(key, "v1"u8.ToArray(), 1, HLCTimestamp.Zero, now, now, KeyValueState.Set, false);
-        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, out _));
+        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, KeyValueReadMode.Default, out _));
 
         HLCTimestamp later = rig.Now();
         rig.Unflushed.Record(key, "v2"u8.ToArray(), 2, HLCTimestamp.Zero, later, later, KeyValueState.Set, false);
-        Assert.False(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, out _), "newer unflushed write");
+        Assert.False(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, KeyValueReadMode.Default, out _), "newer unflushed write");
         rig.Unflushed.RemoveFlushed(key, 2, later);
-        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, out _));
+        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, KeyValueReadMode.Default, out _));
 
         rig.Ring.NotePendingApply(key, 2, later);
-        Assert.False(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, out _), "pending apply");
+        Assert.False(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, KeyValueReadMode.Default, out _), "pending apply");
         rig.Context.PublishedHeads.ClearPendingApply(key, 2, later);
-        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, out _));
+        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, KeyValueReadMode.Default, out _));
     }
 
     /// <summary>
@@ -195,7 +329,7 @@ public sealed class TestPublishedHeadReads : RaftTrackingTest
         const string key = "hazard/key";
         HLCTimestamp now = rig.Now();
         rig.InsertResident(key, "v1", 1, now);
-        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, out _));
+        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, KeyValueReadMode.Default, out _));
 
         HoldTurn hold = new();
         KeyValueRequest turnRequest = Request(KeyValueRequestType.RunActorTurn, key, HLCTimestamp.Zero);
@@ -215,11 +349,11 @@ public sealed class TestPublishedHeadReads : RaftTrackingTest
 
         // The record still says v1 and is live; both guards send the read to the actor.
         Assert.True(rig.Context.PublishedHeads.TryGet(key, out PublishedHead stale) && !stale.IsRetracted && stale.Revision == 1);
-        Assert.False(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, out _), "while the apply is pending");
+        Assert.False(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, KeyValueReadMode.Default, out _), "while the apply is pending");
 
         // Even with the overlay already flushed (the flush raced the actor), the pending note alone blocks.
         rig.Unflushed.RemoveFlushed(key, 2, later);
-        Assert.False(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, out _), "pending note alone");
+        Assert.False(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, KeyValueReadMode.Default, out _), "pending note alone");
 
         hold.Release.SetResult();
         await turn;
@@ -229,7 +363,7 @@ public sealed class TestPublishedHeadReads : RaftTrackingTest
         Assert.Equal(2L, viaActor.Entry!.Revision);
 
         Assert.Equal(0, rig.Context.PublishedHeads.PendingApplyCount);
-        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, out ReadOnlyKeyValueEntry? fresh));
+        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, KeyValueReadMode.Default, out ReadOnlyKeyValueEntry? fresh));
         Assert.Equal(2L, fresh!.Revision);
         Assert.Equal("v2", Encoding.UTF8.GetString(fresh.Value!));
     }
@@ -308,6 +442,66 @@ public sealed class TestPublishedHeadReads : RaftTrackingTest
         (KeyValueResponseType t4, ReadOnlyKeyValueEntry? e4) = await node.Kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
         Assert.Equal(KeyValueResponseType.Get, t4);
         Assert.Equal("two"u8.ToArray(), e4!.Value);
+    }
+
+    [Fact]
+    public async Task EmbeddedNode_LockFreeProbe_AnswersPublishedAndActorKeysAlike_AndPinsATransaction()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using EmbeddedKahunaNode node = new(Options(), loggerFactory);
+        await node.StartAsync(ct);
+        string space = "e2e/probe-" + Guid.NewGuid().ToString("N")[..8];
+        string[] keys = [$"{space}/a", $"{space}/absent", $"{space}/b", $"{space}/gone"];
+        await node.WaitForLeaderForKeyAsync(keys[0], ct);
+
+        foreach (string key in (string[])[keys[0], keys[2], keys[3]])
+            await node.Kahuna.LocateAndTrySetKeyValue(HLCTimestamp.Zero, key, "one"u8.ToArray(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+        await node.Kahuna.LocateAndTryDeleteKeyValue(HLCTimestamp.Zero, keys[3], KeyValueDurability.Persistent, ct);
+
+        // Two keys have a live record and two (never written, deleted) have none: one probe answers both kinds,
+        // each as a single read of the key does, in input order.
+        PublishedHeadTable table = ((KahunaManager)node.Kahuna).KeyValueRouters.Persistent.PublishedHeadsFor(keys[0]);
+        Assert.True(table.TryGet(keys[0], out PublishedHead headA) && !headA.IsRetracted);
+        Assert.True(table.TryGet(keys[2], out PublishedHead headB) && !headB.IsRetracted);
+
+        KeyValueProbeResult[] probed = await node.Kahuna.LocateAndTryProbeMany(
+            HLCTimestamp.Zero, HLCTimestamp.Zero, keys, KeyValueProbeLock.None, 0, KeyValueDurability.Persistent, ct);
+
+        Assert.Equal(keys.Length, probed.Length);
+        for (int i = 0; i < keys.Length; i++)
+        {
+            (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await node.Kahuna.LocateAndTryGetValue(
+                HLCTimestamp.Zero, keys[i], -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+            Assert.Equal(type, probed[i].Type);
+            Assert.Equal(entry?.Revision, probed[i].Entry?.Revision);
+            Assert.Equal(entry?.Value, probed[i].Entry?.Value);
+            Assert.False(probed[i].Locked);
+        }
+
+        Assert.Equal(KeyValueResponseType.Get, probed[0].Type);
+        Assert.Equal(KeyValueResponseType.Get, probed[2].Type);
+
+        // A transactional probe pins what it read, as a transactional single read does: a write that lands after
+        // it aborts the transaction's next read of the key.
+        (KeyValueResponseType started, TransactionHandle handle) = await node.Kahuna.LocateAndStartTransaction(
+            new KeyValueTransactionOptions { CoordinatorKey = keys[0], Locking = KeyValueTransactionLocking.Optimistic, Timeout = 10_000 }, ct);
+        Assert.Equal(KeyValueResponseType.Set, started);
+
+        string[] live = [keys[0], keys[2]];
+        KeyValueProbeResult[] pinned = await node.Kahuna.LocateAndTryProbeMany(
+            handle.TransactionId, HLCTimestamp.Zero, live, KeyValueProbeLock.None, 0, KeyValueDurability.Persistent, ct,
+            handle.CoordinatorKey, TransactionOperationId.NewRandom());
+        Assert.All(pinned, answer => Assert.Equal(KeyValueResponseType.Get, answer.Type));
+
+        await WaitUntil(() => table.TryGet(keys[0], out PublishedHead a) && a.MvccHeld && table.TryGet(keys[2], out PublishedHead b) && b.MvccHeld);
+
+        await node.Kahuna.LocateAndTrySetKeyValue(HLCTimestamp.Zero, keys[2], "two"u8.ToArray(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+
+        KeyValueProbeResult[] after = await node.Kahuna.LocateAndTryProbeMany(
+            handle.TransactionId, HLCTimestamp.Zero, live, KeyValueProbeLock.None, 0, KeyValueDurability.Persistent, ct,
+            handle.CoordinatorKey, TransactionOperationId.NewRandom());
+        Assert.Equal(KeyValueResponseType.Get, after[0].Type);
+        Assert.Equal(KeyValueResponseType.Aborted, after[1].Type);
     }
 
     [Fact]
@@ -422,6 +616,13 @@ public sealed class TestPublishedHeadReads : RaftTrackingTest
     private static KeyValueRequest Get(string key, HLCTimestamp transactionId = default, KeyValueDurability durability = KeyValueDurability.Ephemeral) =>
         new(KeyValueRequestType.TryGet, transactionId, HLCTimestamp.Zero, key, null, null, -1, KeyValueFlags.None, 0, HLCTimestamp.Zero, durability, 0, 0, default);
 
+    private static KeyValueRequest SnapshotGet(string key, HLCTimestamp readTimestamp, HLCTimestamp transactionId = default)
+    {
+        KeyValueRequest request = Get(key, transactionId);
+        request.ReadTimestamp = readTimestamp;
+        return request;
+    }
+
     /// <summary>A turn that parks the actor until released, so a test can open a window on its mailbox.</summary>
     private sealed class HoldTurn : IKeyValueActorTurn
     {
@@ -450,7 +651,7 @@ public sealed class TestPublishedHeadReads : RaftTrackingTest
         private IDisposable actorSystemLifetime = null!;
         private bool persistent;
 
-        public static async Task<ActorRig> CreateAsync(TestPublishedHeadReads owner, bool persistent = false)
+        public static async Task<ActorRig> CreateAsync(TestPublishedHeadReads owner, bool persistent = false, InstalledHistoryFence? installedHistory = null)
         {
             ActorRig rig = new() { persistent = persistent };
 
@@ -522,7 +723,8 @@ public sealed class TestPublishedHeadReads : RaftTrackingTest
                 rig.Unflushed,
                 new PreparedIntentStore(),
                 rig.raft,
-                enabled: true);
+                enabled: true,
+                installedHistory: installedHistory);
 
             return rig;
         }
