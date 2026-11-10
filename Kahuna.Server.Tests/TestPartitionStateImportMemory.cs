@@ -1,3 +1,5 @@
+using System.Runtime.CompilerServices;
+
 using Kommander.Time;
 
 using Kahuna.Server.KeyValues;
@@ -20,8 +22,8 @@ namespace Kahuna.Server.Tests;
 /// beyond the state it installs is a page of rows, independent of the partition's size.
 ///
 /// <para>The peak is sampled by a thread that forces full collections while the import runs, so this measures
-/// the process-wide live heap and shares the exclusive collection with the other allocation measurements.
-/// Sampling can only under-read the true peak, so a pass is conservative in the direction that matters.</para>
+/// the process-wide live heap (see <see cref="LiveHeapMeasurement"/>) and shares the exclusive collection with
+/// the other allocation measurements. Sampling can only under-read the true peak.</para>
 /// </summary>
 [Collection("ExclusiveAllocationMeasurement")]
 public sealed class TestPartitionStateImportMemory
@@ -70,70 +72,71 @@ public sealed class TestPartitionStateImportMemory
             node.Receipts.Record(Ts(5_000_000 + i), $"ranged1/account{i:D7}", "ranged1/anchor", KeyValueDurability.Persistent);
     }
 
+    // The source and the warm-up node each hold a full copy of the partition, so they live in methods of their own:
+    // a copy still live when the import starts is released while the import runs, and the sampled peak would then be
+    // that copy's and not the import's.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static async Task<byte[]> ExportAsync(CancellationToken ct)
+    {
+        Node source = MakeNode();
+        Populate(source);
+
+        await using Stream exported = await source.Transfer.ExportPartitionState(2, 42, ct);
+        using MemoryStream copy = new();
+        await exported.CopyToAsync(copy, ct);
+        return copy.ToArray();
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static async Task WarmUpAsync(byte[] snapshot, CancellationToken ct)
+    {
+        Node warm = MakeNode();
+        await warm.Transfer.ImportPartitionState(2, new MemoryStream(snapshot, writable: false), ct);
+    }
+
     [Fact]
     public async Task Import_PeakLiveHeap_StaysNearTheInstalledState_NotAMultipleOfTheSnapshot()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
-        Node source = MakeNode();
-        Populate(source);
-
-        byte[] snapshot;
-        await using (Stream exported = await source.Transfer.ExportPartitionState(2, 42, ct))
-        {
-            using MemoryStream copy = new();
-            await exported.CopyToAsync(copy, ct);
-            snapshot = copy.ToArray();
-        }
-
-        source = null!;
+        byte[] snapshot = await ExportAsync(ct);
 
         // Warm-up on a throwaway node, so JIT and first-use allocations are not charged to the measured import.
-        await MakeNode().Transfer.ImportPartitionState(2, new MemoryStream(snapshot, writable: false), ct);
+        await WarmUpAsync(snapshot, ct);
+
+        // The code after an await runs inside the completion of the awaited method, before that method's frame, and
+        // with it the partition copy it held, is gone. Yield so it unwinds before anything is measured.
+        await Task.Yield();
 
         Node target = MakeNode();
 
-        long peak = 0;
-        using CancellationTokenSource stop = new();
-        Thread sampler = new(() =>
+        long before = LiveHeapMeasurement.Measure();
+        long peak;
+
+        using (LiveHeapPeakSampler sampler = new("import-heap-sampler"))
         {
-            while (!stop.IsCancellationRequested)
+            try
             {
-                long live = GC.GetTotalMemory(forceFullCollection: true);
-                if (live > peak)
-                    peak = live;
-
-                // Paced so the import makes progress between collections; a materialised section stays live
-                // for the whole decode, far longer than this.
-                Thread.Sleep(20);
+                await target.Transfer.ImportPartitionState(2, new MemoryStream(snapshot, writable: false), ct);
             }
-        }) { IsBackground = true, Name = "import-heap-sampler" };
-
-        GC.Collect();
-        GC.WaitForPendingFinalizers();
-        GC.Collect();
-
-        sampler.Start();
-        try
-        {
-            await target.Transfer.ImportPartitionState(2, new MemoryStream(snapshot, writable: false), ct);
-        }
-        finally
-        {
-            stop.Cancel();
-            sampler.Join();
+            finally
+            {
+                peak = sampler.Stop();
+            }
         }
 
         // The installed state, with the staged snapshot still referenced exactly as it was during the import.
-        long installed = GC.GetTotalMemory(forceFullCollection: true);
+        long installed = LiveHeapMeasurement.Measure();
         GC.KeepAlive(snapshot);
 
         Assert.Equal(Records, target.Records.Count);
         Assert.Equal(Receipts, target.Receipts.Count);
 
-        long excess = peak - installed;
+        // The empty node is the smaller footprint here; taking the larger of the two keeps the comparison right if
+        // something else in the process released memory while the import ran.
+        long excess = peak - Math.Max(before, installed);
         TestContext.Current.TestOutputHelper?.WriteLine(
-            $"snapshot {snapshot.Length} B, installed live heap {installed} B, sampled peak {peak} B, excess {excess} B ({(double)excess / snapshot.Length:F2}x the snapshot)");
+            $"snapshot {snapshot.Length} B, live heap before {before} B, installed {installed} B, sampled peak {peak} B, excess {excess} B ({(double)excess / snapshot.Length:F2}x the snapshot)");
 
         // Materialising the store section costs several times the snapshot on top of the installed state (two
         // payload copies plus a protobuf object per entry); streaming costs a page of rows.

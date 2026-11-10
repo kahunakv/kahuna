@@ -123,7 +123,7 @@ public class PublishedHeadReadBenchmark : IDisposable
 
         for (int i = 0; i < Keys; i++)
         {
-            if (!reader.TryRead(HLCTimestamp.Zero, keys[i], -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, out _))
+            if (!reader.TryRead(HLCTimestamp.Zero, keys[i], -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out _))
                 throw new InvalidOperationException("record not published for " + keys[i]);
         }
 
@@ -157,7 +157,7 @@ public class PublishedHeadReadBenchmark : IDisposable
         long revisions = 0;
         for (int i = 0; i < Readers; i++)
         {
-            if (!reader.TryRead(HLCTimestamp.Zero, NextKey(), -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, out ReadOnlyKeyValueEntry? entry))
+            if (!reader.TryRead(HLCTimestamp.Zero, NextKey(), -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out ReadOnlyKeyValueEntry? entry))
                 throw new InvalidOperationException("record not served");
 
             revisions += entry!.Revision;

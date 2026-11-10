@@ -23,8 +23,8 @@ namespace Kahuna.Server.Tests;
 /// a small fraction of the snapshot, whatever the partition's size.
 ///
 /// <para>The peak is sampled by a thread that forces full collections while the install runs, so this measures the
-/// process-wide live heap and shares the exclusive collection with the other allocation measurements. Sampling can
-/// only under-read the true peak.</para>
+/// process-wide live heap (see <see cref="LiveHeapMeasurement"/>) and shares the exclusive collection with the other
+/// allocation measurements. Sampling can only under-read the true peak.</para>
 /// </summary>
 [Collection("ExclusiveAllocationMeasurement")]
 public sealed class TestPartitionStateInstallPeakMemory
@@ -103,13 +103,6 @@ public sealed class TestPartitionStateInstallPeakMemory
         }
     }
 
-    private static long LiveHeap()
-    {
-        GC.Collect();
-        GC.WaitForPendingFinalizers();
-        return GC.GetTotalMemory(forceFullCollection: true);
-    }
-
     // The source and the warm-up node each hold a full copy of the partition, so they live in methods of their own:
     // a copy still live when the node's footprint is measured would make the install's own peak look smaller than it is.
     [MethodImpl(MethodImplOptions.NoInlining)]
@@ -148,38 +141,26 @@ public sealed class TestPartitionStateInstallPeakMemory
         Node target = MakeNode();
         Populate(target, generation: 1);
 
-        long before = LiveHeap();
+        long before = LiveHeapMeasurement.Measure();
         long allocatedBefore = GC.GetTotalAllocatedBytes(precise: true);
-        long peak = 0;
+        long peak;
 
-        using CancellationTokenSource stop = new();
-        Thread sampler = new(() =>
+        using (LiveHeapPeakSampler sampler = new("install-heap-sampler"))
         {
-            while (!stop.IsCancellationRequested)
+            try
             {
-                long live = GC.GetTotalMemory(forceFullCollection: true);
-                if (live > peak)
-                    peak = live;
-
-                Thread.Sleep(20);
+                await target.Transfer.ImportPartitionState(2, new MemoryStream(snapshot, writable: false), ct);
             }
-        }) { IsBackground = true, Name = "install-heap-sampler" };
-
-        sampler.Start();
-        try
-        {
-            await target.Transfer.ImportPartitionState(2, new MemoryStream(snapshot, writable: false), ct);
-        }
-        finally
-        {
-            stop.Cancel();
-            sampler.Join();
+            finally
+            {
+                peak = sampler.Stop();
+            }
         }
 
         long allocated = GC.GetTotalAllocatedBytes(precise: true) - allocatedBefore;
 
         // Measured with the staged snapshot still referenced, as it is until Kommander disposes it after the install.
-        long after = LiveHeap();
+        long after = LiveHeapMeasurement.Measure();
         GC.KeepAlive(snapshot);
 
         Assert.Equal(Records, target.Records.Count);

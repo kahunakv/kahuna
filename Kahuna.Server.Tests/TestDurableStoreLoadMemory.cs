@@ -15,8 +15,8 @@ namespace Kahuna.Server.Tests;
 /// the loaded set at once. It now decodes each entry straight off the file into the store, so the heap the load
 /// needs beyond the set it loads is one entry, independent of the file's size.
 ///
-/// <para>Measured with the same forced-collection sampler as the install's memory test, and therefore in the
-/// same exclusive collection.</para>
+/// <para>Measured with the same forced-collection sampler as the install's memory test (see
+/// <see cref="LiveHeapMeasurement"/>), and therefore in the same exclusive collection.</para>
 /// </summary>
 [Collection("ExclusiveAllocationMeasurement")]
 public sealed class TestDurableStoreLoadMemory : IDisposable
@@ -40,39 +40,28 @@ public sealed class TestDurableStoreLoadMemory : IDisposable
     /// object together with how far the sampled live heap peaked above the heap with the loaded object retained.</summary>
     private static (T Loaded, long Excess, long Installed) MeasureLoad<T>(Func<T> load) where T : class
     {
-        long peak = 0;
-        using CancellationTokenSource stop = new();
-        Thread sampler = new(() =>
-        {
-            while (!stop.IsCancellationRequested)
-            {
-                long live = GC.GetTotalMemory(forceFullCollection: true);
-                if (live > peak)
-                    peak = live;
-
-                Thread.Sleep(20);
-            }
-        }) { IsBackground = true, Name = "load-heap-sampler" };
-
-        GC.Collect();
-        GC.WaitForPendingFinalizers();
-        GC.Collect();
+        long before = LiveHeapMeasurement.Measure();
+        long peak;
 
         T loaded;
-        sampler.Start();
-        try
+        using (LiveHeapPeakSampler sampler = new("load-heap-sampler"))
         {
-            loaded = load();
-        }
-        finally
-        {
-            stop.Cancel();
-            sampler.Join();
+            try
+            {
+                loaded = load();
+            }
+            finally
+            {
+                peak = sampler.Stop();
+            }
         }
 
-        long installed = GC.GetTotalMemory(forceFullCollection: true);
+        long installed = LiveHeapMeasurement.Measure();
         GC.KeepAlive(loaded);
-        return (loaded, peak - installed, installed);
+
+        // The larger of the two footprints, so memory that something else in the process released while the load
+        // ran is not charged to the load.
+        return (loaded, peak - Math.Max(before, installed), installed);
     }
 
     [Fact]
