@@ -788,7 +788,9 @@ public sealed class KahunaConfiguration
     public int PersistentRevisionRetentionCount { get; set; }
 
     /// <summary>
-    /// Maximum age of persisted key/value revision records. <see cref="TimeSpan.Zero"/> disables age retention.
+    /// How far back persisted key/value history stays readable. A revision is pruned once the revision that
+    /// replaced it is older than this, so a read anywhere inside the window finds the revision it sees.
+    /// <see cref="TimeSpan.Zero"/> disables age retention.
     /// </summary>
     public TimeSpan PersistentRevisionRetentionAge { get; set; }
 

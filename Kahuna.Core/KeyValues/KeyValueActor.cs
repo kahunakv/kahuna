@@ -462,6 +462,9 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
             && (!FenceClockAtSnapshot(message.Key, message.ReadTimestamp) || !InstalledHistoryCanAnswer(message)))
             return KeyValueStaticResponses.MustRetryResponse;
 
+        if (!message.ReadTimestamp.IsNull() && IsSnapshotRead(message.Type) && !PrunedHistoryCanAnswer(message))
+            return KeyValueStaticResponses.SnapshotTooOldResponse;
+
     return message.Type switch
         {
             KeyValueRequestType.TrySet => await TrySet(message),
@@ -647,6 +650,39 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
         }
 
         return ServableAt(fence, message.StartKey ?? message.Key, message.ReadTimestamp);
+    }
+
+    /// <summary>
+    /// Whether revision retention on this node still keeps the history a snapshot read needs. The store records,
+    /// with every prune, the timestamp below which some key lost revisions (its pruned-history floor). A read
+    /// below it could find a key with no revision at its timestamp, and that is indistinguishable from a key that
+    /// did not exist, so the read is refused as too old instead of answered. One comparison per request covers
+    /// every read shape; no other replica is consulted, because each prunes on its own schedule and the caller
+    /// needs a newer timestamp, not another node.
+    ///
+    /// <para>A registered snapshot hold needs no exemption here. While it stands, the prune keeps the revision the
+    /// hold reads and everything newer for every key, so no prune raises the floor above the hold, and a read
+    /// at or above the hold passes this check on its own.</para>
+    /// </summary>
+    private bool PrunedHistoryCanAnswer(KeyValueRequest message)
+    {
+        if (kvContext is null || message.Durability != KeyValueDurability.Persistent)
+            return true;
+
+        HLCTimestamp prunedFloor = kvContext.PersistenceBackend.GetPrunedHistoryFloor();
+
+        if (message.ReadTimestamp.CompareTo(prunedFloor) >= 0)
+            return true;
+
+        KeyValueSnapshotReadMetrics.PrunedHistoryRefused.Add(1);
+
+        long tick = Environment.TickCount64;
+        long lastTick = Volatile.Read(ref lastSnapshotRefusalWarningTick);
+        if (tick - lastTick >= SnapshotRefusalWarningSpacingMs
+            && Interlocked.CompareExchange(ref lastSnapshotRefusalWarningTick, tick, lastTick) == lastTick)
+            kvContext.Logger.LogSnapshotReadRefusedPrunedHistory(message.Key, message.ReadTimestamp, prunedFloor);
+
+        return false;
     }
 
     private bool ServableAt(InstalledHistoryFence fence, string key, HLCTimestamp readTimestamp)

@@ -143,9 +143,14 @@ internal sealed class LocatorScanOperations
 
         await Task.WhenAll(fanOutTasks);
 
-        // Propagate any early-exit response (MustRetry / WaitingForReplication).
+        // Propagate a refused descriptor. A transient refusal (MustRetry / WaitingForReplication) is
+        // reported first: the caller retries the bucket, and the retry meets any terminal refusal again.
         foreach ((KeyValueResponseType type, _) in slots)
             if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
+                return new(type, []);
+
+        foreach ((KeyValueResponseType type, _) in slots)
+            if (type != KeyValueResponseType.Get)
                 return new(type, []);
 
         // Concatenate in descriptor StartKey order (FindAll is sorted; ranges are disjoint, so
@@ -186,14 +191,14 @@ internal sealed class LocatorScanOperations
                     cursorKey, cursorInc, clEnd, clEndInc,
                     bucketPageSize, readTimestamp, durability, cancellationToken);
 
-                if (page.Type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
+                // A page that is not Get is a refused page, never the end of the range: an empty range
+                // still answers Get with zero items. Its type is the answer of the whole bucket, so the
+                // rows collected so far are dropped instead of returned as if the scan had completed.
+                if (page.Type != KeyValueResponseType.Get)
                 {
                     slots[idx] = (page.Type, []);
                     return;
                 }
-
-                if (page.Type != KeyValueResponseType.Get)
-                    break;
 
                 items.AddRange(page.Items);
 
@@ -308,8 +313,10 @@ internal sealed class LocatorScanOperations
                 return part;
             }
 
+            // Any other refusal ends the scan with that refusal. Skipping the descriptor would return the
+            // rows of the others as a complete page, with every key of this one missing and no error.
             if (part.Type != KeyValueResponseType.Get)
-                continue;
+                return new(part.Type, [], null, false, observation);
 
             accumulated.AddRange(part.Items);
 

@@ -379,7 +379,7 @@ public class TestPersistenceBackends
     }
 
     [Fact]
-    public void TestSqliteRetentionAgePrunesOldRowsButProtectsCurrentRevision()
+    public void TestSqliteRetentionAgePrunesOldRowsButKeepsTheRevisionVisibleInTheWindow()
     {
         const string key = "retention/age";
         string path = SqliteTempPath();
@@ -401,11 +401,15 @@ public class TestPersistenceBackends
             HLCTimestamp.Zero,
             out RevisionPruneResult result));
 
+        // Revision 4 was the visible value until revision 5 replaced it a moment ago, so a read
+        // anywhere in the last 30 minutes still needs it. Revisions 1-3 were each replaced an hour ago.
         Assert.False(result.BatchLimitReached);
-        Assert.Equal(1, CountSqliteRevisionRows(path, "revtest", key));
+        Assert.Equal(2, CountSqliteRevisionRows(path, "revtest", key));
         Assert.NotNull(backend.GetKeyValue(key));
         Assert.Equal(5, backend.GetKeyValue(key)!.Revision);
         Assert.NotNull(backend.GetKeyValueRevision(key, 5));
+        Assert.NotNull(backend.GetKeyValueRevision(key, 4));
+        Assert.Null(backend.GetKeyValueRevision(key, 3));
         Assert.Null(backend.GetKeyValueRevision(key, 1));
     }
 
@@ -824,7 +828,7 @@ public class TestPersistenceBackends
     }
 
     [Fact]
-    public void TestRocksDbRetentionAgePrunesOldRowsButProtectsCurrentRevision()
+    public void TestRocksDbRetentionAgePrunesOldRowsButKeepsTheRevisionVisibleInTheWindow()
     {
         const string key = "retention/age";
         string path = RocksDbTempPath();
@@ -839,11 +843,16 @@ public class TestPersistenceBackends
         }
 
         Assert.True(backend.PruneKeyValueRevisions([key], retentionCount: 0, TimeSpan.FromMinutes(30), batchSize: 1000, HLCTimestamp.Zero, out RevisionPruneResult result));
+        // Revision 4 was the visible value until revision 5 replaced it a moment ago, so a read
+        // anywhere in the last 30 minutes still needs it. Revisions 1-3 were each replaced an hour ago.
         Assert.False(result.BatchLimitReached);
-        Assert.Equal(1, CountRocksDbRevisionEntries(backend, key));
+        Assert.Equal(3, result.RevisionsDeleted);
+        Assert.Equal(2, CountRocksDbRevisionEntries(backend, key));
         Assert.NotNull(backend.GetKeyValue(key));
         Assert.Equal(5, backend.GetKeyValue(key)!.Revision);
         Assert.NotNull(backend.GetKeyValueRevision(key, 5));
+        Assert.NotNull(backend.GetKeyValueRevision(key, 4));
+        Assert.Null(backend.GetKeyValueRevision(key, 3));
         Assert.Null(backend.GetKeyValueRevision(key, 1));
     }
 

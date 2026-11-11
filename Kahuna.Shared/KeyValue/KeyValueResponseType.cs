@@ -152,4 +152,15 @@ public enum KeyValueResponseType
     /// <see cref="MustRetry"/>, which names a transient condition.
     /// </summary>
     StorageCorrupt = 115,
+
+    /// <summary>
+    /// A snapshot read was refused because its timestamp is older than the history this node still keeps:
+    /// revision retention already removed revisions that a read at that timestamp could need, and no snapshot
+    /// hold protected them. Answering would report a key as absent, or as an older value, with no error.
+    /// <b>Not retryable at the same timestamp</b>: the history is gone. Read again at a newer timestamp, or
+    /// register a snapshot hold before a long read and keep it for as long as the read runs. Deliberately
+    /// distinct from <see cref="MustRetry"/>, which names a transient condition, and from
+    /// <see cref="DoesNotExist"/>, which is an answer.
+    /// </summary>
+    SnapshotTooOld = 116,
 }

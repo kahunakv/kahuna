@@ -137,9 +137,9 @@ public sealed class TestRevisionPruneSweepQuiescence : IDisposable
         SweepCycle(age: age);
         Assert.True(Sweep(age: age).SweepIdle);
 
-        // Old non-current history arrives: the next cycle must run and delete it.
+        // History replaced before the cutoff arrives: the next cycle must run and delete it.
         long old = NowMs - 120_000;
-        Assert.True(backend.StoreKeyValues([Item("write/new", 1, old), Item("write/new", 2, NowMs)]));
+        Assert.True(backend.StoreKeyValues([Item("write/new", 1, old), Item("write/new", 2, old + 1)]));
 
         RevisionPruneResult reopened = Sweep(age: age);
         Assert.False(reopened.SweepIdle);
@@ -168,7 +168,7 @@ public sealed class TestRevisionPruneSweepQuiescence : IDisposable
     public void MovedFloorOrOtherRetention_ReopensTheSweep()
     {
         long old = NowMs - 120_000;
-        Assert.True(backend.StoreKeyValues([Item("floor/a", 1, old), Item("floor/a", 2, old + 1), Item("floor/a", 3, NowMs)]));
+        Assert.True(backend.StoreKeyValues([Item("floor/a", 1, old), Item("floor/a", 2, old + 1), Item("floor/a", 3, old + 2)]));
 
         // A hold at the oldest revision protects revisions 1 and up.
         HLCTimestamp floor = new(0, old, 0);
@@ -255,8 +255,8 @@ public sealed class TestRevisionPruneSweepQuiescence : IDisposable
         // own current row must be told apart from the longer "a~b~CURRENT".
         long old = NowMs - 120_000;
         Assert.True(backend.StoreKeyValues([
-            Item("a", 1, old), Item("a", 2, old + 1), Item("a", 3, NowMs),
-            Item("a~b", 1, old), Item("a~b", 2, NowMs),
+            Item("a", 1, old), Item("a", 2, old + 1), Item("a", 3, old + 2),
+            Item("a~b", 1, old), Item("a~b", 2, old + 1),
         ]));
 
         Assert.True(backend.PruneKeyValueRevisions(["a", "a~b"], 0, TimeSpan.FromSeconds(30), 1000, HLCTimestamp.Zero, out RevisionPruneResult result));

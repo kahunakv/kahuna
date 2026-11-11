@@ -1582,7 +1582,7 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
     // count/age/floor bounds) so the will-delete probe and kept-min query match the delete exactly.
     private static void BindPrunePredicate(
         SqliteCommand cmd, string key, long currentRevision,
-        bool floorActive, long floorRevision, bool countEnabled, int retentionCount, bool ageEnabled, long cutoffPhysical)
+        bool floorActive, long floorRevision, bool countEnabled, int retentionCount, bool ageEnabled, long ageBoundaryRevision)
     {
         cmd.Parameters.AddWithValue("@key", key);
         cmd.Parameters.AddWithValue("@currentRevision", currentRevision);
@@ -1591,7 +1591,33 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
         if (countEnabled)
             cmd.Parameters.AddWithValue("@retentionCount", retentionCount);
         if (ageEnabled)
-            cmd.Parameters.AddWithValue("@cutoffPhysical", cutoffPhysical);
+            cmd.Parameters.AddWithValue("@ageBoundaryRevision", ageBoundaryRevision);
+    }
+
+    /// <summary>
+    /// The revision age retention must keep, with everything newer: the newest revision committed
+    /// before the cutoff. A read at the cutoff sees that revision, which stays visible until its
+    /// successor commits, however long ago it was written itself. The current row counts as a
+    /// candidate, because once it is older than the cutoff it answers every read in the window by
+    /// itself. -1 when nothing was committed before the cutoff, so age deletes nothing.
+    /// </summary>
+    private static long GetAgeBoundaryRevision(SqliteConnection connection, string key, long cutoffPhysical)
+    {
+        const string query = """
+            SELECT COALESCE(MAX(revision), -1)
+            FROM (
+                SELECT revision FROM keys_revisions WHERE key = @key AND lastModifiedPhysical < @cutoffPhysical
+                UNION ALL
+                SELECT revision FROM keys WHERE key = @key AND lastModifiedPhysical < @cutoffPhysical
+            )
+            """;
+
+        using SqliteCommand command = new(query, connection);
+        command.Parameters.AddWithValue("@key", key);
+        command.Parameters.AddWithValue("@cutoffPhysical", cutoffPhysical);
+
+        object? scalar = command.ExecuteScalar();
+        return scalar is null or DBNull ? -1 : Convert.ToInt64(scalar);
     }
 
     private static long? GetCurrentRevision(SqliteConnection connection, string key)
@@ -1656,6 +1682,8 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
             floorRevision = scalar is null or DBNull ? -1 : Convert.ToInt64(scalar);
         }
 
+        long ageBoundaryRevision = ageEnabled ? GetAgeBoundaryRevision(connection, key, cutoffPhysical) : -1;
+
         List<string> predicates = [];
 
         if (countEnabled)
@@ -1675,7 +1703,7 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
         }
 
         if (ageEnabled)
-            predicates.Add("lastModifiedPhysical < @cutoffPhysical");
+            predicates.Add("revision < @ageBoundaryRevision");
 
         string policy = string.Join(" OR ", predicates);
 
@@ -1696,6 +1724,7 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                   AND revision <> @currentRevision
                   {floorFilter}
                   AND ({policy})
+                ORDER BY revision ASC
                 LIMIT @limit
             )
             """;
@@ -1711,7 +1740,7 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
             command.Parameters.AddWithValue("@retentionCount", retentionCount);
 
         if (ageEnabled)
-            command.Parameters.AddWithValue("@cutoffPhysical", cutoffPhysical);
+            command.Parameters.AddWithValue("@ageBoundaryRevision", ageBoundaryRevision);
 
         command.Parameters.AddWithValue("@limit", limit);
 
@@ -1724,7 +1753,7 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
         {
             string willDeleteSql = $"SELECT EXISTS(SELECT 1 FROM keys_revisions WHERE key = @key AND revision <> @currentRevision {floorFilter} AND ({policy}) LIMIT 1)";
             using SqliteCommand willCmd = new(willDeleteSql, connection);
-            BindPrunePredicate(willCmd, key, currentRevision.Value, floorActive, floorRevision, countEnabled, retentionCount, ageEnabled, cutoffPhysical);
+            BindPrunePredicate(willCmd, key, currentRevision.Value, floorActive, floorRevision, countEnabled, retentionCount, ageEnabled, ageBoundaryRevision);
             bool willDelete = Convert.ToInt64(willCmd.ExecuteScalar()) != 0;
             if (willDelete)
             {
@@ -1737,7 +1766,7 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
                     """;
                 using (SqliteCommand keptCmd = new(keptMinSql, connection))
                 {
-                    BindPrunePredicate(keptCmd, key, currentRevision.Value, floorActive, floorRevision, countEnabled, retentionCount, ageEnabled, cutoffPhysical);
+                    BindPrunePredicate(keptCmd, key, currentRevision.Value, floorActive, floorRevision, countEnabled, retentionCount, ageEnabled, ageBoundaryRevision);
                     using SqliteDataReader kr = keptCmd.ExecuteReader();
                     if (kr.Read())
                         candidate = new HLCTimestamp(kr.GetInt32(0), kr.GetInt64(1), (uint)kr.GetInt64(2));
@@ -1838,6 +1867,8 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
             floorRevision = scalar is null or DBNull ? -1 : Convert.ToInt64(scalar);
         }
 
+        long ageBoundaryRevision = ageEnabled ? GetAgeBoundaryRevision(connection, key, cutoffPhysical) : -1;
+
         List<string> predicates = [];
 
         if (countEnabled)
@@ -1857,7 +1888,7 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
         }
 
         if (ageEnabled)
-            predicates.Add("lastModifiedPhysical < @cutoffPhysical");
+            predicates.Add("revision < @ageBoundaryRevision");
 
         string policy = string.Join(" OR ", predicates);
 
@@ -1885,7 +1916,7 @@ internal sealed class SqlitePersistenceBackend : IPersistenceBackend, IDisposabl
             command.Parameters.AddWithValue("@retentionCount", retentionCount);
 
         if (ageEnabled)
-            command.Parameters.AddWithValue("@cutoffPhysical", cutoffPhysical);
+            command.Parameters.AddWithValue("@ageBoundaryRevision", ageBoundaryRevision);
 
         return command.ExecuteScalar() is not null;
     }

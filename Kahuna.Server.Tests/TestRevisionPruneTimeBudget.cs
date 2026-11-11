@@ -41,7 +41,8 @@ public sealed class TestRevisionPruneTimeBudget : IDisposable
         new(key, [1, 2, 3], revision, 0, 0, 0, 0, 0, 0, 0, physical, 0, (int)KeyValueState.Set);
 
     /// <summary>Writes <paramref name="keyCount"/> keys with <paramref name="depth"/> revisions each, every
-    /// non-head revision old enough to be deletable under a 30-second age policy.</summary>
+    /// revision older than a 30-second age policy reaches. The head is then what a read at the cutoff
+    /// sees, so every non-head revision is deletable.</summary>
     private List<string> Seed(string bucket, int keyCount, int depth)
     {
         long old = NowMs - 120_000;
@@ -53,7 +54,7 @@ public sealed class TestRevisionPruneTimeBudget : IDisposable
             string key = $"{bucket}/k{k:D5}";
             keys.Add(key);
             for (long r = 1; r <= depth; r++)
-                items.Add(Item(key, r, r == depth ? NowMs : old + r));
+                items.Add(Item(key, r, old + r));
 
             if (items.Count >= 4096)
             {
@@ -253,11 +254,11 @@ public sealed class TestRevisionPruneTimeBudget : IDisposable
         long old = NowMs - 120_000;
         List<PersistenceRequestItem> items = [];
         for (long r = 1; r <= 30; r++)
-            items.Add(Item("a/x", r, r == 30 ? NowMs : old + r));
+            items.Add(Item("a/x", r, old + r));
         for (long r = 1; r <= 12; r++)
-            items.Add(Item("a/x~1sib", r, r == 12 ? NowMs : old + r));
+            items.Add(Item("a/x~1sib", r, old + r));
         for (long r = 1; r <= 12; r++)
-            items.Add(Item("b/plain", r, r == 12 ? NowMs : old + r));
+            items.Add(Item("b/plain", r, old + r));
         Assert.True(backend.StoreKeyValues(items));
 
         int visited = 0;

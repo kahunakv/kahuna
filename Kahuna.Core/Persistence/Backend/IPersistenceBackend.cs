@@ -369,7 +369,12 @@ public interface IPersistenceBackend
     /// </summary>
     /// <param name="keys">Target keys to prune, or <c>null</c> for a backend-wide sweep.</param>
     /// <param name="retentionCount">Maximum revisions to keep per key; <c>0</c> disables count-based pruning.</param>
-    /// <param name="retentionAge">Maximum revision age; <see cref="TimeSpan.Zero"/> disables age-based pruning.</param>
+    /// <param name="retentionAge">
+    /// How far back the history stays readable; <see cref="TimeSpan.Zero"/> disables age-based pruning.
+    /// The age of a revision counts from the commit of the revision that replaced it, not from its own:
+    /// the newest revision committed before <c>now - retentionAge</c> and every newer one are kept, so
+    /// a read anywhere inside the window finds the revision it sees.
+    /// </param>
     /// <param name="batchSize">Maximum revision records to delete in this pass.</param>
     /// <param name="floorTimestamp">
     /// Snapshot floor: the highest-revision entry whose <c>LastModified ≤ floorTimestamp</c>

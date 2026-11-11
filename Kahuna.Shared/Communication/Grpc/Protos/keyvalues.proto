@@ -2017,6 +2017,10 @@ enum GrpcKeyValueResponseType {
   // from this store. Not retryable against this node: a retry gets the same answer until an operator
   // repairs or replaces the store; another replica of the partition serves once the leadership moves.
   TYPE_STORAGE_CORRUPT = 115;
+  // A snapshot read was refused because its timestamp is older than the history the node still keeps: revision
+  // retention removed revisions a read at that timestamp could need, and no snapshot hold protected them.
+  // Not retryable at the same timestamp: read again at a newer one, or hold a snapshot for a long read.
+  TYPE_SNAPSHOT_TOO_OLD = 116;
 }
 
 enum GrpcKeyValueDurability {

@@ -145,11 +145,12 @@ public sealed class TestDeletedKeyRevisionPrune : IDisposable
 
         Assert.True(backend.StoreKeyValues([Value(key, 0, HoursAgo(3)), DeleteRecord(key, 1, NowMs)]));
 
-        // The old value is past the age and goes; the delete record is new and keeps its row.
+        // The old value was what a read saw until the delete, a moment ago: reads inside the
+        // retention age still need it. The delete record is new and keeps its row too.
         RevisionPruneResult first = Prune([key], Age);
-        Assert.Equal(1, first.RevisionsDeleted);
+        Assert.Equal(0, first.RevisionsDeleted);
         Assert.Equal(0, first.DeleteRecordsReleased);
-        Assert.Null(backend.GetKeyValueRevision(key, 0));
+        Assert.NotNull(backend.GetKeyValueRevision(key, 0));
         Assert.NotNull(backend.GetKeyValueRevision(key, 1));
 
         // Until the age reaches the delete record, the key costs no walk.
@@ -159,7 +160,7 @@ public sealed class TestDeletedKeyRevisionPrune : IDisposable
         Thread.Sleep(20);
         RevisionPruneResult later = Prune([key], TimeSpan.FromMilliseconds(5));
         Assert.Equal(0, later.KeysSkipped);
-        Assert.Equal(1, later.RevisionsDeleted);
+        Assert.Equal(2, later.RevisionsDeleted);
         Assert.Equal(1, later.DeleteRecordsReleased);
         AssertOnlyTheDeleteRecordIsLeft(key, deleteRevision: 1);
     }
@@ -312,13 +313,13 @@ public sealed class TestDeletedKeyRevisionPrune : IDisposable
             Value("dropped/x", 0, HoursAgo(3)),
             DeleteRecord("dropped/x", 1, HoursAgo(2)),
             Value("dropped/x~1", 0, HoursAgo(3)),
-            Value("dropped/x~1", 1, NowMs),
+            Value("dropped/x~1", 1, HoursAgo(2)),
             Value("dropped/y", 0, NowMs)
         ]));
 
         RevisionPruneResult result = Prune(null, Age);
 
-        // dropped/x loses both rows; dropped/x~1 loses its old non-current row, as any live key does.
+        // dropped/x loses both rows; dropped/x~1 loses the row replaced before the cutoff, as any live key does.
         Assert.Equal(3, result.RevisionsDeleted);
         Assert.Equal(1, result.DeleteRecordsReleased);
         AssertOnlyTheDeleteRecordIsLeft("dropped/x", deleteRevision: 1);

@@ -437,6 +437,9 @@ public static partial class KahunaLoggerExtensions
     [LoggerMessage(Level = LogLevel.Warning, Message = "Snapshot read of {Key} at {ReadTimestamp} refused: partition #{PartitionId} was installed on this node by a snapshot that does not carry that timestamp. A replica that kept its history can answer it; a timestamp below the install that a client needs must be named by a snapshot hold before the install.")]
     public static partial void LogSnapshotReadRefusedInstalledHistory(this ILogger<IKahuna> logger, string key, HLCTimestamp readTimestamp, int partitionId);
 
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Snapshot read of {Key} at {ReadTimestamp} refused as too old: revision retention on this node removed history up to {PrunedFloor}, so a read below it could miss a revision. Read at a newer timestamp, or register a snapshot hold for a read that outlasts the retention")]
+    public static partial void LogSnapshotReadRefusedPrunedHistory(this ILogger<IKahuna> logger, string key, HLCTimestamp readTimestamp, HLCTimestamp prunedFloor);
+
     [LoggerMessage(Level = LogLevel.Warning, Message = "Snapshot read of {Key} at {ReadTimestamp} refused: the split or merge that moved its range to partition #{PartitionId} did not carry that timestamp; only snapshot holds registered at the move and later timestamps can be answered")]
     public static partial void LogSnapshotReadRefusedRangeHistory(this ILogger<IKahuna> logger, string key, HLCTimestamp readTimestamp, int partitionId);
 

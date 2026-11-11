@@ -199,6 +199,26 @@ increments `kahuna.kv.snapshot_installed_history_refused_total`, even for a key 
 This covers point reads, exists, range, bucket and prefix scans, and batched probes. A replica that kept
 its history still answers the timestamp, so the read succeeds again if leadership moves to one.
 
+### Reads older than the retained history
+
+Revision retention (`PersistentRevisionRetentionCount`, `PersistentRevisionRetentionAge`) removes old
+revisions from disk. Every prune records, in the same write as its deletes, the timestamp below which
+some key lost revisions: the store's *pruned-history floor*. A snapshot read below that floor could find
+a key with no revision at its timestamp, which looks exactly like a key that did not exist. So the node
+refuses the whole request with `SnapshotTooOld` (key-value response type 116) and increments
+`kahuna.kv.snapshot_pruned_history_refused_total`. This covers point reads, exists, range, bucket and
+prefix scans, and batched probes.
+
+- `SnapshotTooOld` is **not retryable at the same timestamp**: the history is gone on that node. Read
+  again at a newer timestamp.
+- With age retention the floor stays older than `now - age`, so a read inside the window is never
+  refused. With count retention the floor follows the most recently pruned key and can be recent: a
+  workload that reads snapshots under count retention must hold them (below).
+- A read at or above a registered hold is not refused. While the hold stands, the prune keeps the
+  revision the hold reads and everything newer, so no prune raises the floor above the hold.
+- A read whose key has not changed since the timestamp may still be answered from the published head
+  without reaching this check. That answer is correct: it needs no history.
+
 Consequences for clients:
 
 - Read at the hold's own timestamp, unchanged. CamusDB branches do this: a branch reads each ancestor at
@@ -296,6 +316,7 @@ The subsystem publishes these instruments under the `Kahuna` meter scope:
 | `kahuna.snapshot_floor.prune_confirm_timed_out_total` | counter | Catch-up confirmations that ran out of `RevisionPruneConfirmTimeout` (default 1 s) before answering. Each is also a skipped prune cycle; a sustained rate means the node is not receiving the meta partition (not yet a roster member, or cut off from its leader). |
 | `kahuna.kv.snapshot_range_history_refused_total` | counter | Snapshot reads refused because the split or merge that moved the key's range did not carry their timestamp. A burst can follow a move; a sustained rate means a client reads an old timestamp no hold names. |
 | `kahuna.kv.snapshot_installed_history_refused_total` | counter | Snapshot reads refused because the install that seeded this replica did not carry their timestamp (§5). A burst of old statement reads can follow an install. A sustained rate means a client reads a timestamp no hold names, or a hold could not be pinned. |
+| `kahuna.kv.snapshot_pruned_history_refused_total` | counter | Snapshot reads answered `SnapshotTooOld` because revision retention already removed history their timestamp could need (§5). A sustained rate means a client reads for longer than the retention keeps history, without a hold. |
 | `kahuna.snapshot_floor.missing_protected_version_total` | counter | **Must stay 0.** Increments if reclamation ever schedules a floor-protected version for deletion. |
 
 `missing_protected_version_total` is the **fault signal**. It is wired at both reclamation sites: the in-memory trim (if the
@@ -373,7 +394,7 @@ hold has to protect:
 |------|---------|-------------------------------|
 | `RevisionRetention` (`--revisions-to-cache`) | 4 | How many recent revisions per key answer as-of reads from memory before falling back to disk. A live hold additionally keeps one boundary revision. An ephemeral key has no disk history, so its revisions older than this are gone. |
 | `PersistentRevisionRetentionCount` | 0 (keep all) | How many revisions the persistent sweep keeps per key. The floor clamps this: protected revisions are kept regardless. |
-| `PersistentRevisionRetentionAge` | disabled | Age-based persistent pruning; also clamped by the floor. |
+| `PersistentRevisionRetentionAge` | disabled | Age-based persistent pruning; also clamped by the floor. The age of a revision counts from the commit of the revision that replaced it: the newest revision committed before `now - age` and every newer one stay, so a read anywhere inside the window finds its revision. |
 | `PersistentRevisionCleanupBatchSize` | 10000 | Revision rows one prune pass (a targeted cycle or a sweep pass) may delete. The time budget bounds the pass; this only caps its tombstones. Keep it well above what one hot key sheds per visit: a walk cut short by this limit has already paid for the whole block and must walk it again next cycle. |
 | `PersistentRevisionCleanupTimeBudget` | 250 ms | Wall-clock the revision prune may spend per flush cycle, shared by the targeted prune and the sweep that follows it (the sweep always gets at least a quarter). The RocksDB backend checks it before every key and every 1,024 sweep rows; keys and keyspace it does not reach are resumed next cycle. Keep it well under `DirtyObjectsWriterDelay` (the flush budget): the prune runs on the same writer, so its time comes straight out of flush throughput. |
 | `RevisionPruneConfirmTimeout` / `RevisionPruneConfirmRetryInterval` | 1 s / 5 s | How long the writer waits for the meta-partition catch-up confirmation that gates a prune, and how long it waits before asking again after one timed out (a confirmation that fails at once is retried next cycle). A node that cannot be confirmed keeps its revisions (the safe direction) and loses the writer at most one timeout per interval. |

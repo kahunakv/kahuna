@@ -302,15 +302,18 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         /// revision's own row. Exact after a walk; only ever incremented between walks.</summary>
         public int HistoryRows;
 
-        /// <summary>Commit physical time of the oldest history row that is not the current revision's,
-        /// or <see cref="long.MaxValue"/> when none exists. Exact after a walk; only lowered between walks.</summary>
+        /// <summary>Physical time the age cutoff must pass before age retention can delete a row of the
+        /// key: the earliest commit among the rows above the oldest non-current row (the current row
+        /// included), because a revision stays readable until a newer one is older than the cutoff.
+        /// <see cref="long.MaxValue"/> when the key has no non-current row. Exact after a walk; only
+        /// lowered between walks.</summary>
         public long OldestNonCurrentPhysical;
 
-        /// <summary>Commit physical time of the oldest non-current row the last walk's floor did NOT
-        /// protect (below the floor-boundary revision), or <see cref="long.MaxValue"/>. Equals
-        /// <see cref="OldestNonCurrentPhysical"/> when no floor was active. While a floor stands, this is
-        /// the row age retention can still reach — the one that decides whether a floor-blocked key is
-        /// worth walking again. Only lowered between walks.</summary>
+        /// <summary>The same time, counted only when the oldest non-current row is one the last walk's
+        /// floor did NOT protect (below the floor-boundary revision); <see cref="long.MaxValue"/>
+        /// otherwise. Equals <see cref="OldestNonCurrentPhysical"/> when no floor was active. While a
+        /// floor stands, this decides whether a floor-blocked key is worth walking again. Only lowered
+        /// between walks.</summary>
         public long OldestUnprotectedPhysical;
 
         /// <summary>True when the last walk found deletable rows the snapshot floor made it keep: the key
@@ -1140,6 +1143,10 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
 
     public HLCTimestamp GetPrunedHistoryFloor()
     {
+        // Every snapshot read asks, so the loaded floor is answered without the fence or the lock.
+        if (publishedPrunedFloor is { } published)
+            return published.Value;
+
         EnterDbFence();
         try
         {
@@ -1157,6 +1164,19 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     }
 
     private const int PrunedFloorSize = 24;
+
+    /// <summary>An immutable copy of the floor, so a reader takes it in one reference read.</summary>
+    private sealed class PublishedPrunedFloor(HLCTimestamp value)
+    {
+        public readonly HLCTimestamp Value = value;
+    }
+
+    /// <summary>
+    /// The floor as last loaded or raised, or null until the first load. Written under <c>_floorLock</c>, in step
+    /// with <c>_prunedFloorCache</c>; read lock-free. A reader that misses a raise by an instant sees the lower
+    /// floor, exactly as a reader that took the lock a moment earlier would.
+    /// </summary>
+    private volatile PublishedPrunedFloor? publishedPrunedFloor;
 
     // Must hold _floorLock. Lazily loads the durable floor from the DB; a corrupt/unreadable value for
     // a store that may have pruned yields FailClosedFloor so backups refuse every cut until repaired.
@@ -1201,7 +1221,12 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 _prunedFloorCorrupt = true;
             }
         }
-        return _prunedFloorCorrupt ? FailClosedFloor : _prunedFloorCache!.Value;
+        HLCTimestamp floor = _prunedFloorCorrupt ? FailClosedFloor : _prunedFloorCache!.Value;
+
+        if (publishedPrunedFloor is not { } published || published.Value != floor)
+            publishedPrunedFloor = new(floor);
+
+        return floor;
     }
 
     // Adds a floor Put to the delete batch when the candidate advances the floor, so the floor lands
@@ -1226,7 +1251,10 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
         lock (_floorLock)
         {
             if (!_prunedFloorCorrupt && (_prunedFloorCache is null || value.CompareTo(_prunedFloorCache.Value) > 0))
+            {
                 _prunedFloorCache = value;
+                publishedPrunedFloor = new(value);
+            }
         }
     }
 
@@ -1815,8 +1843,10 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// still decide eligibility without a walk. Every history row written counts towards the key's
     /// row total; a history row that lands below the head is non-current from the moment it lands,
     /// and when the head advances the previous head's own row becomes non-current — both lower the
-    /// oldest-non-current timestamp. Only ever moves a memo towards "eligible". Keys without a memo
-    /// are not tracked here: their next visit walks anyway.
+    /// time at which age retention next reaches the key. The times used are lower bounds of the exact
+    /// one (the commit of the row above the oldest non-current row), so the worst case is one walk
+    /// that deletes nothing and records the exact time. Only ever moves a memo towards "eligible".
+    /// Keys without a memo are not tracked here: their next visit walks anyway.
     /// </summary>
     private void NotePruneMemoStoredRows(
         Span<PersistenceRequestItem> span,
@@ -1848,7 +1878,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 }
 
                 if (writeCurrent[i] && durableHeads.TryGetValue(item.Key, out StoredKeyValueOrdering previousHead))
-                    LowerOldest(memo, previousHead.LastModifiedPhysical);
+                    LowerOldest(memo, Math.Min(previousHead.LastModifiedPhysical, item.LastModifiedPhysical));
             }
         }
     }
@@ -1864,7 +1894,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// <summary>
     /// O(1) eligibility check before a prune walk. True when the key's memo proves the walk would
     /// delete nothing under the given policy: no more history rows than count retention keeps and no
-    /// non-current row older than the age cutoff. When the last walk was floor-blocked, the deletable
+    /// non-current row with a newer revision older than the age cutoff. When the last walk was floor-blocked, the deletable
     /// rows it found are known to be protected, so only a moved floor, history written since, or an
     /// unprotected row aging past the cutoff can change the answer. False (walk) whenever the key has
     /// no memo.
@@ -4437,7 +4467,9 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
 
     /// <summary>
     /// Prunes old revision records for a single logical key, keeping the current revision
-    /// and any revisions within the configured count/age retention window.
+    /// and any revisions within the configured count/age retention window. Age retention keeps the
+    /// newest revision committed before the cutoff and everything newer: that revision is what a read
+    /// at the cutoff sees, so it leaves only once a newer revision is itself older than the cutoff.
     /// When <paramref name="floorTimestamp"/> is non-zero the floor-boundary revision
     /// (the highest revision whose LastModified ≤ floorTimestamp) and everything newer
     /// are also protected from deletion.
@@ -4456,8 +4488,9 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
     /// </para>
     /// <para>
     /// <paramref name="ageFrontierPhysical"/> receives the commit time at which the key's memo verdict
-    /// turns back to "walk" once age retention reaches it — the oldest non-current row, or, when the
-    /// floor blocked the walk, the oldest row below the floor boundary; a delete record that waits on
+    /// turns back to "walk" once age retention reaches it — the earliest commit above the oldest
+    /// non-current row, counted only for a row below the floor boundary when the floor blocked the
+    /// walk; a delete record that waits on
     /// the retention age counts as such a row — or <see cref="long.MaxValue"/> when there is none. It
     /// is meaningless when <paramref name="batchLimitReached"/> is set.
     /// </para>
@@ -4620,6 +4653,24 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 }
             }
 
+            // Age retention promises every read at or after the cutoff. Such a read sees the newest
+            // revision committed before the cutoff, which stays visible until its successor commits,
+            // however long ago it was written itself. So age deletes only below that boundary revision.
+            // The current row counts as a candidate: once it is older than the cutoff it answers every
+            // read in the window by itself. -1 when nothing was committed before the cutoff.
+            long ageBoundaryRevision = -1;
+            if (needAge)
+            {
+                if (currentOrdering.LastModifiedPhysical < cutoffPhysical)
+                    ageBoundaryRevision = currentRevision;
+
+                foreach ((long rev, long physical, _, _) in revisions)
+                {
+                    if (physical < cutoffPhysical && rev > ageBoundaryRevision)
+                        ageBoundaryRevision = rev;
+                }
+            }
+
             int deletedForKey = 0;
             int floorBlockedCandidates = 0;
             int currentRowIndex = -1;
@@ -4630,9 +4681,13 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
             if (aged && heldByFloor)
                 floorBlockedCandidates++;
 
-            for (int i = 0; i < revisions.Count; i++)
+            // Oldest first. A pass that stops on its delete budget then leaves a key whose surviving
+            // revisions are contiguous up to the head, so the floor raised below names exactly what was
+            // lost: a read at or above it still finds the revision it sees. Newest first would leave an
+            // older revision under a hole, and a read into the hole would be answered with that one.
+            for (int i = revisions.Count - 1; i >= 0; i--)
             {
-                (long revNum, long lastModifiedPhysical, _, byte[] rawKeyBytes) = revisions[i];
+                (long revNum, _, _, byte[] rawKeyBytes) = revisions[i];
 
                 // The current revision's own row is not judged here. It stays for a live key; for a
                 // released delete record it goes last, below, once every older row is in the batch.
@@ -4645,7 +4700,7 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 if (!released)
                 {
                     bool deleteByCount = retentionCount > 0 && i >= retentionCount;
-                    bool deleteByAge = needAge && lastModifiedPhysical < cutoffPhysical;
+                    bool deleteByAge = revNum < ageBoundaryRevision;
 
                     if (!deleteByCount && !deleteByAge)
                         continue;
@@ -4752,17 +4807,38 @@ internal sealed class RocksDbPersistenceBackend : IPersistenceBackend, IDisposab
                 return;
             }
 
-            long oldestNonCurrent = long.MaxValue;
-            long oldestUnprotected = long.MaxValue;
-            foreach ((long revNum, long lastModifiedPhysical, _, _) in revisions)
+            // Age reaches a surviving non-current row when a newer revision's commit falls behind the
+            // cutoff. The lowest surviving row is the first one that can happen to, so the time that
+            // reopens the verdict is the earliest commit among the rows above it, the current row
+            // included. The list is sorted newest first: the lowest survivor is the last one met.
+            long lowestSurvivorRevision = -1;
+            for (int i = revisions.Count - 1; i >= 0; i--)
             {
+                long revNum = revisions[i].Revision;
                 if (revNum == currentRevision || (deletedRevNums is not null && deletedRevNums.Contains(revNum)))
                     continue;
-                if (lastModifiedPhysical < oldestNonCurrent)
-                    oldestNonCurrent = lastModifiedPhysical;
-                bool protectedByFloor = needFloor && (floorRevision < 0 || revNum >= floorRevision);
-                if (!protectedByFloor && lastModifiedPhysical < oldestUnprotected)
-                    oldestUnprotected = lastModifiedPhysical;
+                lowestSurvivorRevision = revNum;
+                break;
+            }
+
+            long oldestNonCurrent = long.MaxValue;
+            long oldestUnprotected = long.MaxValue;
+            if (lowestSurvivorRevision >= 0)
+            {
+                oldestNonCurrent = currentOrdering.LastModifiedPhysical;
+                foreach ((long revNum, long lastModifiedPhysical, _, _) in revisions)
+                {
+                    if (revNum <= lowestSurvivorRevision || (deletedRevNums is not null && deletedRevNums.Contains(revNum)))
+                        continue;
+                    if (lastModifiedPhysical < oldestNonCurrent)
+                        oldestNonCurrent = lastModifiedPhysical;
+                }
+
+                // Rows the floor protects sit at or above its boundary, so if the lowest survivor is
+                // protected every survivor is, and only a moved floor releases one.
+                bool protectedByFloor = needFloor && (floorRevision < 0 || lowestSurvivorRevision >= floorRevision);
+                if (!protectedByFloor)
+                    oldestUnprotected = oldestNonCurrent;
             }
 
             // A delete record still inside the retention age holds rows that fall to the prune the

@@ -593,9 +593,9 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
 
         string bound = (byCount, byAge) switch
         {
-            (true, true) => $"the newest {configuration.PersistentRevisionRetentionCount} revisions per key and any revision younger than {configuration.PersistentRevisionRetentionAge} are kept; older ones past the count are pruned",
+            (true, true) => $"the newest {configuration.PersistentRevisionRetentionCount} revisions per key and any revision a read in the last {configuration.PersistentRevisionRetentionAge} can see are kept; older ones past the count are pruned",
             (true, false) => $"the newest {configuration.PersistentRevisionRetentionCount} revisions per key are kept; older ones are pruned regardless of age",
-            (false, true) => $"every revision younger than {configuration.PersistentRevisionRetentionAge} is kept regardless of count; older ones are pruned. History on disk grows at the write rate for that long before the prune deletes anything",
+            (false, true) => $"every revision a read in the last {configuration.PersistentRevisionRetentionAge} can see is kept regardless of count (a revision counts as old from the moment the next one replaced it); older ones are pruned. History on disk grows at the write rate for that long before the prune deletes anything",
             _ => "count and age retention are both disabled: no historical revision is ever pruned and history on disk is unbounded"
         };
 

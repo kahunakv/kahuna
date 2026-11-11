@@ -89,15 +89,26 @@ public sealed class TestRevisionPruneMemo : IDisposable
         Assert.Equal(0, Prune(key, age: age).RevisionsDeleted);
         Assert.Equal(1, Prune(key, age: age).KeysSkipped);
 
-        // Advancing the head turns revision 1's row into an old non-current row: the store path
-        // must move the memo so the next visit walks and deletes it.
-        Assert.True(backend.StoreKeyValues([Item(key, 2, NowMs)]));
+        // Advancing the head with a commit that is itself older than the cutoff turns revision 1's
+        // row into one no read in the window sees: the store path must move the memo so the next
+        // visit walks and deletes it.
+        Assert.True(backend.StoreKeyValues([Item(key, 2, NowMs - 60_000)]));
 
         RevisionPruneResult afterAdvance = Prune(key, age: age);
         Assert.Equal(0, afterAdvance.KeysSkipped);
         Assert.Equal(1, afterAdvance.RevisionsDeleted);
         Assert.Null(backend.GetKeyValueRevision(key, 1));
         Assert.NotNull(backend.GetKeyValue(key));
+
+        // A head that advances now leaves revision 2 visible inside the window: the visit walks
+        // once, keeps it, and the key is skipped from then on.
+        Assert.True(backend.StoreKeyValues([Item(key, 3, NowMs)]));
+
+        RevisionPruneResult afterFreshAdvance = Prune(key, age: age);
+        Assert.Equal(0, afterFreshAdvance.KeysSkipped);
+        Assert.Equal(0, afterFreshAdvance.RevisionsDeleted);
+        Assert.NotNull(backend.GetKeyValueRevision(key, 2));
+        Assert.Equal(1, Prune(key, age: age).KeysSkipped);
     }
 
     [Fact]
@@ -139,9 +150,11 @@ public sealed class TestRevisionPruneMemo : IDisposable
         Assert.Equal(2, partial.RevisionsDeleted);
         Assert.True(partial.BatchLimitReached);
 
+        // Revision 6 was replaced a moment ago, so it stays; 3 to 5 are what is left to delete.
         RevisionPruneResult rest = Prune(key, age: TimeSpan.FromSeconds(30), batchSize: 100);
         Assert.Equal(0, rest.KeysSkipped);
-        Assert.Equal(4, rest.RevisionsDeleted);
+        Assert.Equal(3, rest.RevisionsDeleted);
+        Assert.NotNull(backend.GetKeyValueRevision(key, 6));
 
         Assert.Equal(1, Prune(key, age: TimeSpan.FromSeconds(30)).KeysSkipped);
     }
@@ -174,11 +187,13 @@ public sealed class TestRevisionPruneMemo : IDisposable
         Assert.Null(backend.GetKeyValueRevision(key, 1));
         Assert.NotNull(backend.GetKeyValueRevision(key, 2));
 
-        // Floor lifted entirely: the remaining old rows go.
+        // Floor lifted entirely: revision 2 goes. Revision 3 was replaced a moment ago and stays.
         RevisionPruneResult lifted = Prune(key, age: TimeSpan.FromSeconds(30));
         Assert.Equal(0, lifted.KeysSkipped);
         Assert.Equal(0, lifted.KeysFloorBlocked);
-        Assert.Equal(2, lifted.RevisionsDeleted);
+        Assert.Equal(1, lifted.RevisionsDeleted);
+        Assert.Null(backend.GetKeyValueRevision(key, 2));
+        Assert.NotNull(backend.GetKeyValueRevision(key, 3));
     }
 
     [Fact]
@@ -202,32 +217,38 @@ public sealed class TestRevisionPruneMemo : IDisposable
     }
 
     [Fact]
-    public void FloorBlockedKey_StillWalksWhenAnUnprotectedRowAgesPastTheCutoff()
+    public void FloorBlockedKey_IsNotWalkedAgain_WhenTheCutoffOnlyPassesRowsTheFloorProtects()
     {
         const string key = "memo/floor-age";
         long now = NowMs;
 
-        // rev1 is the youngest-but-lowest revision (90 s old); rev2 (100 s old) is the floor boundary,
-        // so rev2 and everything above it is protected while rev1 is not.
-        Assert.True(backend.StoreKeyValues([Item(key, 1, now - 90_000), Item(key, 2, now - 100_000), Item(key, 3, now - 50_000), Item(key, 4, now)]));
-        HLCTimestamp floor = new(0, now - 95_000, 0);
+        Assert.True(backend.StoreKeyValues([Item(key, 1, now - 200_000), Item(key, 2, now - 100_000), Item(key, 3, now - 50_000), Item(key, 4, now)]));
 
-        // Age 95 s: rev2 is deletable but protected → floor-blocked; rev1 (90 s) is not old enough.
+        // The hold reads at 150 s ago and sees rev1, so rev1 and everything above it is protected.
+        HLCTimestamp floor = new(0, now - 150_000, 0);
+
+        // Age 95 s: a read at the cutoff sees rev2, so rev1 is deletable by age, but the hold reads it.
         RevisionPruneResult blocked = Prune(key, age: TimeSpan.FromSeconds(95), floor: floor);
         Assert.Equal(0, blocked.RevisionsDeleted);
         RevisionPruneResult blockedAgain = Prune(key, age: TimeSpan.FromSeconds(95), floor: floor);
         Assert.Equal(1, blockedAgain.KeysSkipped);
         Assert.Equal(1, blockedAgain.KeysFloorBlocked);
 
-        // Same floor, but the cutoff now passes rev1: the memo must not hide it behind the block.
-        RevisionPruneResult aged = Prune(key, age: TimeSpan.FromSeconds(80), floor: floor);
-        Assert.Equal(0, aged.KeysSkipped);
-        Assert.Equal(1, aged.RevisionsDeleted);
+        // Same floor, and the cutoff now passes rev3 too. Every row it reaches sits at or above the
+        // floor boundary, so a walk could delete nothing and the key still skips.
+        RevisionPruneResult aged = Prune(key, age: TimeSpan.FromSeconds(40), floor: floor);
+        Assert.Equal(1, aged.KeysSkipped);
+        Assert.Equal(1, aged.KeysFloorBlocked);
+        Assert.Equal(0, aged.RevisionsDeleted);
+
+        // The hold moves up to rev2: rev1 is below both boundaries and goes; rev2 is still read.
+        HLCTimestamp moved = new(0, now - 60_000, 0);
+        RevisionPruneResult released = Prune(key, age: TimeSpan.FromSeconds(40), floor: moved);
+        Assert.Equal(0, released.KeysSkipped);
+        Assert.Equal(1, released.RevisionsDeleted);
         Assert.Null(backend.GetKeyValueRevision(key, 1));
         Assert.NotNull(backend.GetKeyValueRevision(key, 2));
-
-        // Blocked again on rev2 only; nothing unprotected remains, so the key skips.
-        Assert.Equal(1, Prune(key, age: TimeSpan.FromSeconds(80), floor: floor).KeysSkipped);
+        Assert.NotNull(backend.GetKeyValueRevision(key, 3));
     }
 
     [Fact]
@@ -245,7 +266,7 @@ public sealed class TestRevisionPruneMemo : IDisposable
 
         // Recreated with old history: the fresh walk sees it.
         long old = NowMs - 120_000;
-        Assert.True(backend.StoreKeyValues([Item(key, 1, old), Item(key, 2, NowMs)]));
+        Assert.True(backend.StoreKeyValues([Item(key, 1, old), Item(key, 2, old + 1)]));
         RevisionPruneResult recreated = Prune(key, age: TimeSpan.FromSeconds(30));
         Assert.Equal(0, recreated.KeysSkipped);
         Assert.Equal(1, recreated.RevisionsDeleted);

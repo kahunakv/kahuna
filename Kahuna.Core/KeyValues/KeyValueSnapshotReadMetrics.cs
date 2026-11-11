@@ -50,6 +50,16 @@ internal static class KeyValueSnapshotReadMetrics
     /// that kept its history can still answer it. A burst of old statement reads can follow an install. A sustained
     /// rate means a client reads an old timestamp no snapshot hold names, or holds a hold the install could not pin.
     /// </summary>
+    /// <summary>
+    /// Snapshot reads refused because revision retention on this node already removed history at or above their
+    /// timestamp. A read there could find a key absent, or an older value, so it is answered SnapshotTooOld. A
+    /// sustained rate means a client reads for longer than the retention keeps history without a snapshot hold.
+    /// </summary>
+    internal static readonly Counter<long> PrunedHistoryRefused =
+        Meter.CreateCounter<long>(
+            "kahuna.kv.snapshot_pruned_history_refused_total",
+            description: "Snapshot reads refused because revision retention already removed history their timestamp could need.");
+
     internal static readonly Counter<long> InstalledHistoryFenceRefused =
         Meter.CreateCounter<long>(
             "kahuna.kv.snapshot_installed_history_refused_total",
