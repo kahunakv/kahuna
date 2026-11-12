@@ -36,6 +36,10 @@ internal sealed class PublishedHead
     /// live record with this flag clear proves no transaction holds a snapshot on the key.</summary>
     public readonly bool MvccHeld;
 
+    /// <summary>The process clock when this head became the committed head in this process, or zero when the
+    /// entry could not say (see <see cref="KeyValueEntry.HeadSeenTicks"/>).</summary>
+    public readonly long HeadSinceTicks;
+
     // 0 = live, 1 = retracted. Written only by the owning actor; read by every off-actor reader.
     private int retracted;
 
@@ -43,8 +47,9 @@ internal sealed class PublishedHead
     // actor thread so a key that is hot only through published reads is not treated as idle.
     private long lastUsedMs;
 
-    public PublishedHead(byte[]? value, long revision, HLCTimestamp expires, HLCTimestamp lastModified, KeyValueState state, bool mvccHeld, long lastUsedMs)
+    public PublishedHead(byte[]? value, long revision, HLCTimestamp expires, HLCTimestamp lastModified, KeyValueState state, bool mvccHeld, long lastUsedMs, long headSinceTicks = 0)
     {
+        HeadSinceTicks = headSinceTicks;
         Value = value;
         Revision = revision;
         Expires = expires;

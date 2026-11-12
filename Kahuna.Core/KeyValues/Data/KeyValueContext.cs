@@ -508,7 +508,8 @@ internal sealed class KeyValueContext
                     entry.LastModified,
                     entry.State,
                     mvccHeld: entry.MvccEntries is not null,
-                    lastUsedMs: entry.LastUsed.L);
+                    lastUsedMs: entry.LastUsed.L,
+                    headSinceTicks: entry.HeadSeenRevision == entry.Revision ? entry.HeadSeenTicks : 0);
 
                 entry.Published = head;
                 PublishedHeads.Publish(key, head);

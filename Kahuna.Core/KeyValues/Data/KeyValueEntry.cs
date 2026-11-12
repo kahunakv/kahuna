@@ -95,11 +95,32 @@ internal sealed class KeyValueEntry
     /// <summary>
     /// Current modification revision
     /// </summary>
+    /// <summary>
+    /// The head revision that <see cref="HeadSeenTicks"/> belongs to. In memory only, written by the key's actor.
+    /// </summary>
+    internal long HeadSeenRevision = long.MinValue;
+
+    /// <summary>
+    /// The process clock (<see cref="System.Diagnostics.Stopwatch.GetTimestamp"/>) when <see cref="HeadSeenRevision"/>
+    /// became the committed head in this process: stamped by the <see cref="Revision"/> setter, so at the install of
+    /// a committed write, and also when the entry is loaded or created. A load stamps a time later than the true
+    /// one. It never states an earlier time than the true one, which is what the read floor of a transaction
+    /// relies on (see <c>TransactionReadFloors</c>).
+    /// </summary>
+    internal long HeadSeenTicks;
+
     public long Revision
     {
         get => revision;
         set
         {
+            // The same revision set again is the same head: its stamp stands.
+            if (value != revision)
+            {
+                HeadSeenRevision = value;
+                HeadSeenTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+            }
+
             revision = value;
             HeadChanged();
         }

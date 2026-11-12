@@ -100,4 +100,14 @@ public sealed class KeyValueTransactionOptions
     /// the client; zero (embedded callers, Kahuna's own transactions) means no limit.
     /// </summary>
     public int MutationLimit { get; set; }
+
+    /// <summary>
+    /// Whether the registered latest reads of this transaction are held to one point in time. With true, a read
+    /// of a key the transaction has not read yet is answered only if every key it read before still has the
+    /// revision it read; otherwise the read answers <c>Aborted</c>. Without it each key is read at its own time,
+    /// and the transaction can be handed values of several keys that were never committed together, which only
+    /// its commit refuses. Honoured by the node the transaction is started on and issues its reads through; it
+    /// is not sent to another node. Experimental. See <see cref="TransactionReadFloors"/>.
+    /// </summary>
+    public bool ReadFloor { get; set; }
 }

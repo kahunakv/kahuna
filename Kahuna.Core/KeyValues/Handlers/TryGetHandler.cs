@@ -287,9 +287,35 @@ internal sealed class TryGetHandler : BaseHandler
                 || (mvccEntry.Expires != HLCTimestamp.Zero && mvccEntry.Expires - currentTime < TimeSpan.Zero))
                 return KeyValueStaticResponses.DoesNotExistContextResponse;
 
+            // For the read floor of the transaction (see TransactionReadFloors): how long the served revision has
+            // been the committed head, as far as this actor can vouch. A pin taken from a committed intent that
+            // the resident head does not include yet, or a staged write of the transaction, states nothing.
+            long servedTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+            long headSeenTicks = 0;
+
+            if (mvccEntry.StagedUnder is not null)
+            {
+                headSeenTicks = ReadOnlyKeyValueEntry.OwnStagedWrite;
+            }
+            else if (mvccEntry.Revision == entry.Revision)
+            {
+                // Stamped at the head's install; an entry whose stamp belongs to another revision states now.
+                if (entry.HeadSeenRevision != entry.Revision)
+                {
+                    entry.HeadSeenRevision = entry.Revision;
+                    entry.HeadSeenTicks = servedTicks;
+                }
+
+                headSeenTicks = entry.HeadSeenTicks;
+            }
+
             return PointReadStep.Serve(new ReadOnlyKeyValueEntry(
                 mvccEntry.Value, mvccEntry.Revision, mvccEntry.Expires,
-                mvccEntry.LastUsed, mvccEntry.LastModified, mvccEntry.State));
+                mvccEntry.LastUsed, mvccEntry.LastModified, mvccEntry.State)
+            {
+                HeadSeenTicks = headSeenTicks,
+                ServedTicks = servedTicks
+            });
         }
 
         // ── Statement read of a key this transaction staged a write on ──────────────────

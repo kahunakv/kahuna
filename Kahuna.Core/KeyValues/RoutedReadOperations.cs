@@ -28,10 +28,34 @@ internal sealed class RoutedReadOperations
 
     private readonly OperationRegistrar registrar;
 
+    private readonly TransactionReadFloors readFloors = new();
+
     internal RoutedReadOperations(KeyValuesRuntime runtime, OperationRegistrar registrar)
     {
         this.runtime = runtime;
         this.registrar = registrar;
+    }
+
+    /// <summary>Drops the read floor of a transaction this node committed or rolled back.</summary>
+    internal void ForgetReadFloor(HLCTimestamp transactionId) => readFloors.Forget(transactionId);
+
+    /// <summary>Starts holding the reads of a transaction this node started with a read floor.</summary>
+    internal void TrackReadFloor(HLCTimestamp transactionId) => readFloors.Track(transactionId);
+
+    /// <summary>
+    /// Whether a registered read is held to its transaction's read floor: the transaction asked for one and the
+    /// read is a latest read. A statement read and an as-of read name their own point in time.
+    /// </summary>
+    private bool HoldsToReadFloor(HLCTimestamp transactionId, HLCTimestamp readTimestamp) =>
+        readTimestamp.IsNull() && readFloors.Tracks(transactionId);
+
+    /// <summary>The committed head of a key as a read outside any transaction answers it.</summary>
+    private async ValueTask<(KeyValueResponseType, long)> ReadCommittedHead(string key, KeyValueDurability durability, CancellationToken cancellationToken)
+    {
+        (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) =
+            await locator.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, durability, cancellationToken);
+
+        return (type, entry?.Revision ?? -1);
     }
 
     // Aliases matching the field names the moved bodies use, so those bodies stay byte-for-byte as they were.
@@ -208,6 +232,23 @@ internal sealed class RoutedReadOperations
 
         bool exists = entry is not null && type is KeyValueResponseType.Get or KeyValueResponseType.Exists;
 
+        // Hold the read to the transaction's read floor: a key new to the transaction is answered only if the
+        // keys it read before still have the revisions it read. The observation is folded either way, so the
+        // commit of a refused transaction is refused too.
+        bool admitted = true;
+
+        if (HoldsToReadFloor(transactionId, readTimestamp)
+            && type is KeyValueResponseType.Get or KeyValueResponseType.Exists or KeyValueResponseType.DoesNotExist
+            && entry?.HeadSeenTicks != ReadOnlyKeyValueEntry.OwnStagedWrite)
+        {
+            TransactionReadFloors.Observation[] observed =
+            [
+                new(key, durability, exists, exists ? entry!.Revision : -1, entry?.HeadSeenTicks ?? 0, entry?.ServedTicks ?? 0)
+            ];
+
+            admitted = await readFloors.Admit(transactionId, observed, ReadCommittedHead, cancellationToken);
+        }
+
         // A plain as-of read is pinned to a past timestamp: it owns no live transactional MVCC entry and so
         // contributes no read dependency to validate at commit. It still completes for finalize fencing and
         // idempotent replay, but records no observation into the read set. A latest read and a statement read
@@ -235,6 +276,9 @@ internal sealed class RoutedReadOperations
 
         if (!completed)
             return (KeyValueResponseType.MustRetry, null);
+
+        if (!admitted)
+            return (KeyValueResponseType.Aborted, null);
 
         return (type, entry);
     }
@@ -514,6 +558,28 @@ internal sealed class RoutedReadOperations
             ? KeyValueResponseType.MustRetry
             : KeyValueResponseType.Get;
 
+        // Hold the probe to the transaction's read floor, as a single read is (see RegisterAndTryReadValue).
+        bool admitted = true;
+
+        if (HoldsToReadFloor(transactionId, readTimestamp) && observations is not null)
+        {
+            List<TransactionReadFloors.Observation> observed = new(observations.Count);
+
+            for (int i = 0; i < results.Length; i++)
+            {
+                KeyValueProbeResult result = results[i];
+
+                if (result.Type is not (KeyValueResponseType.Get or KeyValueResponseType.DoesNotExist)
+                    || result.Entry?.HeadSeenTicks == ReadOnlyKeyValueEntry.OwnStagedWrite)
+                    continue;
+
+                bool exists = result.Entry is not null && result.Type == KeyValueResponseType.Get;
+                observed.Add(new(keys[i], durability, exists, exists ? result.Entry!.Revision : -1, result.Entry?.HeadSeenTicks ?? 0, result.Entry?.ServedTicks ?? 0));
+            }
+
+            admitted = await readFloors.Admit(transactionId, observed, ReadCommittedHead, cancellationToken);
+        }
+
         OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
         payload.ReadObservations = observations;
         payload.AcquiredRangeLocks = acquired;
@@ -526,6 +592,11 @@ internal sealed class RoutedReadOperations
         {
             for (int i = 0; i < results.Length; i++)
                 results[i] = KeyValueProbeResult.MustRetry with { Locked = results[i].Locked };
+        }
+        else if (!admitted)
+        {
+            for (int i = 0; i < results.Length; i++)
+                results[i] = new KeyValueProbeResult(KeyValueResponseType.Aborted, null, HLCTimestamp.Zero, results[i].Locked);
         }
 
         return results;

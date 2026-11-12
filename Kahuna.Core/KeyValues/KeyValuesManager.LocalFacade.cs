@@ -393,10 +393,27 @@ internal sealed partial class KeyValuesManager
 
 
     public Task<(KeyValueResponseType, TransactionHandle)> LocateAndStartTransaction(KeyValueTransactionOptions options, CancellationToken cancellationToken) =>
-        transactionSessions.LocateAndStartTransaction(options, cancellationToken);
+        options.ReadFloor
+            ? StartWithReadFloor(transactionSessions.LocateAndStartTransaction(options, cancellationToken))
+            : transactionSessions.LocateAndStartTransaction(options, cancellationToken);
 
-    public Task<TransactionCommitAnswer> LocateAndCommitTransaction(TransactionHandle handle, CancellationToken cancellationToken) =>
-        transactionSessions.LocateAndCommitTransaction(handle, cancellationToken);
+    /// <summary>Holds the reads of a transaction that started with <see cref="KeyValueTransactionOptions.ReadFloor"/>.</summary>
+    private async Task<(KeyValueResponseType, TransactionHandle)> StartWithReadFloor(Task<(KeyValueResponseType, TransactionHandle)> start)
+    {
+        (KeyValueResponseType type, TransactionHandle handle) = await start;
+
+        if (type == KeyValueResponseType.Set && handle.TransactionId != HLCTimestamp.Zero)
+            routedReads.TrackReadFloor(handle.TransactionId);
+
+        return (type, handle);
+    }
+
+    public Task<TransactionCommitAnswer> LocateAndCommitTransaction(TransactionHandle handle, CancellationToken cancellationToken)
+    {
+        // The transaction issues no read after this, whatever the answer.
+        routedReads.ForgetReadFloor(handle.TransactionId);
+        return transactionSessions.LocateAndCommitTransaction(handle, cancellationToken);
+    }
 
     public Task<TransactionWorkingSet?> LocateAndGetTransactionWorkingSet(string coordinatorKey, HLCTimestamp transactionId, CancellationToken cancellationToken) =>
         transactionSessions.LocateAndGetTransactionWorkingSet(coordinatorKey, transactionId, cancellationToken);
@@ -410,14 +427,19 @@ internal sealed partial class KeyValuesManager
     public Task<(KeyValueResponseType, TransactionWorkingSet?)> CloseTransaction(HLCTimestamp transactionId, CancellationToken cancellationToken) =>
         transactionSessions.CloseTransaction(transactionId, cancellationToken);
 
-    public Task<KeyValueResponseType> LocateAndRollbackTransaction(TransactionHandle handle, CancellationToken cancellationToken) =>
-        transactionSessions.LocateAndRollbackTransaction(handle, cancellationToken);
+    public Task<KeyValueResponseType> LocateAndRollbackTransaction(TransactionHandle handle, CancellationToken cancellationToken)
+    {
+        routedReads.ForgetReadFloor(handle.TransactionId);
+        return transactionSessions.LocateAndRollbackTransaction(handle, cancellationToken);
+    }
 
     public Task<KeyValueTransactionResult> TryExecuteTx(ReadOnlyMemory<byte> script, string? hash, List<KeyValueParameter>? parameters, TransactionPriority priority = TransactionPriority.Normal, int mutationLimit = 0) =>
         transactionSessions.TryExecuteTx(script, hash, parameters, priority, mutationLimit);
 
     public Task<(KeyValueResponseType, TransactionHandle)> StartTransaction(KeyValueTransactionOptions options) =>
-        transactionSessions.StartTransaction(options);
+        options.ReadFloor
+            ? StartWithReadFloor(transactionSessions.StartTransaction(options))
+            : transactionSessions.StartTransaction(options);
 
     internal DecisionDurability? GetRecordedDecisionDurability(HLCTimestamp transactionId) =>
         transactionSessions.GetRecordedDecisionDurability(transactionId);

@@ -128,6 +128,10 @@ internal sealed class PublishedHeadReader
         KeyValueActorRing ring = durability == KeyValueDurability.Ephemeral ? ephemeralRing : persistentRing;
         PublishedHeadTable table = ring.PublishedHeadsFor(key);
 
+        // For the read floor of a transaction: a time at which the record below was the committed head. Taken
+        // before the record is looked up, so only a record installed after it needs the later of the two.
+        long beforeLookupTicks = transactional && !snapshot ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+
         if (!table.TryGet(key, out PublishedHead head) || head.IsRetracted || table.PrefixLocksHeld)
             return false;
 
@@ -162,7 +166,11 @@ internal sealed class PublishedHeadReader
         if (transactional && !snapshot)
             ring.Send(KeyValueRequestPool.RentReadPin(key, transactionId, durability, head));
 
-        entry = new ReadOnlyKeyValueEntry(head.Value, head.Revision, head.Expires, currentTime, head.LastModified, head.State);
+        entry = new ReadOnlyKeyValueEntry(head.Value, head.Revision, head.Expires, currentTime, head.LastModified, head.State)
+        {
+            HeadSeenTicks = beforeLookupTicks != 0 ? head.HeadSinceTicks : 0,
+            ServedTicks = beforeLookupTicks != 0 && head.HeadSinceTicks != 0 ? Math.Max(beforeLookupTicks, head.HeadSinceTicks) : 0
+        };
         return true;
     }
 }
