@@ -122,4 +122,11 @@ public enum KeyValueRequestType
     /// never replicated.
     /// </summary>
     TrySetMany = 36,
+
+    /// <summary>
+    /// Wakes a transactional read that parked behind a live write intent of another transaction: the intent went
+    /// away, the key left the store, or the wait's timer fired. The read runs again from the start in this turn.
+    /// Sent by an actor to itself; never replicated, never sent between nodes.
+    /// </summary>
+    ResumeIntentWait = 37,
 }

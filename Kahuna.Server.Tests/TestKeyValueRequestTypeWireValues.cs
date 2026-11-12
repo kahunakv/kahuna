@@ -53,6 +53,7 @@ public sealed class TestKeyValueRequestTypeWireValues
         (KeyValueRequestType.TryProbeMany, 34),
         (KeyValueRequestType.TryProbeManyRanges, 35),
         (KeyValueRequestType.TrySetMany, 36),
+        (KeyValueRequestType.ResumeIntentWait, 37),
     ];
 
     [Fact]

@@ -63,7 +63,8 @@ internal sealed class LocatorReadOperations
         HLCTimestamp readTimestamp,
         KeyValueDurability durability,
         CancellationToken cancellationToken,
-        KeyValueReadMode readMode = KeyValueReadMode.Default
+        KeyValueReadMode readMode = KeyValueReadMode.Default,
+        KeyValueIntentWait intentWait = default
     )
     {
         if (string.IsNullOrEmpty(key) || !KeyValueReadModeChecks.IsWellFormed(readMode, readTimestamp))
@@ -86,8 +87,16 @@ internal sealed class LocatorReadOperations
         if (confirmed)
         {
             routing.RecordLocalKeyRoute(key, partitionId);
-            LocalPointRead local = await manager.TryGetValueLocal(transactionId, key, revision, readTimestamp, durability, readMode);
+            LocalPointRead local = await manager.TryGetValueLocal(transactionId, key, revision, readTimestamp, durability, readMode, intentWait);
             KeyValueReadMetrics.RecordActor(confirmEnd, Stopwatch.GetTimestamp(), local.ServedFromPublishedHead);
+
+            // A read that may wait behind a write intent can be answered long after the confirmation above. Confirm
+            // again, so its answer is never older than a leadership a quorum confirmed: a node that lost the
+            // partition while the read waited answers MustRetry and the caller finds the new leader.
+            if (MayHaveWaited(transactionId, readTimestamp, intentWait, local.ServedFromPublishedHead)
+                && !await routing.ConfirmLeadershipForRead(partitionId, cancellationToken))
+                return (KeyValueResponseType.MustRetry, null);
+
             return (local.Type, local.Entry);
         }
 
@@ -101,7 +110,7 @@ internal sealed class LocatorReadOperations
 
         ValueStopwatch stopwatch = ValueStopwatch.StartNew();
 
-        (KeyValueResponseType, ReadOnlyKeyValueEntry?) response = await interNodeCommunication.TryGetValue(leader, transactionId, key, revision, readTimestamp, durability, cancellationToken, readMode);
+        (KeyValueResponseType, ReadOnlyKeyValueEntry?) response = await interNodeCommunication.TryGetValue(leader, transactionId, key, revision, readTimestamp, durability, cancellationToken, readMode, intentWait);
 
         if (logger.IsEnabled(LogLevel.Debug))
             logger.LogGetKeyValueRedirected(key, partitionId, leader, stopwatch.GetElapsedMilliseconds());
@@ -109,6 +118,14 @@ internal sealed class LocatorReadOperations
         return response;
     }
     
+    /// <summary>
+    /// Whether a local read may have parked behind a live write intent before it was answered (see
+    /// <see cref="KeyValueIntentWait"/>): a transactional latest read that asked to wait and was not answered from
+    /// the published head record.
+    /// </summary>
+    internal static bool MayHaveWaited(HLCTimestamp transactionId, HLCTimestamp readTimestamp, KeyValueIntentWait intentWait, bool servedFromPublishedHead) =>
+        intentWait.IsEnabled && transactionId != HLCTimestamp.Zero && readTimestamp.IsNull() && !servedFromPublishedHead;
+
     /// <summary>
     /// Locates the leader node for the given key and executes the TryExistsValue request.
     /// </summary>

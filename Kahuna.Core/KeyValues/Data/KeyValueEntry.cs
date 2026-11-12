@@ -42,6 +42,12 @@ internal sealed class KeyValueEntry
     internal bool PublishQueued;
 
     /// <summary>
+    /// Transactional reads parked on this entry behind its live write intent (see
+    /// <see cref="Handlers.IntentWaitRegistry"/>), or null when none is. Actor thread only.
+    /// </summary>
+    internal List<Handlers.ParkedIntentRead>? ParkedReads;
+
+    /// <summary>
     /// Retracts the live published record, if any, and queues the entry for republication at the end of the
     /// actor turn. Called by every setter whose value an off-actor reader would serve or must defer to.
     /// </summary>

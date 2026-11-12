@@ -1129,7 +1129,8 @@ public class GrpcCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
         CancellationToken cancellationToken,
         string coordinatorKey = "",
         TransactionOperationId operationId = default,
-        KeyValueReadMode readMode = KeyValueReadMode.Default
+        KeyValueReadMode readMode = KeyValueReadMode.Default,
+        KeyValueIntentWait intentWait = default
     )
     {
         GrpcTryGetKeyValueRequest request = new()
@@ -1146,7 +1147,9 @@ public class GrpcCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             CoordinatorKey = coordinatorKey,
             OperationIdHigh = operationId.High,
             OperationIdLow = operationId.Low,
-            ReadMode = (GrpcKeyValueReadMode)readMode
+            ReadMode = (GrpcKeyValueReadMode)readMode,
+            IntentWaitMs = intentWait.LimitMs,
+            IntentWaitHoldsLocks = intentWait.HoldsLocks
         };
 
         for (int unavailableRetries = 0; unavailableRetries < 2; unavailableRetries++)

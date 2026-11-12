@@ -53,7 +53,7 @@ public interface IInterNodeCommunication
 
     public Task<(KeyValueResponseType, long, HLCTimestamp)> TryExtendKeyValue(string node, HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken);
 
-    public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryGetValue(string node, HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, KeyValueReadMode readMode = KeyValueReadMode.Default);
+    public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryGetValue(string node, HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, KeyValueReadMode readMode = KeyValueReadMode.Default, KeyValueIntentWait intentWait = default);
 
     public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryExistsValue(string node, HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken);
 
@@ -63,7 +63,7 @@ public interface IInterNodeCommunication
     /// Forwards a batched probe to the node that leads its keys' partitions, which routes the keys again on
     /// arrival. Returns one result per key, in order. A transport failure answers <c>MustRetry</c> for every key.
     /// </summary>
-    public Task<KeyValueProbeResult[]> TryProbeMany(string node, HLCTimestamp transactionId, HLCTimestamp readTimestamp, string[] keys, KeyValueProbeLock lockMode, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, KeyValueReadMode readMode = KeyValueReadMode.Default);
+    public Task<KeyValueProbeResult[]> TryProbeMany(string node, HLCTimestamp transactionId, HLCTimestamp readTimestamp, string[] keys, KeyValueProbeLock lockMode, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, KeyValueReadMode readMode = KeyValueReadMode.Default, KeyValueIntentWait intentWait = default);
 
     /// <summary>
     /// Forwards a batched range probe to the node that leads its seeks' partitions, which routes the seeks again on

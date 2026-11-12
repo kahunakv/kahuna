@@ -90,6 +90,20 @@ public sealed class KeyValueRequest : IConsistentHashable
     public KeyValueReadMode ReadMode { get; internal set; }
 
     /// <summary>
+    /// Lets the first transactional latest read of a key (a point get or a batched probe) park behind a live write
+    /// intent of another transaction instead of pinning the committed head below it (see
+    /// <see cref="KeyValueIntentWait"/>). <see cref="KeyValueIntentWait.None"/> on every other request.
+    /// </summary>
+    public KeyValueIntentWait IntentWait { get; internal set; }
+
+    /// <summary>
+    /// The parked read a <see cref="KeyValueRequestType.ResumeIntentWait"/> message wakes. Null on every other type.
+    /// The message's <see cref="CompareRevision"/> carries the park generation the wake was armed for, so a timer
+    /// armed for an earlier park of the same read is dropped.
+    /// </summary>
+    internal Handlers.ParkedIntentRead? ParkedRead { get; set; }
+
+    /// <summary>
     /// Prefix scans: when set, entries whose newest visible state is <see cref="KeyValueState.Deleted"/>
     /// are returned with that state instead of being filtered out. The cluster-wide scan union needs
     /// tombstones to travel so a node that has applied a committed delete can suppress a stale live
@@ -345,6 +359,8 @@ public sealed class KeyValueRequest : IConsistentHashable
         Limit = 0;
         ReadTimestamp = HLCTimestamp.Zero;
         ReadMode = KeyValueReadMode.Default;
+        IntentWait = KeyValueIntentWait.None;
+        ParkedRead = null;
         IncludeTombstones = false;
         ForeignDecisionHint = default;
         ForeignScanDecisions = null;

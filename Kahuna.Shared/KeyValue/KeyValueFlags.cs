@@ -28,5 +28,15 @@ public enum KeyValueFlags
     /// client promise as <c>MustRetry</c> — the caller retries and the write succeeds once the
     /// partition settles — rather than surfacing the retryable failure as terminal <c>Errored</c>.
     /// </summary>
-    ReplicationRetry = 1 << 7        // 128
+    ReplicationRetry = 1 << 7,       // 128
+
+    /// <summary>
+    /// A transactional set that can no longer commit answers <c>Aborted</c> at once instead of <c>MustRetry</c>.
+    /// The set is doomed when a live write intent of another transaction refuses it and this transaction already
+    /// read the key (it holds a read pin on the key and staged no write there): the pin is below the other
+    /// transaction's write, so the set can succeed only if that transaction rolls back. Without the flag the set
+    /// answers <c>MustRetry</c> with the holder, and the caller waits for the holder's outcome. Ignored outside a
+    /// transaction.
+    /// </summary>
+    AbortWhenDoomed = 1 << 8         // 256
 }

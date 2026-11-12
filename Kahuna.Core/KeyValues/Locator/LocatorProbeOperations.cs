@@ -80,7 +80,8 @@ internal sealed class LocatorProbeOperations
         int expiresMs,
         KeyValueDurability durability,
         CancellationToken cancellationToken,
-        KeyValueReadMode readMode = KeyValueReadMode.Default
+        KeyValueReadMode readMode = KeyValueReadMode.Default,
+        KeyValueIntentWait intentWait = default
     )
     {
         if (!IsWellFormedProbe(transactionId, keys, lockMode, expiresMs) || !KeyValueReadModeChecks.IsWellFormed(readMode, readTimestamp))
@@ -190,7 +191,16 @@ internal sealed class LocatorProbeOperations
             }
 
             KeyValueProbeResult[] answers = await manager.TryProbeMany(
-                transactionId, readTimestamp, Subset(keys, positions), lockMode, expiresMs, durability, readMode);
+                transactionId, readTimestamp, Subset(keys, positions), lockMode, expiresMs, durability, readMode, intentWait);
+
+            // A probe that may wait behind a write intent can be answered long after the confirmation above: confirm
+            // again, as a single read does. A key that took a lock keeps reporting it, so the caller releases it.
+            if (LocatorReadOperations.MayHaveWaited(transactionId, readTimestamp, intentWait, servedFromPublishedHead: false)
+                && !await routing.ConfirmLeadershipForRead(partitionId, cancellationToken))
+            {
+                for (int j = 0; j < answers.Length; j++)
+                    answers[j] = KeyValueProbeResult.MustRetry with { Locked = answers[j].Locked };
+            }
 
             // No shared array means this group is the only one and holds every key in input order: its answers
             // are the result. The array is this call's own; nothing else writes to it.
@@ -219,7 +229,7 @@ internal sealed class LocatorProbeOperations
                 logger.LogDebug("PROBE-MANY {Count} keys redirected to {Leader}", positions.Count, leader);
 
             KeyValueProbeResult[] answers = await interNodeCommunication.TryProbeMany(
-                leader, transactionId, readTimestamp, Subset(keys, positions), lockMode, expiresMs, durability, cancellationToken, readMode);
+                leader, transactionId, readTimestamp, Subset(keys, positions), lockMode, expiresMs, durability, cancellationToken, readMode, intentWait);
 
             results ??= new KeyValueProbeResult[keys.Count];
 

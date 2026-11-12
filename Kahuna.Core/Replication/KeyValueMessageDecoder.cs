@@ -85,6 +85,7 @@ internal static class KeyValueMessageDecoder
             or KeyValueRequestType.TryFinalizeMutation
             or KeyValueRequestType.RunActorTurn
             or KeyValueRequestType.RecordReadPin
+            or KeyValueRequestType.ResumeIntentWait
             or KeyValueRequestType.TryProbeMany
             or KeyValueRequestType.TryProbeManyRanges
             or KeyValueRequestType.TrySetMany => KeyValueRecordKind.NotLogged,

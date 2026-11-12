@@ -305,7 +305,7 @@ public sealed class TestClientBatchFrames
         public override ValueTask<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
             HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp,
             KeyValueDurability durability, CancellationToken cancellationToken,
-            string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default)
+            string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default, KeyValueIntentWait intentWait = default)
             => ValueTask.FromResult<(KeyValueResponseType, ReadOnlyKeyValueEntry?)>((
                 KeyValueResponseType.Get,
                 new ReadOnlyKeyValueEntry(ValueFor(key), 1, HLCTimestamp.Zero, HLCTimestamp.Zero, LastModified, KeyValueState.Set)));

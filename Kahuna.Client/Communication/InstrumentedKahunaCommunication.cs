@@ -118,10 +118,10 @@ internal sealed class InstrumentedKahunaCommunication : IKahunaCommunication
         catch (Exception ex) { op.Fail(ex); throw; }
     }
 
-    public Task<(bool, byte[]?, long, HLCTimestamp, int)> TryGetKeyValue(string url, HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default)
+    public Task<(bool, byte[]?, long, HLCTimestamp, int)> TryGetKeyValue(string url, HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default, KeyValueIntentWait intentWait = default)
     {
         KahunaClientOperation op = KahunaClientOperation.Begin("GetKeyValue", url);
-        try { return op.Observe(inner.TryGetKeyValue(url, transactionId, key, revision, readTimestamp, durability, cancellationToken, coordinatorKey, operationId, readMode)); }
+        try { return op.Observe(inner.TryGetKeyValue(url, transactionId, key, revision, readTimestamp, durability, cancellationToken, coordinatorKey, operationId, readMode, intentWait)); }
         catch (Exception ex) { op.Fail(ex); throw; }
     }
 

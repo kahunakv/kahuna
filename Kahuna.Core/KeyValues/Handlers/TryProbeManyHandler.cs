@@ -46,6 +46,95 @@ internal sealed class TryProbeManyHandler : BaseHandler
 
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
 
+        long intentWaitDeadline = getHandler.IntentWaitDeadline(message);
+
+        if (intentWaitDeadline != 0 && FindIntentToWaitFor(message, keys, currentTime, intentWaitDeadline) is { } entry)
+            return ParkFirstProbe(message, keys, entry, intentWaitDeadline, currentTime);
+
+        // A probe served inline from inside another request's turn, or driven without an actor, finishes its
+        // backend reads in this turn instead of deferring a reply that is not its own.
+        bool deferReply = context.ActorContext is not null && message.Inline is null;
+
+        return await Probe(message, keys, currentTime, deferReply);
+    }
+
+    /// <summary>
+    /// The first key of the probe whose read must park behind a live write intent of another transaction (see
+    /// <see cref="TryGetHandler.MustParkBehindIntent"/>), checked before any key is locked or read, or null when no
+    /// key must wait. The whole probe then parks on that key and runs again from the start when it wakes, so a probe
+    /// never leaves some of its keys pinned below an intent it chose to wait for.
+    /// </summary>
+    private KeyValueEntry? FindIntentToWaitFor(KeyValueRequest message, string[] keys, HLCTimestamp currentTime, long deadline)
+    {
+        ForeignDecisionHint[]? hints = message.ProbeHints;
+
+        for (int i = 0; i < keys.Length; i++)
+        {
+            if (!context.Store.TryGetValue(keys[i], out KeyValueEntry? entry) || entry.WriteIntent is null)
+                continue;
+
+            if (getHandler.MustParkBehindIntent(keys[i], message.TransactionId, message.IntentWait, hints is null ? default : hints[i], entry, currentTime, deadline))
+                return entry;
+
+            // A key that took an exit (the deadline, wait-die, the bounds) does not wait, and no other key does: the
+            // probe is one read, and one exit decides it.
+            if (getHandler.LastWaitExit is not null)
+                return null;
+        }
+
+        return null;
+    }
+
+    private KeyValueResponse ParkFirstProbe(KeyValueRequest message, string[] keys, KeyValueEntry entry, long deadline, HLCTimestamp currentTime)
+    {
+        IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext = context.ActorContext;
+
+        KeyValueRequest copy = new(
+            KeyValueRequestType.TryProbeMany, message.TransactionId, HLCTimestamp.Zero, keys[0], null, null, -1,
+            KeyValueFlags.None, message.ExpiresMs, HLCTimestamp.Zero, message.Durability, 0, message.PartitionId, default)
+        {
+            ReadMode = message.ReadMode,
+            ProbeKeys = (string[])keys.Clone(),
+            ProbeHints = message.ProbeHints is { } hints ? (ForeignDecisionHint[])hints.Clone() : null,
+            ProbeLock = message.ProbeLock,
+            IntentWait = message.IntentWait
+        };
+
+        ParkedIntentRead read = new(copy, KeyValueReplyRef.From(actorContext.Reply!.Value), deadline, actorContext.Self.Send);
+        context.IntentWaits.Park(read, entry, currentTime);
+
+        actorContext.ByPassReply = true;
+        return KeyValueStaticResponses.WaitingForReplicationResponse;
+    }
+
+    /// <summary>
+    /// Runs a woken probe again from the start. Returns the answer, or null when the probe parked again. The probe
+    /// finishes in this turn: the turn belongs to the wake message, whose reply is not the probe's, and a
+    /// transactional latest probe (the only kind that parks) loads its missing heads inline anyway.
+    /// </summary>
+    internal async ValueTask<KeyValueResponse?> ResumeParkedProbe(ParkedIntentRead read)
+    {
+        KeyValueRequest message = read.Request;
+        string[] keys = message.ProbeKeys!;
+
+        HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
+
+        getHandler.ClearWaitExit();
+
+        if (FindIntentToWaitFor(message, keys, currentTime, read.DeadlineTick) is { } entry)
+        {
+            context.IntentWaits.Park(read, entry, currentTime);
+            return null;
+        }
+
+        return await Probe(message, keys, currentTime, deferReply: false);
+    }
+
+    /// <summary>The exit the probe's last wait decision recorded, or null when it recorded none.</summary>
+    internal IntentWaitExit? LastWaitExit => getHandler.LastWaitExit;
+
+    private async ValueTask<KeyValueResponse> Probe(KeyValueRequest message, string[] keys, HLCTimestamp currentTime, bool deferReply)
+    {
         KeyValueProbeResult[] results = new KeyValueProbeResult[keys.Length];
         Transactions.Data.ForeignDecisionHint[]? hints = message.ProbeHints;
 
@@ -58,10 +147,6 @@ internal sealed class TryProbeManyHandler : BaseHandler
             : null;
 
         Dictionary<string, ReadOnlyKeyValueEntry?>? preloadedHeads = await PreloadMissingHeads(message, keys);
-
-        // A probe served inline from inside another request's turn, or driven without an actor, finishes its
-        // backend reads in this turn instead of deferring a reply that is not its own.
-        bool deferReply = context.ActorContext is not null && message.Inline is null;
 
         ProbeManyContinuation? deferred = null;
 
@@ -140,7 +225,7 @@ internal sealed class TryProbeManyHandler : BaseHandler
         if (deferred is null)
             return KeyValueResponse.ForProbe(results);
 
-        return await Dispatch(message, deferred, keys, currentTime);
+        return await Dispatch(message, deferred, keys, currentTime, deferReply);
     }
 
     /// <summary>
@@ -293,7 +378,7 @@ internal sealed class TryProbeManyHandler : BaseHandler
     /// served inline from inside another request's turn (whose reply is not this probe's to defer), the same two
     /// stages run here and the answer is returned directly.
     /// </summary>
-    private async ValueTask<KeyValueResponse> Dispatch(KeyValueRequest message, ProbeManyContinuation deferred, string[] keys, HLCTimestamp currentTime)
+    private async ValueTask<KeyValueResponse> Dispatch(KeyValueRequest message, ProbeManyContinuation deferred, string[] keys, HLCTimestamp currentTime, bool deferReply)
     {
         Persistence.Backend.IPersistenceBackend backend = context.PersistenceBackend;
         Persistence.KeyValuePointReadExecutor pointReads = context.PointReadExecutor;
@@ -301,7 +386,7 @@ internal sealed class TryProbeManyHandler : BaseHandler
 
         IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse>? actorContext = context.ActorContext;
 
-        if (actorContext is null || message.Inline is not null)
+        if (actorContext is null || !deferReply)
         {
             // No joined reads here: a probe that finishes inside its turn never joins (see AttachRead).
             if (deferred.HasOwnReads)

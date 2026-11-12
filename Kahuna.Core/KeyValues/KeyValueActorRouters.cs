@@ -112,7 +112,8 @@ internal sealed class KeyValueActorRouters
     /// backpressure: <c>InvalidateOrApply</c> (follower cache coherence — dropping it yields a stale
     /// read), <c>FlushAck</c> (durability marker), and the periodic <c>Collect</c> / snapshot
     /// <c>GetSafeTimestamp</c>, and <c>RecordReadPin</c> (the pin of a read already answered off the actor —
-    /// dropping it would let the transaction's later write skip the conflict check against what it read).
+    /// dropping it would let the transaction's later write skip the conflict check against what it read), and
+    /// <c>ResumeIntentWait</c> (the wake of a parked read whose caller still waits for its answer).
     /// Everything else is an external user op and is subject to the bound.
     /// </summary>
     internal static bool IsControlRequest(KeyValueRequest request) =>
@@ -123,7 +124,8 @@ internal sealed class KeyValueActorRouters
             or KeyValueRequestType.FlushAck
             or KeyValueRequestType.Collect
             or KeyValueRequestType.GetSafeTimestamp
-            or KeyValueRequestType.RecordReadPin;
+            or KeyValueRequestType.RecordReadPin
+            or KeyValueRequestType.ResumeIntentWait;
 
     /// <summary>
     /// Sends a request to a bounded key-value actor ring, mapping inbox-full backpressure (a hot

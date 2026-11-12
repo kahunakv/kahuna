@@ -23,7 +23,8 @@ internal static class ProbeManyWire
         KeyValueProbeLock lockMode,
         int expiresMs,
         KeyValueDurability durability,
-        KeyValueReadMode readMode = KeyValueReadMode.Default)
+        KeyValueReadMode readMode = KeyValueReadMode.Default,
+        KeyValueIntentWait intentWait = default)
     {
         GrpcTryProbeManyRequest request = new()
         {
@@ -36,7 +37,9 @@ internal static class ProbeManyWire
             Durability = (GrpcKeyValueDurability)durability,
             LockMode = (GrpcProbeLockMode)lockMode,
             ExpiresMs = expiresMs,
-            ReadMode = (GrpcKeyValueReadMode)readMode
+            ReadMode = (GrpcKeyValueReadMode)readMode,
+            IntentWaitMs = intentWait.LimitMs,
+            IntentWaitHoldsLocks = intentWait.HoldsLocks
         };
 
         Reserve(request.Keys, keys.Count);

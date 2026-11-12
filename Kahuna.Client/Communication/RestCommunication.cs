@@ -1016,7 +1016,8 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
         CancellationToken cancellationToken,
         string coordinatorKey = "",
         TransactionOperationId operationId = default,
-        KeyValueReadMode readMode = KeyValueReadMode.Default
+        KeyValueReadMode readMode = KeyValueReadMode.Default,
+        KeyValueIntentWait intentWait = default
     )
     {
         KahunaGetKeyValueRequest request = new()
@@ -1027,6 +1028,8 @@ public class RestCommunication : IKahunaCommunication, IKahunaRouteSinkReceiver,
             ReadTimestamp = readTimestamp,
             Durability = durability,
             ReadMode = readMode,
+            IntentWaitMs = intentWait.LimitMs,
+            IntentWaitHoldsLocks = intentWait.HoldsLocks,
             CoordinatorKey = coordinatorKey,
             OperationIdHigh = operationId.High,
             OperationIdLow = operationId.Low

@@ -77,7 +77,7 @@ namespace RadLine
 
             // Render the prompt
             builder.Append(_console.ToAnsi(prompt));
-            builder.Append(new string(' ', margin));
+            builder.Append(' ', margin);
 
             // Build the buffer
             var width = _console.Profile.Width - prompt.Length - margin - 1;

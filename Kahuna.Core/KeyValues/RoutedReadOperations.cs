@@ -79,7 +79,8 @@ internal sealed class RoutedReadOperations
         CancellationToken cancellationToken,
         string coordinatorKey = "",
         TransactionOperationId operationId = default,
-        KeyValueReadMode readMode = KeyValueReadMode.Default
+        KeyValueReadMode readMode = KeyValueReadMode.Default,
+        KeyValueIntentWait intentWait = default
     )
     {
         if (ReservedKeys.IsReserved(key) || !KeyValueReadModeChecks.IsWellFormed(readMode, readTimestamp))
@@ -87,12 +88,12 @@ internal sealed class RoutedReadOperations
 
         RegistrationRouting routing = ClassifyRegistration(transactionId, coordinatorKey, operationId);
         if (routing is RegistrationRouting.Legacy)
-            return TryGetValueDirect(transactionId, key, revision, readTimestamp, durability, readMode, cancellationToken);
+            return TryGetValueDirect(transactionId, key, revision, readTimestamp, durability, readMode, intentWait, cancellationToken);
         if (routing is RegistrationRouting.Malformed)
             return new((KeyValueResponseType.InvalidInput, null));
 
         // A registered read always suspends on its registration, so its task is the one allocation it needs.
-        return new(RegisterAndTryReadValue(OperationKind.Get, transactionId, coordinatorKey, operationId, key, revision, readTimestamp, durability, cancellationToken, readMode));
+        return new(RegisterAndTryReadValue(OperationKind.Get, transactionId, coordinatorKey, operationId, key, revision, readTimestamp, durability, cancellationToken, readMode, intentWait));
     }
 
     /// <summary>
@@ -105,10 +106,10 @@ internal sealed class RoutedReadOperations
     /// </para>
     /// </summary>
     private ValueTask<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryGetValueDirect(
-        HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, KeyValueReadMode readMode, CancellationToken cancellationToken)
+        HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, KeyValueReadMode readMode, KeyValueIntentWait intentWait, CancellationToken cancellationToken)
     {
         long start = Stopwatch.GetTimestamp();
-        ValueTask<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> read = locator.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken, readMode);
+        ValueTask<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> read = locator.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken, readMode, intentWait);
 
         if (!read.IsCompletedSuccessfully)
             return AwaitDirectRead(read, start);
@@ -146,8 +147,9 @@ internal sealed class RoutedReadOperations
     private async Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> RegisterAndTryReadValue(
         OperationKind kind, HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId, string key,
         long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken,
-        KeyValueReadMode readMode = KeyValueReadMode.Default)
+        KeyValueReadMode readMode = KeyValueReadMode.Default, KeyValueIntentWait intentWait = default)
     {
+        // The wait is not part of the digest: it changes when the read is answered, not what it reads.
         byte[] digest = OperationDigest.ForRead(kind, key, revision, readTimestamp, durability, readMode);
 
         long start = Stopwatch.GetTimestamp();
@@ -189,7 +191,7 @@ internal sealed class RoutedReadOperations
         {
             (type, entry) = kind == OperationKind.Exists
                 ? await locator.LocateAndTryExistsValue(transactionId, key, revision, readTimestamp, durability, cancellationToken)
-                : await locator.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken, readMode);
+                : await locator.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken, readMode, intentWait);
         }
         catch
         {
@@ -367,7 +369,8 @@ internal sealed class RoutedReadOperations
         CancellationToken cancellationToken,
         string coordinatorKey = "",
         TransactionOperationId operationId = default,
-        KeyValueReadMode readMode = KeyValueReadMode.Default
+        KeyValueReadMode readMode = KeyValueReadMode.Default,
+        KeyValueIntentWait intentWait = default
     )
     {
         if (!KeyValueReadModeChecks.IsWellFormed(readMode, readTimestamp))
@@ -375,13 +378,13 @@ internal sealed class RoutedReadOperations
 
         RegistrationRouting routing = ClassifyRegistration(transactionId, coordinatorKey, operationId);
         if (routing is RegistrationRouting.Legacy)
-            return locator.LocateAndTryProbeMany(transactionId, readTimestamp, keys, lockMode, expiresMs, durability, cancellationToken, readMode);
+            return locator.LocateAndTryProbeMany(transactionId, readTimestamp, keys, lockMode, expiresMs, durability, cancellationToken, readMode, intentWait);
 
         // The re-entry-only mode is the replay a registered probe derives for itself; a caller never asks for it.
         if (routing is RegistrationRouting.Malformed || lockMode == KeyValueProbeLock.SharedReentryOnly)
             return Task.FromResult(BuildProbeRejection(keys.Count, KeyValueResponseType.InvalidInput));
 
-        return RegisterAndTryProbeMany(transactionId, coordinatorKey, operationId, readTimestamp, keys, lockMode, expiresMs, durability, readMode, cancellationToken);
+        return RegisterAndTryProbeMany(transactionId, coordinatorKey, operationId, readTimestamp, keys, lockMode, expiresMs, durability, readMode, intentWait, cancellationToken);
     }
 
     private static KeyValueProbeResult[] BuildProbeRejection(int count, KeyValueResponseType type)
@@ -411,7 +414,7 @@ internal sealed class RoutedReadOperations
     private async Task<KeyValueProbeResult[]> RegisterAndTryProbeMany(
         HLCTimestamp transactionId, string coordinatorKey, TransactionOperationId operationId,
         HLCTimestamp readTimestamp, IReadOnlyList<string> keys, KeyValueProbeLock lockMode, int expiresMs,
-        KeyValueDurability durability, KeyValueReadMode readMode, CancellationToken cancellationToken)
+        KeyValueDurability durability, KeyValueReadMode readMode, KeyValueIntentWait intentWait, CancellationToken cancellationToken)
     {
         byte[] digest = OperationDigest.ForProbeMany(keys, readTimestamp, lockMode, expiresMs, durability, readMode);
 
@@ -463,7 +466,7 @@ internal sealed class RoutedReadOperations
         try
         {
             using (LockGrantScope.Begin(out grants))
-                results = await locator.LocateAndTryProbeMany(transactionId, readTimestamp, keys, effectiveLock, expiresMs, durability, cancellationToken, readMode);
+                results = await locator.LocateAndTryProbeMany(transactionId, readTimestamp, keys, effectiveLock, expiresMs, durability, cancellationToken, readMode, intentWait);
         }
         catch
         {

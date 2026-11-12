@@ -191,6 +191,9 @@ internal sealed class KeyValueContext
     /// </summary>
     public PublishedHeadTable PublishedHeads { get; }
 
+    /// <summary>The transactional reads parked on this actor behind live write intents of other transactions.</summary>
+    internal Handlers.IntentWaitRegistry IntentWaits { get; }
+
     // Resident entries whose head or intents changed during the current actor turn, each queued once (see
     // KeyValueEntry.PublishQueued). Drained by FlushHeadPublications at the end of the turn.
     private readonly List<KeyValueEntry> headChanges = new();
@@ -245,6 +248,7 @@ internal sealed class KeyValueContext
     {
         ActorContext = actorContext;
         PublishedHeads = publishedHeads ?? new PublishedHeadTable();
+        IntentWaits = new Handlers.IntentWaitRegistry(this);
         Store = store;
         LocksByPrefix = locksByPrefix;
         LocksByRange = locksByRange;
@@ -355,6 +359,9 @@ internal sealed class KeyValueContext
             {
                 Unlink(existing); // replacing with a new entry object; unlink the old one
                 DetachPublishedHead(existing);
+
+                // The reads parked on the old object wait for an intent no request can change any more.
+                IntentWaits.WakeAll(existing);
             }
         }
 
@@ -407,6 +414,10 @@ internal sealed class KeyValueContext
         entry.StoreKey = null;
         DetachPublishedHead(entry);
         PublishedHeads.Remove(key);
+
+        // A read parked on the entry runs again: it loads the key anew, or answers MustRetry when this node no
+        // longer leads the key.
+        IntentWaits.WakeAll(entry);
         return true;
     }
 
@@ -461,7 +472,15 @@ internal sealed class KeyValueContext
                 entry.PublishQueued = false;
 
                 string? key = entry.StoreKey;
-                if (key is null || entry.Owner != this || entry.Published is not null)
+                if (key is null || entry.Owner != this)
+                    continue;
+
+                // Every change of the write intent queues the entry here, so this is where a read parked behind
+                // an intent that went away is woken, whichever path cleared or replaced it.
+                if (entry.ParkedReads is not null)
+                    IntentWaits.WakeIfIntentGone(entry);
+
+                if (entry.Published is not null)
                     continue;
 
                 if (!enabled)

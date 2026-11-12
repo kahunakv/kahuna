@@ -19,6 +19,11 @@ internal enum PointReadDetach
     /// <summary>A snapshot read whose resident archive no longer holds the as-of revision: read the persisted
     /// history at or below <see cref="PointReadStep.AsOfCeiling"/> (<see cref="SnapshotReadContinuation"/>).</summary>
     SnapshotHistory,
+
+    /// <summary>A transactional latest read that may wait met a live write intent of another transaction: park the
+    /// read on the key's entry (see <see cref="IntentWaitRegistry"/>). Only a caller that passed a wait deadline to
+    /// <see cref="TryGetHandler.ResolvePointRead"/> gets it.</summary>
+    IntentWait,
 }
 
 /// <summary>

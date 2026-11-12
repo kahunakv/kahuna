@@ -30,11 +30,14 @@ internal sealed class TryGetHandler : BaseHandler
         HLCTimestamp currentTime = context.Raft.HybridLogicalClock
             .TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
 
-        PointReadStep step = await ResolvePointRead(message, currentTime, preloadedHeads: null);
+        long intentWaitDeadline = IntentWaitDeadline(message);
+
+        PointReadStep step = await ResolvePointRead(message, currentTime, preloadedHeads: null, intentWaitDeadline);
 
         return step.Detach switch
         {
             PointReadDetach.None => step.ToResponse()!,
+            PointReadDetach.IntentWait => ParkFirstRead(message, intentWaitDeadline, currentTime),
             PointReadDetach.LatestMiss => DispatchLatestMiss(message, currentTime),
             PointReadDetach.SnapshotHydrate => await DispatchSnapshotRead(message, KeyValueResponseType.Get, currentTime, hydrate: true, asOfCeiling: -1),
             _ => await DispatchSnapshotRead(message, KeyValueResponseType.Get, currentTime, hydrate: false, asOfCeiling: step.AsOfCeiling),
@@ -49,11 +52,16 @@ internal sealed class TryGetHandler : BaseHandler
     /// <para>A transactional latest read, and a read that the durable-intent overlay answers, load a non-resident
     /// head inline. <paramref name="preloadedHeads"/> holds heads the caller already loaded from the backend for
     /// that purpose; a head is taken from it at most once.</para>
+    /// <para><paramref name="intentWaitDeadline"/> is the <see cref="Environment.TickCount64"/> until which the read
+    /// may park behind a live write intent of another transaction (see <see cref="MustParkBehindIntent"/>), or zero
+    /// when the caller cannot park it. A read that must park answers <see cref="PointReadDetach.IntentWait"/> and
+    /// changes nothing on the key.</para>
     /// </summary>
     internal async ValueTask<PointReadStep> ResolvePointRead(
         KeyValueRequest message,
         HLCTimestamp currentTime,
-        Dictionary<string, ReadOnlyKeyValueEntry?>? preloadedHeads)
+        Dictionary<string, ReadOnlyKeyValueEntry?>? preloadedHeads,
+        long intentWaitDeadline = 0)
     {
         // ── Stage 1: in-memory pre-checks (actor thread, synchronous) ────────────────────
         bool inCache = context.Store.TryGetValue(message.Key, out KeyValueEntry? entry);
@@ -181,6 +189,12 @@ internal sealed class TryGetHandler : BaseHandler
                 else if (!message.ReadTimestamp.IsNull()
                          && KeyValueWriteIntentSafeTime.MustWait(entry, entry.WriteIntent, message.ReadTimestamp))
                     return KeyValueStaticResponses.WaitingForReplicationResponse;
+                else if (intentWaitDeadline != 0
+                         && MustParkBehindIntent(message.Key, message.TransactionId, message.IntentWait, message.ForeignDecisionHint, entry, currentTime, intentWaitDeadline))
+                {
+                    parkEntry = entry;
+                    return PointReadStep.Detached(PointReadDetach.IntentWait, -1);
+                }
                 // live write intent from another tx and outside our snapshot window: fall through
             }
         }
@@ -366,6 +380,135 @@ internal sealed class TryGetHandler : BaseHandler
             entry.Value, entry.Revision, entry.Expires,
             entry.LastUsed, entry.LastModified, entry.State));
     }
+
+    // The entry the last ResolvePointRead that answered IntentWait parks on, and the exit the last wait decision
+    // recorded. Actor thread only: read right after the call that set them, in the same turn.
+    private KeyValueEntry? parkEntry;
+
+    private IntentWaitExit? lastWaitExit;
+
+    /// <summary>
+    /// The <see cref="Environment.TickCount64"/> until which <paramref name="message"/> may park behind a live
+    /// write intent of another transaction, or zero when it cannot park: the read did not ask to wait, the server
+    /// turned the wait off, it is not a transactional latest read, or it is served inline from another request's
+    /// turn (whose reply is not this read's to defer).
+    /// </summary>
+    internal long IntentWaitDeadline(KeyValueRequest message)
+    {
+        int limitMs = Math.Min(message.IntentWait.LimitMs, context.Configuration.MaxIntentWaitMs);
+
+        if (limitMs <= 0
+            || message.TransactionId == HLCTimestamp.Zero
+            || !message.ReadTimestamp.IsNull()
+            || message.Inline is not null
+            || context.ActorContext is null
+            || !context.ActorContext.Reply.HasValue)
+            return 0;
+
+        return Environment.TickCount64 + limitMs;
+    }
+
+    /// <summary>
+    /// Whether the first transactional latest read of <paramref name="key"/> by <paramref name="transactionId"/>
+    /// parks behind the entry's write intent instead of pinning the committed head below it. It parks when the
+    /// intent is another transaction's, live, not yielding (a yielding holder gives the key up to a writer, so the
+    /// reader is not doomed by it), and not already decided (a decided holder is answered from its decision, as
+    /// before), and the transaction has no pin or staged write on the key. Three exits serve the read as if it had
+    /// not asked to wait, and are counted: the wait reached its deadline, a younger requester that holds locks
+    /// (wait-die), and no room under the bounds.
+    /// </summary>
+    internal bool MustParkBehindIntent(
+        string key,
+        HLCTimestamp transactionId,
+        KeyValueIntentWait wait,
+        Transactions.Data.ForeignDecisionHint hint,
+        KeyValueEntry? entry,
+        HLCTimestamp currentTime,
+        long deadline)
+    {
+        lastWaitExit = null;
+
+        if (deadline == 0 || entry?.WriteIntent is not { } intent || intent.TransactionId == transactionId)
+            return false;
+
+        if (entry.MvccEntries is not null && entry.MvccEntries.ContainsKey(transactionId))
+            return false;
+
+        if (intent.Yielding
+            || !KeyValueWriteIntentLease.IsLive(context, key, intent, currentTime)
+            || IsAwaitingSettlement(key, intent.TransactionId, hint))
+            return false;
+
+        IntentWaitExit exit;
+
+        if (Environment.TickCount64 >= deadline)
+            exit = IntentWaitExit.Limit;
+        else if (wait.HoldsLocks && transactionId.CompareTo(intent.TransactionId) > 0)
+            exit = IntentWaitExit.WaitDie;
+        else if (!context.IntentWaits.HasRoom(entry))
+            exit = IntentWaitExit.Bound;
+        else
+            return true;
+
+        lastWaitExit = exit;
+        IntentWaitMetrics.RecordExit(exit);
+        return false;
+    }
+
+    /// <summary>
+    /// Parks a read that stage 1 found behind a live foreign write intent, the first time: the read gets its own copy
+    /// of the request, its reply is deferred, and the actor goes on with its mailbox.
+    /// </summary>
+    private KeyValueResponse ParkFirstRead(KeyValueRequest message, long deadline, HLCTimestamp currentTime)
+    {
+        IActorContext<KeyValueActor, KeyValueRequest, KeyValueResponse> actorContext = context.ActorContext;
+
+        KeyValueRequest copy = new(
+            KeyValueRequestType.TryGet, message.TransactionId, HLCTimestamp.Zero, message.Key, null, null, -1,
+            KeyValueFlags.None, 0, HLCTimestamp.Zero, message.Durability, 0, message.PartitionId, default)
+        {
+            ReadMode = message.ReadMode,
+            ForeignDecisionHint = message.ForeignDecisionHint,
+            IntentWait = message.IntentWait
+        };
+
+        ParkedIntentRead read = new(copy, KeyValueReplyRef.From(actorContext.Reply!.Value), deadline, actorContext.Self.Send);
+
+        context.IntentWaits.Park(read, parkEntry!, currentTime);
+        parkEntry = null;
+
+        actorContext.ByPassReply = true;
+        return KeyValueStaticResponses.WaitingForReplicationResponse;
+    }
+
+    /// <summary>
+    /// Runs a woken point read again from the start. Returns the answer, or null when the read parked again (the
+    /// intent is still another live writer's, or a new one is, and the deadline allows).
+    /// </summary>
+    internal async ValueTask<KeyValueResponse?> ResumeParkedRead(ParkedIntentRead read)
+    {
+        HLCTimestamp currentTime = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
+
+        ClearWaitExit();
+
+        PointReadStep step = await ResolvePointRead(read.Request, currentTime, preloadedHeads: null, read.DeadlineTick);
+
+        if (step.Detach == PointReadDetach.IntentWait)
+        {
+            context.IntentWaits.Park(read, parkEntry!, currentTime);
+            parkEntry = null;
+            return null;
+        }
+
+        // A transactional latest read never detaches to the backend; anything else is retried by the caller.
+        return step.Detach == PointReadDetach.None ? step.ToResponse() : KeyValueStaticResponses.MustRetryResponse;
+    }
+
+    /// <summary>The exit the last wait decision recorded, or null when it recorded none.</summary>
+    internal IntentWaitExit? LastWaitExit => lastWaitExit;
+
+    /// <summary>Forgets the exit of an earlier decision, before a read runs that may make none.</summary>
+    internal void ClearWaitExit() => lastWaitExit = null;
 
     /// <summary>
     /// Loads a non-resident persistent head for a read that must compare against it before answering: from

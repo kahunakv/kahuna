@@ -63,9 +63,10 @@ internal sealed partial class KeyValuesManager
         long revision,
         HLCTimestamp readTimestamp,
         KeyValueDurability durability,
-        KeyValueReadMode readMode = KeyValueReadMode.Default
+        KeyValueReadMode readMode = KeyValueReadMode.Default,
+        KeyValueIntentWait intentWait = default
     ) =>
-        localKeyValueReads.TryGetValue(transactionId, key, revision, readTimestamp, durability, readMode);
+        localKeyValueReads.TryGetValue(transactionId, key, revision, readTimestamp, durability, readMode, intentWait);
 
     /// <summary>
     /// <see cref="TryGetValue"/> plus which step answered it (the published head record or an actor round trip),
@@ -77,9 +78,10 @@ internal sealed partial class KeyValuesManager
         long revision,
         HLCTimestamp readTimestamp,
         KeyValueDurability durability,
-        KeyValueReadMode readMode = KeyValueReadMode.Default
+        KeyValueReadMode readMode = KeyValueReadMode.Default,
+        KeyValueIntentWait intentWait = default
     ) =>
-        localKeyValueReads.TryGetValueLocal(transactionId, key, revision, readTimestamp, durability, readMode);
+        localKeyValueReads.TryGetValueLocal(transactionId, key, revision, readTimestamp, durability, readMode, intentWait);
 
     public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryExistsValue(
         HLCTimestamp transactionId,
@@ -104,9 +106,10 @@ internal sealed partial class KeyValuesManager
         KeyValueProbeLock lockMode,
         int expiresMs,
         KeyValueDurability durability,
-        KeyValueReadMode readMode = KeyValueReadMode.Default
+        KeyValueReadMode readMode = KeyValueReadMode.Default,
+        KeyValueIntentWait intentWait = default
     ) =>
-        localKeyValueReads.TryProbeMany(transactionId, readTimestamp, keys, lockMode, expiresMs, durability, readMode);
+        localKeyValueReads.TryProbeMany(transactionId, readTimestamp, keys, lockMode, expiresMs, durability, readMode, intentWait);
 
     public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryExistsManyValues(
         HLCTimestamp transactionId,

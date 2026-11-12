@@ -236,6 +236,13 @@ message GrpcTryGetKeyValueRequest {
   // How the read treats the transaction's own state at ReadTimestamp. An older receiver ignores it and
   // serves the default shape.
   GrpcKeyValueReadMode ReadMode = 13;
+  // Most milliseconds the first transactional latest read of the key may wait behind a live write intent of
+  // another transaction instead of pinning the committed head below it. Zero: no wait. An older receiver
+  // ignores it and does not wait.
+  int32 IntentWaitMs = 14;
+  // Whether the reading transaction already holds a write intent or a lock: a younger such reader does not wait
+  // for an older holder.
+  bool IntentWaitHoldsLocks = 15;
 }
 
 message GrpcTryGetKeyValueResponse {
@@ -335,6 +342,10 @@ message GrpcTryProbeManyRequest {
   // How each key's read treats the transaction's own state at the read timestamp. An older receiver
   // ignores it and serves the default shape.
   GrpcKeyValueReadMode ReadMode = 11;
+  // The wait of a transactional latest probe behind a live write intent of another transaction, as in
+  // GrpcTryGetKeyValueRequest. An older receiver ignores it and does not wait.
+  int32 IntentWaitMs = 12;
+  bool IntentWaitHoldsLocks = 13;
 }
 
 enum GrpcProbeLockMode {
@@ -1963,6 +1974,9 @@ enum GrpcKeyValueFlags {
   SET_IF_NOT_EXISTS = 8;
   SET_IF_EQUAL_TO_VALUE = 16;
   SET_IF_EQUAL_TO_REVISION = 32;
+  // A transactional set refused by a live foreign write intent on a key the transaction already read answers
+  // Aborted at once instead of MustRetry. An older receiver ignores the bit.
+  ABORT_WHEN_DOOMED = 256;
 }
 
 enum GrpcKeyValueResponseType {

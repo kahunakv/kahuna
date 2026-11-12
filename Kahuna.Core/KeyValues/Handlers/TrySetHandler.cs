@@ -241,14 +241,14 @@ internal sealed class TrySetHandler : BaseHandler
                         }
 
                         if (!IsStealableYieldingIntent(message.Key, entry.WriteIntent))
-                            return (KeyValueResponse.Denied(KeyValueResponseType.MustRetry, entry.WriteIntent.TransactionId), entry, exists, readFromBackend);
+                            return (RefuseForLiveIntent(message, entry), entry, exists, readFromBackend);
 
                         if (takeOverYielding)
                             TakeOverYieldingIntent(message, message.Key, entry, currentTime);
                     }
                     else
                     {
-                        return (KeyValueResponse.Denied(KeyValueResponseType.MustRetry, entry.WriteIntent.TransactionId), entry, exists, readFromBackend);
+                        return (RefuseForLiveIntent(message, entry), entry, exists, readFromBackend);
                     }
                 }
                 else
@@ -276,6 +276,32 @@ internal sealed class TrySetHandler : BaseHandler
             return (KeyValueResponse.Denied(KeyValueResponseType.MustRetry, rangeLockHolder), entry, exists, readFromBackend);
 
         return (null, entry, exists, readFromBackend);
+    }
+
+    /// <summary>
+    /// The answer to a write refused by the live write intent of another transaction that the writer cannot take
+    /// over: <c>MustRetry</c> with the holder, so the caller can wait for the holder's outcome. A transactional
+    /// write that asked for it (<see cref="KeyValueFlags.AbortWhenDoomed"/>) answers <c>Aborted</c> instead when it
+    /// can no longer commit: its transaction read the key and staged nothing there, so its read pin is below the
+    /// holder's write. If the holder commits, the pin is stale and the write aborts at its next attempt; only a
+    /// rollback of the holder lets it through. Waiting for that outcome costs the holder's whole commit and almost
+    /// always ends in the same abort.
+    /// </summary>
+    private static KeyValueResponse RefuseForLiveIntent(KeyValueRequest message, KeyValueEntry entry)
+    {
+        KeyValueWriteIntent holder = entry.WriteIntent!;
+
+        if ((message.Flags & KeyValueFlags.AbortWhenDoomed) != 0
+            && message.TransactionId != HLCTimestamp.Zero
+            && entry.MvccEntries is not null
+            && entry.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? own)
+            && own.StagedUnder is null)
+        {
+            IntentWaitMetrics.DoomedSetAborts.Add(1);
+            return KeyValueStaticResponses.AbortedResponse;
+        }
+
+        return KeyValueResponse.Denied(KeyValueResponseType.MustRetry, holder.TransactionId);
     }
 
     /// <summary>

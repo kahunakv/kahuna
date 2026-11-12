@@ -62,8 +62,13 @@ public interface IKahuna
     /// it, await it more than once, or pass it to a method that takes a <see cref="Task"/> converts it with
     /// <see cref="ValueTask{TResult}.AsTask"/>.
     /// </para>
+    /// <para>
+    /// <paramref name="intentWait"/> lets the first latest read of the key by a transaction wait for a live write
+    /// intent of another transaction instead of pinning the committed head below it; see <see cref="KeyValueIntentWait"/>.
+    /// The default does not wait.
+    /// </para>
     /// </summary>
-    public ValueTask<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default);
+    public ValueTask<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default, KeyValueIntentWait intentWait = default);
 
     public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryGetManyValues(HLCTimestamp transactionId, HLCTimestamp readTimestamp, List<(string key, long revision, KeyValueDurability durability)> keys, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default);
 
@@ -77,8 +82,13 @@ public interface IKahuna
     /// <see cref="KeyValueProbeResult.Locked"/> says whether it holds the lock. A request of more than the configured
     /// maximum keys, or of keys of several key spaces, is refused as a whole with <c>InvalidInput</c>, as is a
     /// <see cref="KeyValueReadMode.StatementSnapshot"/> probe without a read timestamp.
+    /// <para>
+    /// <paramref name="intentWait"/> lets a transactional latest probe wait for a live write intent of another
+    /// transaction on any of its keys that the transaction has not read yet, as <see cref="LocateAndTryGetValue"/>
+    /// does for one key: the whole probe waits and then reads every key. The default does not wait.
+    /// </para>
     /// </summary>
-    public Task<KeyValueProbeResult[]> LocateAndTryProbeMany(HLCTimestamp transactionId, HLCTimestamp readTimestamp, IReadOnlyList<string> keys, KeyValueProbeLock lockMode, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default);
+    public Task<KeyValueProbeResult[]> LocateAndTryProbeMany(HLCTimestamp transactionId, HLCTimestamp readTimestamp, IReadOnlyList<string> keys, KeyValueProbeLock lockMode, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default, KeyValueIntentWait intentWait = default);
 
     public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryExistsManyValues(HLCTimestamp transactionId, HLCTimestamp readTimestamp, List<(string key, long revision, KeyValueDurability durability)> keys, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default);
 

@@ -73,6 +73,32 @@ public sealed class TestPointReadGrpcWire
         Assert.Equal(GrpcKeyValueState.StateSet, onWire.State);
     }
 
+    /// <summary>
+    /// The wait behind a live foreign write intent crosses the wire on the point get and on the batched probe, so a
+    /// forwarded read waits on the leader exactly as a local one does. A request without the fields does not wait.
+    /// </summary>
+    [Fact]
+    public async Task IntentWait_ReachesTheReadFromTheWire()
+    {
+        FixedPointReadKahuna kahuna = new(KeyValueResponseType.Get, Entry(Value));
+        KeyValuesService service = new(kahuna, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
+
+        GrpcTryGetKeyValueRequest get = GrpcTryGetKeyValueRequest.Parser.ParseFrom(
+            new GrpcTryGetKeyValueRequest { Key = "greeting", Revision = -1, IntentWaitMs = 250, IntentWaitHoldsLocks = true }.ToByteArray());
+        await service.TryGetKeyValue(get, Context());
+        Assert.Equal(new KeyValueIntentWait(250, HoldsLocks: true), kahuna.LastIntentWait);
+
+        await service.TryGetKeyValue(new GrpcTryGetKeyValueRequest { Key = "greeting", Revision = -1 }, Context());
+        Assert.Equal(KeyValueIntentWait.None, kahuna.LastIntentWait);
+
+        GrpcTryProbeManyRequest probe = GrpcTryProbeManyRequest.Parser.ParseFrom(
+            Kahuna.Server.Communication.Internode.Grpc.ProbeManyWire.ToRequest(
+                new HLCTimestamp(1, 100, 0), HLCTimestamp.Zero, ["greeting/a"], KeyValueProbeLock.None, 0,
+                KeyValueDurability.Persistent, KeyValueReadMode.Default, new KeyValueIntentWait(400, HoldsLocks: false)).ToByteArray());
+        await service.TryProbeManyInternal(probe, Context());
+        Assert.Equal(new KeyValueIntentWait(400, HoldsLocks: false), kahuna.LastIntentWait);
+    }
+
     /// <summary>Answers the routed point-read entry points with one fixed entry.</summary>
     private sealed class FixedPointReadKahuna : FakeKahunaBase
     {
@@ -83,11 +109,26 @@ public sealed class TestPointReadGrpcWire
             result = (type, entry);
         }
 
+        /// <summary>The wait the last point get or probe was asked with.</summary>
+        public KeyValueIntentWait LastIntentWait { get; private set; }
+
         public override ValueTask<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
             HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp,
             KeyValueDurability durability, CancellationToken cancellationToken,
-            string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default)
-            => ValueTask.FromResult(result);
+            string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default, KeyValueIntentWait intentWait = default)
+        {
+            LastIntentWait = intentWait;
+            return ValueTask.FromResult(result);
+        }
+
+        public override Task<KeyValueProbeResult[]> LocateAndTryProbeMany(
+            HLCTimestamp transactionId, HLCTimestamp readTimestamp, IReadOnlyList<string> keys, KeyValueProbeLock lockMode,
+            int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "",
+            TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default, KeyValueIntentWait intentWait = default)
+        {
+            LastIntentWait = intentWait;
+            return Task.FromResult(new KeyValueProbeResult[keys.Count]);
+        }
 
         public override Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryExistsValue(
             HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp,

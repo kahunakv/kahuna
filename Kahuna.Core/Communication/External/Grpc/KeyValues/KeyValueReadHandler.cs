@@ -113,7 +113,8 @@ internal sealed class KeyValueReadHandler
             context.CancellationToken,
             request.CoordinatorKey,
             new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow),
-            (KeyValueReadMode)request.ReadMode
+            (KeyValueReadMode)request.ReadMode,
+            new KeyValueIntentWait(request.IntentWaitMs, request.IntentWaitHoldsLocks)
         );
         
         if (keyValueContext is not null)
@@ -193,7 +194,8 @@ internal sealed class KeyValueReadHandler
             request.ExpiresMs,
             (KeyValueDurability)request.Durability,
             context.CancellationToken,
-            readMode: (KeyValueReadMode)request.ReadMode
+            readMode: (KeyValueReadMode)request.ReadMode,
+            intentWait: new KeyValueIntentWait(request.IntentWaitMs, request.IntentWaitHoldsLocks)
         );
 
         GrpcTryProbeManyResponse response = new();

@@ -86,9 +86,10 @@ internal sealed partial class KeyValuesManager
         CancellationToken cancellationToken,
         string coordinatorKey = "",
         TransactionOperationId operationId = default,
-        KeyValueReadMode readMode = KeyValueReadMode.Default
+        KeyValueReadMode readMode = KeyValueReadMode.Default,
+        KeyValueIntentWait intentWait = default
     ) =>
-        routedReads.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken, coordinatorKey, operationId, readMode);
+        routedReads.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken, coordinatorKey, operationId, readMode, intentWait);
 
     public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryExistsValue(
         HLCTimestamp transactionId,
@@ -130,9 +131,10 @@ internal sealed partial class KeyValuesManager
         CancellationToken cancellationToken,
         string coordinatorKey = "",
         TransactionOperationId operationId = default,
-        KeyValueReadMode readMode = KeyValueReadMode.Default
+        KeyValueReadMode readMode = KeyValueReadMode.Default,
+        KeyValueIntentWait intentWait = default
     ) =>
-        routedReads.LocateAndTryProbeMany(transactionId, readTimestamp, keys, lockMode, expiresMs, durability, cancellationToken, coordinatorKey, operationId, readMode);
+        routedReads.LocateAndTryProbeMany(transactionId, readTimestamp, keys, lockMode, expiresMs, durability, cancellationToken, coordinatorKey, operationId, readMode, intentWait);
 
     public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryGetManyValues(
         HLCTimestamp transactionId,

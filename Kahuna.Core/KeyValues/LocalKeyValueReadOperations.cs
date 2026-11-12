@@ -95,10 +95,11 @@ internal sealed class LocalKeyValueReadOperations
         long revision,
         HLCTimestamp readTimestamp,
         KeyValueDurability durability,
-        KeyValueReadMode readMode = KeyValueReadMode.Default
+        KeyValueReadMode readMode = KeyValueReadMode.Default,
+        KeyValueIntentWait intentWait = default
     )
     {
-        ValueTask<LocalPointRead> read = TryGetValueLocal(transactionId, key, revision, readTimestamp, durability, readMode);
+        ValueTask<LocalPointRead> read = TryGetValueLocal(transactionId, key, revision, readTimestamp, durability, readMode, intentWait);
 
         if (!read.IsCompletedSuccessfully)
             return Awaited(read);
@@ -131,7 +132,8 @@ internal sealed class LocalKeyValueReadOperations
         long revision,
         HLCTimestamp readTimestamp,
         KeyValueDurability durability,
-        KeyValueReadMode readMode = KeyValueReadMode.Default
+        KeyValueReadMode readMode = KeyValueReadMode.Default,
+        KeyValueIntentWait intentWait = default
     )
     {
         try
@@ -147,7 +149,7 @@ internal sealed class LocalKeyValueReadOperations
             return ValueTask.FromException<LocalPointRead>(ex);
         }
 
-        return TryGetValueFromActor(transactionId, key, revision, readTimestamp, durability, readMode);
+        return TryGetValueFromActor(transactionId, key, revision, readTimestamp, durability, readMode, intentWait);
     }
 
     private async ValueTask<LocalPointRead> TryGetValueFromActor(
@@ -156,7 +158,8 @@ internal sealed class LocalKeyValueReadOperations
         long revision,
         HLCTimestamp readTimestamp,
         KeyValueDurability durability,
-        KeyValueReadMode readMode
+        KeyValueReadMode readMode,
+        KeyValueIntentWait intentWait
     )
     {
         KeyValueRequest request = KeyValueRequestPool.Rent(
@@ -178,6 +181,7 @@ internal sealed class LocalKeyValueReadOperations
 
         request.ReadTimestamp = readTimestamp;
         request.ReadMode = readMode;
+        request.IntentWait = intentWait;
 
         try
         {
@@ -459,7 +463,8 @@ internal sealed class LocalKeyValueReadOperations
         KeyValueProbeLock lockMode,
         int expiresMs,
         KeyValueDurability durability,
-        KeyValueReadMode readMode = KeyValueReadMode.Default
+        KeyValueReadMode readMode = KeyValueReadMode.Default,
+        KeyValueIntentWait intentWait = default
     )
     {
         if (keys.Count == 0)
@@ -536,7 +541,7 @@ internal sealed class LocalKeyValueReadOperations
                         batchHints[j] = hints![index];
                 }
 
-                KeyValueResponse? response = await AskProbe(router, transactionId, readTimestamp, batchKeys, batchHints, lockMode, expiresMs, durability, readMode);
+                KeyValueResponse? response = await AskProbe(router, transactionId, readTimestamp, batchKeys, batchHints, lockMode, expiresMs, durability, readMode, intentWait);
 
                 if (response?.ProbeResults is not { } answers || answers.Length != count)
                 {
@@ -674,7 +679,8 @@ internal sealed class LocalKeyValueReadOperations
         KeyValueProbeLock lockMode,
         int expiresMs,
         KeyValueDurability durability,
-        KeyValueReadMode readMode)
+        KeyValueReadMode readMode,
+        KeyValueIntentWait intentWait)
     {
         // The first key routes the request: every key of a key space hashes to the same actor.
         KeyValueRequest request = KeyValueRequestPool.Rent(
@@ -683,6 +689,7 @@ internal sealed class LocalKeyValueReadOperations
 
         request.ReadTimestamp = readTimestamp;
         request.ReadMode = readMode;
+        request.IntentWait = intentWait;
         request.ProbeKeys = keys;
         request.ProbeHints = hints;
         request.ProbeLock = lockMode;

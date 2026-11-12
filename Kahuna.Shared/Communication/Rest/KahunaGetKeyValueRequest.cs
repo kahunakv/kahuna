@@ -31,6 +31,17 @@ public sealed class KahunaGetKeyValueRequest
     [JsonPropertyName("readMode")]
     public KeyValueReadMode ReadMode { get; set; }
 
+    /// <summary>
+    /// Most milliseconds the first latest read of the key by a transaction may wait behind a live write intent of
+    /// another transaction (see <see cref="KeyValueIntentWait"/>). Absent or zero means no wait.
+    /// </summary>
+    [JsonPropertyName("intentWaitMs")]
+    public int IntentWaitMs { get; set; }
+
+    /// <summary>Whether the reading transaction already holds a write intent or a lock (see <see cref="KeyValueIntentWait"/>).</summary>
+    [JsonPropertyName("intentWaitHoldsLocks")]
+    public bool IntentWaitHoldsLocks { get; set; }
+
     [JsonPropertyName("coordinatorKey")]
     public string? CoordinatorKey { get; set; }
 

@@ -1038,6 +1038,25 @@ public sealed class EmbeddedKahunaOptions
     public int StagedWriteIntentLeaseMs { get; set; } = 15_000;
 
     /// <summary>
+    /// Most milliseconds a transactional read may wait behind a live write intent of another transaction; a
+    /// caller's larger limit is cut to it, and zero turns every such wait off. See
+    /// <see cref="Server.Configuration.KahunaConfiguration.MaxIntentWaitMs"/>.
+    /// </summary>
+    public int MaxIntentWaitMs { get; set; } = 1_000;
+
+    /// <summary>
+    /// Most reads that may wait on one key behind a live write intent. See
+    /// <see cref="Server.Configuration.KahunaConfiguration.MaxParkedReadsPerKey"/>.
+    /// </summary>
+    public int MaxParkedReadsPerKey { get; set; } = 64;
+
+    /// <summary>
+    /// Most reads that may wait behind live write intents on one key-value actor. See
+    /// <see cref="Server.Configuration.KahunaConfiguration.MaxParkedReadsPerActor"/>.
+    /// </summary>
+    public int MaxParkedReadsPerActor { get; set; } = 4_096;
+
+    /// <summary>
     /// Milliseconds one range-scan page may keep answering transient before the scan fails loudly with
     /// the range and cursor named. Must stay below the smallest client command deadline in front of the
     /// scan, or the named error is raised into a cancelled call. See

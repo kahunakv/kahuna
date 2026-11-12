@@ -341,7 +341,8 @@ public static class KeyValuesHandlers
                 cancellationToken,
                 request.CoordinatorKey ?? "",
                 new TransactionOperationId(request.OperationIdHigh, request.OperationIdLow),
-                request.ReadMode
+                request.ReadMode,
+                new KeyValueIntentWait(request.IntentWaitMs, request.IntentWaitHoldsLocks)
             );
 
             KahunaRouteHint? getRoute = RouteHintWriter.Rest(capture, KahunaRoutingDomain.KeyValue, request.Key);

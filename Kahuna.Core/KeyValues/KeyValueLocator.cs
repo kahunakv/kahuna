@@ -85,8 +85,8 @@ internal sealed class KeyValueLocator
     public Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTryExtendKeyValue(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken) =>
         writes.LocateAndTryExtendKeyValue(transactionId, key, expiresMs, durability, cancellationToken);
 
-    public ValueTask<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, KeyValueReadMode readMode = KeyValueReadMode.Default) =>
-        reads.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken, readMode);
+    public ValueTask<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, KeyValueReadMode readMode = KeyValueReadMode.Default, KeyValueIntentWait intentWait = default) =>
+        reads.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken, readMode, intentWait);
 
     public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryExistsValue(HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken) =>
         reads.LocateAndTryExistsValue(transactionId, key, revision, readTimestamp, durability, cancellationToken);
@@ -100,8 +100,8 @@ internal sealed class KeyValueLocator
     public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryGetManyValues(HLCTimestamp transactionId, HLCTimestamp readTimestamp, List<(string key, long revision, KeyValueDurability durability)> keys, CancellationToken cancellationToken) =>
         reads.LocateAndTryGetManyValues(transactionId, readTimestamp, keys, cancellationToken);
 
-    public Task<KeyValueProbeResult[]> LocateAndTryProbeMany(HLCTimestamp transactionId, HLCTimestamp readTimestamp, IReadOnlyList<string> keys, KeyValueProbeLock lockMode, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, KeyValueReadMode readMode = KeyValueReadMode.Default) =>
-        probes.LocateAndTryProbeMany(transactionId, readTimestamp, keys, lockMode, expiresMs, durability, cancellationToken, readMode);
+    public Task<KeyValueProbeResult[]> LocateAndTryProbeMany(HLCTimestamp transactionId, HLCTimestamp readTimestamp, IReadOnlyList<string> keys, KeyValueProbeLock lockMode, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, KeyValueReadMode readMode = KeyValueReadMode.Default, KeyValueIntentWait intentWait = default) =>
+        probes.LocateAndTryProbeMany(transactionId, readTimestamp, keys, lockMode, expiresMs, durability, cancellationToken, readMode, intentWait);
 
     public Task<KeyValueProbeRangeResult[]> LocateAndTryProbeManyRanges(HLCTimestamp transactionId, HLCTimestamp readTimestamp, string prefix, IReadOnlyList<KeyValueProbeRange> seeks, KeyValueProbeLock lockMode, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, KeyValueReadMode readMode = KeyValueReadMode.Default) =>
         probes.LocateAndTryProbeManyRanges(transactionId, readTimestamp, prefix, seeks, lockMode, expiresMs, durability, cancellationToken, readMode);

@@ -645,14 +645,15 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         HLCTimestamp readTimestamp,
         KeyValueDurability durability,
         CancellationToken cancellationToken,
-        KeyValueReadMode readMode = KeyValueReadMode.Default
+        KeyValueReadMode readMode = KeyValueReadMode.Default,
+        KeyValueIntentWait intentWait = default
     )
     {
         if (TryGetNode(node, out IKahuna? kahunaNode))
         {
             using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
 
-            return await kahunaNode.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken, readMode: readMode);
+            return await kahunaNode.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken, readMode: readMode, intentWait: intentWait);
         }
 
         throw Unreachable(node);
@@ -746,7 +747,8 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         int expiresMs,
         KeyValueDurability durability,
         CancellationToken cancellationToken,
-        KeyValueReadMode readMode = KeyValueReadMode.Default
+        KeyValueReadMode readMode = KeyValueReadMode.Default,
+        KeyValueIntentWait intentWait = default
     )
     {
         if (TryGetNode(node, out IKahuna? kahunaNode))
@@ -754,7 +756,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
 
             KeyValueProbeResult[] results = await kahunaNode.LocateAndTryProbeMany(
-                transactionId, readTimestamp, keys, lockMode, expiresMs, durability, cancellationToken, readMode: readMode);
+                transactionId, readTimestamp, keys, lockMode, expiresMs, durability, cancellationToken, readMode: readMode, intentWait: intentWait);
 
             // Test seam: count the forwarded probes, so a test can prove a remote group travelled as one message.
             if (ProbeManyForwarded is { } observe)

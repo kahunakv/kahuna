@@ -536,7 +536,21 @@ public class KahunaTransactionSession : IAsyncDisposable
     /// <param name="durability">The specified durability level of the key-value pair, default is persistent.</param>
     /// <param name="cancellationToken">A token to propagate notifications that the operation should be canceled.</param>
     /// <returns>A task that represents the asynchronous operation, which returns a <see cref="KahunaKeyValue"/> containing the key-value information.</returns>
-    public async Task<KahunaKeyValue> GetKeyValue(string key, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
+    public Task<KahunaKeyValue> GetKeyValue(string key, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default) =>
+        GetKeyValue(key, KeyValueIntentWait.None, durability, cancellationToken);
+
+    /// <summary>
+    /// Retrieves a key-value pair from the server, as <see cref="GetKeyValue(string, KeyValueDurability, CancellationToken)"/>
+    /// does. When this is the transaction's first read of the key and another transaction holds a live write intent
+    /// on it, <paramref name="intentWait"/> lets the read wait for that intent to go away instead of reading the
+    /// committed value it is about to replace (see <see cref="KeyValueIntentWait"/>). Use it for a read that the
+    /// transaction will follow with a write of the same key.
+    /// </summary>
+    /// <param name="key">The key to identify the requested value.</param>
+    /// <param name="intentWait">How long the read may wait, and whether this transaction already holds a write intent or a lock.</param>
+    /// <param name="durability">The specified durability level of the key-value pair, default is persistent.</param>
+    /// <param name="cancellationToken">A token to propagate notifications that the operation should be canceled.</param>
+    public async Task<KahunaKeyValue> GetKeyValue(string key, KeyValueIntentWait intentWait, KeyValueDurability durability = KeyValueDurability.Persistent, CancellationToken cancellationToken = default)
     {
         if (Status != KahunaTransactionStatus.Pending)
             throw new KahunaException("Cannot perform actions on a completed transaction.", KeyValueResponseType.Errored);
@@ -553,7 +567,8 @@ public class KahunaTransactionSession : IAsyncDisposable
             durability,
             cancellationToken,
             CoordinatorKey,
-            TransactionOperationId.NewRandom()
+            TransactionOperationId.NewRandom(),
+            intentWait: intentWait
         ).ConfigureAwait(false);
 
 

@@ -357,6 +357,37 @@ internal static class KeyValueRequestPool
         return request;
     }
 
+    /// <summary>
+    /// Rents a <c>ResumeIntentWait</c> message that wakes <paramref name="parkedRead"/> on the actor it parked on.
+    /// <paramref name="generation"/> is the park the wake was armed for. Fire-and-forget with ownership transfer,
+    /// like <see cref="RentResumeRead"/>, and rented outside any inline scope for the same reason: a timer sends it
+    /// from a thread-pool thread, and the end of a turn sends it for a later turn.
+    /// </summary>
+    public static KeyValueRequest RentResumeIntentWait(Handlers.ParkedIntentRead parkedRead, long generation)
+    {
+        KeyValueRequest request = Rent(
+            KeyValueRequestType.ResumeIntentWait,
+            HLCTimestamp.Zero,
+            HLCTimestamp.Zero,
+            string.Empty,
+            null,
+            null,
+            generation,
+            KeyValueFlags.None,
+            0,
+            HLCTimestamp.Zero,
+            KeyValueDurability.Persistent,
+            0,
+            0,
+            default);
+
+        request.Inline = null;
+        request.ParkedRead = parkedRead;
+        request.ReturnToPoolOnReceive = true;
+
+        return request;
+    }
+
     public static void Return(KeyValueRequest obj)
     {
         obj.Clear();

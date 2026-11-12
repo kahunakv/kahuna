@@ -89,10 +89,11 @@ public sealed partial class KahunaManager
         CancellationToken cancellationToken,
         string coordinatorKey = "",
         TransactionOperationId operationId = default,
-        KeyValueReadMode readMode = KeyValueReadMode.Default
+        KeyValueReadMode readMode = KeyValueReadMode.Default,
+        KeyValueIntentWait intentWait = default
     )
     {
-        return keyValues.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken, coordinatorKey, operationId, readMode);
+        return keyValues.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken, coordinatorKey, operationId, readMode, intentWait);
     }
 
     public Task<KeyValueProbeResult[]> LocateAndTryProbeMany(
@@ -105,10 +106,11 @@ public sealed partial class KahunaManager
         CancellationToken cancellationToken,
         string coordinatorKey = "",
         TransactionOperationId operationId = default,
-        KeyValueReadMode readMode = KeyValueReadMode.Default
+        KeyValueReadMode readMode = KeyValueReadMode.Default,
+        KeyValueIntentWait intentWait = default
     )
     {
-        return keyValues.LocateAndTryProbeMany(transactionId, readTimestamp, keys, lockMode, expiresMs, durability, cancellationToken, coordinatorKey, operationId, readMode);
+        return keyValues.LocateAndTryProbeMany(transactionId, readTimestamp, keys, lockMode, expiresMs, durability, cancellationToken, coordinatorKey, operationId, readMode, intentWait);
     }
 
     public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryGetManyValues(

@@ -550,7 +550,8 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         HLCTimestamp readTimestamp,
         KeyValueDurability durability,
         CancellationToken cancellationToken,
-        KeyValueReadMode readMode = KeyValueReadMode.Default
+        KeyValueReadMode readMode = KeyValueReadMode.Default,
+        KeyValueIntentWait intentWait = default
     )
     {
         GrpcTryGetKeyValueRequest request = new()
@@ -565,6 +566,8 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
             ReadTimestampPhysical = readTimestamp.L,
             ReadTimestampCounter  = readTimestamp.C,
             ReadMode              = (GrpcKeyValueReadMode)readMode,
+            IntentWaitMs          = intentWait.LimitMs,
+            IntentWaitHoldsLocks  = intentWait.HoldsLocks,
         };
         
         GrpcServerBatcher batcher = GetSharedBatcher(node);               
@@ -696,12 +699,13 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
         int expiresMs,
         KeyValueDurability durability,
         CancellationToken cancellationToken,
-        KeyValueReadMode readMode = KeyValueReadMode.Default
+        KeyValueReadMode readMode = KeyValueReadMode.Default,
+        KeyValueIntentWait intentWait = default
     )
     {
         GrpcServerBatcher batcher = GetSharedBatcher(node);
 
-        GrpcTryProbeManyRequest request = ProbeManyWire.ToRequest(transactionId, readTimestamp, keys, lockMode, expiresMs, durability, readMode);
+        GrpcTryProbeManyRequest request = ProbeManyWire.ToRequest(transactionId, readTimestamp, keys, lockMode, expiresMs, durability, readMode, intentWait);
 
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryProbeMany", node).ConfigureAwait(false);
         if (!response.IsAnswered)

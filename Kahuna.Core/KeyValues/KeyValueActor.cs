@@ -272,6 +272,9 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
     /// </summary>
     private readonly TrySetManyHandler trySetManyHandler;
 
+    /// <summary>Runs a read that parked behind a live write intent of another transaction again when it wakes.</summary>
+    private readonly ResumeIntentWaitHandler resumeIntentWaitHandler;
+
     /// <summary>
     /// A high-resolution timer used to measure the time elapsed during the handling of requests within the actor.
     /// The stopwatch is utilized to record and log the duration of operations, aiding in performance monitoring
@@ -286,6 +289,8 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
     internal int PendingReadsCount => kvContext?.PendingReads.Count ?? 0;
 
     internal int PendingSnapshotReadsCount => kvContext?.PendingSnapshotReads.Count ?? 0;
+
+    internal int ParkedIntentReadsCount => kvContext?.IntentWaits.ParkedCount ?? 0;
 
     /// <summary>
     /// Constructor
@@ -441,6 +446,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
         tryProbeManyHandler = new(context, tryGetHandler, tryAcquireExclusiveRangeLockHandler);
         tryProbeManyRangesHandler = new(context, tryGetByRangeHandler, tryAcquireExclusiveRangeLockHandler);
         trySetManyHandler = new(context, trySetHandler);
+        resumeIntentWaitHandler = new(context, tryGetHandler, tryProbeManyHandler);
     }
 
     /// <summary>
@@ -503,6 +509,7 @@ internal sealed class KeyValueActor : IActor<KeyValueRequest, KeyValueResponse>,
             KeyValueRequestType.Collect => CollectMessage(),
             KeyValueRequestType.RunActorTurn => await RunActorTurn(message),
             KeyValueRequestType.RecordReadPin => recordReadPinHandler.Execute(message),
+            KeyValueRequestType.ResumeIntentWait => await resumeIntentWaitHandler.Execute(message),
             _ => KeyValueStaticResponses.ErroredResponse
         };
     }

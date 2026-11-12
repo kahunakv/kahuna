@@ -375,6 +375,27 @@ public sealed class KahunaConfiguration
     public int MaxProbeBatchSize { get; set; } = 512;
 
     /// <summary>
+    /// Most milliseconds a transactional read may park behind a live write intent of another transaction (see
+    /// <see cref="Kahuna.Shared.KeyValue.KeyValueIntentWait"/>). A caller's larger limit is cut to this value. Zero
+    /// or less turns every such wait off, and the reads pin the committed head below the intent as they did before
+    /// the wait existed.
+    /// </summary>
+    public int MaxIntentWaitMs { get; set; } = 1_000;
+
+    /// <summary>
+    /// Most reads that may park on one key behind a live write intent. A read over the bound does not wait: it
+    /// pins the committed head below the intent, as a read without the wait does.
+    /// </summary>
+    public int MaxParkedReadsPerKey { get; set; } = 64;
+
+    /// <summary>
+    /// Most reads that may park behind live write intents on one key-value actor, over all its keys. An actor owns
+    /// a fixed share of every partition's keys, so this bounds the parked reads of the node's partitions together.
+    /// A read over the bound does not wait.
+    /// </summary>
+    public int MaxParkedReadsPerActor { get; set; } = 4_096;
+
+    /// <summary>
     /// Most entries one batched range probe may ask for: the sum of its seeks' limits. With
     /// <see cref="MaxProbeBatchSize"/> it bounds the actor turn and the response of a range probe; a probe that asks
     /// for more is refused with <c>InvalidInput</c>. Callers split their batches to fit.

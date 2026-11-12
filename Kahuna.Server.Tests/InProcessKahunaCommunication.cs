@@ -35,10 +35,11 @@ internal sealed class InProcessKahunaCommunication : IKahunaCommunication
     public async Task<(bool, byte[]?, long, HLCTimestamp, int)> TryGetKeyValue(
         string url, HLCTimestamp transactionId, string key, long revision,
         HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken,
-        string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default)
+        string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default,
+        KeyValueIntentWait intentWait = default)
     {
         (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) =
-            await kahuna.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken, coordinatorKey, operationId, readMode);
+            await kahuna.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken, coordinatorKey, operationId, readMode, intentWait);
 
         if (type == KeyValueResponseType.Get && entry is not null)
             return (true, entry.Value, entry.Revision, entry.LastModified, 0);
