@@ -1977,6 +1977,9 @@ enum GrpcKeyValueFlags {
   // A transactional set refused by a live foreign write intent on a key the transaction already read answers
   // Aborted at once instead of MustRetry. An older receiver ignores the bit.
   ABORT_WHEN_DOOMED = 256;
+  // A transactional set of a key that an older, still running transaction has read answers Aborted at once
+  // instead of staging the write. An older receiver ignores the bit.
+  YIELD_TO_OLDER_READERS = 512;
 }
 
 enum GrpcKeyValueResponseType {

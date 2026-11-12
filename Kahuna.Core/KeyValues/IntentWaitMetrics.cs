@@ -37,6 +37,13 @@ internal static class IntentWaitMetrics
             unit: "ms",
             description: "Time a transactional read waited behind a live write intent of another transaction.");
 
+    /// <summary>Transactional sets answered <c>Aborted</c> at once because an older, still running transaction
+    /// had read the key.</summary>
+    internal static readonly Counter<long> OlderReaderYields =
+        Meter.CreateCounter<long>(
+            "kahuna.kv.set.older_reader_yields",
+            description: "Transactional sets refused at once because an older running transaction had read the key.");
+
     /// <summary>Transactional sets answered <c>Aborted</c> at once because they could no longer commit.</summary>
     internal static readonly Counter<long> DoomedSetAborts =
         Meter.CreateCounter<long>(

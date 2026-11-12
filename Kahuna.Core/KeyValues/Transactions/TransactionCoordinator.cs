@@ -214,6 +214,8 @@ internal sealed partial class TransactionCoordinator : IDisposable
                 added = sessions.TryAdd(transactionId, context);
 
             } while (!added);
+
+            LiveTransactions.Opened(transactionId);
         }
         finally
         {
@@ -235,6 +237,8 @@ internal sealed partial class TransactionCoordinator : IDisposable
     /// </summary>
     private void FinalizeSession(HLCTimestamp transactionId)
     {
+        LiveTransactions.Closed(transactionId);
+
         if (sessions.TryRemove(transactionId, out TransactionContext? context))
             context.AdmissionLease?.Dispose();
     }
