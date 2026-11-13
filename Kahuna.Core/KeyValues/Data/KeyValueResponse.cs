@@ -215,6 +215,17 @@ public sealed class KeyValueResponse
         new(KeyValueResponseType.Get) { ProbeResults = results };
 
     /// <summary>
+    /// The per-probe answers of a <see cref="KeyValueRequestType.TryCheckManyWriteIntents"/> request, in request
+    /// order. Null on every other response, and on a request that was answered as a whole (refused, or not
+    /// admitted): <see cref="Type"/> is then the answer for every probe.
+    /// </summary>
+    internal KeyValueConflictProbeResult[]? ConflictProbeResults { get; private set; }
+
+    /// <summary>The answer of a batched conflict probe that reached its keys: one result per probe, in request order.</summary>
+    internal static KeyValueResponse ForConflictProbes(KeyValueConflictProbeResult[] results) =>
+        new(KeyValueResponseType.DoesNotExist) { ConflictProbeResults = results };
+
+    /// <summary>
     /// The per-seek answers of a batched range probe, in request order. Null on every other response, and on a range
     /// probe that was answered as a whole (refused, or expired before its disk pages returned): <see cref="Type"/> is
     /// then the answer for every seek.

@@ -84,13 +84,70 @@ internal sealed class TransactionReadFloors
     /// <summary>Reads a key's committed head outside any transaction: whether it exists, and its revision.</summary>
     internal delegate ValueTask<(KeyValueResponseType Type, long Revision)> HeadReader(string key, KeyValueDurability durability, CancellationToken cancellationToken);
 
-    private sealed class State
+    private sealed class State : IDisposable
     {
         public readonly SemaphoreSlim Gate = new(1, 1);
         public readonly Dictionary<(string, KeyValueDurability), (bool Exists, long Revision)> Keys = [];
         public long FloorTicks;
         public long TouchedTicks = Stopwatch.GetTimestamp();
         public bool Refused;
+
+        // The gate is disposed once, after the state left the table and the last read that had already found it
+        // is done with it. Disposing it under a read would fault that read's release, and would leave a read that
+        // waits on it waiting for ever.
+        private readonly Lock usersLock = new();
+        private int users;
+        private bool retired;
+        private bool disposed;
+
+        /// <summary>
+        /// Registers a read that is about to wait on <see cref="Gate"/>. False when the state was already
+        /// disposed: the transaction ended on this node, and its reads are no longer held.
+        /// </summary>
+        public bool TryEnter()
+        {
+            lock (usersLock)
+            {
+                if (disposed)
+                    return false;
+
+                users++;
+                return true;
+            }
+        }
+
+        /// <summary>Ends a read registered with <see cref="TryEnter"/>, after it released the gate or gave up on it.</summary>
+        public void Leave()
+        {
+            lock (usersLock)
+            {
+                if (--users != 0 || !retired)
+                    return;
+
+                disposed = true;
+            }
+
+            Gate.Dispose();
+        }
+
+        /// <summary>
+        /// Called once the state left the table: disposes the gate now when no read uses it, or leaves that to the
+        /// last read that does.
+        /// </summary>
+        public void Dispose()
+        {
+            lock (usersLock)
+            {
+                retired = true;
+
+                if (users != 0 || disposed)
+                    return;
+
+                disposed = true;
+            }
+
+            Gate.Dispose();
+        }
     }
 
     private readonly ConcurrentDictionary<HLCTimestamp, State> states = new();
@@ -107,7 +164,11 @@ internal sealed class TransactionReadFloors
     internal bool Tracks(HLCTimestamp transactionId) => !states.IsEmpty && states.ContainsKey(transactionId);
 
     /// <summary>Drops the state of a transaction that ended.</summary>
-    internal void Forget(HLCTimestamp transactionId) => states.TryRemove(transactionId, out _);
+    internal void Forget(HLCTimestamp transactionId)
+    {
+        if (states.TryRemove(transactionId, out State? state))
+            state.Dispose();
+    }
 
     /// <summary>
     /// Judges the keys one read of <paramref name="transactionId"/> just answered. True when they are consistent
@@ -122,9 +183,22 @@ internal sealed class TransactionReadFloors
             Sweep();
 
         // A transaction that did not ask, or that this node already ended, is not held.
-        if (!states.TryGetValue(transactionId, out State? state))
+        if (!states.TryGetValue(transactionId, out State? state) || !state.TryEnter())
             return true;
 
+        try
+        {
+            return await AdmitHeld(state, observed, readHead, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            state.Leave();
+        }
+    }
+
+    /// <summary>Judges one read under the transaction's gate, so two reads of one transaction are judged in turn.</summary>
+    private static async ValueTask<bool> AdmitHeld(State state, IReadOnlyList<Observation> observed, HeadReader readHead, CancellationToken cancellationToken)
+    {
         await state.Gate.WaitAsync(cancellationToken).ConfigureAwait(false);
 
         try
@@ -277,8 +351,8 @@ internal sealed class TransactionReadFloors
 
         foreach (KeyValuePair<HLCTimestamp, State> pair in states)
         {
-            if (Stopwatch.GetElapsedTime(pair.Value.TouchedTicks, now) > StaleAfter)
-                states.TryRemove(pair.Key, out _);
+            if (Stopwatch.GetElapsedTime(pair.Value.TouchedTicks, now) > StaleAfter && states.TryRemove(pair.Key, out State? stale))
+                stale.Dispose();
         }
     }
 }

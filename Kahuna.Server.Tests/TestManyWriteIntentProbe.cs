@@ -169,6 +169,192 @@ public sealed class TestManyWriteIntentProbe : BaseCluster
     }
 
     /// <summary>
+    /// The node-local probe groups its keys by the actor that owns them and sends one request per group. Grouping
+    /// must not change any answer: every probe of a mixed list — keys alone on their actor, keys that share one,
+    /// both durabilities, every conflict class and a leader-term probe the locator answers — gets the answer it
+    /// gets when it is asked alone, at its own position in the list.
+    /// </summary>
+    [Fact]
+    public async Task LocalProbe_GroupedByActor_AnswersEachProbeAsItIsAnsweredAlone()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using EmbeddedKahunaNode node = await StartNode(loggerFactory, ct);
+
+        KahunaManager manager = (KahunaManager)node.Kahuna;
+        string run = Guid.NewGuid().ToString("N")[..8];
+
+        // One key space is one actor: these probes travel in one request.
+        string shared = $"grp-{run}";
+        string sharedIntent = $"{shared}/intent";
+        string sharedBase = $"{shared}/base";
+        string sharedStaged = $"{shared}/staged";
+
+        // A key space each: mostly one probe per actor.
+        string aloneIntent = $"alone-{run}-a/intent";
+        string aloneBase = $"alone-{run}-b/base";
+
+        manager.DurablePreparedIntentStore.Apply(new PrepareIntentCommand(UndecidedIntent(sharedIntent)));
+        manager.DurablePreparedIntentStore.Apply(new PrepareIntentCommand(UndecidedIntent(aloneIntent)));
+
+        (KeyValueResponseType sharedSet, long sharedRevision, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+            HLCTimestamp.Zero, sharedBase, "V"u8.ToArray(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.Set, sharedSet);
+
+        (KeyValueResponseType aloneSet, long aloneRevision, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+            HLCTimestamp.Zero, aloneBase, "V"u8.ToArray(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.Set, aloneSet);
+
+        (KeyValueResponseType startType, TransactionHandle tx) = await node.Kahuna.LocateAndStartTransaction(
+            new KeyValueTransactionOptions
+            {
+                CoordinatorKey = sharedStaged,
+                Locking = KeyValueTransactionLocking.Optimistic,
+                AsyncRelease = true,
+                Timeout = 60_000
+            }, ct);
+        Assert.Equal(KeyValueResponseType.Set, startType);
+
+        (KeyValueResponseType stagedType, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+            tx.TransactionId, sharedStaged, "V"u8.ToArray(), null, -1, KeyValueFlags.None, 0,
+            KeyValueDurability.Persistent, ct,
+            coordinatorKey: tx.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
+        Assert.Equal(KeyValueResponseType.Set, stagedType);
+
+        int partition = manager.LocateRange(sharedBase).PartitionId;
+        long term = node.Raft.GetPartitionTerm(partition);
+
+        const KeyValueConflictChecks OwnIntent = KeyValueConflictChecks.ForeignRangeLock | KeyValueConflictChecks.OwnStagedIntent;
+
+        (KeyValueConflictProbe Probe, KeyValueResponseType Expected)[] cases =
+        [
+            (new($"{shared}/clean-a", KeyValueDurability.Persistent, KeyValueConflictChecks.WriteIntent), KeyValueResponseType.DoesNotExist),
+            (new(aloneIntent, KeyValueDurability.Persistent, KeyValueConflictChecks.WriteIntent), KeyValueResponseType.Aborted),
+            (new(sharedIntent, KeyValueDurability.Persistent, KeyValueConflictChecks.WriteIntent), KeyValueResponseType.Aborted),
+            (new(sharedBase, KeyValueDurability.Persistent, KeyValueConflictChecks.StagedBase, sharedRevision), KeyValueResponseType.DoesNotExist),
+            (new($"{shared}/ephemeral", KeyValueDurability.Ephemeral, KeyValueConflictChecks.WriteIntent), KeyValueResponseType.DoesNotExist),
+            (new(sharedBase, KeyValueDurability.Persistent, KeyValueConflictChecks.LeaderTerm, term), KeyValueResponseType.DoesNotExist),
+            (new(aloneBase, KeyValueDurability.Persistent, KeyValueConflictChecks.StagedBase, aloneRevision + 7), KeyValueResponseType.NotSet),
+            (new($"{shared}/missing", KeyValueDurability.Persistent, KeyValueConflictChecks.StagedBase, -1), KeyValueResponseType.DoesNotExist),
+            (new($"{shared}/missing-2", KeyValueDurability.Persistent, KeyValueConflictChecks.StagedBase, 0), KeyValueResponseType.NotSet),
+            (new(sharedStaged, KeyValueDurability.Persistent, OwnIntent), KeyValueResponseType.DoesNotExist),
+            (new($"{shared}/untouched", KeyValueDurability.Persistent, OwnIntent), KeyValueResponseType.Unlocked),
+            (new(sharedBase, KeyValueDurability.Persistent, KeyValueConflictChecks.LeaderTerm, term - 1), KeyValueResponseType.Aborted),
+            (new($"alone-{run}-c/clean", KeyValueDurability.Persistent, KeyValueConflictChecks.WriteIntent | KeyValueConflictChecks.ForeignRangeLock), KeyValueResponseType.DoesNotExist),
+            (new($"alone-{run}-d/ephemeral", KeyValueDurability.Ephemeral, KeyValueConflictChecks.WriteIntent), KeyValueResponseType.DoesNotExist),
+            (new($"{shared}/clean-b", KeyValueDurability.Persistent, KeyValueConflictChecks.WriteIntent | KeyValueConflictChecks.ForeignRangeLock), KeyValueResponseType.DoesNotExist),
+        ];
+
+        List<KeyValueConflictProbe> probes = [.. cases.Select(c => c.Probe)];
+
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability)> grouped =
+            await node.Kahuna.TryCheckManyWriteIntentValues(tx.TransactionId, probes);
+
+        Assert.Equal(cases.Length, grouped.Count);
+
+        for (int i = 0; i < cases.Length; i++)
+        {
+            (KeyValueConflictProbe probe, KeyValueResponseType expected) = cases[i];
+
+            // The answer sits at the probe's own position and names the probe's key and durability.
+            Assert.Equal(probe.Key, grouped[i].key);
+            Assert.Equal(probe.Durability, grouped[i].durability);
+            Assert.True(expected == grouped[i].type, $"probe {i} ({probe.Key}, {probe.Checks}) answered {grouped[i].type}, expected {expected}");
+
+            // A list of one probe is asked alone, without grouping.
+            List<(KeyValueResponseType type, string key, KeyValueDurability durability)> alone =
+                await node.Kahuna.TryCheckManyWriteIntentValues(tx.TransactionId, [probe]);
+
+            Assert.True(Assert.Single(alone).type == grouped[i].type, $"probe {i} ({probe.Key}, {probe.Checks}) answered {grouped[i].type} in the list and {alone[0].type} alone");
+        }
+
+        await node.Kahuna.LocateAndRollbackTransaction(tx, ct);
+    }
+
+    /// <summary>
+    /// A key whose partition is gated as incomplete answers MustRetry from the probe itself, before any actor is
+    /// asked, and the keys of the other partitions in the same list are still asked and answered.
+    /// </summary>
+    [Fact]
+    public async Task LocalProbe_GatedPartition_AnswersMustRetryForItsKeysOnly()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using EmbeddedKahunaNode node = await StartNode(loggerFactory, ct);
+
+        KahunaManager manager = (KahunaManager)node.Kahuna;
+        string run = Guid.NewGuid().ToString("N")[..8];
+
+        List<KeyValueConflictProbe> probes = [];
+
+        for (int i = 0; i < 48; i++)
+            probes.Add(new($"gate-{run}-{i}/k", KeyValueDurability.Persistent, KeyValueConflictChecks.WriteIntent));
+
+        int gatedPartition = manager.KeyValues.RouteKey(probes[0].Key);
+
+        // With 48 key spaces over four partitions, some keys route elsewhere.
+        Assert.Contains(probes, p => manager.KeyValues.RouteKey(p.Key) != gatedPartition);
+
+        using (manager.KeyValues.DivergenceContainment.GateForTests(gatedPartition))
+        {
+            List<(KeyValueResponseType type, string key, KeyValueDurability durability)> results =
+                await node.Kahuna.TryCheckManyWriteIntentValues(new HLCTimestamp(0, 500, 0), probes);
+
+            Assert.Equal(probes.Count, results.Count);
+
+            for (int i = 0; i < probes.Count; i++)
+            {
+                Assert.Equal(probes[i].Key, results[i].key);
+
+                KeyValueResponseType expected = manager.KeyValues.RouteKey(probes[i].Key) == gatedPartition
+                    ? KeyValueResponseType.MustRetry
+                    : KeyValueResponseType.DoesNotExist;
+
+                Assert.True(expected == results[i].type, $"{probes[i].Key} answered {results[i].type}, expected {expected}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// More probes than one actor turn carries, all in one key space: the group travels as several requests and
+    /// every probe is still answered at its own position, including the probes at the edges of each request.
+    /// </summary>
+    [Fact]
+    public async Task LocalProbe_GroupLargerThanOneTurn_AnswersEveryProbeInOrder()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using EmbeddedKahunaNode node = await StartNode(loggerFactory, ct);
+
+        KahunaManager manager = (KahunaManager)node.Kahuna;
+        string space = $"big-{Guid.NewGuid().ToString("N")[..8]}";
+
+        const int Count = 150;
+        HashSet<int> conflicted = [0, 1, 63, 64, 65, 127, 128, 149];
+
+        List<KeyValueConflictProbe> probes = [];
+
+        for (int i = 0; i < Count; i++)
+        {
+            string key = $"{space}/k{i:D3}";
+            probes.Add(new(key, KeyValueDurability.Persistent, KeyValueConflictChecks.WriteIntent));
+
+            if (conflicted.Contains(i))
+                manager.DurablePreparedIntentStore.Apply(new PrepareIntentCommand(UndecidedIntent(key)));
+        }
+
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability)> results =
+            await node.Kahuna.TryCheckManyWriteIntentValues(new HLCTimestamp(0, 500, 0), probes);
+
+        Assert.Equal(Count, results.Count);
+
+        for (int i = 0; i < Count; i++)
+        {
+            Assert.Equal(probes[i].Key, results[i].key);
+
+            KeyValueResponseType expected = conflicted.Contains(i) ? KeyValueResponseType.Aborted : KeyValueResponseType.DoesNotExist;
+            Assert.True(expected == results[i].type, $"probe {i} answered {results[i].type}, expected {expected}");
+        }
+    }
+
+    /// <summary>
     /// A malformed key is reported against itself and does not cancel the probe for the rest of the set. The
     /// opposite behaviour — bailing out on the whole request — would silently drop the write-skew guard for
     /// every other read dependency in the transaction.

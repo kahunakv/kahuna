@@ -129,4 +129,11 @@ public enum KeyValueRequestType
     /// Sent by an actor to itself; never replicated, never sent between nodes.
     /// </summary>
     ResumeIntentWait = 37,
+
+    /// <summary>
+    /// Answers the commit-time conflict probes of one transaction that one actor owns, in one actor turn: each
+    /// probe is answered exactly as a <see cref="TryCheckWriteIntent"/> on its key is. Local to a node; never
+    /// replicated.
+    /// </summary>
+    TryCheckManyWriteIntents = 38,
 }

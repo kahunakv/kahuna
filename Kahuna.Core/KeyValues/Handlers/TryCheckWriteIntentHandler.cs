@@ -1,6 +1,8 @@
 
+using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
 using Kommander.Time;
+using Kommander.WAL.IO;
 
 namespace Kahuna.Server.KeyValues.Handlers;
 
@@ -41,6 +43,59 @@ internal sealed class TryCheckWriteIntentHandler : BaseHandler
 {
     public TryCheckWriteIntentHandler(KeyValueContext context) : base(context)
     {
+    }
+
+    /// <summary>
+    /// Answers every probe of a <see cref="KeyValueRequestType.TryCheckManyWriteIntents"/> request in this turn,
+    /// in request order. Each probe is answered by <see cref="Execute"/> over a view of its own key, checks and
+    /// base, so a probe gets the answer it gets when it is asked alone. A probe whose backend read was refused
+    /// answers MustRetry alone; the probes around it keep their answers.
+    /// </summary>
+    public async ValueTask<KeyValueResponse> ExecuteMany(KeyValueRequest message)
+    {
+        KeyValueConflictProbe[]? probes = message.ConflictProbes;
+
+        if (probes is null || probes.Length == 0)
+            return KeyValueStaticResponses.ErroredResponse;
+
+        ForeignDecisionHint[]? hints = message.ProbeHints;
+        KeyValueConflictProbeResult[] results = new KeyValueConflictProbeResult[probes.Length];
+
+        // A rented view, not a field: the turn awaits backend reads, and the view must belong to this request
+        // alone for as long as it runs.
+        KeyValueRequest view = KeyValueRequestPool.Rent(
+            KeyValueRequestType.TryCheckWriteIntent, message.TransactionId, HLCTimestamp.Zero, probes[0].Key, null, null, -1,
+            KeyValueFlags.None, 0, HLCTimestamp.Zero, probes[0].Durability, 0, 0, default);
+
+        try
+        {
+            for (int i = 0; i < probes.Length; i++)
+            {
+                KeyValueConflictProbe probe = probes[i];
+
+                view.Reset(
+                    KeyValueRequestType.TryCheckWriteIntent, message.TransactionId, HLCTimestamp.Zero, probe.Key, null, null,
+                    probe.BaseRevision, KeyValueFlags.None, 0, HLCTimestamp.Zero, probe.Durability, 0, 0, default);
+                view.ConflictChecks = probe.Checks;
+                view.ForeignDecisionHint = hints is null ? default : hints[i];
+
+                try
+                {
+                    KeyValueResponse answer = await Execute(view);
+                    results[i] = new(answer.Type, answer.CommitFloor);
+                }
+                catch (ReadBackpressureExceededException)
+                {
+                    results[i] = new(KeyValueResponseType.MustRetry, HLCTimestamp.Zero);
+                }
+            }
+        }
+        finally
+        {
+            KeyValueRequestPool.Return(view);
+        }
+
+        return KeyValueResponse.ForConflictProbes(results);
     }
 
     public async ValueTask<KeyValueResponse> Execute(KeyValueRequest message)

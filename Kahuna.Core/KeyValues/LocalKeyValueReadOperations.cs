@@ -705,28 +705,332 @@ internal sealed class LocalKeyValueReadOperations
     }
 
     /// <summary>
-    /// Probes several locally owned keys for concurrent write intents, returning one result per requested key.
-    /// The keys are dispatched to their owning actors independently, as the many-key reads do: the grouping that
-    /// pays is by node, upstream in the locator, not by actor here.
+    /// The most probes one actor answers in one turn of a batched conflict probe. A probe of a key that is not
+    /// resident reads the backend inside the turn, so an unbounded group would hold the actor's other requests
+    /// behind all of those reads; a larger group is sent as several requests, which the actor takes in order.
     /// </summary>
-    public async Task<List<(KeyValueResponseType type, string key, KeyValueDurability durability)>> TryCheckManyWriteIntentValues(
+    private const int MaxConflictProbesPerTurn = 64;
+
+    /// <summary>Marks a probe that no actor request carries: it was answered here, or it is asked alone.</summary>
+    private const int NotGrouped = -2;
+
+    /// <summary>
+    /// One request of a batched conflict probe that is waiting for its answer: the probes it carries, or the
+    /// single probe that is answered without an actor.
+    /// </summary>
+    private struct PendingConflictProbe
+    {
+        /// <summary>Index of the first probe the request carries.</summary>
+        public int First;
+
+        /// <summary>How many probes the request carries, chained from <see cref="First"/>.</summary>
+        public int Count;
+
+        /// <summary>The request sent to the actor, returned to the pool once its reply was awaited.</summary>
+        public KeyValueRequest? Request;
+
+        /// <summary>The actor's reply. Awaited exactly once, by the loop that collects the answers.</summary>
+        public ValueTask<KeyValueResponse?> Reply;
+
+        /// <summary>The answer of a probe that is asked alone through <see cref="TryCheckWriteIntentValue"/>.</summary>
+        public Task<KeyValueResponseType>? Alone;
+
+        /// <summary>A request that was sent to its actor, with the reply it is waiting for.</summary>
+        public static PendingConflictProbe Sent(int first, int count, KeyValueRequest request, ValueTask<KeyValueResponse?> reply) =>
+            new() { First = first, Count = count, Request = request, Reply = reply };
+    }
+
+    /// <summary>
+    /// Probes several locally owned keys for the conflict classes each probe names, returning one result per
+    /// requested key, in request order. The probes are grouped by the actor that owns each key and one request
+    /// per group carries them, so an actor answers its probes in one turn; a key that is alone on its actor is
+    /// asked as a single probe. Every request is sent before any reply is awaited.
+    /// </summary>
+    public Task<List<(KeyValueResponseType type, string key, KeyValueDurability durability)>> TryCheckManyWriteIntentValues(
         HLCTimestamp transactionId,
         List<KeyValueConflictProbe> keys
     )
     {
-        Task<(KeyValueResponseType, string, KeyValueDurability)>[] tasks = new Task<(KeyValueResponseType, string, KeyValueDurability)>[keys.Count];
+        return keys.Count == 1 ? CheckOne(transactionId, keys[0]) : CheckGrouped(transactionId, keys);
 
-        for (int i = 0; i < keys.Count; i++)
-            tasks[i] = CheckWriteIntent(keys[i]);
-
-        return [.. await Task.WhenAll(tasks)];
-
-        async Task<(KeyValueResponseType, string, KeyValueDurability)> CheckWriteIntent(KeyValueConflictProbe item)
+        async Task<List<(KeyValueResponseType, string, KeyValueDurability)>> CheckOne(HLCTimestamp txId, KeyValueConflictProbe probe)
         {
-            KeyValueResponseType type = await TryCheckWriteIntentValue(transactionId, item.Key, item.Durability, item.Checks, item.BaseRevision);
+            KeyValueResponseType type = await TryCheckWriteIntentValue(txId, probe.Key, probe.Durability, probe.Checks, probe.BaseRevision);
 
-            return (type, item.Key, item.Durability);
+            return [(type, probe.Key, probe.Durability)];
         }
+    }
+
+    private async Task<List<(KeyValueResponseType type, string key, KeyValueDurability durability)>> CheckGrouped(
+        HLCTimestamp transactionId,
+        List<KeyValueConflictProbe> keys
+    )
+    {
+        int count = keys.Count;
+
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability)> results = new(count);
+
+        if (count == 0)
+            return results;
+
+        KeyValueActorRing persistentRing = persistentKeyValuesRouter;
+        KeyValueActorRing ephemeralRing = ephemeralKeyValuesRouter;
+
+        // An owner is one actor of one ring: the persistent actors first, then the ephemeral ones.
+        int persistentOwners = persistentRing.ActorCount;
+        int owners = persistentOwners + ephemeralRing.ActorCount;
+
+        // heads[owner] is the first probe of that owner's chain and next[i] the probe after i in it; both end at -1.
+        int[] heads = System.Buffers.ArrayPool<int>.Shared.Rent(owners);
+        int[] next = System.Buffers.ArrayPool<int>.Shared.Rent(count);
+        PendingConflictProbe[] pending = System.Buffers.ArrayPool<PendingConflictProbe>.Shared.Rent(count);
+        int pendingCount = 0;
+
+        Transactions.Data.ForeignDecisionHint[]? hints = null;
+        KeyValueRequest? scratch = null;
+
+        try
+        {
+            for (int i = 0; i < count; i++)
+            {
+                KeyValueConflictProbe probe = keys[i];
+                results.Add((KeyValueResponseType.Errored, probe.Key, probe.Durability));
+
+                // The leader-term check is answered by the locator and not by an actor: it is asked alone.
+                if ((probe.Checks & KeyValueConflictChecks.LeaderTerm) != 0)
+                {
+                    next[i] = NotGrouped;
+                    pending[pendingCount++] = new()
+                    {
+                        First = i,
+                        Count = 1,
+                        Alone = TryCheckWriteIntentValue(transactionId, probe.Key, probe.Durability, probe.Checks, probe.BaseRevision)
+                    };
+                    continue;
+                }
+
+                if (IsGatedKey(probe.Key))
+                {
+                    logger.LogCommitProbeGated(transactionId, probe.Key);
+                    results[i] = (KeyValueResponseType.MustRetry, probe.Key, probe.Durability);
+                    next[i] = NotGrouped;
+                    continue;
+                }
+
+                next[i] = -1;
+
+                // Resolve a remote-anchor concurrent writer's decision off the mailbox first, so a committed/aborted
+                // intent whose record lives on another node is not mis-flagged as a live undecided conflict by the
+                // actor. Only the write-intent check consults foreign intents.
+                if ((probe.Checks & KeyValueConflictChecks.WriteIntent) == 0 || probe.Durability == KeyValueDurability.Ephemeral)
+                    continue;
+
+                scratch ??= KeyValueRequestPool.Rent(
+                    KeyValueRequestType.TryCheckWriteIntent, transactionId, HLCTimestamp.Zero, probe.Key, null, null, -1,
+                    KeyValueFlags.None, 0, HLCTimestamp.Zero, probe.Durability, 0, 0, default);
+
+                scratch.ForeignDecisionHint = default;
+
+                await TryRouteForeignDecision(scratch, probe.Key, transactionId, probe.Durability, alreadyAttempted: false);
+
+                if (scratch.ForeignDecisionHint.TransactionId == HLCTimestamp.Zero)
+                    continue;
+
+                hints ??= new Transactions.Data.ForeignDecisionHint[count];
+                hints[i] = scratch.ForeignDecisionHint;
+            }
+
+            heads.AsSpan(0, owners).Fill(-1);
+
+            // Chain from the last probe back, so each owner's chain runs in request order.
+            for (int i = count - 1; i >= 0; i--)
+            {
+                if (next[i] == NotGrouped)
+                    continue;
+
+                KeyValueConflictProbe probe = keys[i];
+
+                int owner = probe.Durability == KeyValueDurability.Ephemeral
+                    ? persistentOwners + ephemeralRing.ActorIndexOf(probe.Key)
+                    : persistentRing.ActorIndexOf(probe.Key);
+
+                next[i] = heads[owner];
+                heads[owner] = i;
+            }
+
+            // Send every request before any reply is awaited: the actors answer side by side.
+            for (int owner = 0; owner < owners; owner++)
+            {
+                KeyValueActorRing ring = owner < persistentOwners ? persistentRing : ephemeralRing;
+
+                for (int first = heads[owner]; first >= 0;)
+                {
+                    int members = 0;
+                    int after = first;
+
+                    while (after >= 0 && members < MaxConflictProbesPerTurn)
+                    {
+                        after = next[after];
+                        members++;
+                    }
+
+                    KeyValueRequest request = members == 1
+                        ? RentWriteIntentProbe(transactionId, keys[first], hints is null ? default : hints[first])
+                        : RentManyWriteIntentProbes(transactionId, keys, next, first, members, hints);
+
+                    pending[pendingCount++] = PendingConflictProbe.Sent(first, members, request, AskKeyValueActor(ring, request));
+
+                    first = after;
+                }
+            }
+
+            for (int p = 0; p < pendingCount; p++)
+            {
+                PendingConflictProbe item = pending[p];
+
+                if (item.Alone is { } alone)
+                {
+                    (_, string aloneKey, KeyValueDurability aloneDurability) = results[item.First];
+                    results[item.First] = (await alone, aloneKey, aloneDurability);
+                    continue;
+                }
+
+                KeyValueResponse? response;
+
+                try
+                {
+                    response = await item.Reply;
+                }
+                finally
+                {
+                    // The actor is done with the request once its reply was awaited, also when the reply faulted.
+                    pending[p].Request = null;
+                    KeyValueRequestPool.Return(item.Request!);
+                }
+
+                KeyValueConflictProbeResult[]? answers = response?.ConflictProbeResults;
+                int index = item.First;
+
+                for (int j = 0; j < item.Count; j++, index = next[index])
+                {
+                    KeyValueConflictProbe probe = keys[index];
+
+                    // A request the actor answered as a whole (refused, or not admitted) gives every probe that answer.
+                    KeyValueResponseType type = response is null
+                        ? KeyValueResponseType.Errored
+                        : answers is not null ? answers[j].Type : response.Type;
+
+                    HLCTimestamp commitFloor = response is null
+                        ? HLCTimestamp.Zero
+                        : answers is not null ? answers[j].CommitFloor : response.CommitFloor;
+
+                    results[index] = (CompleteWriteIntentProbe(transactionId, probe.Key, probe.Checks, type, commitFloor), probe.Key, probe.Durability);
+                }
+            }
+
+            return results;
+        }
+        finally
+        {
+            if (scratch is not null)
+                KeyValueRequestPool.Return(scratch);
+
+            // A request whose reply was never awaited (an earlier reply faulted) may still be in its actor's hands:
+            // it is left to the collector and not handed back to the pool.
+            System.Buffers.ArrayPool<int>.Shared.Return(heads);
+            System.Buffers.ArrayPool<int>.Shared.Return(next);
+            System.Buffers.ArrayPool<PendingConflictProbe>.Shared.Return(pending, clearArray: true);
+        }
+    }
+
+    /// <summary>Rents the actor request of one conflict probe.</summary>
+    private static KeyValueRequest RentWriteIntentProbe(HLCTimestamp transactionId, KeyValueConflictProbe probe, Transactions.Data.ForeignDecisionHint hint)
+    {
+        KeyValueRequest request = KeyValueRequestPool.Rent(
+            KeyValueRequestType.TryCheckWriteIntent,
+            transactionId,
+            HLCTimestamp.Zero,
+            probe.Key,
+            null,
+            null,
+            // CompareRevision carries the staged-base check's validated base; -1 (also the pool's
+            // idle value) doubles as "the base was a non-existent key", which only the StagedBase
+            // check consults.
+            probe.BaseRevision,
+            KeyValueFlags.None,
+            0,
+            HLCTimestamp.Zero,
+            probe.Durability,
+            0,
+            0,
+            default
+        );
+
+        request.ConflictChecks = probe.Checks;
+        request.ForeignDecisionHint = hint;
+
+        return request;
+    }
+
+    /// <summary>
+    /// Rents the actor request that carries <paramref name="members"/> probes of one actor, chained from
+    /// <paramref name="first"/> through <paramref name="next"/>. The first probe's key routes the request.
+    /// </summary>
+    private static KeyValueRequest RentManyWriteIntentProbes(
+        HLCTimestamp transactionId,
+        List<KeyValueConflictProbe> keys,
+        int[] next,
+        int first,
+        int members,
+        Transactions.Data.ForeignDecisionHint[]? hints)
+    {
+        KeyValueConflictProbe[] probes = new KeyValueConflictProbe[members];
+        Transactions.Data.ForeignDecisionHint[]? probeHints = null;
+
+        int index = first;
+
+        for (int j = 0; j < members; j++, index = next[index])
+        {
+            probes[j] = keys[index];
+
+            if (hints is null || hints[index].TransactionId == HLCTimestamp.Zero)
+                continue;
+
+            probeHints ??= new Transactions.Data.ForeignDecisionHint[members];
+            probeHints[j] = hints[index];
+        }
+
+        KeyValueRequest request = KeyValueRequestPool.Rent(
+            KeyValueRequestType.TryCheckManyWriteIntents, transactionId, HLCTimestamp.Zero, probes[0].Key, null, null, -1,
+            KeyValueFlags.None, 0, HLCTimestamp.Zero, probes[0].Durability, 0, 0, default);
+
+        request.ConflictProbes = probes;
+        request.ProbeHints = probeHints;
+
+        return request;
+    }
+
+    /// <summary>
+    /// What the caller does with an actor's answer to a conflict probe, whichever request carried the probe: a
+    /// refusal is logged, and a commit floor is raised into the open capture.
+    /// </summary>
+    private KeyValueResponseType CompleteWriteIntentProbe(
+        HLCTimestamp transactionId,
+        string key,
+        KeyValueConflictChecks checks,
+        KeyValueResponseType type,
+        HLCTimestamp commitFloor)
+    {
+        if (type == KeyValueResponseType.MustRetry)
+            logger.LogCommitProbeActorRefused(transactionId, key, checks);
+
+        // The commit floor a held own staged intent carries travels to the coordinator the way a lock grant's
+        // leadership term does: into the capture the probing request opened, which a transport that crossed a
+        // process boundary replays on the caller's side.
+        if (!commitFloor.IsNull())
+            LockGrantScope.RaiseCommitFloor(commitFloor);
+
+        return type;
     }
 
     /// <summary>
@@ -771,27 +1075,7 @@ internal sealed class LocalKeyValueReadOperations
             return leadership;
         }
 
-        KeyValueRequest request = KeyValueRequestPool.Rent(
-            KeyValueRequestType.TryCheckWriteIntent,
-            transactionId,
-            HLCTimestamp.Zero,
-            key,
-            null,
-            null,
-            // CompareRevision carries the staged-base check's validated base; -1 (also the pool's
-            // idle value) doubles as "the base was a non-existent key", which only the StagedBase
-            // check consults.
-            baseRevision,
-            KeyValueFlags.None,
-            0,
-            HLCTimestamp.Zero,
-            durability,
-            0,
-            0,
-            default
-        );
-
-        request.ConflictChecks = checks;
+        KeyValueRequest request = RentWriteIntentProbe(transactionId, new(key, durability, checks, baseRevision), default);
 
         try
         {
@@ -808,16 +1092,7 @@ internal sealed class LocalKeyValueReadOperations
             if (response is null)
                 return KeyValueResponseType.Errored;
 
-            if (response.Type == KeyValueResponseType.MustRetry)
-                logger.LogCommitProbeActorRefused(transactionId, key, checks);
-
-            // The commit floor a held own staged intent carries travels to the coordinator the way a lock grant's
-            // leadership term does: into the capture the probing request opened, which a transport that crossed a
-            // process boundary replays on the caller's side.
-            if (!response.CommitFloor.IsNull())
-                LockGrantScope.RaiseCommitFloor(response.CommitFloor);
-
-            return response.Type;
+            return CompleteWriteIntentProbe(transactionId, key, checks, response.Type, response.CommitFloor);
         }
         finally
         {

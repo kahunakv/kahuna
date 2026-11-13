@@ -88,7 +88,8 @@ internal static class KeyValueMessageDecoder
             or KeyValueRequestType.ResumeIntentWait
             or KeyValueRequestType.TryProbeMany
             or KeyValueRequestType.TryProbeManyRanges
-            or KeyValueRequestType.TrySetMany => KeyValueRecordKind.NotLogged,
+            or KeyValueRequestType.TrySetMany
+            or KeyValueRequestType.TryCheckManyWriteIntents => KeyValueRecordKind.NotLogged,
 
         _ => KeyValueRecordKind.Unknown
     };

@@ -49,6 +49,9 @@ internal sealed class KeyValueActorRing
     internal PublishedHeadTable PublishedHeadsFor(string key) =>
         publishedHeads[((int)HashUtils.InversePrefixedStaticHash(key, '/') & int.MaxValue) % publishedHeads.Length];
 
+    /// <summary>The number of actors in the ring: the exclusive upper bound of <see cref="ActorIndexOf"/>.</summary>
+    internal int ActorCount => instances.Length;
+
     /// <summary>
     /// The index of the actor a point request on <paramref name="key"/> routes to: the same bucket
     /// <see cref="KeyValueRequest.GetHash"/> hashes a point key to, so items grouped by this index are owned by one

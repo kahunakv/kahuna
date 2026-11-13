@@ -171,7 +171,9 @@ public sealed class KeyValueRequest : IConsistentHashable
 
     /// <summary>
     /// Per-key foreign decision hints of a <see cref="KeyValueRequestType.TryProbeMany"/> request, parallel to
-    /// <see cref="ProbeKeys"/>: what <see cref="ForeignDecisionHint"/> is to a single read. Null means no hints.
+    /// <see cref="ProbeKeys"/>, or of a <see cref="KeyValueRequestType.TryCheckManyWriteIntents"/> request,
+    /// parallel to <see cref="ConflictProbes"/>: what <see cref="ForeignDecisionHint"/> is to a single read or
+    /// probe. Null means no hints.
     /// </summary>
     internal Transactions.Data.ForeignDecisionHint[]? ProbeHints { get; set; }
 
@@ -195,6 +197,13 @@ public sealed class KeyValueRequest : IConsistentHashable
     /// <see cref="TransactionId"/> is the transaction every item belongs to. Null on every other type.
     /// </summary>
     internal KahunaSetKeyValueRequestItem[]? SetManyItems { get; set; }
+
+    /// <summary>
+    /// The probes of a <see cref="KeyValueRequestType.TryCheckManyWriteIntents"/> request, all owned by one actor,
+    /// answered in this order. <see cref="Key"/> carries the first probe's key so the request hashes to that actor,
+    /// and <see cref="TransactionId"/> is the transaction that asks. Null on every other type.
+    /// </summary>
+    internal KeyValueConflictProbe[]? ConflictProbes { get; set; }
 
     /// <summary>
     /// A <see cref="KeyValueRequestType.TrySetMany"/> request that only checks its items: every item's condition and
@@ -377,6 +386,7 @@ public sealed class KeyValueRequest : IConsistentHashable
         ProbeLock = KeyValueProbeLock.None;
         ProbeRanges = null;
         SetManyItems = null;
+        ConflictProbes = null;
         CheckOnly = false;
         ReturnToPoolOnReceive = false;
         ReleaseOnlyIfHeld = false;

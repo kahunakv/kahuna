@@ -1,5 +1,6 @@
 using System.Text;
 using Kahuna.Server.KeyValues;
+using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
 using Kommander;
@@ -213,5 +214,63 @@ public sealed class TestTransactionalReadFloor
 
         KeyValueProbeResult[] refused = await TxProbe(kahuna, reader, [b, c], ct);
         Assert.All(refused, result => Assert.Equal(KeyValueResponseType.Aborted, result.Type));
+    }
+
+    /// <summary>
+    /// A transaction that ends while one of its reads is being judged, and another waits to be judged: both reads
+    /// finish with an answer. The state of an ended transaction is released only after the last read that had
+    /// found it is done, so neither read faults on it and the waiting read is not left waiting.
+    /// </summary>
+    [Fact]
+    public async Task TransactionEndsWhileReadsAreJudged_BothReadsFinish()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        TransactionReadFloors floors = new();
+        HLCTimestamp transactionId = new(0, 100, 0);
+
+        floors.Track(transactionId);
+
+        TaskCompletionSource<(KeyValueResponseType, long)> heldCheck = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource checkStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        int checks = 0;
+
+        // The first check of an earlier key is held open; every later check answers at once that the key holds.
+        async ValueTask<(KeyValueResponseType Type, long Revision)> ReadHead(string key, KeyValueDurability durability, CancellationToken cancellationToken)
+        {
+            if (Interlocked.Increment(ref checks) != 1)
+                return (KeyValueResponseType.Get, 1);
+
+            checkStarted.TrySetResult();
+            return await heldCheck.Task.WaitAsync(cancellationToken);
+        }
+
+        static TransactionReadFloors.Observation[] Unknown(string key) =>
+            [new(key, KeyValueDurability.Persistent, Exists: true, Revision: 1, HeadSeenTicks: 0, ServedTicks: 0)];
+
+        Assert.True(await floors.Admit(
+            transactionId,
+            [new("floor-end/a", KeyValueDurability.Persistent, Exists: true, Revision: 1, HeadSeenTicks: 1, ServedTicks: 2)],
+            ReadHead, ct));
+
+        // A key that states nothing refreshes the floor: the earlier key is checked, and the check is held.
+        Task<bool> judged = floors.Admit(transactionId, Unknown("floor-end/b"), ReadHead, ct).AsTask();
+        await checkStarted.Task.WaitAsync(ct);
+
+        // A second read of the same transaction waits behind the first.
+        Task<bool> waiting = floors.Admit(transactionId, Unknown("floor-end/c"), ReadHead, ct).AsTask();
+        Assert.False(waiting.IsCompleted);
+
+        floors.Forget(transactionId);
+        Assert.Equal(0, floors.Count);
+
+        heldCheck.SetResult((KeyValueResponseType.Get, 1));
+
+        Assert.True(await judged.WaitAsync(TimeSpan.FromSeconds(10), ct));
+        Assert.True(await waiting.WaitAsync(TimeSpan.FromSeconds(10), ct));
+
+        // A read that arrives after the transaction ended is not held, and ending it again is harmless.
+        Assert.True(await floors.Admit(transactionId, Unknown("floor-end/d"), ReadHead, ct));
+        floors.Forget(transactionId);
     }
 }
