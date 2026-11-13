@@ -511,9 +511,8 @@ static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts, 
         // Check-quorum: a leader that hears no same-term ack from a majority of voters for the
         // window steps down, which bounds how long an isolated leader keeps answering as one. On
         // by default because the acknowledged-write loss of a two-leader window is silent to
-        // clients. KAHUNA_CHECK_QUORUM=0 forces it off (the CLI bool is a bare switch and cannot
-        // express "false").
-        EnableCheckQuorum = opts.RaftEnableCheckQuorum
+        // clients. Either --raft-enable-check-quorum false or KAHUNA_CHECK_QUORUM=0 turns it off.
+        EnableCheckQuorum = (opts.RaftEnableCheckQuorum ?? true)
             && Environment.GetEnvironmentVariable("KAHUNA_CHECK_QUORUM") != "0",
         CheckQuorumIntervalMultiplier = opts.RaftCheckQuorumIntervalMultiplier,
         TimerInitialDelay = TimeSpan.FromMilliseconds(opts.RaftTimerInitialDelay),
@@ -531,7 +530,7 @@ static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts, 
         // partitions) does not spend one OS thread per partition. PoolSize 0 auto-sizes to the core count.
         // KAHUNA_SHARED_POOL=0 forces the original one-thread-per-partition model (diagnostic escape
         // hatch — the CLI bool is a bare switch and cannot express "false").
-        EnableSharedExecutorPool = opts.RaftEnableSharedExecutorPool
+        EnableSharedExecutorPool = opts.RaftEnableSharedExecutorPool ?? true
             && Environment.GetEnvironmentVariable("KAHUNA_SHARED_POOL") != "0",
         PartitionExecutorPoolSize = opts.RaftExecutorPoolSize,
         CompactEveryOperations = opts.RaftCompactEveryOperations,
@@ -544,7 +543,7 @@ static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts, 
         MaxWalBatchSize = opts.RaftMaxWalBatchSize,
         MaxWalGroupBatchPartitions = opts.RaftMaxWalGroupBatchPartitions,
         WalGroupCommitLingerMs = opts.RaftWalGroupCommitLingerMs,
-        WalSingleFsyncCommit = opts.RaftWalSingleFsyncCommit,
+        WalSingleFsyncCommit = opts.RaftWalSingleFsyncCommit ?? true,
         SqliteWalShardCount = opts.RaftSqliteWalShardCount,
         MaxDrainQuantumControl = opts.RaftMaxDrainQuantumControl,
         MaxDrainQuantumReplication = opts.RaftMaxDrainQuantumReplication,
@@ -568,7 +567,7 @@ static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts, 
         MaxPreAuthRequestBodyBytes = opts.RaftMaxPreAuthRequestBodyBytes,
         GrpcEnableAppendLogsCoalescing = opts.RaftGrpcEnableAppendLogsCoalescing,
         GrpcAppendLogsMaxCoalesceBatch = opts.RaftGrpcAppendLogsMaxCoalesceBatch,
-        BackfillEnabled = opts.RaftBackfillEnabled,
+        BackfillEnabled = opts.RaftBackfillEnabled ?? true,
         BackfillThreshold = opts.RaftBackfillThreshold,
         MaxBackfillEntriesPerRound = opts.RaftMaxBackfillEntriesPerRound,
         FollowerSaturationBackoff = TimeSpan.FromMilliseconds(opts.RaftFollowerSaturationBackoff),
@@ -589,7 +588,7 @@ static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts, 
         // A node evicted from the roster while it was down (dead-member eviction firing across a
         // slow restart) re-runs the join flow instead of parking as NotMember forever. KAHUNA_AUTO_REJOIN=0
         // forces it off (the CLI bool is a bare switch and cannot express "false").
-        EnableAutoRejoin = opts.RaftEnableAutoRejoin
+        EnableAutoRejoin = opts.RaftEnableAutoRejoin ?? true
             && Environment.GetEnvironmentVariable("KAHUNA_AUTO_REJOIN") != "0",
         // Quiesce idle partitions in cluster mode: with many partitions the per-partition
         // keep-alive heartbeats dominate idle traffic, so a leader stops heartbeating a partition
@@ -597,7 +596,7 @@ static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts, 
         // PingInterval > 0 and < StartElectionTimeout, validated by RaftConfiguration at startup.
         // KAHUNA_QUIESCENCE=0 forces quiescence off (diagnostic escape hatch — the CLI bool is a
         // bare switch and cannot express "false").
-        EnableQuiescence = opts.RaftEnableQuiescence
+        EnableQuiescence = opts.RaftEnableQuiescence ?? true
             && Environment.GetEnvironmentVariable("KAHUNA_QUIESCENCE") != "0",
         QuiesceAfter = TimeSpan.FromMilliseconds(opts.RaftQuiesceAfter),
         EnableLeaderBalancer = opts.RaftEnableLeaderBalancer,
@@ -641,10 +640,10 @@ static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts, 
         CompactionLiveReplicaLagBudget = opts.RaftCompactionLiveReplicaLagBudget,
         CompactionSilentPeerRetentionWindow = TimeSpan.FromMilliseconds(opts.RaftCompactionSilentPeerRetentionWindow),
         CompactionDurabilityClampReportInterval = TimeSpan.FromMilliseconds(opts.RaftCompactionDurabilityClampReportInterval),
-        FanOutBeforeLocalWrite = opts.RaftFanOutBeforeLocalWrite,
+        FanOutBeforeLocalWrite = opts.RaftFanOutBeforeLocalWrite ?? true,
         CompactionLiveReplicaLagWindow = TimeSpan.FromMilliseconds(opts.RaftCompactionLiveReplicaLagWindow),
         CompactionLiveReplicaLagCap = opts.RaftCompactionLiveReplicaLagCap,
-        FollowerApplyInOwnTurn = opts.RaftFollowerApplyInOwnTurn,
+        FollowerApplyInOwnTurn = opts.RaftFollowerApplyInOwnTurn ?? true,
         FollowerApplyTurnTime = TimeSpan.FromMicroseconds(opts.RaftFollowerApplyTurnTime),
         FollowerApplyTurnBudget = opts.RaftFollowerApplyTurnBudget
     };

@@ -93,8 +93,8 @@ or GC pauses should not depose the sole real node. The cluster constructor retai
 check-quorum setting, including `EmbeddedKahunaCluster` members. This is not additional failure tolerance
 for standalone hosts: only their own backend/WAL can preserve data through process loss.
 
-The server switch is a bare flag and cannot express "off". Set the environment variable
-`KAHUNA_CHECK_QUORUM=0` to turn the step-down off.
+The server flag takes a value: pass `--raft-enable-check-quorum false`, or set the environment variable
+`KAHUNA_CHECK_QUORUM=0`, to turn the step-down off.
 
 With the multiplier at 0 the window equals the start of the election timeout (2 s by default), which is
 the largest window that still steps an isolated leader down before any follower can start an election.

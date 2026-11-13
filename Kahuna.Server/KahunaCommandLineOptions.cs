@@ -215,8 +215,9 @@ public sealed class KahunaCommandLineOptions
     [Option("backend-read-queue-depth", Required = false, HelpText = "Per-partition pending-queue depth for the Kahuna backend read scheduler", Default = 4096)]
     public int BackendReadQueueDepth { get; set; } = 4096;
 
-    [Option("raft-enable-shared-executor-pool", Required = false, HelpText = "Share a bounded pool of worker threads across all Raft partitions instead of one OS thread per partition. Required to run thousands of partitions (e.g. after range splits). Disable only to isolate scheduler issues.", Default = true)]
-    public bool RaftEnableSharedExecutorPool { get; set; } = true;
+    // Nullable so it takes an explicit value: a bare switch cannot turn a true default off.
+    [Option("raft-enable-shared-executor-pool", Required = false, HelpText = "Share a bounded pool of worker threads across all Raft partitions instead of one OS thread per partition. Required to run thousands of partitions (e.g. after range splits). Disable only to isolate scheduler issues: true or false (default true)")]
+    public bool? RaftEnableSharedExecutorPool { get; set; }
 
     [Option("raft-executor-pool-size", Required = false, HelpText = "Number of shared Raft executor worker threads. 0 auto-sizes to the processor count. Raise above the core count only if ops queue behind busy partitions while CPU is not saturated.", Default = 0)]
     public int RaftExecutorPoolSize { get; set; }
@@ -257,8 +258,9 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-wal-stall-warn-threshold", Required = false, HelpText = "Age past which a pending WAL write on this node is logged as a stall and, when reported by a peer, excluded from entry-carrying backfill and snapshot transfers, in milliseconds. Values <= 0 disable the log lines only; the peer rules still use 500 ms.", Default = 500)]
     public int RaftWalStallWarnThreshold { get; set; } = 500;
 
-    [Option("raft-enable-check-quorum", Required = false, HelpText = "A leader that has not heard a same-term append/heartbeat ack from a majority of voters for the check-quorum window steps down to follower. On by default; set the environment variable KAHUNA_CHECK_QUORUM=0 to turn it off (the CLI bool is a bare switch and cannot express false)", Default = true)]
-    public bool RaftEnableCheckQuorum { get; set; } = true;
+    // Nullable so it takes an explicit value: a bare switch cannot turn a true default off.
+    [Option("raft-enable-check-quorum", Required = false, HelpText = "A leader that has not heard a same-term append/heartbeat ack from a majority of voters for the check-quorum window steps down to follower: true or false (default true)")]
+    public bool? RaftEnableCheckQuorum { get; set; }
 
     [Option("raft-check-quorum-interval-multiplier", Required = false, HelpText = "Number of heartbeat intervals without a majority of same-term acks after which a leader with check-quorum enabled steps down. 0 derives the window from the election timeout (the largest window that still steps an isolated leader down before a follower can start an election). An explicit value must be at least 2 and must keep heartbeat-interval x multiplier at or below the election timeout start", Default = 0)]
     public int RaftCheckQuorumIntervalMultiplier { get; set; }
@@ -323,8 +325,9 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-wal-group-commit-linger-ms", Required = false, HelpText = "Group-commit linger window in milliseconds (0 = disabled; raise on networks where fsync rate is the bottleneck)", Default = 0)]
     public int RaftWalGroupCommitLingerMs { get; set; }
 
-    [Option("raft-wal-single-fsync-commit", Required = false, HelpText = "Enable single-fsync fast path: ack on propose-quorum-durable and demote the commit marker to a lazy write", Default = true)]
-    public bool RaftWalSingleFsyncCommit { get; set; } = true;
+    // Nullable so it takes an explicit value: a bare switch cannot turn a true default off.
+    [Option("raft-wal-single-fsync-commit", Required = false, HelpText = "Single-fsync fast path: ack on propose-quorum-durable and demote the commit marker to a lazy write: true or false (default true)")]
+    public bool? RaftWalSingleFsyncCommit { get; set; }
 
     // Raft WAL shard column-family sizing (Kommander RocksDbWalTuning). Zero is the "not set"
     // value on every numeric knob here, because none of them accepts zero as a real setting:
@@ -418,8 +421,9 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-max-pre-auth-request-body-bytes", Required = false, HelpText = "Ceiling on a Raft REST request body before it is authenticated/signed, in bytes. Bounds buffering independent of the host's own request-size limit.", Default = 32L * 1024 * 1024)]
     public long RaftMaxPreAuthRequestBodyBytes { get; set; } = 32L * 1024 * 1024;
 
-    [Option("raft-backfill-enabled", Required = false, HelpText = "Whether a leader ships catch-up batches (and falls back to a snapshot transfer) to lagging followers. Turning it off makes a follower that misses entries permanently stale — only set it false when the deployment owns its peers' catch-up story.", Default = true)]
-    public bool RaftBackfillEnabled { get; set; } = true;
+    // Nullable so it takes an explicit value: a bare switch cannot turn a true default off.
+    [Option("raft-backfill-enabled", Required = false, HelpText = "Whether a leader ships catch-up batches (and falls back to a snapshot transfer) to lagging followers. Turning it off makes a follower that misses entries permanently stale — only set it false when the deployment owns its peers' catch-up story: true or false (default true)")]
+    public bool? RaftBackfillEnabled { get; set; }
 
     [Option("raft-backfill-threshold", Required = false, HelpText = "Committed entries a follower may trail the leader before active backfill kicks in", Default = 10)]
     public int RaftBackfillThreshold { get; set; } = 10;
@@ -472,11 +476,13 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-ping-interval", Required = false, HelpText = "Interval between SWIM ping rounds in milliseconds (0 disables the failure detector). Must be > 0 and < raft-start-election-timeout when quiescence is enabled.", Default = 1000)]
     public int RaftPingInterval { get; set; } = 1000;
 
-    [Option("raft-enable-auto-rejoin", Required = false, HelpText = "A node that finds itself removed from the committed roster (dead-member eviction firing across a slow restart) re-runs the join flow against the remaining members instead of staying NotMember. Disable only when an operator workflow removes live nodes and expects them to stay out.", Default = true)]
-    public bool RaftEnableAutoRejoin { get; set; } = true;
+    // Nullable so it takes an explicit value: a bare switch cannot turn a true default off.
+    [Option("raft-enable-auto-rejoin", Required = false, HelpText = "A node that finds itself removed from the committed roster (dead-member eviction firing across a slow restart) re-runs the join flow against the remaining members instead of staying NotMember. Disable only when an operator workflow removes live nodes and expects them to stay out: true or false (default true)")]
+    public bool? RaftEnableAutoRejoin { get; set; }
 
-    [Option("raft-enable-quiescence", Required = false, HelpText = "Quiesce idle partitions: a leader stops per-partition heartbeats after a partition is idle, relying on the SWIM failure detector for node liveness. Cuts O(NxM) idle heartbeat traffic across many partitions. Requires SWIM (raft-ping-interval > 0 and < raft-start-election-timeout).", Default = true)]
-    public bool RaftEnableQuiescence { get; set; } = true;
+    // Nullable so it takes an explicit value: a bare switch cannot turn a true default off.
+    [Option("raft-enable-quiescence", Required = false, HelpText = "Quiesce idle partitions: a leader stops per-partition heartbeats after a partition is idle, relying on the SWIM failure detector for node liveness. Cuts O(NxM) idle heartbeat traffic across many partitions. Requires SWIM (raft-ping-interval > 0 and < raft-start-election-timeout): true or false (default true)")]
+    public bool? RaftEnableQuiescence { get; set; }
 
     [Option("raft-quiesce-after", Required = false, HelpText = "How long a partition must be idle (no proposals, no in-flight replication) before its leader quiesces it, in milliseconds", Default = 1500)]
     public int RaftQuiesceAfter { get; set; } = 1500;
@@ -610,8 +616,9 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-compaction-durability-clamp-report-interval", Required = false, HelpText = "How often a partition whose compaction is clamped by the application-durability floor repeats its warning, and how long the floor must sit unchanged before the warning calls the flusher stalled, in milliseconds. Values <= 0 keep only the streak-start and streak-end log lines.", Default = 60000)]
     public int RaftCompactionDurabilityClampReportInterval { get; set; } = 60000;
 
-    [Option("raft-fan-out-before-local-write", Required = false, HelpText = "Send a proposal to the followers while the leader's own write is queued, so the follower writes overlap the leader's. When false, the fan-out waits until the leader's write is durable, which puts two WAL writes in series in every round.", Default = true)]
-    public bool RaftFanOutBeforeLocalWrite { get; set; } = true;
+    // Nullable so it takes an explicit value: a bare switch cannot turn a true default off.
+    [Option("raft-fan-out-before-local-write", Required = false, HelpText = "Send a proposal to the followers while the leader's own write is queued, so the follower writes overlap the leader's. When false, the fan-out waits until the leader's write is durable, which puts two WAL writes in series in every round: true or false (default true)")]
+    public bool? RaftFanOutBeforeLocalWrite { get; set; }
 
     [Option("raft-compaction-live-replica-lag-window", Required = false, HelpText = "How much recent write history, in milliseconds, the leader keeps for a follower that still lags. The retention is the larger of this window's entry count and the live-replica lag budget, up to the lag cap. 0 sizes the retention by the lag budget alone.", Default = 180000)]
     public int RaftCompactionLiveReplicaLagWindow { get; set; } = 180000;
@@ -619,8 +626,9 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-compaction-live-replica-lag-cap", Required = false, HelpText = "Upper bound, in entries, on how far the live-replica lag window can raise the retention. Values <= 0 turn the window off.", Default = 10_000_000L)]
     public long RaftCompactionLiveReplicaLagCap { get; set; } = 10_000_000L;
 
-    [Option("raft-follower-apply-in-own-turn", Required = false, HelpText = "Deliver committed entries to the application on a follower in executor turns of their own, so the next append waits for one short turn at most. When false, the follower delivers inside the append's completion, before its ack.", Default = true)]
-    public bool RaftFollowerApplyInOwnTurn { get; set; } = true;
+    // Nullable so it takes an explicit value: a bare switch cannot turn a true default off.
+    [Option("raft-follower-apply-in-own-turn", Required = false, HelpText = "Deliver committed entries to the application on a follower in executor turns of their own, so the next append waits for one short turn at most. When false, the follower delivers inside the append's completion, before its ack: true or false (default true)")]
+    public bool? RaftFollowerApplyInOwnTurn { get; set; }
 
     [Option("raft-follower-apply-turn-time", Required = false, HelpText = "How long one follower apply turn may deliver entries before it yields the executor, in microseconds. 0 leaves only the turn entry budget.", Default = 100)]
     public int RaftFollowerApplyTurnTime { get; set; } = 100;
@@ -950,8 +958,9 @@ public sealed class KahunaCommandLineOptions
     [Option("durable-maintenance-interval", Required = false, HelpText = "Seconds between durable-2PC maintenance ticks (prepared-intent recovery and the record retention sweep, TTL and memory budget). Shorter than the collection interval so a memory budget is enforced within seconds of being exceeded. Clamped to --range-collection-interval; 0 uses it. Default 5.", Default = 5)]
     public int DurableMaintenanceIntervalSeconds { get; set; } = 5;
 
-    [Option("fail-fast-on-oom", Required = false, HelpText = "Terminate the process on any OutOfMemoryException so the orchestrator restarts the node with an empty heap, instead of leaving a reachable replica whose WAL/apply pipeline is dead. When false the node still never swallows the fault in its own apply paths and reports itself not ready on /v1/cluster/health from the first fatal fault on. Default true.", Default = true)]
-    public bool FailFastOnOutOfMemory { get; set; } = true;
+    // Nullable so it takes an explicit value: a bare switch cannot turn a true default off.
+    [Option("fail-fast-on-oom", Required = false, HelpText = "Terminate the process on any OutOfMemoryException so the orchestrator restarts the node with an empty heap, instead of leaving a reachable replica whose WAL/apply pipeline is dead. When false the node still never swallows the fault in its own apply paths and reports itself not ready on /v1/cluster/health from the first fatal fault on: true or false (default true)")]
+    public bool? FailFastOnOutOfMemory { get; set; }
 
     [Option("oom-restart-breaker-threshold", Required = false, HelpText = "Consecutive starts that may end in an out-of-memory fail-fast early in recovery (within ten minutes of starting, under the same heap limit) before the node trips its restart breaker on the next start: it still restores and votes, but withholds its candidacy and reports not ready with the reason instead of crash-looping. The exits are kept in out-of-memory-exits.log under the storage path; raising the memory limit, an hour without a crash, or removing the file clears the count. 0 disables the breaker. Default 3.", Default = 3)]
     public int OutOfMemoryRestartBreakerThreshold { get; set; } = 3;

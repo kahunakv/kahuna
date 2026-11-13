@@ -59,7 +59,7 @@ public static class EmbeddedOptionsFactory
         Port = opts.RaftPort,
         InitialPartitions = opts.InitialClusterPartitions,
         MaxPartitions = opts.RaftMaxPartitions,
-        EnableSharedExecutorPool = opts.RaftEnableSharedExecutorPool,
+        EnableSharedExecutorPool = opts.RaftEnableSharedExecutorPool ?? true,
         PartitionExecutorPoolSize = opts.RaftExecutorPoolSize,
         ReplicationFactor = opts.RaftReplicationFactor,
         EnablePlacementRebalancer = opts.RaftEnablePlacementRebalancer,
@@ -79,6 +79,15 @@ public static class EmbeddedOptionsFactory
         WalPath = opts.WalPath,
         WalRevision = opts.WalRevision,
         WalSyncWrites = opts.GetWalSyncWrites(),
+        // The Raft I/O and log write options a standalone node shares with a clustered one. The snapshot bounds
+        // and timeouts are left on the embedded defaults on purpose: the command line always carries a value for
+        // them, and the embedded node derives better ones for a node that stages snapshots on disk.
+        RaftWalSingleFsyncCommit = opts.RaftWalSingleFsyncCommit ?? true,
+        ReadIOThreads = opts.ReadIOThreads,
+        WriteIOThreads = opts.WriteIOThreads,
+        RaftMaxWalGroupBatchPartitions = opts.RaftMaxWalGroupBatchPartitions,
+        RaftWalGroupCommitLingerMs = opts.RaftWalGroupCommitLingerMs,
+        RaftSnapshotStagingDirectory = opts.RaftSnapshotStagingDirectory,
         RaftWalShardWriteBufferSizeMb = NullIfZero(opts.RaftWalShardWriteBufferSizeMb),
         RaftWalShardMinWriteBufferNumberToMerge = NullIfZero(opts.RaftWalShardMinWriteBufferNumberToMerge),
         RaftWalShardMaxWriteBufferNumber = NullIfZero(opts.RaftWalShardMaxWriteBufferNumber),
@@ -203,7 +212,7 @@ public static class EmbeddedOptionsFactory
         DurableRecordRetentionHeapPressure = opts.DurableRecordRetentionHeapPressure,
         DurableRecordRetentionFloor = TimeSpan.FromSeconds(opts.DurableRecordRetentionFloorSeconds),
         DurableMaintenanceInterval = TimeSpan.FromSeconds(opts.DurableMaintenanceIntervalSeconds),
-        FailFastOnOutOfMemory = opts.FailFastOnOutOfMemory,
+        FailFastOnOutOfMemory = opts.FailFastOnOutOfMemory ?? true,
         OutOfMemoryRestartBreakerThreshold = opts.OutOfMemoryRestartBreakerThreshold,
         RangeSplitLoadWindow = TimeSpan.FromSeconds(opts.RangeSplitLoadWindowSeconds),
         RangeSplitLoadPollInterval = TimeSpan.FromSeconds(opts.RangeSplitLoadPollIntervalSeconds),

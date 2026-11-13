@@ -592,7 +592,8 @@ Two WAL behaviours are worth knowing because they dominate commit latency:
 `RaftWalSingleFsyncCommit`). Check the host's effective configuration rather than assuming the server
 and embedded defaults match:
 `RaftWalSingleFsyncCommit` is **false** by default on `EmbeddedKahunaOptions`, whereas the server's
-`--raft-wal-single-fsync-commit` defaults to **true**. New replication scheduling and retention controls
+`--raft-wal-single-fsync-commit` defaults to **true**, on a standalone node and on a clustered one. The flag
+takes a value: pass `--raft-wal-single-fsync-commit false` to turn the fast path off. New replication scheduling and retention controls
 are described in the [snapshot and Raft recovery guide](snapshot-and-raft-recovery-guide.md#replication-scheduling-and-log-retention).
 
 **Storage.** Raft durability and *backend* persistence are separate. Committed state reaches the
