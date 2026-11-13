@@ -146,6 +146,8 @@ message GrpcTryDeleteManyKeyValueRequestItem {
   string Key = 4;
   GrpcKeyValueDurability Durability = 5;
   GrpcTransactionConflictPolicy ConflictPolicy = 6;
+  // Only YIELD_TO_OLDER_READERS has a meaning for a delete. An older receiver ignores the field.
+  GrpcKeyValueFlags Flags = 7;
 }
 
 message GrpcTryDeleteManyKeyValueResponse {

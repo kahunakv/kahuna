@@ -305,32 +305,6 @@ internal sealed class TrySetHandler : BaseHandler
     }
 
     /// <summary>
-    /// Whether a transaction older than <paramref name="writer"/> has read the key and is still running: it holds a
-    /// read pin on the entry, staged nothing there, its session is open in this process, and this actor recorded
-    /// no outcome for it. A writer that already staged the key is past this check. See
-    /// <see cref="KeyValueFlags.YieldToOlderReaders"/>.
-    /// </summary>
-    private bool HasOlderLiveReader(KeyValueEntry entry, HLCTimestamp writer)
-    {
-        if (entry.MvccEntries is null)
-            return false;
-
-        if (entry.MvccEntries.TryGetValue(writer, out KeyValueMvccEntry? own) && own.StagedUnder is not null)
-            return false;
-
-        foreach ((HLCTimestamp reader, KeyValueMvccEntry pin) in entry.MvccEntries)
-        {
-            if (pin.StagedUnder is not null || reader.CompareTo(writer) >= 0)
-                continue;
-
-            if (Transactions.LiveTransactions.IsOpen(reader) && !context.WasCommittedHere(reader) && !context.WasRolledBackHere(reader))
-                return true;
-        }
-
-        return false;
-    }
-
-    /// <summary>
     /// Applies an ephemeral (non-persistent) set inline: no Raft proposal, mutate the in-memory entry and
     /// return. Split out so the persistent and ephemeral tails of <see cref="Execute"/> stay readable.
     /// </summary>

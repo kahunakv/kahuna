@@ -454,7 +454,7 @@ internal sealed class LocalKeyValueOperations
                 null,
                 null,
                 -1,
-                KeyValueFlags.None,
+                item.Flags & KeyValueFlags.YieldToOlderReaders,
                 0,
                 HLCTimestamp.Zero,
                 item.Durability,

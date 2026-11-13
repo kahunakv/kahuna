@@ -41,8 +41,8 @@ public enum KeyValueFlags
     AbortWhenDoomed = 1 << 8,        // 256
 
     /// <summary>
-    /// A transactional set of a key that an older transaction has read, and is still running, answers
-    /// <c>Aborted</c> at once instead of staging the write. Without the flag the write is staged, and the older
+    /// A transactional set, or a delete of a batched delete, of a key that an older transaction has read, and is
+    /// still running, answers <c>Aborted</c> at once instead of staging the write. Without the flag the write is staged, and the older
     /// reader is refused at its commit, after it did all its work, because a key it read carries a write intent.
     /// With it the younger of the two gives way at its first write, which is the order a shared lock on the key
     /// would give. The reader counts only while its coordinator session is open on the node that leads the key.

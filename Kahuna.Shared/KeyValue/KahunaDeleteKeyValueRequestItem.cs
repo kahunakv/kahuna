@@ -21,4 +21,11 @@ public sealed class KahunaDeleteKeyValueRequestItem
     /// </summary>
     [JsonPropertyName("conflictPolicy")]
     public TransactionConflictPolicy ConflictPolicy { get; set; }
+
+    /// <summary>
+    /// Flags of the delete. Only <see cref="KeyValueFlags.YieldToOlderReaders"/> has a meaning for a delete;
+    /// every other bit is ignored.
+    /// </summary>
+    [JsonPropertyName("flags")]
+    public KeyValueFlags Flags { get; set; }
 }

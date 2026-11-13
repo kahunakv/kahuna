@@ -227,6 +227,13 @@ internal sealed class TryDeleteHandler : BaseHandler
         if (terminal is not null)
             return terminal;
 
+        // A delete gives way to an older running reader of the key as a set does.
+        if ((message.Flags & KeyValueFlags.YieldToOlderReaders) != 0 && HasOlderLiveReader(entry!, message.TransactionId))
+        {
+            IntentWaitMetrics.OlderReaderYields.Add(1);
+            return KeyValueStaticResponses.AbortedResponse;
+        }
+
         entry!.MvccEntries ??= new();
 
         if (!entry.MvccEntries.TryGetValue(message.TransactionId, out KeyValueMvccEntry? mvccEntry))

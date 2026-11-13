@@ -650,6 +650,32 @@ internal abstract class BaseHandler
     }
 
     /// <summary>
+    /// Whether a transaction older than <paramref name="writer"/> has read the key and is still running: it holds a
+    /// read pin on the entry, staged nothing there, its session is open in this process, and this actor recorded
+    /// no outcome for it. A writer that already staged the key is past this check. See
+    /// <see cref="KeyValueFlags.YieldToOlderReaders"/>.
+    /// </summary>
+    protected bool HasOlderLiveReader(KeyValueEntry entry, HLCTimestamp writer)
+    {
+        if (entry.MvccEntries is null)
+            return false;
+
+        if (entry.MvccEntries.TryGetValue(writer, out KeyValueMvccEntry? own) && own.StagedUnder is not null)
+            return false;
+
+        foreach ((HLCTimestamp reader, KeyValueMvccEntry pin) in entry.MvccEntries)
+        {
+            if (pin.StagedUnder is not null || reader.CompareTo(writer) >= 0)
+                continue;
+
+            if (Transactions.LiveTransactions.IsOpen(reader) && !context.WasCommittedHere(reader) && !context.WasRolledBackHere(reader))
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
     /// Removes MvccEntries from other transactions that have elapsed their Expires deadline, or whose
     /// transaction is definitively no longer live (committed, rolled back, or older than the maximum
     /// possible session lifetime). Called at transaction resolve time (commit/rollback) so the collector

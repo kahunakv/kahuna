@@ -236,7 +236,8 @@ internal sealed class KeyValueWriteHandler
                 TransactionId = new(item.TransactionIdNode, item.TransactionIdPhysical, item.TransactionIdCounter),
                 Key = item.Key,
                 Durability = (KeyValueDurability)item.Durability,
-                ConflictPolicy = TransactionConflictPolicyWire.FromGrpc(item.ConflictPolicy)
+                ConflictPolicy = TransactionConflictPolicyWire.FromGrpc(item.ConflictPolicy),
+                Flags = (KeyValueFlags)item.Flags
             });
         }
 

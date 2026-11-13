@@ -146,4 +146,35 @@ public sealed class TestYieldToOlderReaders
         (KeyValueResponseType committed, _) = await kahuna.LocateAndCommitTransaction(next, ct);
         Assert.Equal(KeyValueResponseType.Committed, committed);
     }
+
+    private static async Task<KeyValueResponseType> TxDeleteMany(IKahuna kahuna, TransactionHandle tx, string key, KeyValueFlags flags, CancellationToken ct)
+    {
+        List<KahunaDeleteKeyValueResponseItem> answers = await kahuna.LocateAndTryDeleteManyKeyValue(
+            [new KahunaDeleteKeyValueRequestItem { TransactionId = tx.TransactionId, Key = key, Durability = KeyValueDurability.Persistent, Flags = flags }],
+            ct, tx.CoordinatorKey, TransactionOperationId.NewRandom());
+        return Assert.Single(answers).Type;
+    }
+
+    [Fact]
+    public async Task YoungerBatchedDelete_IsRefused_WhileAnOlderReaderRuns_AndStagedWithoutTheFlag()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using EmbeddedKahunaNode node = await StartNode(loggerFactory, ct);
+        IKahuna kahuna = node.Kahuna;
+        string key = NewKey();
+        await AutoCommitSet(kahuna, key, "seed", ct);
+
+        TransactionHandle older = await Start(kahuna, key + "/older", ct);
+        TransactionHandle younger = await Start(kahuna, key + "/younger", ct);
+        TransactionHandle plain = await Start(kahuna, key + "/plain", ct);
+
+        Assert.Equal(KeyValueResponseType.Get, await TxGet(kahuna, older, key, ct));
+        await Task.Delay(100, ct);
+
+        Assert.Equal(KeyValueResponseType.Aborted, await TxDeleteMany(kahuna, younger, key, KeyValueFlags.YieldToOlderReaders, ct));
+        await kahuna.LocateAndRollbackTransaction(younger, ct);
+
+        // Without the flag the delete is staged over the older reader's pin, as before.
+        Assert.Equal(KeyValueResponseType.Deleted, await TxDeleteMany(kahuna, plain, key, KeyValueFlags.None, ct));
+    }
 }

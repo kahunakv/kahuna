@@ -438,7 +438,8 @@ public partial class GrpcInterNodeCommunication : IInterNodeCommunication
                 TransactionIdCounter = item.TransactionId.C,
                 Key = item.Key,
                 Durability = (GrpcKeyValueDurability)item.Durability,
-                ConflictPolicy = TransactionConflictPolicyWire.ToGrpc(item.ConflictPolicy)
+                ConflictPolicy = TransactionConflictPolicyWire.ToGrpc(item.ConflictPolicy),
+                Flags = (GrpcKeyValueFlags)item.Flags
             });
         }
     }
