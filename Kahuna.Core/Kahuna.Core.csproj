@@ -58,6 +58,7 @@
     <Compile Remove="Communication/External/ClusterLeave.cs" />
     <Compile Remove="Communication/External/Grpc/**/*.cs" />
     <Compile Remove="Communication/InterNode/GrpcInterNodeCommunication.cs" />
+    <Compile Remove="Communication/InterNode/GrpcInterNodeCommunication.*.cs" />
     <Compile Remove="Communication/InterNode/Grpc/**/*.cs" />
     <Compile Remove="Persistence/Backend/RocksDbPersistenceBackend.cs" />
     <Compile Remove="Persistence/Backend/SqlitePersistenceBackend.cs" />
