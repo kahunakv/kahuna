@@ -418,6 +418,8 @@ Completion of committed durable entry #4917 on partition 2 (PreparedIntent) did 
 |---|---|---|
 | `kahuna.keyvalues.applied_log_id{partition}` | gauge | Highest kv log id this node applied for the partition |
 | `kahuna.durable_tx.committed_head_ledger_entries{partition}` | gauge | Committed heads this node holds for the partition |
+| `kahuna.durable_tx.committed_head_ledger_size_floor_raises` | counter | Times a partition's ledger passed `CommittedHeadLedgerMaxEntries` and moved its horizon nearer |
+| `kahuna.durable_tx.committed_head_ledger_over_budget` | counter | Warnings that a ledger stays over its budget with its horizon at the 15-second minimum |
 | `kahuna.keyvalues.apply_divergence_detected` | counter | Replicas found divergent at a leader change or before a split |
 | `kahuna.keyvalues.apply_fingerprint_inconclusive` | counter | Leader-change comparisons that could not compare every peer inside the retry window |
 | `kahuna.keyvalues.apply_divergence_contained{action}` | counter | Containment actions on this node: `gated`, `transferred`, `stepped_down`, `relinquish_failed` |

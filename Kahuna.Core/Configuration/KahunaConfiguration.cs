@@ -1307,6 +1307,21 @@ public sealed class KahunaConfiguration
     public int StagedBaseFenceRetentionMs { get; set; } = 600_000;
 
     /// <summary>
+    /// Heads one partition's committed-head ledger slice may hold. The retention horizon alone bounds a slice
+    /// by the write rate of distinct keys times <see cref="StagedBaseFenceRetentionMs"/>, which a sustained
+    /// bulk load turns into millions of heads. A slice that passes this budget moves its horizon nearer: its
+    /// oldest heads leave until three quarters of the budget remain, and a validated-base prepare or a
+    /// validated commit from a transaction that began before the new horizon is refused, as one older than the
+    /// retention horizon is. The horizon never comes nearer than 15 seconds; a load above the budget inside
+    /// that span keeps the slice over it and the node logs a warning. The budget is per partition, so a node's
+    /// worst case is the budget times the partitions it hosts. <c>0</c> turns the bound off.
+    /// <para>With <see cref="OnePhaseApplyTimeValidation"/> on it must be identical on every node in the group,
+    /// as the retention horizon must: the bound is judged at apply. A node on a version without the bound
+    /// behaves as <c>0</c>, so set <c>0</c> on the upgraded nodes until the last such node is gone.</para>
+    /// </summary>
+    public int CommittedHeadLedgerMaxEntries { get; set; } = 500_000;
+
+    /// <summary>
     /// Root directory for PITR backup artifacts and catalog manifests.
     /// When empty, backup operations are disabled.
     /// <para>

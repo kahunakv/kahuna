@@ -680,6 +680,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             SessionOwnedIntentCeilingMs = options.SessionOwnedIntentCeilingMs,
             PublishedHeadReads = options.PublishedHeadReads,
             StagedBaseFenceRetentionMs = options.StagedBaseFenceRetentionMs,
+            CommittedHeadLedgerMaxEntries = options.CommittedHeadLedgerMaxEntries,
             OnePhaseApplyTimeValidation = options.OnePhaseApplyTimeValidation,
             CommitAdmissionLagMs = options.CommitAdmissionLagMs,
             HistoryHoldMaxLeaseMs = options.HistoryHoldMaxLeaseMs,

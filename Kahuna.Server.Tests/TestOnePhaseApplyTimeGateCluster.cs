@@ -484,6 +484,101 @@ public sealed class TestOnePhaseApplyTimeGateCluster : BaseCluster
         Assert.Equal((0, 0), await CountsOf(Settle(predecessor, "p"), Materialization()));
     }
 
+    // ── ledger size bound ─────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// A load of new keys that passes the head budget of a partition's ledger slice moves the slice's horizon
+    /// on every replica to the same floor and leaves the same heads. A transaction that read before the load
+    /// is then refused at its commit and its write is not applied; with the bound off the same transaction
+    /// commits, so the refusal is the bound's.
+    /// </summary>
+    [Theory]
+    [InlineData(20)]
+    [InlineData(0)]
+    public async Task LoadOverTheLedgerBudget_MovesTheHorizonOnEveryReplica_AndRefusesTheOlderTransaction(int maxEntries)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Cluster cluster = await Assemble(applyTimeValidation: true, config =>
+        {
+            config.CommittedHeadLedgerMaxEntries = maxEntries;
+            // The older transaction stays idle for the whole load; its staged write must not lapse meanwhile.
+            config.StagedWriteIntentLeaseMs = 120_000;
+        });
+
+        try
+        {
+            await RunUnderStableLeadership(cluster.Rafts[0], Partitions, async () =>
+            {
+                // One key space, so every key of the load routes to one partition.
+                string space = "atv-bound-" + Guid.NewGuid().ToString("N")[..8];
+                string victim = $"{space}/victim";
+                await SeedDurable(cluster, victim, "100");
+                int partition = PartitionOf(cluster.Managers[0], victim);
+                int leader = await cluster.LeaderIndexOf(partition, ct);
+                KahunaManager coordinator = cluster.Managers[leader];
+
+                // The older transaction: it validates the victim's base before the load starts.
+                (TransactionHandle older, _) = await StartAndRead(coordinator, KeyRoutedTo(coordinator, "atv-coord", partition), victim, ct);
+                await Write(coordinator, older, victim, "150", ct);
+
+                const int loadKeys = 30;
+                for (int i = 0; i < loadKeys; i++)
+                    await SeedDurable(cluster, $"{space}/k{i:D2}", "v");
+
+                // The horizon may not come nearer than the minimum, so the load stays in the slice until the
+                // newest commit is that far ahead of it.
+                await Task.Delay(PreparedIntentStore.LedgerSizeBoundMinRetentionMs + 2_000, ct);
+                await SeedDurable(cluster, $"{space}/trigger", "v");
+
+                if (maxEntries == 0)
+                {
+                    foreach (KahunaManager manager in cluster.Managers)
+                    {
+                        Assert.Equal(0, manager.DurablePreparedIntentStore.GetLedgerSizeFloor(partition));
+                        Assert.Equal(loadKeys + 2, manager.DurablePreparedIntentStore.CommittedHeadCountForPartition(partition));
+                    }
+
+                    Assert.Equal(KeyValueResponseType.Committed, await CommitToTerminal(coordinator, older, ct));
+                    Assert.Equal("150", await ReadValue(cluster.Managers[(leader + 1) % 3], victim, ct));
+                    return;
+                }
+
+                // Every replica raised the floor at the same entry: same floor, same heads, inside the budget.
+                PreparedIntentStore reference = cluster.Managers[0].DurablePreparedIntentStore;
+                await WaitUntilAsync(() => reference.GetLedgerSizeFloor(partition) > 0);
+                long floor = reference.GetLedgerSizeFloor(partition);
+
+                foreach (KahunaManager manager in cluster.Managers)
+                {
+                    PreparedIntentStore store = manager.DurablePreparedIntentStore;
+                    await WaitUntilAsync(() => store.GetLedgerSizeFloor(partition) == floor);
+                    Assert.Equal(reference.SnapshotLedger(partition), store.SnapshotLedger(partition));
+                    Assert.True(store.CommittedHeadCountForPartition(partition) <= maxEntries);
+                    Assert.False(store.TryGetLedgerHead(partition, $"{space}/k00", out _, out _, out _));
+                    Assert.True(store.TryGetLedgerHead(partition, $"{space}/trigger", out _, out _, out _));
+                }
+
+                // The older transaction began before the floor: its base cannot be verified, so it does not commit.
+                Assert.NotEqual(KeyValueResponseType.Committed, await CommitToTerminal(coordinator, older, ct));
+
+                // A transaction that begins now commits, on a base nobody else wrote.
+                (TransactionHandle younger, long baseRevision) = await StartAndRead(coordinator, KeyRoutedTo(coordinator, "atv-coord", partition), victim, ct);
+                await Write(coordinator, younger, victim, "200", ct);
+                Assert.Equal(KeyValueResponseType.Committed, await CommitToTerminal(coordinator, younger, ct));
+
+                foreach (KahunaManager manager in cluster.Managers)
+                    await WaitUntilAsync(() =>
+                        manager.DurablePreparedIntentStore.TryGetLedgerHead(partition, victim, out long head, out _, out _) && head == baseRevision + 1);
+
+                Assert.Equal("200", await ReadValue(cluster.Managers[(leader + 1) % 3], victim, ct));
+            });
+        }
+        finally
+        {
+            await cluster.Leave();
+        }
+    }
+
     // ── eligibility ───────────────────────────────────────────────────────────────
 
     [Fact]

@@ -1108,6 +1108,13 @@ public sealed class EmbeddedKahunaOptions
     public int StagedBaseFenceRetentionMs { get; set; } = 600_000;
 
     /// <summary>
+    /// Heads one partition's committed-head ledger slice may hold before its horizon moves nearer; <c>0</c>
+    /// turns the bound off. See
+    /// <see cref="Server.Configuration.KahunaConfiguration.CommittedHeadLedgerMaxEntries"/>.
+    /// </summary>
+    public int CommittedHeadLedgerMaxEntries { get; set; } = 500_000;
+
+    /// <summary>
     /// Lets read-modify-write and read-carrying durable transactions take the one-phase commit fast path in a
     /// multi-process Raft group by validating the bundled commit at apply time, in log order, against the
     /// partition's replicated committed-head ledger. Off by default. Turn it on only when every node in the

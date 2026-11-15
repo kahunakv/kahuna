@@ -197,7 +197,7 @@ internal sealed partial class PreparedIntentStore
             }
 
             if (message.LedgerPresent)
-                InstallLedger(message.LedgerPartitionId, LedgerEntriesOf(message), LedgerWatermarkOf(message), message.LedgerReflectedThroughIndex, SettledEntriesOf(message), message.LedgerFullyReflectedThroughIndex);
+                InstallLedger(message.LedgerPartitionId, LedgerEntriesOf(message), LedgerWatermarkOf(message), message.LedgerReflectedThroughIndex, SettledEntriesOf(message), message.LedgerFullyReflectedThroughIndex, message.LedgerSizeFloorPhysical);
             else if (TryParsePartitionFromSnapshotPath(path, out int partitionId))
                 ledgerMissingPartitions.Add(partitionId);
         }
@@ -259,10 +259,11 @@ internal sealed partial class PreparedIntentStore
             }
         }
 
-        // Written last, as the highest-numbered field; a zero is omitted exactly as the message serializer omits it.
+        // Written last, as the highest-numbered fields; a zero is omitted exactly as the message serializer omits it.
         PreparedIntentSnapshotMessage positionTrailer = new()
         {
-            LedgerFullyReflectedThroughIndex = Math.Clamp(fullyReflectedThroughIndex, 0, reflected)
+            LedgerFullyReflectedThroughIndex = Math.Clamp(fullyReflectedThroughIndex, 0, reflected),
+            LedgerSizeFloorPhysical = ledger?.SizeFloor ?? 0
         };
 
         positionTrailer.WriteTo(output);
@@ -651,7 +652,8 @@ internal sealed partial class PreparedIntentStore
         HLCTimestamp LedgerWatermark,
         long ReflectedThroughIndex = 0,
         IReadOnlyList<SettledIdentityEntry>? Settled = null,
-        long FullyReflectedThroughIndex = 0);
+        long FullyReflectedThroughIndex = 0,
+        long LedgerSizeFloor = 0);
 
     /// <summary>Serializes one partition's intents together with its committed-head ledger slice, for
     /// whole-partition state transfer. The ledger is captured first so its position is no later than the
@@ -681,6 +683,7 @@ internal sealed partial class PreparedIntentStore
             message.LedgerWatermarkNode = captured.Watermark.N;
             message.LedgerWatermarkPhysical = captured.Watermark.L;
             message.LedgerWatermarkCounter = captured.Watermark.C;
+            message.LedgerSizeFloorPhysical = captured.SizeFloor;
 
             foreach (KeyValuePair<string, CommittedHead> entry in captured.Heads)
             {
@@ -729,7 +732,8 @@ internal sealed partial class PreparedIntentStore
             message.LedgerPresent ? LedgerWatermarkOf(message) : HLCTimestamp.Zero,
             message.LedgerPresent ? message.LedgerReflectedThroughIndex : 0,
             message.LedgerPresent ? SettledEntriesOf(message) : null,
-            message.LedgerPresent ? message.LedgerFullyReflectedThroughIndex : 0);
+            message.LedgerPresent ? message.LedgerFullyReflectedThroughIndex : 0,
+            message.LedgerPresent ? message.LedgerSizeFloorPhysical : 0);
     }
 
     /// <summary>
@@ -752,7 +756,7 @@ internal sealed partial class PreparedIntentStore
             PurgePartitionLedger(partitionId);
         }
         else
-            InstallLedger(partitionId, section.Ledger, section.LedgerWatermark, section.ReflectedThroughIndex, section.Settled, section.FullyReflectedThroughIndex);
+            InstallLedger(partitionId, section.Ledger, section.LedgerWatermark, section.ReflectedThroughIndex, section.Settled, section.FullyReflectedThroughIndex, section.LedgerSizeFloor);
 
         ImportIntents(section.Intents, partitionId);
     }
@@ -826,7 +830,7 @@ internal sealed partial class PreparedIntentStore
 
         PartitionLedger? ledger = section.Ledger is null
             ? null
-            : BuildLedger(section.Ledger, section.LedgerWatermark, section.ReflectedThroughIndex, section.Settled, section.FullyReflectedThroughIndex);
+            : BuildLedger(section.Ledger, section.LedgerWatermark, section.ReflectedThroughIndex, section.Settled, section.FullyReflectedThroughIndex, section.LedgerSizeFloor);
 
         lock (applyGate)
         {
@@ -844,6 +848,8 @@ internal sealed partial class PreparedIntentStore
 
                 InstallLedgerLocked(partitionId, ledger);
             }
+            else
+                RecomputeLedgerSizeFloorLocked();
 
             foreach (PreparedIntent intent in section.Intents)
                 MergeLoad(intent, partitionId);

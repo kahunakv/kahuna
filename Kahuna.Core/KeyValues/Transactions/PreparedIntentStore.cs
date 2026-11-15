@@ -324,6 +324,26 @@ internal sealed partial class PreparedIntentStore
         // Approximate retained bytes (keys plus entries), for the ledger gauge. Maintained under applyGate.
         public long Bytes;
 
+        // Number of heads the slice holds. The size bound compares it with the budget on every record, and
+        // ConcurrentDictionary.Count takes every bucket lock. Maintained under applyGate.
+        public long HeadCount;
+
+        // Heads per second of commit time (CommittedAt.L / LedgerSizeBucketMs). The size bound reads it to find
+        // the lowest floor that keeps the slice inside its budget without a scan of the heads. Maintained under
+        // applyGate with every head added, moved or removed.
+        public readonly Dictionary<long, int> HeadsPerBucket = new();
+
+        // The size floor, in commit-timestamp milliseconds, a multiple of LedgerSizeBucketMs. A head committed
+        // before it is absent and a transaction that began before it is refused, as past the retention horizon.
+        // It only rises. A pure function of the applied log prefix and the head budget, so every replica with
+        // the same budget holds the same floor; persisted with the slice. Zero until the bound first acts.
+        // Written under applyGate, read lock-free by the gauge.
+        public long SizeFloor;
+
+        // The count the size bound last warned at, so a slice that stays over its budget (the minimum horizon
+        // holds the floor back) logs once per doubling. Node-local.
+        public long SizeWarnedAt;
+
         // The partition's highest applied log index this slice is known to reflect: set when the slice was
         // installed from a whole-partition snapshot (the exporter's applied position when it wrote the section)
         // and persisted with the slice, so it survives a restart mid catch-up. Entries at or below it are
@@ -393,6 +413,34 @@ internal sealed partial class PreparedIntentStore
     // Physical prunes run when the slice's watermark crosses into a new bucket of this many milliseconds:
     // one scan per quarter retention per partition, instead of one per apply.
     private int LedgerPruneBucketMs => Math.Max(1, stagedBaseFenceRetentionMs / 4);
+
+    /// <summary>Default head budget of one ledger slice. At a few hundred bytes of heap per head it keeps a
+    /// slice under a few hundred megabytes whatever the write rate.</summary>
+    internal const int DefaultCommittedHeadLedgerMaxEntries = 500_000;
+
+    // Heads one slice may hold before the size bound raises its floor; 0 turns the bound off. Judged at apply,
+    // so it must be the same on every replica, as the retention horizon must.
+    private int ledgerMaxEntries = DefaultCommittedHeadLedgerMaxEntries;
+
+    // Width of one bucket of the per-slice head histogram, and the alignment of the size floor.
+    private const int LedgerSizeBucketMs = 1_000;
+
+    /// <summary>
+    /// The horizon the size bound never cuts below, measured from the slice's watermark. A floor nearer than
+    /// this refuses ordinary short transactions, which is a worse failure than a slice over its budget: the
+    /// slice then stays over it and the node warns. A constant and not a setting, because the floor is judged
+    /// at apply and every replica must compute the same one.
+    /// </summary>
+    internal const int LedgerSizeBoundMinRetentionMs = 15_000;
+
+    // Highest size floor across every slice: what the advisory fence adds to its staleness gate, as it measures
+    // the retention horizon from the node-wide watermark. Guarded by applyGate.
+    private long ledgerSizeFloor;
+
+    // Tick of the last size-bound log line, so a load that raises the floor every few seconds logs once a minute.
+    private long lastLedgerBoundLogTicks = -LedgerBoundLogIntervalMs;
+
+    private const int LedgerBoundLogIntervalMs = 60_000;
 
     /// <summary>Approximate bytes one ledger entry retains: the key's characters plus the entry struct and
     /// the dictionary slot around it.</summary>
@@ -967,6 +1015,13 @@ internal sealed partial class PreparedIntentStore
     /// long transactions into spurious aborts. Idempotent; safe to call on a shared store.</summary>
     public void ConfigureStagedBaseFence(int retentionMs) =>
         stagedBaseFenceRetentionMs = Math.Max(1, retentionMs);
+
+    /// <summary>Sets the head budget of one committed-head ledger slice; 0 or less turns the size bound off.
+    /// A slice that passes the budget raises its floor: the oldest heads leave and a transaction that began
+    /// before the floor is refused, as one older than the retention horizon is. The floor is judged at apply,
+    /// so every replica of a partition must run with the same budget. Idempotent; safe to call on a shared store.</summary>
+    public void ConfigureCommittedHeadLedgerBound(int maxEntries) =>
+        ledgerMaxEntries = Math.Max(0, maxEntries);
 
     /// <summary>
     /// Declares whether this node produces and applies one-phase bundled commits that are validated against

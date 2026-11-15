@@ -189,6 +189,7 @@ internal sealed class KeyValuesManagerBuilder
         // The staged-base fence's memory horizon comes from configuration; idempotent, so re-applying it to a
         // shared external store is harmless.
         preparedIntentStore.ConfigureStagedBaseFence(configuration.StagedBaseFenceRetentionMs);
+        preparedIntentStore.ConfigureCommittedHeadLedgerBound(configuration.CommittedHeadLedgerMaxEntries);
 
         // A one-phase bundled commit is legal only if its own prepare — earlier in the same atomic batch — took
         // ownership of every written key, and (when the bundle asks for apply-time validation) only if every

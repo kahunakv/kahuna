@@ -721,6 +721,25 @@ internal static class DurableTransactionMetrics
         });
 
     /// <summary>
+    /// Times the size bound of a committed-head ledger slice raised the slice's floor: the slice passed its
+    /// head budget, its oldest heads left, and a transaction that began before the new floor is refused. A
+    /// steady rate means the write rate of distinct keys, not the retention horizon, sets the horizon.
+    /// </summary>
+    internal static readonly Counter<long> CommittedHeadLedgerSizeFloorRaises =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.committed_head_ledger_size_floor_raises",
+            description: "Raises of a committed-head ledger slice's size floor because the slice passed its head budget.");
+
+    /// <summary>
+    /// Warnings that a committed-head ledger slice stays over its head budget because its horizon is already at
+    /// the minimum: one when it first happens and one each time the slice doubles.
+    /// </summary>
+    internal static readonly Counter<long> CommittedHeadLedgerOverBudget =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.committed_head_ledger_over_budget",
+            description: "Warnings that a committed-head ledger slice stays over its head budget at the minimum horizon.");
+
+    /// <summary>
     /// Fence-wedge watchdog escalations: a key refused a run of consecutive validated-base prepares at an
     /// unchanged (validated base, committed head) pair, meaning this node's visible entry stopped converging
     /// with its committed head — the key is effectively read-only until the entry reconciles. Healthy refusals
@@ -2197,7 +2216,7 @@ internal static class DurableTransactionMetrics
             // Tagged by partition: cardinality is the node's hosted partition count, which is small and bounded.
             gaugeMeter.CreateObservableGauge("kahuna.durable_tx.committed_head_ledger_entries",
                 () => LedgerMeasurements(committedHeadLedgerSizes(), static size => size.Entries),
-                description: "Keys retained by the committed-head ledger, per partition (bounded by the staged-base fence retention).");
+                description: "Keys retained by the committed-head ledger, per partition (bounded by the staged-base fence retention and the head budget).");
             gaugeMeter.CreateObservableGauge("kahuna.durable_tx.committed_head_ledger_bytes",
                 () => LedgerMeasurements(committedHeadLedgerSizes(), static size => size.Bytes),
                 unit: "By", description: "Approximate bytes retained by the committed-head ledger, per partition.");

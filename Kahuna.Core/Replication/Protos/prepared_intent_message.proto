@@ -183,4 +183,9 @@ message PreparedIntentSnapshotMessage {
   // re-creating, out of history, an intent the exporter had rejected. At most ledgerReflectedThroughIndex.
   // Zero when unknown (an older writer, or a section not cut against a log position).
   int64  ledgerFullyReflectedThroughIndex = 11;
+  // The slice's size floor, in commit-timestamp milliseconds: the size bound raised it when the slice passed
+  // its head budget. A head committed before it is absent, and a transaction that began before it is refused,
+  // exactly as past the retention horizon. Part of the replicated slice, because the floor only rises and a
+  // reader cannot derive it from the heads that remain. Zero when the bound never raised it (or an older writer).
+  int64  ledgerSizeFloorPhysical = 12;
 }

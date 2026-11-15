@@ -142,7 +142,9 @@ internal sealed partial class PreparedIntentStore
         // evidence. The transaction id is the begin HLC, so it lower-bounds every read the base came from.
         // Measured against the head watermark — an HLC from replicated commits — never a local clock. A blind
         // write has no base to verify, so the gate does not apply to it.
-        if (hasValidatedBase && IsOlderThanRetention(transactionId, ledgerWatermark))
+        // The size bound moves the horizon nearer on a slice over its head budget; the highest such floor on the
+        // node applies, as the node-wide watermark does, because the head may come from any slice.
+        if (hasValidatedBase && (IsOlderThanRetention(transactionId, ledgerWatermark) || transactionId.L < ledgerSizeFloor))
             return $"transaction began before the staged-base fence retention horizon; its validated base for key {key} cannot be verified";
 
         if (!TryFindHeadFor(sliceOf, key, out CommittedHead head))
@@ -228,6 +230,17 @@ internal sealed partial class PreparedIntentStore
     private bool IsWithinRetention(CommittedHead head, HLCTimestamp watermark) =>
         head.CommittedAt.L >= watermark.L - stagedBaseFenceRetentionMs;
 
+    /// <summary>Whether a transaction that began at <paramref name="transactionId"/> predates a slice's horizon:
+    /// the retention horizon measured from the slice's watermark, or the size floor when the size bound raised
+    /// it above that. Never true without a slice.</summary>
+    private bool IsOlderThanSliceHorizon(HLCTimestamp transactionId, PartitionLedger? ledger) =>
+        ledger is not null && (IsOlderThanRetention(transactionId, ledger.Watermark) || transactionId.L < ledger.SizeFloor);
+
+    /// <summary>Whether a head is logically present in its slice: inside the retention window and at or above
+    /// the size floor, whether or not the physical prune ran.</summary>
+    private bool IsWithinSliceHorizon(CommittedHead head, PartitionLedger ledger) =>
+        IsWithinRetention(head, ledger.Watermark) && head.CommittedAt.L >= ledger.SizeFloor;
+
     /// <summary>The head the apply-time fence judges a prepare of <paramref name="sliceOf"/>'s log against: the
     /// head that slice remembers for the key, or, when it remembers none (or no slice is named), the highest
     /// head across every slice (<see cref="TryFindHead"/>). Lock-free, like the probes it serves.</summary>
@@ -272,7 +285,7 @@ internal sealed partial class PreparedIntentStore
     /// base and staged revision and each carried read-only dependency are additionally judged against the
     /// partition's ledger slice: a foreign undecided or committed intent on a read key, a head above the
     /// validated base or the observed revision, a head at or above the staged revision, a value where absence
-    /// was validated, or a transaction older than the slice's retention horizon rejects. Only replicated state is consulted — the intent map, the slice's heads and its
+    /// was validated, or a transaction older than the slice's retention horizon or size floor rejects. Only replicated state is consulted — the intent map, the slice's heads and its
     /// watermark — so every replica of the partition reaches the same verdict for the same log entry.
     /// Evaluated under the apply gate so the (intents, heads, watermark) read is one consistent state.
     /// </summary>
@@ -281,8 +294,6 @@ internal sealed partial class PreparedIntentStore
         lock (applyGate)
         {
             ledgers.TryGetValue(partitionId, out PartitionLedger? ledger);
-            HLCTimestamp watermark = ledger?.Watermark ?? HLCTimestamp.Zero;
-
             if (commit.BundledPrepareKeys is not null)
             {
                 foreach (string bundledKey in commit.BundledPrepareKeys)
@@ -295,12 +306,12 @@ internal sealed partial class PreparedIntentStore
                     if (!commit.ApplyTimeValidation || !IsFenceJudged(intent))
                         continue;
 
-                    if (intent.HasValidatedBase && IsOlderThanRetention(commit.TransactionId, watermark))
+                    if (intent.HasValidatedBase && IsOlderThanSliceHorizon(commit.TransactionId, ledger))
                         return new(BundledCommitVerdict.StaleBase, $"transaction began before the ledger retention horizon; its validated base for key {bundledKey} cannot be verified");
 
                     if (ledger is null
                         || !ledger.Heads.TryGetValue(bundledKey, out CommittedHead head)
-                        || !IsWithinRetention(head, watermark))
+                        || !IsWithinSliceHorizon(head, ledger))
                         continue;
 
                     if (intent.HasValidatedBase)
@@ -326,7 +337,7 @@ internal sealed partial class PreparedIntentStore
             if (!commit.ApplyTimeValidation || commit.BundledReadDependencies is not { Count: > 0 } reads)
                 return BundledCommitJudgement.Admitted;
 
-            if (IsOlderThanRetention(commit.TransactionId, watermark))
+            if (IsOlderThanSliceHorizon(commit.TransactionId, ledger))
                 return new(BundledCommitVerdict.StaleRead, "transaction began before the ledger retention horizon; its read-set cannot be verified");
 
             foreach (BundledReadDependency read in reads)
@@ -341,7 +352,7 @@ internal sealed partial class PreparedIntentStore
 
                 if (ledger is null
                     || !ledger.Heads.TryGetValue(read.Key, out CommittedHead head)
-                    || !IsWithinRetention(head, watermark))
+                    || !IsWithinSliceHorizon(head, ledger))
                     continue;
 
                 // The same rule as a validated base: an observed value is stale once a head moved past its

@@ -249,6 +249,41 @@ public sealed class TestOnePhaseApplyTimeGate
     }
 
     [Fact]
+    public void TransactionOlderThanTheSizeFloor_IsRefused_AndAYoungerOneCommits()
+    {
+        (TransactionRecordStore records, PreparedIntentStore intents) = Stores();
+        intents.ConfigureCommittedHeadLedgerBound(maxEntries: 8);
+
+        // Nine new keys, 10 s of commit time apart: the ninth passes the budget and the three oldest heads leave.
+        for (int i = 0; i < 9; i++)
+            CommitThroughStore(intents, MakeIntent($"g/load{i}", Ts(100_000 + i * 10_000), revision: 1, baseRevision: 0, KeyValueState.Undefined));
+
+        long floor = intents.GetLedgerSizeFloor(Partition);
+        Assert.Equal(121_000, floor);
+        Assert.False(intents.TryGetLedgerHead(Partition, "g/load1", out _, out _, out _));
+
+        // The transaction began before the floor and validated the key as absent; the head that made it a value
+        // left with the bound, so absence of evidence must refuse.
+        HLCTimestamp old = Ts(floor - 1);
+        Assert.Equal(TransactionApplyOutcome.Rejected,
+            ApplyBundle(records, intents, old, MakeIntent("g/load1", old, revision: 1, baseRevision: 0, KeyValueState.Undefined), Ts(floor + 50)));
+        Assert.Equal(TransactionDecision.Undecided, records.Get(old, 1)!.Decision);
+
+        // A read-only dependency of such a transaction is refused for the same reason.
+        HLCTimestamp oldReader = Ts(floor - 2);
+        Assert.Equal(TransactionApplyOutcome.Rejected,
+            ApplyBundle(records, intents, oldReader,
+                MakeIntent("g/blind", oldReader, revision: 1, baseRevision: PreparedIntent.UnknownBaseRevision, KeyValueState.Undefined), Ts(floor + 60),
+                reads: [new BundledReadDependency("g/load0", 0, false)]));
+
+        // A transaction that began at the floor read after every commit the bound dropped.
+        HLCTimestamp young = Ts(floor);
+        Assert.Equal(TransactionApplyOutcome.Applied,
+            ApplyBundle(records, intents, young, MakeIntent("g/load2", young, revision: 2, baseRevision: 1, KeyValueState.Set), Ts(floor + 70)));
+        Assert.Equal(TransactionDecision.Commit, records.Get(young, 1)!.Decision);
+    }
+
+    [Fact]
     public void HeadOutsideTheRetentionWindow_IsAbsentToTheGate_EvenWhileStillPhysicallyHeld()
     {
         (TransactionRecordStore records, PreparedIntentStore intents) = Stores();

@@ -371,6 +371,7 @@ internal sealed partial class PreparedIntentStore
             ledgers.Clear();
             fenceRefusalStreaks.Clear();
             ledgerWatermark = HLCTimestamp.Zero;
+            ledgerSizeFloor = 0;
         }
     }
 
@@ -543,9 +544,24 @@ internal sealed partial class PreparedIntentStore
         if (existed && current.Revision >= revision)
             return false;
 
+        // A new head below the slice's horizon is absent to every verdict, and the staleness gates refuse the
+        // transactions it could matter to, so it is not stored. A restart replays log entries from below its
+        // checkpoint; stored, the heads the prune had dropped would come back and count against the budget on
+        // this replica alone. The answer is "moved": the slice held no head at or above this revision, and a
+        // live commit that lands here must still reach its watches.
+        if (!existed && committedAt.L < Math.Max(ledger.Watermark.L - stagedBaseFenceRetentionMs, ledger.SizeFloor))
+            return true;
+
         ledger.Heads[key] = new(revision, state, committedAt);
-        if (!existed)
+        if (existed)
+            RemoveFromHeadBucket(ledger, current.CommittedAt);
+        else
+        {
             ledger.Bytes += LedgerEntryBytes(key);
+            ledger.HeadCount++;
+        }
+
+        AddToHeadBucket(ledger, committedAt);
 
         // The head moved: whatever refusal streak the key held was measured against the old pair.
         fenceRefusalStreaks.TryRemove(key, out _);
@@ -568,7 +584,147 @@ internal sealed partial class PreparedIntentStore
             PruneLedger(ledger);
         }
 
+        if (ledgerMaxEntries > 0 && ledger.HeadCount > ledgerMaxEntries)
+            EnforceLedgerBound(ledger, partitionId);
+
         return true;
+    }
+
+    private static void AddToHeadBucket(PartitionLedger ledger, HLCTimestamp committedAt)
+    {
+        long bucket = committedAt.L / LedgerSizeBucketMs;
+        ledger.HeadsPerBucket[bucket] = ledger.HeadsPerBucket.TryGetValue(bucket, out int count) ? count + 1 : 1;
+    }
+
+    private static void RemoveFromHeadBucket(PartitionLedger ledger, HLCTimestamp committedAt)
+    {
+        long bucket = committedAt.L / LedgerSizeBucketMs;
+        if (!ledger.HeadsPerBucket.TryGetValue(bucket, out int count))
+            return;
+
+        if (count <= 1)
+            ledger.HeadsPerBucket.Remove(bucket);
+        else
+            ledger.HeadsPerBucket[bucket] = count - 1;
+    }
+
+    /// <summary>
+    /// Brings a slice that passed its head budget back inside it: raises the slice's size floor to the lowest
+    /// second of commit time that leaves at most three quarters of the budget above it, then drops the heads
+    /// below the floor. The retention horizon alone bounds the slice by the write rate times the horizon, and a
+    /// sustained load of new keys fills the heap long before the horizon releases its first head.
+    ///
+    /// <para>A raised floor is the retention horizon moved nearer: a head below it is absent, and the staleness
+    /// gates refuse a transaction that began before it, so absence is never read as "no commit happened". The
+    /// floor is computed from the slice's heads and watermark only, which are a function of the applied log
+    /// prefix, so replicas with the same budget raise it at the same entry to the same value. The quarter of
+    /// slack makes the scan of the heads run once per quarter budget of new heads, not once per record.</para>
+    ///
+    /// <para>The floor stays <see cref="LedgerSizeBoundMinRetentionMs"/> behind the watermark. A load that puts
+    /// more than the budget inside that span keeps the slice over its budget, and the node warns.</para>
+    /// Caller holds <see cref="applyGate"/>.
+    /// </summary>
+    private void EnforceLedgerBound(PartitionLedger ledger, int partitionId)
+    {
+        long floorBucket = ledger.SizeFloor / LedgerSizeBucketMs;
+        long highestFloorBucket = (ledger.Watermark.L - LedgerSizeBoundMinRetentionMs) / LedgerSizeBucketMs;
+
+        if (highestFloorBucket <= floorBucket)
+        {
+            WarnLedgerOverBudget(ledger, partitionId);
+            return;
+        }
+
+        long target = ledgerMaxEntries - ledgerMaxEntries / 4;
+
+        long[] buckets = new long[ledger.HeadsPerBucket.Count];
+        ledger.HeadsPerBucket.Keys.CopyTo(buckets, 0);
+        Array.Sort(buckets);
+
+        // Newest second first: the floor is the second after the first one that does not fit.
+        long newFloorBucket = floorBucket;
+        long kept = 0;
+
+        for (int i = buckets.Length - 1; i >= 0; i--)
+        {
+            kept += ledger.HeadsPerBucket[buckets[i]];
+            if (kept > target)
+            {
+                newFloorBucket = buckets[i] + 1;
+                break;
+            }
+        }
+
+        if (newFloorBucket > highestFloorBucket)
+            newFloorBucket = highestFloorBucket;
+
+        // A floor at or below the oldest head drops nothing and only refuses transactions.
+        if (newFloorBucket <= floorBucket || buckets[0] >= newFloorBucket)
+        {
+            WarnLedgerOverBudget(ledger, partitionId);
+            return;
+        }
+
+        long before = ledger.HeadCount;
+
+        ledger.SizeFloor = newFloorBucket * LedgerSizeBucketMs;
+        if (ledger.SizeFloor > ledgerSizeFloor)
+            ledgerSizeFloor = ledger.SizeFloor;
+
+        PruneLedger(ledger);
+
+        // A capture that read the old floor must not pair it with heads scanned after the raise.
+        ledger.PruneGeneration++;
+
+        DurableTransactionMetrics.CommittedHeadLedgerSizeFloorRaises.Add(1);
+
+        long nowTicks = Environment.TickCount64;
+        if (logger is not null && nowTicks - Volatile.Read(ref lastLedgerBoundLogTicks) >= LedgerBoundLogIntervalMs)
+        {
+            Volatile.Write(ref lastLedgerBoundLogTicks, nowTicks);
+
+            logger.LogWarning(
+                "Committed-head ledger of partition {PartitionId} passed its budget of {MaxEntries} heads ({Before} held): the horizon moved to {HorizonMs} ms behind the newest commit and {Dropped} heads left. A transaction that began before the new horizon is refused at its prepare or commit until the write rate falls",
+                partitionId, ledgerMaxEntries, before, ledger.Watermark.L - ledger.SizeFloor, before - ledger.HeadCount);
+        }
+
+        if (ledger.HeadCount > ledgerMaxEntries)
+            WarnLedgerOverBudget(ledger, partitionId);
+        else
+            ledger.SizeWarnedAt = 0;
+    }
+
+    /// <summary>Logs that a slice stays over its budget because the minimum horizon holds its floor back: once
+    /// when it first happens and again each time the slice doubles. Caller holds <see cref="applyGate"/>.</summary>
+    private void WarnLedgerOverBudget(PartitionLedger ledger, int partitionId)
+    {
+        if (ledger.SizeWarnedAt != 0 && ledger.HeadCount < 2 * ledger.SizeWarnedAt)
+            return;
+
+        ledger.SizeWarnedAt = ledger.HeadCount;
+        DurableTransactionMetrics.CommittedHeadLedgerOverBudget.Add(1);
+
+        logger?.LogWarning(
+            "Committed-head ledger of partition {PartitionId} holds {Entries} heads (about {Bytes} bytes), over its budget of {MaxEntries}, and its horizon is already at the minimum of {MinRetentionMs} ms: the write rate of distinct keys is above what the budget holds, and the slice grows until the rate falls",
+            partitionId, ledger.HeadCount, Volatile.Read(ref ledger.Bytes), ledgerMaxEntries, LedgerSizeBoundMinRetentionMs);
+    }
+
+    /// <summary>The size floor of a partition's ledger slice in commit-timestamp milliseconds (0 when the size
+    /// bound never raised it, or the node holds no slice). Test and observability seam.</summary>
+    internal long GetLedgerSizeFloor(int partitionId) =>
+        ledgers.TryGetValue(partitionId, out PartitionLedger? ledger) ? Volatile.Read(ref ledger.SizeFloor) : 0;
+
+    /// <summary>Recomputes the node-wide size floor after a slice left. Caller holds <see cref="applyGate"/>.</summary>
+    private void RecomputeLedgerSizeFloorLocked()
+    {
+        long floor = 0;
+        foreach (KeyValuePair<int, PartitionLedger> slice in ledgers)
+        {
+            if (slice.Value.SizeFloor > floor)
+                floor = slice.Value.SizeFloor;
+        }
+
+        ledgerSizeFloor = floor;
     }
 
     /// <summary>Hands a durable transaction's committed write to the watches on the partition whose log settled
@@ -608,27 +764,31 @@ internal sealed partial class PreparedIntentStore
         partitionVersion.AddOrUpdate(partitionId, static (_, t) => t, static (_, prev, t) => Math.Max(prev, t), tick);
     }
 
-    /// <summary>Physically drops a slice's entries that fell outside its retention window. Removes only what
+    /// <summary>Physically drops a slice's entries that fell outside its retention window or below its size floor. Removes only what
     /// the window already treats as absent, so a verdict never depends on whether this ran. Bumps the prune
     /// generation so a concurrent snapshot capture can detect the tear. Caller holds <see cref="applyGate"/>.</summary>
     private void PruneLedger(PartitionLedger ledger)
     {
-        long cutoff = ledger.Watermark.L - stagedBaseFenceRetentionMs;
+        long cutoff = Math.Max(ledger.Watermark.L - stagedBaseFenceRetentionMs, ledger.SizeFloor);
 
-        List<string>? expired = null;
+        List<KeyValuePair<string, CommittedHead>>? expired = null;
         foreach (KeyValuePair<string, CommittedHead> entry in ledger.Heads)
         {
             if (entry.Value.CommittedAt.L < cutoff)
-                (expired ??= []).Add(entry.Key);
+                (expired ??= []).Add(entry);
         }
 
         if (expired is null)
             return;
 
-        foreach (string key in expired)
+        foreach (KeyValuePair<string, CommittedHead> entry in expired)
         {
-            if (ledger.Heads.TryRemove(key, out _))
-                ledger.Bytes -= LedgerEntryBytes(key);
+            if (!ledger.Heads.TryRemove(entry.Key, out _))
+                continue;
+
+            ledger.Bytes -= LedgerEntryBytes(entry.Key);
+            ledger.HeadCount--;
+            RemoveFromHeadBucket(ledger, entry.Value.CommittedAt);
         }
 
         ledger.PruneGeneration++;
@@ -643,9 +803,10 @@ internal sealed partial class PreparedIntentStore
     /// interleave with the swap.</summary>
     private void InstallLedger(
         int partitionId, IReadOnlyList<(string Key, long Revision, KeyValueState State, HLCTimestamp CommittedAt)> heads,
-        HLCTimestamp watermark, long reflectedThroughIndex, IReadOnlyList<SettledIdentityEntry>? settled, long fullyReflectedThroughIndex)
+        HLCTimestamp watermark, long reflectedThroughIndex, IReadOnlyList<SettledIdentityEntry>? settled, long fullyReflectedThroughIndex,
+        long sizeFloor)
     {
-        PartitionLedger ledger = BuildLedger(heads, watermark, reflectedThroughIndex, settled, fullyReflectedThroughIndex);
+        PartitionLedger ledger = BuildLedger(heads, watermark, reflectedThroughIndex, settled, fullyReflectedThroughIndex, sizeFloor);
 
         lock (applyGate)
             InstallLedgerLocked(partitionId, ledger);
@@ -655,7 +816,8 @@ internal sealed partial class PreparedIntentStore
     /// copied in before the swap). The fully reflected position is clamped to the reflected one.</summary>
     private PartitionLedger BuildLedger(
         IReadOnlyList<(string Key, long Revision, KeyValueState State, HLCTimestamp CommittedAt)> heads,
-        HLCTimestamp watermark, long reflectedThroughIndex, IReadOnlyList<SettledIdentityEntry>? settled, long fullyReflectedThroughIndex)
+        HLCTimestamp watermark, long reflectedThroughIndex, IReadOnlyList<SettledIdentityEntry>? settled, long fullyReflectedThroughIndex,
+        long sizeFloor)
     {
         long reflected = Math.Max(0, reflectedThroughIndex);
         PartitionLedger ledger = new()
@@ -664,13 +826,18 @@ internal sealed partial class PreparedIntentStore
             PrunedBucket = watermark.L / LedgerPruneBucketMs,
             SettledPrunedBucket = watermark.L / SettledIdentityPruneBucketMs,
             ReflectedThroughIndex = reflected,
-            FullyReflectedThroughIndex = Math.Clamp(fullyReflectedThroughIndex, 0, reflected)
+            FullyReflectedThroughIndex = Math.Clamp(fullyReflectedThroughIndex, 0, reflected),
+            SizeFloor = Math.Max(0, sizeFloor)
         };
 
         foreach ((string key, long revision, KeyValueState state, HLCTimestamp committedAt) in heads)
         {
-            if (ledger.Heads.TryAdd(key, new CommittedHead(revision, state, committedAt)))
-                ledger.Bytes += LedgerEntryBytes(key);
+            if (!ledger.Heads.TryAdd(key, new CommittedHead(revision, state, committedAt)))
+                continue;
+
+            ledger.Bytes += LedgerEntryBytes(key);
+            ledger.HeadCount++;
+            AddToHeadBucket(ledger, committedAt);
         }
 
         if (settled is not null)
@@ -698,6 +865,9 @@ internal sealed partial class PreparedIntentStore
         }
 
         ledgers[partitionId] = ledger;
+
+        // Recomputed, not raised: the slice this one replaces may be the one that held the node-wide floor.
+        RecomputeLedgerSizeFloorLocked();
 
         if (ledger.Watermark > ledgerWatermark)
             ledgerWatermark = ledger.Watermark;
@@ -784,14 +954,17 @@ internal sealed partial class PreparedIntentStore
         lock (applyGate)
         {
             if (ledgers.TryRemove(partitionId, out _))
+            {
+                RecomputeLedgerSizeFloorLocked();
                 StampPartitionDirty(partitionId);
+            }
         }
     }
 
     /// <summary>
     /// Captures one slice consistently for persistence: the watermark is read under the gate, the heads are
-    /// scanned lock-free, and the scan is repeated if a physical prune ran in between — a prune under a newer
-    /// watermark may drop a head the captured watermark still retains, and a snapshot that paired the two would
+    /// scanned lock-free, and the scan is repeated if a physical prune or a raise of the size floor ran in between — a prune under a newer
+    /// watermark or floor may drop a head the captured watermark still retains, and a snapshot that paired the two would
     /// judge differently on reload than a replica that never restarted. Heads recorded after the watermark read
     /// are harmless in the capture: the log entries that recorded them are replayed on top of it. Null when the
     /// partition has no slice.
@@ -807,6 +980,7 @@ internal sealed partial class PreparedIntentStore
             long generation;
             long reflectedThroughIndex;
             long fullyReflectedThroughIndex;
+            long sizeFloor;
             List<SettledIdentityEntry> settled;
             lock (applyGate)
             {
@@ -814,6 +988,7 @@ internal sealed partial class PreparedIntentStore
                 generation = ledger.PruneGeneration;
                 reflectedThroughIndex = ledger.ReflectedThroughIndex;
                 fullyReflectedThroughIndex = ledger.FullyReflectedThroughIndex;
+                sizeFloor = ledger.SizeFloor;
                 // The settled memory is mutated and read under the gate only, so it is copied here: the copy
                 // pairs with the watermark read in the same critical section and cannot tear.
                 settled = CopySettledLocked(ledger);
@@ -826,7 +1001,7 @@ internal sealed partial class PreparedIntentStore
             lock (applyGate)
             {
                 if (generation == ledger.PruneGeneration)
-                    return new LedgerCapture(watermark, reflectedThroughIndex, fullyReflectedThroughIndex, heads, settled);
+                    return new LedgerCapture(watermark, reflectedThroughIndex, fullyReflectedThroughIndex, heads, settled, sizeFloor);
 
                 // A prune tore the capture. Prunes are rare (once per retention bucket), so a rescan almost
                 // always succeeds; past a few attempts take the gate for the scan itself.
@@ -835,7 +1010,7 @@ internal sealed partial class PreparedIntentStore
                     heads.Clear();
                     foreach (KeyValuePair<string, CommittedHead> entry in ledger.Heads)
                         heads.Add(entry);
-                    return new LedgerCapture(ledger.Watermark, ledger.ReflectedThroughIndex, ledger.FullyReflectedThroughIndex, heads, CopySettledLocked(ledger));
+                    return new LedgerCapture(ledger.Watermark, ledger.ReflectedThroughIndex, ledger.FullyReflectedThroughIndex, heads, CopySettledLocked(ledger), ledger.SizeFloor);
                 }
             }
         }
@@ -855,6 +1030,6 @@ internal sealed partial class PreparedIntentStore
     /// identities (copied under the gate with the watermark).</summary>
     private readonly record struct LedgerCapture(
         HLCTimestamp Watermark, long ReflectedThroughIndex, long FullyReflectedThroughIndex,
-        List<KeyValuePair<string, CommittedHead>> Heads, List<SettledIdentityEntry> Settled);
+        List<KeyValuePair<string, CommittedHead>> Heads, List<SettledIdentityEntry> Settled, long SizeFloor);
 
 }
