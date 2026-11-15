@@ -2,9 +2,9 @@
 // Copyright (c) Wayne Kelly, John Gough, QUT 2005-2014
 // (see accompanying GPPGcopyright.rtf)
 
-// GPPG version 1.5.3
-// DateTime: 17/10/2026 6:38:47 PM
-// Input file <ScriptParser/ScriptParser.Language.grammar.y - 17/10/2026 6:37:25 PM>
+// GPPG version 1.6.0
+// DateTime: 15/11/2026 2:46:41 PM
+// Input file <ScriptParser/ScriptParser.Language.grammar.y - 15/11/2026 2:46:40 PM>
 
 // options: no-lines gplex
 
@@ -38,7 +38,7 @@ internal partial struct ValueType
         public int l;
 }
 // Abstract base class for GPLEX scanners
-[GeneratedCodeAttribute( "Gardens Point Parser Generator", "1.5.3")]
+[GeneratedCodeAttribute( "Gardens Point Parser Generator", "1.6.0")]
 internal abstract class ScanBase : AbstractScanner<ValueType,LexLocation> {
   private LexLocation __yylloc = new LexLocation();
   public override LexLocation yylloc { get { return __yylloc; } set { __yylloc = value; } }
@@ -46,7 +46,7 @@ internal abstract class ScanBase : AbstractScanner<ValueType,LexLocation> {
 }
 
 // Utility class for encapsulating token information
-[GeneratedCodeAttribute( "Gardens Point Parser Generator", "1.5.3")]
+[GeneratedCodeAttribute( "Gardens Point Parser Generator", "1.6.0")]
 internal class ScanObj {
   public int token;
   public ValueType yylval;
@@ -56,7 +56,7 @@ internal class ScanObj {
   }
 }
 
-[GeneratedCodeAttribute( "Gardens Point Parser Generator", "1.5.3")]
+[GeneratedCodeAttribute( "Gardens Point Parser Generator", "1.6.0")]
 internal partial class scriptParser: ShiftReduceParser<ValueType, LexLocation>
 {
 #pragma warning disable 649
@@ -568,524 +568,1702 @@ internal partial class scriptParser: ShiftReduceParser<ValueType, LexLocation>
     this.InitStates(states);
     this.InitRules(rules);
     this.InitNonTerminals(nonTerms);
+    this.InitLocationTracking(false);
   }
 
+#pragma warning disable 162, 1522
   protected override void DoAction(int action)
   {
-#pragma warning disable 162, 1522
     switch (action)
     {
       case 2: // stmt_list -> stmt_list, stmt
-{ CurrentSemanticValue.n = new(NodeType.StmtList, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+        YYAction2();
         break;
       case 3: // stmt_list -> stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction3();
         break;
       case 4: // stmt -> set_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction4();
         break;
       case 5: // stmt -> eset_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction5();
         break;
       case 6: // stmt -> get_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction6();
         break;
       case 7: // stmt -> eget_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction7();
         break;
       case 8: // stmt -> exists_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction8();
         break;
       case 9: // stmt -> eexists_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction9();
         break;
       case 10: // stmt -> delete_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction10();
         break;
       case 11: // stmt -> edelete_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction11();
         break;
       case 12: // stmt -> extend_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction12();
         break;
       case 13: // stmt -> eextend_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction13();
         break;
       case 14: // stmt -> get_by_bucket_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction14();
         break;
       case 15: // stmt -> eget_by_bucket_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction15();
         break;
       case 16: // stmt -> scan_by_prefix_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction16();
         break;
       case 17: // stmt -> escan_by_prefix_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction17();
         break;
       case 18: // stmt -> let_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction18();
         break;
       case 19: // stmt -> for_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction19();
         break;
       case 20: // stmt -> if_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction20();
         break;
       case 21: // stmt -> switch_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction21();
         break;
       case 22: // stmt -> begin_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction22();
         break;
       case 23: // stmt -> commit_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction23();
         break;
       case 24: // stmt -> rollback_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction24();
         break;
       case 25: // stmt -> return_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction25();
         break;
       case 26: // stmt -> sleep_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction26();
         break;
       case 27: // stmt -> throw_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction27();
         break;
       case 28: // set_stmt -> TSET, key_name, expression
-{ CurrentSemanticValue.n = new(NodeType.Set, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+        YYAction28();
         break;
       case 29: // set_stmt -> TSET, key_name, expression, set_flags
-{ CurrentSemanticValue.n = new(NodeType.Set, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, ValueStack[ValueStack.Depth-4].l); }
+        YYAction29();
         break;
       case 30: // eset_stmt -> TESET, key_name, expression
-{ CurrentSemanticValue.n = new(NodeType.Eset, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+        YYAction30();
         break;
       case 31: // eset_stmt -> TESET, key_name, expression, set_flags
-{ CurrentSemanticValue.n = new(NodeType.Eset, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, ValueStack[ValueStack.Depth-4].l); }
+        YYAction31();
         break;
       case 32: // set_flags -> set_flags, set_flag
-{ CurrentSemanticValue.n = new(NodeType.SetFlagsList, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+        YYAction32();
         break;
       case 33: // set_flags -> set_flag
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction33();
         break;
       case 34: // set_flag -> set_not_exists
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction34();
         break;
       case 35: // set_flag -> set_exists
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction35();
         break;
       case 36: // set_flag -> set_cmp
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction36();
         break;
       case 37: // set_flag -> set_expires
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction37();
         break;
       case 38: // set_flag -> set_no_rev
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction38();
         break;
       case 39: // set_not_exists -> TNX
-{ CurrentSemanticValue.n = new(NodeType.SetNotExists, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-1].l); }
+        YYAction39();
         break;
       case 40: // set_exists -> TXX
-{ CurrentSemanticValue.n = new(NodeType.SetExists, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-1].l); }
+        YYAction40();
         break;
       case 41: // set_cmp -> TCMP, expression
-{ CurrentSemanticValue.n = new(NodeType.SetCmp, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+        YYAction41();
         break;
       case 42: // set_cmp -> TCMPREV, expression
-{ CurrentSemanticValue.n = new(NodeType.SetCmpRev, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+        YYAction42();
         break;
       case 43: // set_expires -> TEX, expression
-{ CurrentSemanticValue.n = new(NodeType.SetEx, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+        YYAction43();
         break;
       case 44: // set_no_rev -> TNOREV
-{ CurrentSemanticValue.n = new(NodeType.SetNoRev, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-1].l); }
+        YYAction44();
         break;
       case 45: // get_stmt -> TGET, key_name
-{ CurrentSemanticValue.n = new(NodeType.Get, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+        YYAction45();
         break;
       case 46: // get_stmt -> TLET, identifier, TEQUALS, TGET, key_name
-{ CurrentSemanticValue.n = new(NodeType.Get, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-4].n, null, null, null, null, null, ValueStack[ValueStack.Depth-5].l); }
+        YYAction46();
         break;
       case 47: // get_stmt -> TGET, key_name, TAT, int
-{ CurrentSemanticValue.n = new(NodeType.Get, ValueStack[ValueStack.Depth-3].n, null, ValueStack[ValueStack.Depth-1].n, null, null, null, null, ValueStack[ValueStack.Depth-4].l); }
+        YYAction47();
         break;
       case 48: // get_stmt -> TLET, identifier, TEQUALS, TGET, key_name, TAT, int
-{ CurrentSemanticValue.n = new(NodeType.Get, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, ValueStack[ValueStack.Depth-7].l); }
+        YYAction48();
         break;
       case 49: // get_stmt -> TGET, key_name, TAS, TOF, expression
-{ CurrentSemanticValue.n = new(NodeType.Get, ValueStack[ValueStack.Depth-4].n, null, null, ValueStack[ValueStack.Depth-1].n, null, null, null, ValueStack[ValueStack.Depth-5].l); }
+        YYAction49();
         break;
       case 50: // get_stmt -> TLET, identifier, TEQUALS, TGET, key_name, TAS, TOF, expression
-{ CurrentSemanticValue.n = new(NodeType.Get, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-7].n, null, ValueStack[ValueStack.Depth-1].n, null, null, null, ValueStack[ValueStack.Depth-8].l); }
+        YYAction50();
         break;
       case 51: // eget_stmt -> TEGET, key_name
-{ CurrentSemanticValue.n = new(NodeType.Eget, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+        YYAction51();
         break;
       case 52: // eget_stmt -> TLET, identifier, TEQUALS, TEGET, key_name
-{ CurrentSemanticValue.n = new(NodeType.Eget, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-4].n, null, null, null, null, null, ValueStack[ValueStack.Depth-5].l); }
+        YYAction52();
         break;
       case 53: // eget_stmt -> TEGET, key_name, TAT, int
-{ CurrentSemanticValue.n = new(NodeType.Eget, ValueStack[ValueStack.Depth-3].n, null, ValueStack[ValueStack.Depth-1].n, null, null, null, null, ValueStack[ValueStack.Depth-4].l); }
+        YYAction53();
         break;
       case 54: // eget_stmt -> TLET, identifier, TEQUALS, TEGET, key_name, TAT, int
-{ CurrentSemanticValue.n = new(NodeType.Eget, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, ValueStack[ValueStack.Depth-7].l); }
+        YYAction54();
         break;
       case 55: // eget_stmt -> TEGET, key_name, TAS, TOF, expression
-{ CurrentSemanticValue.n = new(NodeType.Eget, ValueStack[ValueStack.Depth-4].n, null, null, ValueStack[ValueStack.Depth-1].n, null, null, null, ValueStack[ValueStack.Depth-5].l); }
+        YYAction55();
         break;
       case 56: // eget_stmt -> TLET, identifier, TEQUALS, TEGET, key_name, TAS, TOF, expression
-{ CurrentSemanticValue.n = new(NodeType.Eget, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-7].n, null, ValueStack[ValueStack.Depth-1].n, null, null, null, ValueStack[ValueStack.Depth-8].l); }
+        YYAction56();
         break;
       case 57: // exists_stmt -> TEXISTS, key_name
-{ CurrentSemanticValue.n = new(NodeType.Exists, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+        YYAction57();
         break;
       case 58: // exists_stmt -> TLET, identifier, TEQUALS, TEXISTS, key_name
-{ CurrentSemanticValue.n = new(NodeType.Exists, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-4].n, null, null, null, null, null, ValueStack[ValueStack.Depth-5].l); }
+        YYAction58();
         break;
       case 59: // exists_stmt -> TEXISTS, key_name, TAT, int
-{ CurrentSemanticValue.n = new(NodeType.Exists, ValueStack[ValueStack.Depth-3].n, null, ValueStack[ValueStack.Depth-1].n, null, null, null, null, ValueStack[ValueStack.Depth-4].l); }
+        YYAction59();
         break;
       case 60: // exists_stmt -> TLET, identifier, TEQUALS, TEXISTS, key_name, TAT, int
-{ CurrentSemanticValue.n = new(NodeType.Exists, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, ValueStack[ValueStack.Depth-7].l); }
+        YYAction60();
         break;
       case 61: // exists_stmt -> TEXISTS, key_name, TAS, TOF, expression
-{ CurrentSemanticValue.n = new(NodeType.Exists, ValueStack[ValueStack.Depth-4].n, null, null, ValueStack[ValueStack.Depth-1].n, null, null, null, ValueStack[ValueStack.Depth-5].l); }
+        YYAction61();
         break;
       case 62: // exists_stmt -> TLET, identifier, TEQUALS, TEXISTS, key_name, TAS, TOF, 
                //                expression
-{ CurrentSemanticValue.n = new(NodeType.Exists, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-7].n, null, ValueStack[ValueStack.Depth-1].n, null, null, null, ValueStack[ValueStack.Depth-8].l); }
+        YYAction62();
         break;
       case 63: // eexists_stmt -> TEEXISTS, key_name
-{ CurrentSemanticValue.n = new(NodeType.Eexists, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+        YYAction63();
         break;
       case 64: // eexists_stmt -> TLET, identifier, TEQUALS, TEEXISTS, key_name
-{ CurrentSemanticValue.n = new(NodeType.Eexists, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-4].n, null, null, null, null, null, ValueStack[ValueStack.Depth-5].l); }
+        YYAction64();
         break;
       case 65: // eexists_stmt -> TEEXISTS, key_name, TAT, int
-{ CurrentSemanticValue.n = new(NodeType.Eexists, ValueStack[ValueStack.Depth-3].n, null, ValueStack[ValueStack.Depth-1].n, null, null, null, null, ValueStack[ValueStack.Depth-4].l); }
+        YYAction65();
         break;
       case 66: // eexists_stmt -> TLET, identifier, TEQUALS, TEEXISTS, key_name, TAT, int
-{ CurrentSemanticValue.n = new(NodeType.Eexists, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, ValueStack[ValueStack.Depth-7].l); }
+        YYAction66();
         break;
       case 67: // eexists_stmt -> TEEXISTS, key_name, TAS, TOF, expression
-{ CurrentSemanticValue.n = new(NodeType.Eexists, ValueStack[ValueStack.Depth-4].n, null, null, ValueStack[ValueStack.Depth-1].n, null, null, null, ValueStack[ValueStack.Depth-5].l); }
+        YYAction67();
         break;
       case 68: // eexists_stmt -> TLET, identifier, TEQUALS, TEEXISTS, key_name, TAS, TOF, 
                //                 expression
-{ CurrentSemanticValue.n = new(NodeType.Eexists, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-7].n, null, ValueStack[ValueStack.Depth-1].n, null, null, null, ValueStack[ValueStack.Depth-8].l); }
+        YYAction68();
         break;
       case 69: // delete_stmt -> TDELETE, key_name
-{ CurrentSemanticValue.n = new(NodeType.Delete, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+        YYAction69();
         break;
       case 70: // edelete_stmt -> TEDELETE, key_name
-{ CurrentSemanticValue.n = new(NodeType.Edelete, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+        YYAction70();
         break;
       case 71: // extend_stmt -> TEXTEND, key_name, int
-{ CurrentSemanticValue.n = new(NodeType.Extend, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+        YYAction71();
         break;
       case 72: // eextend_stmt -> TEEXTEND, key_name, int
-{ CurrentSemanticValue.n = new(NodeType.Eextend, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+        YYAction72();
         break;
       case 73: // get_by_bucket_stmt -> TGET, TBY, TBUCKET, key_name
-{ CurrentSemanticValue.n = new(NodeType.GetByBucket, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-4].l); }
+        YYAction73();
         break;
       case 74: // get_by_bucket_stmt -> TLET, identifier, TEQUALS, TGET, TBY, TBUCKET, key_name
-{ CurrentSemanticValue.n = new(NodeType.GetByBucket, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-6].n, null, null, null, null, null, ValueStack[ValueStack.Depth-7].l); }
+        YYAction74();
         break;
       case 75: // get_by_bucket_stmt -> TGET, TBY, TBUCKET, key_name, TAS, TOF, expression
-{ CurrentSemanticValue.n = new(NodeType.GetByBucket, ValueStack[ValueStack.Depth-4].n, null, null, ValueStack[ValueStack.Depth-1].n, null, null, null, ValueStack[ValueStack.Depth-7].l); }
+        YYAction75();
         break;
       case 76: // get_by_bucket_stmt -> TLET, identifier, TEQUALS, TGET, TBY, TBUCKET, key_name, 
                //                       TAS, TOF, expression
-{ CurrentSemanticValue.n = new(NodeType.GetByBucket, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-9].n, null, ValueStack[ValueStack.Depth-1].n, null, null, null, ValueStack[ValueStack.Depth-10].l); }
+        YYAction76();
         break;
       case 77: // eget_by_bucket_stmt -> TEGET, TBY, TBUCKET, key_name
-{ CurrentSemanticValue.n = new(NodeType.EGetByBucket, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-4].l); }
+        YYAction77();
         break;
       case 78: // eget_by_bucket_stmt -> TLET, identifier, TEQUALS, TEGET, TBY, TBUCKET, key_name
-{ CurrentSemanticValue.n = new(NodeType.EGetByBucket, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-6].n, null, null, null, null, null, ValueStack[ValueStack.Depth-7].l); }
+        YYAction78();
         break;
       case 79: // eget_by_bucket_stmt -> TEGET, TBY, TBUCKET, key_name, TAS, TOF, expression
-{ CurrentSemanticValue.n = new(NodeType.EGetByBucket, ValueStack[ValueStack.Depth-4].n, null, null, ValueStack[ValueStack.Depth-1].n, null, null, null, ValueStack[ValueStack.Depth-7].l); }
+        YYAction79();
         break;
       case 80: // eget_by_bucket_stmt -> TLET, identifier, TEQUALS, TEGET, TBY, TBUCKET, key_name, 
                //                        TAS, TOF, expression
-{ CurrentSemanticValue.n = new(NodeType.EGetByBucket, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-9].n, null, ValueStack[ValueStack.Depth-1].n, null, null, null, ValueStack[ValueStack.Depth-10].l); }
+        YYAction80();
         break;
       case 81: // scan_by_prefix_stmt -> TSCAN, TBY, TPREFIX, key_name
-{ CurrentSemanticValue.n = new(NodeType.ScanByPrefix, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-4].l); }
+        YYAction81();
         break;
       case 82: // scan_by_prefix_stmt -> TLET, identifier, TEQUALS, TSCAN, TBY, TPREFIX, key_name
-{ CurrentSemanticValue.n = new(NodeType.ScanByPrefix, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-6].n, null, null, null, null, null, ValueStack[ValueStack.Depth-7].l); }
+        YYAction82();
         break;
       case 83: // scan_by_prefix_stmt -> TSCAN, TBY, TPREFIX, key_name, TAS, TOF, expression
-{ CurrentSemanticValue.n = new(NodeType.ScanByPrefix, ValueStack[ValueStack.Depth-4].n, null, null, ValueStack[ValueStack.Depth-1].n, null, null, null, ValueStack[ValueStack.Depth-7].l); }
+        YYAction83();
         break;
       case 84: // scan_by_prefix_stmt -> TLET, identifier, TEQUALS, TSCAN, TBY, TPREFIX, key_name, 
                //                        TAS, TOF, expression
-{ CurrentSemanticValue.n = new(NodeType.ScanByPrefix, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-9].n, null, ValueStack[ValueStack.Depth-1].n, null, null, null, ValueStack[ValueStack.Depth-10].l); }
+        YYAction84();
         break;
       case 85: // escan_by_prefix_stmt -> TESCAN, TBY, TPREFIX, key_name
-{ CurrentSemanticValue.n = new(NodeType.EscanByPrefix, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-4].l); }
+        YYAction85();
         break;
       case 86: // escan_by_prefix_stmt -> TLET, identifier, TEQUALS, TESCAN, TBY, TPREFIX, 
                //                         key_name
-{ CurrentSemanticValue.n = new(NodeType.EscanByPrefix, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-6].n, null, null, null, null, null, ValueStack[ValueStack.Depth-7].l); }
+        YYAction86();
         break;
       case 87: // escan_by_prefix_stmt -> TESCAN, TBY, TPREFIX, key_name, TAS, TOF, expression
-{ CurrentSemanticValue.n = new(NodeType.EscanByPrefix, ValueStack[ValueStack.Depth-4].n, null, null, ValueStack[ValueStack.Depth-1].n, null, null, null, ValueStack[ValueStack.Depth-7].l); }
+        YYAction87();
         break;
       case 88: // escan_by_prefix_stmt -> TLET, identifier, TEQUALS, TESCAN, TBY, TPREFIX, 
                //                         key_name, TAS, TOF, expression
-{ CurrentSemanticValue.n = new(NodeType.EscanByPrefix, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-9].n, null, ValueStack[ValueStack.Depth-1].n, null, null, null, ValueStack[ValueStack.Depth-10].l); }
+        YYAction88();
         break;
       case 89: // key_name -> identifier
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction89();
         break;
       case 90: // key_name -> placeholder
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction90();
         break;
       case 91: // key_name -> string
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction91();
         break;
       case 92: // let_stmt -> TLET, identifier, TEQUALS, expression
-{ CurrentSemanticValue.n = new(NodeType.Let, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-4].l); }
+        YYAction92();
         break;
       case 93: // if_stmt -> TIF, expression, TTHEN, stmt_list, TEND
-{ CurrentSemanticValue.n = new(NodeType.If, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, ValueStack[ValueStack.Depth-5].l); }
+        YYAction93();
         break;
       case 94: // if_stmt -> TIF, expression, TTHEN, stmt_list, TELSE, stmt_list, TEND
-{ CurrentSemanticValue.n = new(NodeType.If, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, ValueStack[ValueStack.Depth-7].l); }
+        YYAction94();
         break;
       case 95: // switch_stmt -> TSWITCH, expression, switch_cases, TEND
-{ CurrentSemanticValue.n = new(NodeType.Switch, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, ValueStack[ValueStack.Depth-4].l); }
+        YYAction95();
         break;
       case 96: // switch_stmt -> TSWITCH, expression, switch_cases, TELSE, stmt_list, TEND
-{ CurrentSemanticValue.n = new(NodeType.Switch, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, ValueStack[ValueStack.Depth-6].l); }
+        YYAction96();
         break;
       case 97: // switch_cases -> switch_cases, switch_case
-{ CurrentSemanticValue.n = new(NodeType.SwitchCaseList, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+        YYAction97();
         break;
       case 98: // switch_cases -> switch_case
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction98();
         break;
       case 99: // switch_case -> TCASE, switch_values, TTHEN, stmt_list
-{ CurrentSemanticValue.n = new(NodeType.SwitchCase, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-4].l); }
+        YYAction99();
         break;
       case 100: // switch_values -> switch_values, TCOMMA, expression
-{ CurrentSemanticValue.n = new(NodeType.SwitchValueList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+        YYAction100();
         break;
       case 101: // switch_values -> expression
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction101();
         break;
       case 102: // for_stmt -> TFOR, identifier, TIN, expression, TDO, stmt_list, TEND
-{ CurrentSemanticValue.n = new(NodeType.For, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, ValueStack[ValueStack.Depth-7].l); }
+        YYAction102();
         break;
       case 103: // begin_stmt -> TBEGIN, stmt_list, TEND
-{ CurrentSemanticValue.n = new(NodeType.Begin, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+        YYAction103();
         break;
       case 104: // begin_stmt -> TBEGIN, LPAREN, begin_options, RPAREN, stmt_list, TEND
-{ CurrentSemanticValue.n = new(NodeType.Begin, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-4].n, null, null, null, null, null, ValueStack[ValueStack.Depth-6].l); }
+        YYAction104();
         break;
       case 105: // begin_options -> begin_options, TCOMMA, begin_option
-{ CurrentSemanticValue.n = new(NodeType.BeginOptionList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+        YYAction105();
         break;
       case 106: // begin_options -> begin_option
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction106();
         break;
       case 107: // begin_option -> identifier, TEQUALS, simple_expr
-{ CurrentSemanticValue.n = new(NodeType.BeginOption, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+        YYAction107();
         break;
       case 108: // commit_stmt -> TCOMMIT
-{ CurrentSemanticValue.n = new(NodeType.Commit, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-1].l); }
+        YYAction108();
         break;
       case 109: // rollback_stmt -> TROLLBACK
-{ CurrentSemanticValue.n = new(NodeType.Rollback, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-1].l); }
+        YYAction109();
         break;
       case 110: // return_stmt -> TRETURN, expression
-{ CurrentSemanticValue.n = new(NodeType.Return, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+        YYAction110();
         break;
       case 111: // return_stmt -> TRETURN
-{ CurrentSemanticValue.n = new(NodeType.Return, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-1].l); }
+        YYAction111();
         break;
       case 112: // sleep_stmt -> TSLEEP, int
-{ CurrentSemanticValue.n = new(NodeType.Sleep, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+        YYAction112();
         break;
       case 113: // throw_stmt -> TTHROW, expression
-{ CurrentSemanticValue.n = new(NodeType.Throw, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+        YYAction113();
         break;
       case 114: // expression -> expression, TEQUALS, expression
-{ CurrentSemanticValue.n = new(NodeType.Equals, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+        YYAction114();
         break;
       case 115: // expression -> expression, TDOUBLEEQUALS, expression
-{ CurrentSemanticValue.n = new(NodeType.Equals, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+        YYAction115();
         break;
       case 116: // expression -> expression, TNOTEQUALS, expression
-{ CurrentSemanticValue.n = new(NodeType.NotEquals, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+        YYAction116();
         break;
       case 117: // expression -> expression, TLESSTHAN, expression
-{ CurrentSemanticValue.n = new(NodeType.LessThan, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+        YYAction117();
         break;
       case 118: // expression -> expression, TGREATERTHAN, expression
-{ CurrentSemanticValue.n = new(NodeType.GreaterThan, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+        YYAction118();
         break;
       case 119: // expression -> expression, TLESSTHANEQUALS, expression
-{ CurrentSemanticValue.n = new(NodeType.LessThanEquals, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+        YYAction119();
         break;
       case 120: // expression -> expression, TGREATERTHANEQUALS, expression
-{ CurrentSemanticValue.n = new(NodeType.GreaterThanEquals, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+        YYAction120();
         break;
       case 121: // expression -> expression, TAND, expression
-{ CurrentSemanticValue.n = new(NodeType.And, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+        YYAction121();
         break;
       case 122: // expression -> expression, TOR, expression
-{ CurrentSemanticValue.n = new(NodeType.Or, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+        YYAction122();
         break;
       case 123: // expression -> expression, TADD, expression
-{ CurrentSemanticValue.n = new(NodeType.Add, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+        YYAction123();
         break;
       case 124: // expression -> expression, TMINUS, expression
-{ CurrentSemanticValue.n = new(NodeType.Subtract, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+        YYAction124();
         break;
       case 125: // expression -> expression, TMULT, expression
-{ CurrentSemanticValue.n = new(NodeType.Mult, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+        YYAction125();
         break;
       case 126: // expression -> expression, TDIV, expression
-{ CurrentSemanticValue.n = new(NodeType.Div, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+        YYAction126();
         break;
       case 127: // expression -> expression, TDOUBLEDOT, expression
-{ CurrentSemanticValue.n = new(NodeType.Range, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+        YYAction127();
         break;
       case 128: // expression -> TMINUS, expression
-{ CurrentSemanticValue.n = new(NodeType.Negate, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+        YYAction128();
         break;
       case 129: // expression -> TNOT, expression
-{ CurrentSemanticValue.n = new(NodeType.Not, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+        YYAction129();
         break;
       case 130: // expression -> TNOT, TSET
-{ CurrentSemanticValue.n = new(NodeType.NotSet, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+        YYAction130();
         break;
       case 131: // expression -> TNOT, TFOUND
-{ CurrentSemanticValue.n = new(NodeType.NotFound, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+        YYAction131();
         break;
       case 132: // expression -> TNOTDELETED
-{ CurrentSemanticValue.n = new(NodeType.NotDeleted, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-1].l); }
+        YYAction132();
         break;
       case 133: // expression -> TNOTEXTENDED
-{ CurrentSemanticValue.n = new(NodeType.NotExtended, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-1].l); }
+        YYAction133();
         break;
       case 134: // expression -> expression, LSQUAREBRACE, expression, RSQUAREBRACE
-{ CurrentSemanticValue.n = new(NodeType.ArrayIndex, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, ValueStack[ValueStack.Depth-4].l); }
+        YYAction134();
         break;
       case 135: // expression -> array_literal
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction135();
         break;
       case 136: // expression -> LPAREN, expression, RPAREN
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-2].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-2].l; }
+        YYAction136();
         break;
       case 137: // expression -> fcall_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction137();
         break;
       case 138: // expression -> identifier
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction138();
         break;
       case 139: // expression -> placeholder
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction139();
         break;
       case 140: // expression -> int
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction140();
         break;
       case 141: // expression -> float
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction141();
         break;
       case 142: // expression -> string
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction142();
         break;
       case 143: // expression -> boolean
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction143();
         break;
       case 144: // expression -> null
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction144();
         break;
       case 145: // array_literal -> LSQUAREBRACE, RSQUAREBRACE
-{ CurrentSemanticValue.n = new(NodeType.ArrayLiteral, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+        YYAction145();
         break;
       case 146: // array_literal -> LSQUAREBRACE, array_element_list, RSQUAREBRACE
-{ CurrentSemanticValue.n = new(NodeType.ArrayLiteral, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+        YYAction146();
         break;
       case 147: // array_element_list -> array_element_list, TCOMMA, expression
-{ CurrentSemanticValue.n = new(NodeType.ArrayElementList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+        YYAction147();
         break;
       case 148: // array_element_list -> expression
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction148();
         break;
       case 149: // fcall_expr -> identifier, LPAREN, RPAREN
-{ CurrentSemanticValue.n = new(NodeType.FuncCall, ValueStack[ValueStack.Depth-3].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+        YYAction149();
         break;
       case 150: // fcall_expr -> identifier, LPAREN, fcall_argument_list, RPAREN
-{ CurrentSemanticValue.n = new(NodeType.FuncCall, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, ValueStack[ValueStack.Depth-4].l); }
+        YYAction150();
         break;
       case 151: // fcall_argument_list -> fcall_argument_list, TCOMMA, fcall_argument_item
-{ CurrentSemanticValue.n = new(NodeType.ArgumentList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+        YYAction151();
         break;
       case 152: // fcall_argument_list -> fcall_argument_item
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction152();
         break;
       case 153: // fcall_argument_item -> expression
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction153();
         break;
       case 154: // simple_expr -> identifier
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction154();
         break;
       case 155: // simple_expr -> int
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction155();
         break;
       case 156: // simple_expr -> float
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction156();
         break;
       case 157: // simple_expr -> string
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction157();
         break;
       case 158: // simple_expr -> boolean
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction158();
         break;
       case 159: // simple_expr -> null
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction159();
         break;
       case 160: // simple_expr -> placeholder
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+        YYAction160();
         break;
       case 161: // identifier -> TIDENTIFIER
-{ CurrentSemanticValue.n = new(NodeType.Identifier, null, null, null, null, null, null, CurrentSemanticValue.s, ValueStack[ValueStack.Depth-1].l); }
+        YYAction161();
         break;
       case 162: // placeholder -> TPLACEHOLDER
-{ CurrentSemanticValue.n = new(NodeType.Placeholder, null, null, null, null, null, null, CurrentSemanticValue.s, ValueStack[ValueStack.Depth-1].l); }
+        YYAction162();
         break;
       case 163: // int -> TDIGIT
-{ CurrentSemanticValue.n = new(NodeType.IntegerType, null, null, null, null, null, null, CurrentSemanticValue.s, ValueStack[ValueStack.Depth-1].l); }
+        YYAction163();
         break;
       case 164: // float -> TFLOAT
-{ CurrentSemanticValue.n = new(NodeType.FloatType, null, null, null, null, null, null, CurrentSemanticValue.s, ValueStack[ValueStack.Depth-1].l); }
+        YYAction164();
         break;
       case 165: // boolean -> TTRUE
-{ CurrentSemanticValue.n = new(NodeType.BooleanType, null, null, null, null, null, null, "true", ValueStack[ValueStack.Depth-1].l); }
+        YYAction165();
         break;
       case 166: // boolean -> TFALSE
-{ CurrentSemanticValue.n = new(NodeType.BooleanType, null, null, null, null, null, null, "false", ValueStack[ValueStack.Depth-1].l); }
+        YYAction166();
         break;
       case 167: // string -> TSTRING
-{ CurrentSemanticValue.n = new(NodeType.StringType, null, null, null, null, null, null, CurrentSemanticValue.s, ValueStack[ValueStack.Depth-1].l); }
+        YYAction167();
         break;
       case 168: // null -> TNULL
-{ CurrentSemanticValue.n = new(NodeType.NullType, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-1].l); }
+        YYAction168();
         break;
     }
-#pragma warning restore 162, 1522
   }
+
+  // stmt_list -> stmt_list, stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction2()
+  {
+{ CurrentSemanticValue.n = new(NodeType.StmtList, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+  }
+
+  // stmt_list -> stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction3()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // stmt -> set_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction4()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // stmt -> eset_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction5()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // stmt -> get_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction6()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // stmt -> eget_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction7()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // stmt -> exists_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction8()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // stmt -> eexists_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction9()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // stmt -> delete_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction10()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // stmt -> edelete_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction11()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // stmt -> extend_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction12()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // stmt -> eextend_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction13()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // stmt -> get_by_bucket_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction14()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // stmt -> eget_by_bucket_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction15()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // stmt -> scan_by_prefix_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction16()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // stmt -> escan_by_prefix_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction17()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // stmt -> let_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction18()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // stmt -> for_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction19()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // stmt -> if_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction20()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // stmt -> switch_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction21()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // stmt -> begin_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction22()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // stmt -> commit_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction23()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // stmt -> rollback_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction24()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // stmt -> return_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction25()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // stmt -> sleep_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction26()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // stmt -> throw_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction27()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // set_stmt -> TSET, key_name, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction28()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Set, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+  }
+
+  // set_stmt -> TSET, key_name, expression, set_flags
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction29()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Set, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, ValueStack[ValueStack.Depth-4].l); }
+  }
+
+  // eset_stmt -> TESET, key_name, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction30()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Eset, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+  }
+
+  // eset_stmt -> TESET, key_name, expression, set_flags
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction31()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Eset, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, ValueStack[ValueStack.Depth-4].l); }
+  }
+
+  // set_flags -> set_flags, set_flag
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction32()
+  {
+{ CurrentSemanticValue.n = new(NodeType.SetFlagsList, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+  }
+
+  // set_flags -> set_flag
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction33()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // set_flag -> set_not_exists
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction34()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // set_flag -> set_exists
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction35()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // set_flag -> set_cmp
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction36()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // set_flag -> set_expires
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction37()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // set_flag -> set_no_rev
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction38()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // set_not_exists -> TNX
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction39()
+  {
+{ CurrentSemanticValue.n = new(NodeType.SetNotExists, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-1].l); }
+  }
+
+  // set_exists -> TXX
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction40()
+  {
+{ CurrentSemanticValue.n = new(NodeType.SetExists, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-1].l); }
+  }
+
+  // set_cmp -> TCMP, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction41()
+  {
+{ CurrentSemanticValue.n = new(NodeType.SetCmp, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+  }
+
+  // set_cmp -> TCMPREV, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction42()
+  {
+{ CurrentSemanticValue.n = new(NodeType.SetCmpRev, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+  }
+
+  // set_expires -> TEX, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction43()
+  {
+{ CurrentSemanticValue.n = new(NodeType.SetEx, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+  }
+
+  // set_no_rev -> TNOREV
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction44()
+  {
+{ CurrentSemanticValue.n = new(NodeType.SetNoRev, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-1].l); }
+  }
+
+  // get_stmt -> TGET, key_name
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction45()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Get, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+  }
+
+  // get_stmt -> TLET, identifier, TEQUALS, TGET, key_name
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction46()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Get, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-4].n, null, null, null, null, null, ValueStack[ValueStack.Depth-5].l); }
+  }
+
+  // get_stmt -> TGET, key_name, TAT, int
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction47()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Get, ValueStack[ValueStack.Depth-3].n, null, ValueStack[ValueStack.Depth-1].n, null, null, null, null, ValueStack[ValueStack.Depth-4].l); }
+  }
+
+  // get_stmt -> TLET, identifier, TEQUALS, TGET, key_name, TAT, int
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction48()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Get, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, ValueStack[ValueStack.Depth-7].l); }
+  }
+
+  // get_stmt -> TGET, key_name, TAS, TOF, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction49()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Get, ValueStack[ValueStack.Depth-4].n, null, null, ValueStack[ValueStack.Depth-1].n, null, null, null, ValueStack[ValueStack.Depth-5].l); }
+  }
+
+  // get_stmt -> TLET, identifier, TEQUALS, TGET, key_name, TAS, TOF, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction50()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Get, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-7].n, null, ValueStack[ValueStack.Depth-1].n, null, null, null, ValueStack[ValueStack.Depth-8].l); }
+  }
+
+  // eget_stmt -> TEGET, key_name
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction51()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Eget, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+  }
+
+  // eget_stmt -> TLET, identifier, TEQUALS, TEGET, key_name
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction52()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Eget, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-4].n, null, null, null, null, null, ValueStack[ValueStack.Depth-5].l); }
+  }
+
+  // eget_stmt -> TEGET, key_name, TAT, int
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction53()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Eget, ValueStack[ValueStack.Depth-3].n, null, ValueStack[ValueStack.Depth-1].n, null, null, null, null, ValueStack[ValueStack.Depth-4].l); }
+  }
+
+  // eget_stmt -> TLET, identifier, TEQUALS, TEGET, key_name, TAT, int
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction54()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Eget, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, ValueStack[ValueStack.Depth-7].l); }
+  }
+
+  // eget_stmt -> TEGET, key_name, TAS, TOF, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction55()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Eget, ValueStack[ValueStack.Depth-4].n, null, null, ValueStack[ValueStack.Depth-1].n, null, null, null, ValueStack[ValueStack.Depth-5].l); }
+  }
+
+  // eget_stmt -> TLET, identifier, TEQUALS, TEGET, key_name, TAS, TOF, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction56()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Eget, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-7].n, null, ValueStack[ValueStack.Depth-1].n, null, null, null, ValueStack[ValueStack.Depth-8].l); }
+  }
+
+  // exists_stmt -> TEXISTS, key_name
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction57()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Exists, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+  }
+
+  // exists_stmt -> TLET, identifier, TEQUALS, TEXISTS, key_name
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction58()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Exists, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-4].n, null, null, null, null, null, ValueStack[ValueStack.Depth-5].l); }
+  }
+
+  // exists_stmt -> TEXISTS, key_name, TAT, int
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction59()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Exists, ValueStack[ValueStack.Depth-3].n, null, ValueStack[ValueStack.Depth-1].n, null, null, null, null, ValueStack[ValueStack.Depth-4].l); }
+  }
+
+  // exists_stmt -> TLET, identifier, TEQUALS, TEXISTS, key_name, TAT, int
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction60()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Exists, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, ValueStack[ValueStack.Depth-7].l); }
+  }
+
+  // exists_stmt -> TEXISTS, key_name, TAS, TOF, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction61()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Exists, ValueStack[ValueStack.Depth-4].n, null, null, ValueStack[ValueStack.Depth-1].n, null, null, null, ValueStack[ValueStack.Depth-5].l); }
+  }
+
+  // exists_stmt -> TLET, identifier, TEQUALS, TEXISTS, key_name, TAS, TOF, 
+  //                expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction62()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Exists, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-7].n, null, ValueStack[ValueStack.Depth-1].n, null, null, null, ValueStack[ValueStack.Depth-8].l); }
+  }
+
+  // eexists_stmt -> TEEXISTS, key_name
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction63()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Eexists, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+  }
+
+  // eexists_stmt -> TLET, identifier, TEQUALS, TEEXISTS, key_name
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction64()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Eexists, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-4].n, null, null, null, null, null, ValueStack[ValueStack.Depth-5].l); }
+  }
+
+  // eexists_stmt -> TEEXISTS, key_name, TAT, int
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction65()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Eexists, ValueStack[ValueStack.Depth-3].n, null, ValueStack[ValueStack.Depth-1].n, null, null, null, null, ValueStack[ValueStack.Depth-4].l); }
+  }
+
+  // eexists_stmt -> TLET, identifier, TEQUALS, TEEXISTS, key_name, TAT, int
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction66()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Eexists, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, ValueStack[ValueStack.Depth-7].l); }
+  }
+
+  // eexists_stmt -> TEEXISTS, key_name, TAS, TOF, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction67()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Eexists, ValueStack[ValueStack.Depth-4].n, null, null, ValueStack[ValueStack.Depth-1].n, null, null, null, ValueStack[ValueStack.Depth-5].l); }
+  }
+
+  // eexists_stmt -> TLET, identifier, TEQUALS, TEEXISTS, key_name, TAS, TOF, 
+  //                 expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction68()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Eexists, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-7].n, null, ValueStack[ValueStack.Depth-1].n, null, null, null, ValueStack[ValueStack.Depth-8].l); }
+  }
+
+  // delete_stmt -> TDELETE, key_name
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction69()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Delete, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+  }
+
+  // edelete_stmt -> TEDELETE, key_name
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction70()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Edelete, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+  }
+
+  // extend_stmt -> TEXTEND, key_name, int
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction71()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Extend, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+  }
+
+  // eextend_stmt -> TEEXTEND, key_name, int
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction72()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Eextend, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+  }
+
+  // get_by_bucket_stmt -> TGET, TBY, TBUCKET, key_name
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction73()
+  {
+{ CurrentSemanticValue.n = new(NodeType.GetByBucket, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-4].l); }
+  }
+
+  // get_by_bucket_stmt -> TLET, identifier, TEQUALS, TGET, TBY, TBUCKET, key_name
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction74()
+  {
+{ CurrentSemanticValue.n = new(NodeType.GetByBucket, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-6].n, null, null, null, null, null, ValueStack[ValueStack.Depth-7].l); }
+  }
+
+  // get_by_bucket_stmt -> TGET, TBY, TBUCKET, key_name, TAS, TOF, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction75()
+  {
+{ CurrentSemanticValue.n = new(NodeType.GetByBucket, ValueStack[ValueStack.Depth-4].n, null, null, ValueStack[ValueStack.Depth-1].n, null, null, null, ValueStack[ValueStack.Depth-7].l); }
+  }
+
+  // get_by_bucket_stmt -> TLET, identifier, TEQUALS, TGET, TBY, TBUCKET, key_name, 
+  //                       TAS, TOF, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction76()
+  {
+{ CurrentSemanticValue.n = new(NodeType.GetByBucket, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-9].n, null, ValueStack[ValueStack.Depth-1].n, null, null, null, ValueStack[ValueStack.Depth-10].l); }
+  }
+
+  // eget_by_bucket_stmt -> TEGET, TBY, TBUCKET, key_name
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction77()
+  {
+{ CurrentSemanticValue.n = new(NodeType.EGetByBucket, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-4].l); }
+  }
+
+  // eget_by_bucket_stmt -> TLET, identifier, TEQUALS, TEGET, TBY, TBUCKET, key_name
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction78()
+  {
+{ CurrentSemanticValue.n = new(NodeType.EGetByBucket, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-6].n, null, null, null, null, null, ValueStack[ValueStack.Depth-7].l); }
+  }
+
+  // eget_by_bucket_stmt -> TEGET, TBY, TBUCKET, key_name, TAS, TOF, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction79()
+  {
+{ CurrentSemanticValue.n = new(NodeType.EGetByBucket, ValueStack[ValueStack.Depth-4].n, null, null, ValueStack[ValueStack.Depth-1].n, null, null, null, ValueStack[ValueStack.Depth-7].l); }
+  }
+
+  // eget_by_bucket_stmt -> TLET, identifier, TEQUALS, TEGET, TBY, TBUCKET, key_name, 
+  //                        TAS, TOF, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction80()
+  {
+{ CurrentSemanticValue.n = new(NodeType.EGetByBucket, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-9].n, null, ValueStack[ValueStack.Depth-1].n, null, null, null, ValueStack[ValueStack.Depth-10].l); }
+  }
+
+  // scan_by_prefix_stmt -> TSCAN, TBY, TPREFIX, key_name
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction81()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ScanByPrefix, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-4].l); }
+  }
+
+  // scan_by_prefix_stmt -> TLET, identifier, TEQUALS, TSCAN, TBY, TPREFIX, key_name
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction82()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ScanByPrefix, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-6].n, null, null, null, null, null, ValueStack[ValueStack.Depth-7].l); }
+  }
+
+  // scan_by_prefix_stmt -> TSCAN, TBY, TPREFIX, key_name, TAS, TOF, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction83()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ScanByPrefix, ValueStack[ValueStack.Depth-4].n, null, null, ValueStack[ValueStack.Depth-1].n, null, null, null, ValueStack[ValueStack.Depth-7].l); }
+  }
+
+  // scan_by_prefix_stmt -> TLET, identifier, TEQUALS, TSCAN, TBY, TPREFIX, key_name, 
+  //                        TAS, TOF, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction84()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ScanByPrefix, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-9].n, null, ValueStack[ValueStack.Depth-1].n, null, null, null, ValueStack[ValueStack.Depth-10].l); }
+  }
+
+  // escan_by_prefix_stmt -> TESCAN, TBY, TPREFIX, key_name
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction85()
+  {
+{ CurrentSemanticValue.n = new(NodeType.EscanByPrefix, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-4].l); }
+  }
+
+  // escan_by_prefix_stmt -> TLET, identifier, TEQUALS, TESCAN, TBY, TPREFIX, 
+  //                         key_name
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction86()
+  {
+{ CurrentSemanticValue.n = new(NodeType.EscanByPrefix, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-6].n, null, null, null, null, null, ValueStack[ValueStack.Depth-7].l); }
+  }
+
+  // escan_by_prefix_stmt -> TESCAN, TBY, TPREFIX, key_name, TAS, TOF, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction87()
+  {
+{ CurrentSemanticValue.n = new(NodeType.EscanByPrefix, ValueStack[ValueStack.Depth-4].n, null, null, ValueStack[ValueStack.Depth-1].n, null, null, null, ValueStack[ValueStack.Depth-7].l); }
+  }
+
+  // escan_by_prefix_stmt -> TLET, identifier, TEQUALS, TESCAN, TBY, TPREFIX, 
+  //                         key_name, TAS, TOF, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction88()
+  {
+{ CurrentSemanticValue.n = new(NodeType.EscanByPrefix, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-9].n, null, ValueStack[ValueStack.Depth-1].n, null, null, null, ValueStack[ValueStack.Depth-10].l); }
+  }
+
+  // key_name -> identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction89()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // key_name -> placeholder
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction90()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // key_name -> string
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction91()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // let_stmt -> TLET, identifier, TEQUALS, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction92()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Let, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-4].l); }
+  }
+
+  // if_stmt -> TIF, expression, TTHEN, stmt_list, TEND
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction93()
+  {
+{ CurrentSemanticValue.n = new(NodeType.If, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, ValueStack[ValueStack.Depth-5].l); }
+  }
+
+  // if_stmt -> TIF, expression, TTHEN, stmt_list, TELSE, stmt_list, TEND
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction94()
+  {
+{ CurrentSemanticValue.n = new(NodeType.If, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, ValueStack[ValueStack.Depth-7].l); }
+  }
+
+  // switch_stmt -> TSWITCH, expression, switch_cases, TEND
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction95()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Switch, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, ValueStack[ValueStack.Depth-4].l); }
+  }
+
+  // switch_stmt -> TSWITCH, expression, switch_cases, TELSE, stmt_list, TEND
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction96()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Switch, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, ValueStack[ValueStack.Depth-6].l); }
+  }
+
+  // switch_cases -> switch_cases, switch_case
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction97()
+  {
+{ CurrentSemanticValue.n = new(NodeType.SwitchCaseList, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+  }
+
+  // switch_cases -> switch_case
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction98()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // switch_case -> TCASE, switch_values, TTHEN, stmt_list
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction99()
+  {
+{ CurrentSemanticValue.n = new(NodeType.SwitchCase, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-4].l); }
+  }
+
+  // switch_values -> switch_values, TCOMMA, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction100()
+  {
+{ CurrentSemanticValue.n = new(NodeType.SwitchValueList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+  }
+
+  // switch_values -> expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction101()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // for_stmt -> TFOR, identifier, TIN, expression, TDO, stmt_list, TEND
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction102()
+  {
+{ CurrentSemanticValue.n = new(NodeType.For, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, ValueStack[ValueStack.Depth-7].l); }
+  }
+
+  // begin_stmt -> TBEGIN, stmt_list, TEND
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction103()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Begin, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+  }
+
+  // begin_stmt -> TBEGIN, LPAREN, begin_options, RPAREN, stmt_list, TEND
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction104()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Begin, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-4].n, null, null, null, null, null, ValueStack[ValueStack.Depth-6].l); }
+  }
+
+  // begin_options -> begin_options, TCOMMA, begin_option
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction105()
+  {
+{ CurrentSemanticValue.n = new(NodeType.BeginOptionList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+  }
+
+  // begin_options -> begin_option
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction106()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // begin_option -> identifier, TEQUALS, simple_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction107()
+  {
+{ CurrentSemanticValue.n = new(NodeType.BeginOption, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+  }
+
+  // commit_stmt -> TCOMMIT
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction108()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Commit, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-1].l); }
+  }
+
+  // rollback_stmt -> TROLLBACK
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction109()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Rollback, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-1].l); }
+  }
+
+  // return_stmt -> TRETURN, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction110()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Return, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+  }
+
+  // return_stmt -> TRETURN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction111()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Return, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-1].l); }
+  }
+
+  // sleep_stmt -> TSLEEP, int
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction112()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Sleep, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+  }
+
+  // throw_stmt -> TTHROW, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction113()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Throw, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+  }
+
+  // expression -> expression, TEQUALS, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction114()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Equals, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+  }
+
+  // expression -> expression, TDOUBLEEQUALS, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction115()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Equals, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+  }
+
+  // expression -> expression, TNOTEQUALS, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction116()
+  {
+{ CurrentSemanticValue.n = new(NodeType.NotEquals, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+  }
+
+  // expression -> expression, TLESSTHAN, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction117()
+  {
+{ CurrentSemanticValue.n = new(NodeType.LessThan, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+  }
+
+  // expression -> expression, TGREATERTHAN, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction118()
+  {
+{ CurrentSemanticValue.n = new(NodeType.GreaterThan, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+  }
+
+  // expression -> expression, TLESSTHANEQUALS, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction119()
+  {
+{ CurrentSemanticValue.n = new(NodeType.LessThanEquals, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+  }
+
+  // expression -> expression, TGREATERTHANEQUALS, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction120()
+  {
+{ CurrentSemanticValue.n = new(NodeType.GreaterThanEquals, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+  }
+
+  // expression -> expression, TAND, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction121()
+  {
+{ CurrentSemanticValue.n = new(NodeType.And, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+  }
+
+  // expression -> expression, TOR, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction122()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Or, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+  }
+
+  // expression -> expression, TADD, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction123()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Add, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+  }
+
+  // expression -> expression, TMINUS, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction124()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Subtract, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+  }
+
+  // expression -> expression, TMULT, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction125()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Mult, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+  }
+
+  // expression -> expression, TDIV, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction126()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Div, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+  }
+
+  // expression -> expression, TDOUBLEDOT, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction127()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Range, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+  }
+
+  // expression -> TMINUS, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction128()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Negate, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+  }
+
+  // expression -> TNOT, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction129()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Not, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+  }
+
+  // expression -> TNOT, TSET
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction130()
+  {
+{ CurrentSemanticValue.n = new(NodeType.NotSet, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+  }
+
+  // expression -> TNOT, TFOUND
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction131()
+  {
+{ CurrentSemanticValue.n = new(NodeType.NotFound, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+  }
+
+  // expression -> TNOTDELETED
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction132()
+  {
+{ CurrentSemanticValue.n = new(NodeType.NotDeleted, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-1].l); }
+  }
+
+  // expression -> TNOTEXTENDED
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction133()
+  {
+{ CurrentSemanticValue.n = new(NodeType.NotExtended, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-1].l); }
+  }
+
+  // expression -> expression, LSQUAREBRACE, expression, RSQUAREBRACE
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction134()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ArrayIndex, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, ValueStack[ValueStack.Depth-4].l); }
+  }
+
+  // expression -> array_literal
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction135()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // expression -> LPAREN, expression, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction136()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-2].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-2].l; }
+  }
+
+  // expression -> fcall_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction137()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // expression -> identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction138()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // expression -> placeholder
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction139()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // expression -> int
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction140()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // expression -> float
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction141()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // expression -> string
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction142()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // expression -> boolean
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction143()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // expression -> null
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction144()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // array_literal -> LSQUAREBRACE, RSQUAREBRACE
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction145()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ArrayLiteral, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].l); }
+  }
+
+  // array_literal -> LSQUAREBRACE, array_element_list, RSQUAREBRACE
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction146()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ArrayLiteral, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+  }
+
+  // array_element_list -> array_element_list, TCOMMA, expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction147()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ArrayElementList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+  }
+
+  // array_element_list -> expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction148()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // fcall_expr -> identifier, LPAREN, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction149()
+  {
+{ CurrentSemanticValue.n = new(NodeType.FuncCall, ValueStack[ValueStack.Depth-3].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+  }
+
+  // fcall_expr -> identifier, LPAREN, fcall_argument_list, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction150()
+  {
+{ CurrentSemanticValue.n = new(NodeType.FuncCall, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, ValueStack[ValueStack.Depth-4].l); }
+  }
+
+  // fcall_argument_list -> fcall_argument_list, TCOMMA, fcall_argument_item
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction151()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ArgumentList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-3].l); }
+  }
+
+  // fcall_argument_list -> fcall_argument_item
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction152()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // fcall_argument_item -> expression
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction153()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // simple_expr -> identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction154()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // simple_expr -> int
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction155()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // simple_expr -> float
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction156()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // simple_expr -> string
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction157()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // simple_expr -> boolean
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction158()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // simple_expr -> null
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction159()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // simple_expr -> placeholder
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction160()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.l = ValueStack[ValueStack.Depth-1].l; }
+  }
+
+  // identifier -> TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction161()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Identifier, null, null, null, null, null, null, CurrentSemanticValue.s, ValueStack[ValueStack.Depth-1].l); }
+  }
+
+  // placeholder -> TPLACEHOLDER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction162()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Placeholder, null, null, null, null, null, null, CurrentSemanticValue.s, ValueStack[ValueStack.Depth-1].l); }
+  }
+
+  // int -> TDIGIT
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction163()
+  {
+{ CurrentSemanticValue.n = new(NodeType.IntegerType, null, null, null, null, null, null, CurrentSemanticValue.s, ValueStack[ValueStack.Depth-1].l); }
+  }
+
+  // float -> TFLOAT
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction164()
+  {
+{ CurrentSemanticValue.n = new(NodeType.FloatType, null, null, null, null, null, null, CurrentSemanticValue.s, ValueStack[ValueStack.Depth-1].l); }
+  }
+
+  // boolean -> TTRUE
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction165()
+  {
+{ CurrentSemanticValue.n = new(NodeType.BooleanType, null, null, null, null, null, null, "true", ValueStack[ValueStack.Depth-1].l); }
+  }
+
+  // boolean -> TFALSE
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction166()
+  {
+{ CurrentSemanticValue.n = new(NodeType.BooleanType, null, null, null, null, null, null, "false", ValueStack[ValueStack.Depth-1].l); }
+  }
+
+  // string -> TSTRING
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction167()
+  {
+{ CurrentSemanticValue.n = new(NodeType.StringType, null, null, null, null, null, null, CurrentSemanticValue.s, ValueStack[ValueStack.Depth-1].l); }
+  }
+
+  // null -> TNULL
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction168()
+  {
+{ CurrentSemanticValue.n = new(NodeType.NullType, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-1].l); }
+  }
+
+#pragma warning restore 162, 1522
 
   protected override string TerminalToString(int terminal)
   {

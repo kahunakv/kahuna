@@ -75,7 +75,11 @@
     <PackageReference Include="Nixie" Version="1.3.2" />
     <PackageReference Include="System.IO.Hashing" Version="10.0.14" />
     <PackageReference Include="Polly.Contrib.WaitAndRetry" Version="1.1.1" />
-    <PackageReference Include="YaccLexTools" Version="1.2.3" />
+    <!-- Build-time tools: Gppg.Modern generates the script parser and adds its runtime
+         (ShiftReduceParserCode.cs) to the build; YaccLexTools.Gplex generates the scanner.
+         PrivateAssets keeps both out of the dependencies of the published package. -->
+    <PackageReference Include="Gppg.Modern" Version="1.6.0" PrivateAssets="all" />
+    <PackageReference Include="YaccLexTools.Gplex" Version="1.2.3.1" PrivateAssets="all" />
   </ItemGroup>
 
   <ItemGroup>
