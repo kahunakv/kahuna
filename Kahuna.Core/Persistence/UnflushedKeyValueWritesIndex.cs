@@ -55,7 +55,11 @@ internal sealed class UnflushedKeyValueWritesIndex
     private Action<string, long, HLCTimestamp>? onFlushed;
 
     /// <summary>True when the overlay currently holds no unflushed writes (fast path for reads).</summary>
-    public bool IsEmpty => entries.IsEmpty;
+    public bool IsEmpty => Volatile.Read(ref count) == 0;
+
+    // Number of keys in the overlay. ConcurrentDictionary.IsEmpty takes every bucket lock when the dictionary
+    // looks empty, which is the common case on a read path, so emptiness is answered from this count instead.
+    private int count;
 
     /// <summary>Wires the observer notified with the flushed (revision, commit HLC) head after every confirmed
     /// flush of a key (manager construction). One observer; a later attach replaces the earlier one.</summary>
@@ -76,17 +80,27 @@ internal sealed class UnflushedKeyValueWritesIndex
 
         // The incoming row rides along as the factory argument. A lambda that captured it would cost a
         // display class and a delegate per call, and this runs twice per committed write on the leader.
-        entries.AddOrUpdate(
-            key,
-            static (_, incoming) => incoming,
-            static (_, existing, incoming) =>
+        while (true)
+        {
+            if (entries.TryGetValue(key, out UnflushedKeyValueWrite existing))
             {
                 long oldest = Math.Min(existing.OldestRevision, incoming.Revision);
-                return IsNewer(existing, incoming.Revision, incoming.LastModified)
+                UnflushedKeyValueWrite merged = IsNewer(existing, incoming.Revision, incoming.LastModified)
                     ? existing with { OldestRevision = oldest }
                     : incoming with { OldestRevision = oldest };
-            },
-            incoming);
+
+                if (entries.TryUpdate(key, merged, existing))
+                    return;
+
+                continue;
+            }
+
+            if (entries.TryAdd(key, incoming))
+            {
+                Interlocked.Increment(ref count);
+                return;
+            }
+        }
     }
 
     /// <summary>
@@ -122,6 +136,7 @@ internal sealed class UnflushedKeyValueWritesIndex
             // so a concurrent Record of a newer head is never lost.
             if (entries.TryRemove(new KeyValuePair<string, UnflushedKeyValueWrite>(key, current)))
             {
+                Interlocked.Decrement(ref count);
                 onFlushed?.Invoke(key, flushedRevision, flushedLastModified);
                 return;
             }

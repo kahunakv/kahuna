@@ -32,7 +32,12 @@ internal sealed class UnflushedLockWritesIndex
     private readonly ConcurrentDictionary<string, UnflushedLockWrite> entries = new(StringComparer.Ordinal);
 
     /// <summary>True when the overlay currently holds no unflushed lock mutations.</summary>
-    public bool IsEmpty => entries.IsEmpty;
+    public bool IsEmpty => Volatile.Read(ref count) == 0;
+
+    // Number of resources in the overlay. ConcurrentDictionary.IsEmpty takes every bucket lock when the
+    // dictionary looks empty, which is the common case on a read path, so emptiness is answered from this
+    // count instead.
+    private int count;
 
     /// <summary>Records a committed lock mutation queued for persistence, keeping the newest head per resource.</summary>
     public void Record(
@@ -41,10 +46,23 @@ internal sealed class UnflushedLockWritesIndex
     {
         UnflushedLockWrite incoming = new(owner, fencingToken, expires, lastUsed, lastModified, state);
 
-        entries.AddOrUpdate(
-            resource,
-            incoming,
-            (_, existing) => IsNewer(existing, incoming.FencingToken, incoming.LastModified) ? existing : incoming);
+        while (true)
+        {
+            if (entries.TryGetValue(resource, out UnflushedLockWrite existing))
+            {
+                if (IsNewer(existing, incoming.FencingToken, incoming.LastModified)
+                    || entries.TryUpdate(resource, incoming, existing))
+                    return;
+
+                continue;
+            }
+
+            if (entries.TryAdd(resource, incoming))
+            {
+                Interlocked.Increment(ref count);
+                return;
+            }
+        }
     }
 
     /// <summary>
@@ -60,7 +78,10 @@ internal sealed class UnflushedLockWritesIndex
                 return;
 
             if (entries.TryRemove(new KeyValuePair<string, UnflushedLockWrite>(resource, current)))
+            {
+                Interlocked.Decrement(ref count);
                 return;
+            }
         }
     }
 

@@ -68,4 +68,94 @@ public sealed class TestUnflushedKeyValueWritesIndexAllocation(ITestOutputHelper
         Assert.Equal(new HLCTimestamp(0, 71, 0), head.LastModified);
         Assert.Equal(3, head.OldestRevision);
     }
+
+    [Fact]
+    public void IsEmpty_FollowsRecordsAndConfirmedFlushes()
+    {
+        UnflushedKeyValueWritesIndex overlay = new();
+        Assert.True(overlay.IsEmpty);
+
+        overlay.Record("a", [1], 1, HLCTimestamp.Zero, HLCTimestamp.Zero, new HLCTimestamp(0, 10, 0), KeyValueState.Set, false);
+        Assert.False(overlay.IsEmpty);
+
+        // A second head of the same key and a second key: two keys, three records.
+        overlay.Record("a", [2], 2, HLCTimestamp.Zero, HLCTimestamp.Zero, new HLCTimestamp(0, 20, 0), KeyValueState.Set, false);
+        overlay.Record("b", [3], 1, HLCTimestamp.Zero, HLCTimestamp.Zero, new HLCTimestamp(0, 30, 0), KeyValueState.Set, false);
+
+        // A flush of an older revision of "a" advances its floor and keeps the key.
+        overlay.RemoveFlushed("a", 1, new HLCTimestamp(0, 10, 0));
+        Assert.True(overlay.TryGet("a", out _));
+        Assert.False(overlay.IsEmpty);
+
+        overlay.RemoveFlushed("a", 2, new HLCTimestamp(0, 20, 0));
+        Assert.False(overlay.TryGet("a", out _));
+        Assert.False(overlay.IsEmpty);
+
+        // A repeated confirmation of a key that is already gone must not count twice.
+        overlay.RemoveFlushed("a", 2, new HLCTimestamp(0, 20, 0));
+        Assert.False(overlay.IsEmpty);
+
+        overlay.RemoveFlushed("b", 1, new HLCTimestamp(0, 30, 0));
+        Assert.True(overlay.IsEmpty);
+
+        overlay.Record("b", [4], 2, HLCTimestamp.Zero, HLCTimestamp.Zero, new HLCTimestamp(0, 40, 0), KeyValueState.Set, false);
+        Assert.False(overlay.IsEmpty);
+    }
+
+    [Fact]
+    public async Task IsEmpty_IsExactAfterConcurrentRecordsAndFlushes()
+    {
+        UnflushedKeyValueWritesIndex overlay = new();
+        const int Keys = 64;
+        const int Rounds = 2_000;
+
+        // Several writers record and confirm the same keys, so adds race updates and removals race both.
+        Task[] workers = new Task[8];
+        for (int w = 0; w < workers.Length; w++)
+        {
+            int worker = w;
+            workers[w] = Task.Run(() =>
+            {
+                for (int i = 0; i < Rounds; i++)
+                {
+                    string key = "k" + ((i + worker) % Keys);
+                    HLCTimestamp stamp = new(0, 1 + i, (uint)worker);
+                    overlay.Record(key, [1], i, HLCTimestamp.Zero, HLCTimestamp.Zero, stamp, KeyValueState.Set, false);
+                    overlay.RemoveFlushed(key, i, stamp);
+                }
+            }, TestContext.Current.CancellationToken);
+        }
+
+        await Task.WhenAll(workers);
+
+        // Drain whatever a lost race left behind, then the count must agree with the contents.
+        for (int k = 0; k < Keys; k++)
+        {
+            while (overlay.TryGet("k" + k, out UnflushedKeyValueWrite left))
+                overlay.RemoveFlushed("k" + k, left.Revision, left.LastModified);
+        }
+
+        Assert.True(overlay.IsEmpty);
+    }
+
+    [Fact]
+    public void LockOverlay_IsEmpty_FollowsRecordsAndConfirmedFlushes()
+    {
+        UnflushedLockWritesIndex overlay = new();
+        Assert.True(overlay.IsEmpty);
+
+        overlay.Record("r", [1], 1, HLCTimestamp.Zero, HLCTimestamp.Zero, new HLCTimestamp(0, 10, 0), Kahuna.Server.Locks.Data.LockState.Locked);
+        overlay.Record("r", [1], 2, HLCTimestamp.Zero, HLCTimestamp.Zero, new HLCTimestamp(0, 20, 0), Kahuna.Server.Locks.Data.LockState.Locked);
+        Assert.False(overlay.IsEmpty);
+
+        // A flush of the older head leaves the newer one covered.
+        overlay.RemoveFlushed("r", 1, new HLCTimestamp(0, 10, 0));
+        Assert.False(overlay.IsEmpty);
+
+        overlay.RemoveFlushed("r", 2, new HLCTimestamp(0, 20, 0));
+        Assert.True(overlay.IsEmpty);
+
+        overlay.RemoveFlushed("r", 2, new HLCTimestamp(0, 20, 0));
+        Assert.True(overlay.IsEmpty);
+    }
 }
