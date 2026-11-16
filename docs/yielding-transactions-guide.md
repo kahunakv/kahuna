@@ -5,7 +5,7 @@ That work must never make a foreground transaction fail. A **yielding** transact
 aside: when a foreground writer meets one of its write intents, the foreground writer takes the key and
 the yielding transaction loses it.
 
-This guide explains the option, its one hard guarantee, its limits, and the trade-off you accept when you
+This guide explains the option, its commit guarantee, its limits, and the trade-off you accept when you
 use it.
 
 ## The option
@@ -39,7 +39,7 @@ A `Normal` transaction, or a plain write with no transaction, that meets a live 
 Two yielding transactions do not steal from each other. They conflict exactly as two normal transactions
 do.
 
-## The one hard guarantee
+## Commit guarantee
 
 **A yielding transaction never commits a write to a key it lost.**
 
@@ -61,7 +61,7 @@ intents only, so a prefix or range lock would silently keep the old, non-yieldin
 either from a yielding transaction is refused with `Errored`. A consumer that needs yielding must not take
 those locks in a yielding transaction.
 
-## The trade-off: starvation
+## Starvation
 
 A yielding transaction that keeps losing its keys to a steady stream of foreground writers keeps aborting.
 This is by design: foreground work always wins. A consumer that runs maintenance work in small, bounded
@@ -71,7 +71,7 @@ runs one large yielding transaction over hot keys may never commit it.
 Watch `kahuna.transactions.yield_aborts` to see how often yielding work is losing, and shrink the batch or
 back off when the rate is high.
 
-## Priority is a different thing
+## Priority
 
 `TransactionPriority` and `ConflictPolicy` are separate and independent. Priority governs **admission
 order** only — which of several waiting transactions starts first when a node is at its concurrency

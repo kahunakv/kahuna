@@ -1,11 +1,11 @@
-# Load-based range splitting — operations guide
+# Load-based range splitting operations guide
 
 This guide is for operators (and embedders such as CamusDB) who want a hot Raft partition to relieve
-itself by **splitting under load**, not just under size. It explains what the feature does, the one
-prerequisite that makes or breaks it, how to enable and tune it, and how to tell from metrics whether
+itself by **splitting under load** as well as under size. It explains what the feature does, the
+prerequisite it depends on, how to enable and tune it, and how to tell from metrics whether
 it is working, thrashing, or silently doing nothing.
 
-It builds on two siblings — read those first if the concepts are new:
+It builds on two other guides:
 - [Key-range sharding guide](key-range-sharding-guide.md) — how ranges, descriptors, and splits work.
 - [Leader balancing operations guide](leader-balancing-operations-guide.md) — how leadership is
   redistributed across nodes.
@@ -14,11 +14,11 @@ The feature is **off by default**. Existing deployments are unaffected until you
 
 ---
 
-## 1. The 60-second model
+## 1. Overview
 
 Kahuna shards a `KeyRange` key space into range descriptors, each backed by its own Raft partition.
 Historically a range split only when it grew past a **key-count** threshold. That misses the case that
-actually limits a NewSQL workload: a range that is **small but white-hot** — high write QPS concentrated
+limits a NewSQL workload: a range that is **small but white-hot** — high write QPS concentrated
 on a narrow key span. It never grew, so it never split, so its single leader stayed the bottleneck.
 
 Load-based splitting adds a **second trigger**: split a range when its partition is **hot and backlogged
@@ -34,12 +34,12 @@ There are now two independent split triggers; either can fire:
 
 ---
 
-## 2. The one prerequisite that makes or breaks it: enable the leader balancer
+## 2. Prerequisite: the leader balancer
 
 > **Load-based splitting requires `EnableLeaderBalancer = true`. With the balancer off, the feature is
 > silently inert for the partitions it is meant to relieve.**
 
-There are two independent reasons, and both bite:
+There are two independent reasons:
 
 1. **You can't see the load.** The per-partition load signals (ops/sec, WAL queue depth, commit-wait)
    are only **gossiped across the cluster when the balancer is on**. The split trigger runs on the
@@ -51,7 +51,7 @@ There are two independent reasons, and both bite:
    still share one disk and one fsync. Relief only happens when the new child's leader is **relocated to
    a different, less-loaded node**, and that relocation is the balancer's job.
 
-So the deployment rule is simple: **turn the balancer on whenever you turn load splitting on.** Kahuna
+Deployment rule: **turn the balancer on whenever you turn load splitting on.** Kahuna
 guards the clearest failure (a single-node cluster, or all peers silent) by skipping the split and
 incrementing `kahuna.range.split.no_relief_skips` — but it cannot force the balancer on for you.
 
@@ -75,7 +75,7 @@ var options = new EmbeddedKahunaOptions
 };
 ```
 
-That's it. Everything else has a sensible default. The feature stays off as long as
+The other settings have defaults. The feature stays off as long as
 `RangeSplitLoadThreshold == 0`.
 
 The standalone server takes the same settings as command-line flags — `--range-split-load-threshold
@@ -84,16 +84,16 @@ reachable only from the embedded API.
 
 ---
 
-## 4. How a load split is decided (so the knobs make sense)
+## 4. How a load split is decided
 
 For each `KeyRange` descriptor, the fast poll runs this gate. **All** conditions must hold, **continuously
 for `RangeSplitLoadWindow`**, before a split fires:
 
 1. **Rate** — `LogOpsPerSecond ≥ RangeSplitLoadThreshold`. *Magnitude:* how much log-replication work.
-2. **Saturation** — `WalQueueDepth ≥ RangeSplitLoadMinQueueDepth`. *The critical second gate.* Rate
-   alone is a trap: throughput plateaus at the fsync ceiling, so a partition at 1.1× capacity and one at
-   10× capacity report the *same* rate. What distinguishes "busy but keeping up" from "drowning" is the
-   **backlog**. A high rate with a near-zero queue is healthy — **don't split it**.
+2. **Saturation** — `WalQueueDepth ≥ RangeSplitLoadMinQueueDepth`. Rate
+   alone is not enough: throughput plateaus at the fsync ceiling, so a partition at 1.1× capacity and one at
+   10× capacity report the *same* rate. The **backlog** distinguishes "busy but keeping up" from
+   "drowning". A high rate with a near-zero queue is healthy — **don't split it**.
 3. **(optional) Commit-wait** — if `RangeSplitLoadMinCommitWaitMs > 0`, also require
    `CommitWaitMs ≥` it. Off by default; it's a finer fsync-pressure signal but "sticky when idle," so it
    is only ever combined behind the rate gate.
@@ -103,7 +103,7 @@ centroid**, and — unless the range is **indivisible** (essentially all writes 
 `indivisible_refusals`) — performs the split. Both children then enter a **settle window** during which
 neither is re-evaluated, giving the balancer time to relocate one of them first.
 
-The **debounce window matters** because the gossiped signals lag ~10s; without it a single stale or
+The **debounce window** is needed because the gossiped signals lag ~10s; without it a single stale or
 bursty report could trip a split. Keep `RangeSplitLoadWindow` ≥ ~10s.
 
 ---
@@ -176,7 +176,7 @@ and that the cluster has a less-loaded node. This is the known limitation in sec
 **"It never splits a range I know is hot."** Most likely the balancer is off, so the trigger reads `0`
 for that (remotely-led) partition — enable it. Otherwise the **saturation** gate isn't met: a high rate
 with a shallow queue is "busy but keeping up," and Kahuna intentionally won't split it. Lower
-`RangeSplitLoadMinQueueDepth` only if you're sure the partition is actually backlogged.
+`RangeSplitLoadMinQueueDepth` only if you're sure the partition is backlogged.
 
 **"Ranges merge and re-split repeatedly."** Shouldn't happen — the merge trigger refuses to merge a warm
 range (`warm_skips`). If you see it, a side's rate is below `RangeSplitLoadThreshold` (so "cold" to the
@@ -193,7 +193,7 @@ validated constraint — see section 5.
 
 ---
 
-## 8. What is and isn't counted
+## 8. Counting scope
 
 - **Reads are never counted.** Kahuna reads are served from local state and never hit the consensus log;
   splitting wouldn't relieve them. Read capacity is scaled by adding **replicas**, not by splitting.
@@ -206,7 +206,7 @@ validated constraint — see section 5.
 ## 9. Limitations and safety
 
 - **Placement is best-effort, not guaranteed (known limitation).** Kahuna skips a split when there is
-  *no* peer at all, but it does **not** verify that the balancer will actually move the child to a colder
+  *no* peer at all, but it does **not** verify that the balancer will move the child to a colder
   node, nor that the balancer is even on. In a balancer-off cluster *with* live peers, a load split can
   still land in place and relieve nothing. Mitigation: follow the section-2 rule (enable the balancer),
   and watch `no_relief_skips` and `splits`-without-improvement. A fully placement-aware relief loop is a

@@ -1,6 +1,6 @@
 # Kahuna transaction lifecycle guide
 
-How a transaction actually executes in Kahuna, end to end: from the gRPC / REST / embedded entry point,
+How a transaction executes in Kahuna, end to end: from the gRPC / REST / embedded entry point,
 through routing and staging, into durable-intent 2PC, out to the partition write aggregator, down to the
 Raft WAL, and finally into the persistence backend — plus what happens *after* the commit returns, under
 deferred settlement.
@@ -28,10 +28,10 @@ Everything below funnels into one of two shapes. The difference is who drives th
 | Self-contained | Yes — one call in, one result out | No — spans many round trips |
 | Retry | Safe for the engine or caller to re-run the whole script | The client must re-drive the transaction |
 
-Both converge on the same commit machinery (`TransactionCoordinator.TwoPhaseCommit`). The script path just
+Both converge on the same commit machinery (`TransactionCoordinator.TwoPhaseCommit`). The script path
 builds and finalizes the transaction without leaving the server between statements.
 
-A detail that surprises people: a **bare multi-statement script is one auto-commit transaction**. In
+A **bare multi-statement script is one auto-commit transaction**. In
 `ScriptTransactionExecutor`, a `StmtList` (and `Let`/`If`/`For`/…) routes to
 `ExecuteTransaction(ast, null, parameters, autoCommit: true)`. So this is a single transaction, and the
 final `GET` is an intra-transaction read-your-own-write:
@@ -69,7 +69,7 @@ EmbeddedKahunaNode ────┘
 
 ---
 
-## 3. Two keyspaces, deliberately isolated
+## 3. Two isolated keyspaces
 
 Every key operation carries a `KeyValueDurability`:
 
@@ -86,13 +86,13 @@ never routes to an ephemeral actor, so those stores stay empty for the node's li
 ephemeral path — writes, reads, exists, scans, write-intent checks — can never consult a *persistent*
 key's durable intent.
 
-> **Why this matters.** Sharing those stores once caused a real bug: an ephemeral write to a key whose
+> **Rationale.** Sharing those stores once caused a real bug: an ephemeral write to a key whose
 > persistent namesake held a committed-but-unsettled intent materialized that foreign intent into the
 > ephemeral entry and derived its revision from it, so a *first* ephemeral write reported revision 1
 > instead of 0. It was visible only while deferred settlement left the intent lingering.
 
-A `Durable` transaction that modifies any ephemeral key is rejected outright — durability is a promise an
-in-memory mutation cannot keep.
+A `Durable` transaction that modifies any ephemeral key is rejected, because an in-memory mutation cannot
+be made durable.
 
 ---
 
@@ -107,7 +107,7 @@ For each operation:
    Raft group. If this node is the leader, it dispatches locally; otherwise it forwards over
    `IInterNodeCommunication` (gRPC in production, in-memory for tests and embedded).
 3. **Leader → actor.** The consistent-hash router picks the `KeyValueActor` shard owning the key. Actors
-   are **single-threaded** (Nixie), which is what makes the per-key state machine race-free.
+   are **single-threaded** (Nixie), which makes the per-key state machine race-free.
 
 The range descriptor **generation** resolved here is carried forward and re-checked at dispatch (the
 *fence*), so a split or merge between resolution and dispatch releases the operation retryably instead of
@@ -212,12 +212,12 @@ still be durably aborted), while `Commit` **cannot** — a commit requires an `U
 2. **Prepare retry.** A prepare rejected only because the key still holds a *predecessor's*
    committed-but-unsettled intent is retryable in place: the set is re-prepared a bounded number of times
    (idempotent for partitions that already prepared) **before any decision is written**, so a healthy
-   commit is not aborted merely because background settlement had not caught up.
+   commit is not aborted because background settlement had not caught up.
 3. **Validate** the read set — revision comparison plus a concurrent-writer probe, read through the
    intent-aware path. Only meaningful once every prepare is durable.
 4. **Decide.** Compare-and-set the canonical record: `Commit` only if every prepare is durable *and*
    validation passed; otherwise `Abort`. This is the point of no return. The finalizer reports whatever the
-   record actually *became* — a concurrent recovery abort can win the race.
+   record *became* — a concurrent recovery abort can win the race.
 5. **Resolve** — install committed values and settle (resolve + remove) their intents, or discard aborted
    staging and settle aborted intents. By default commits write materialization records before settlement;
    with `DurableMaterializeOnResolve`, the settlement apply installs the values itself. **When** this runs
@@ -302,7 +302,7 @@ cutover nothing stamped with the frozen route can land anywhere, so a retry unde
 concluded through the record fence before any prepare is re-driven, exactly like a retry past the deadline.
 The fence itself follows the record: a split's hand-off carries the records anchored in the moving half to
 the child partition, so the abort is sent to the anchor key's current partition under its current
-generation. A rollback and the session reaper run the same fence, which is what releases the claimed write
+generation. A rollback and the session reaper run the same fence, which releases the claimed write
 intents of an abandoned attempt on every key it touched, on the half that moved and on the half that did
 not; before this, such an attempt could not be concluded at all and its intents blocked writers and snapshot
 reads of those keys until the session liveness ceiling.
@@ -341,6 +341,69 @@ rollback concludes it through the record fence. A holder that is still undecided
 live conflict and keeps the eight-round budget, after which the loop records the abort with class
 `PrepareExhausted` and logs a warning naming the transaction, its intent count and what held its keys.
 
+### 6.5 The pre-decision replica fence and its lag breaker
+
+Before proposing the commit of a read-modify-write, the finalizer asks every replica of each participant
+partition for its staged-base verdict and refuses the commit if any replica proves the validated base
+moved (`kahuna.durable_tx.replica_fence_refusals`). A replica that cannot answer never blocks the commit —
+a down replica cannot veto either — but before the lag breaker (Kahuna.Core 1.8.2 and earlier) the
+finalizer still *waited* for it: a replica whose
+apply had stalled (its disk paused, its WAL saturated) answered `NotApplied` only after the full 400 ms
+apply wait, and every commit on the leader paid that wait for a verdict that carried nothing. In one
+observed case a follower's 30 s device pause cost a leader with an intact Raft quorum 70% of
+its throughput, and the follower's catch-up kept the cluster below half speed for minutes afterwards.
+
+The fence now carries a per-replica breaker (`ReplicaFenceLagTracker`). After three consecutive
+full-wait asks without an attestation (a timeout, a transport fault, or a serviced reply that is all
+`NotApplied`) the replica is *lagging*: it is still asked on every commit, but with a zero apply wait and
+a 100 ms call budget, so a `StaleBase` it can prove from memory still counts while the commit no longer
+waits on an apply it is not going to see. Once a second, one ask is sent with the full budget as a probe;
+three consecutive attesting probes restore the replica (a relapse within 30 s doubles that requirement,
+up to 24).
+
+**A replica attests from its memory, not only from the applied prepare.** The ask carries the judged
+fields of every fenced intent (`KeyValueStagedBaseProbe`: the validated base revision and state, the
+staged revision, and whether the write stages a revision). A replica that holds the transaction's
+still-pending intent judges the intent, exactly as its apply did. A replica that does not hold it —
+the prepare has not applied there yet, or the node does not host the partition — judges the probe
+against its committed-head memory and answers `Clear` or `StaleBase` at once
+(`kahuna.durable_tx.replica_fence_memory_verdicts`), instead of waiting for the apply and then answering
+`NotApplied`. The memory verdict is sound: heads only advance, and the key's head is frozen while the
+transaction's own intent is live, so the memory now is at or past the memory at the prepare's apply
+position, and a refusal from memory is one the apply-time fence gives too. The one head that is not a
+competitor's — the transaction's own settlement, already applied on that node — answers `Clear` through
+the settled-identity memory. That memory is fed by the settle whether or not the intent is still present
+when the settle applies, and a prepare is rejected as a settled replay when any slice of the node
+remembers its identity: a key that moved between its prepare and its settle has the two in different
+logs, and a node that applies the destination's log first must not re-install the leg from the source's
+(see the [key-range sharding guide](key-range-sharding-guide.md)). So apply lag no longer leaves a commit unattested; only an unreachable
+replica (or one on a build that ignores the probes) still does, and the lag breaker still bounds how
+long such a replica can hold a commit. Under a range-split cascade, where replicas lag the prepares of
+freshly created partitions, this closes the window in which the detached stale-base veto raced
+the commit and lost (`kahuna.durable_tx.stale_base_vetoes_late`); the hand-off of committed heads on a
+range move (see the [key-range sharding guide](key-range-sharding-guide.md)) removes the other half of
+that window, the destination leader's missing memory of the moved keys.
+
+Probe latency alone is the wrong evidence for whether a replica can attest. A replica tens of thousands
+of entries behind the leader answers a probe instantly from state that old, and a replica whose disk is
+paused answers from memory until the entry it is asked about is the one it cannot write. After a
+leader kill a restarted replica attested three fast probes while 75,000 entries behind and
+stalling on a shared NVMe; the fence restored it and every commit then waited the full apply wait for a
+verdict it could not give. The leader already knows both facts from every Raft acknowledgement, so the
+fence reads Kommander's per-follower snapshot (`IRaft.GetFollowerProgress`, Kommander 1.6.10) on every
+ask it plans: a replica whose *durable* frontier is more than `ReplicaFenceLagTracker.MaxEntriesBehind`
+(1,000) committed entries behind the leader's commit index, or that reports a durable-write stall, is
+tripped at once without strikes, is not probed while that holds, and its recovery streak restarts — it is
+restored only by consecutive attesting probes made and answered with its frontier within the bound. The
+evidence exists only where this node leads the partition asked about; for a participant partition led
+elsewhere the probe rules alone apply.
+
+`kahuna.durable_tx.replica_fence_lagging_replicas` is the number of replicas currently held as lagging,
+`…replica_fence_lag_transitions{state,reason}` counts the episodes (`reason` on a `lagging` transition
+is `attestation`, `frontier` or `stall`), and `…replica_fence_lagging_asks{kind}` counts the zero-wait
+asks, the probes, and the asks where a due probe was `held` by the frontier evidence. One warning line
+marks each transition and says why.
+
 ### 6.6 Session ownership and routing
 
 An interactive session lives on the node that began it — the leader of its coordinator key's partition at
@@ -375,7 +438,8 @@ discard a reclaimed commit's leg). It decides from the leg's **completion receip
 value materialized, which only a committed transaction does — and settles the intent as a commit when one
 exists (`kahuna.transactions.recordless_intent_receipt_commits`). Without a receipt the intent is held: its key
 stays read-only until the outcome can be proven. Holds are counted in
-`kahuna.transactions.recordless_intents_held` (the last pass's count on this node) and summarized in one warning
+`kahuna.transactions.recordless_intents_held` (the last pass's count on this node) and summarized in one
+warning
 per recovery pass naming a few of the keys; a non-zero gauge is an operator signal, not a counter. The record
 GC on the anchor leader never reclaims a terminal record while a prepared intent of that transaction is still
 resident on the same node, so the hold can only arise for a leg resident elsewhere.
@@ -388,75 +452,13 @@ is in the log below what this node marked applied: the hold is this replica's di
 transaction's ambiguity. A peer behind this node's applied id is unknown (its "not held" may be "not prepared
 yet"), and with two replicas no majority is possible. The intent stays held either way — nothing is presumed
 locally; the settled value lives on the peers — but a stale hold is logged at error level
-(`Recovery: prepared intent for key … is held record-less past the retention horizon, but 2 of 2 consulted replicas (…) … no longer hold it`),
+(`Recovery: prepared intent for key … is held record-less past the retention horizon, but 2 of 2
+consulted replicas (…) … no longer hold it`),
 counted in `kahuna.transactions.recordless_intents_stale_detected`, and the partition is handed to divergence
 containment (leadership fencing guide, *Containment*): gated on this node, leadership transferred to a
 replica that settled the intent, keys served from there. Containment then has the replica re-seeded
 (a requested whole-partition install from the leader), which replaces its intent slice with the peers'
 settled state: the holds drop to zero when the gate lifts.
-
-### 6.5 The pre-decision replica fence and its lag breaker
-
-Before proposing the commit of a read-modify-write, the finalizer asks every replica of each participant
-partition for its staged-base verdict and refuses the commit if any replica proves the validated base
-moved (`kahuna.durable_tx.replica_fence_refusals`). A replica that cannot answer never blocks the commit —
-a down replica cannot veto either — but before the lag breaker (Kahuna.Core 1.8.2 and earlier) the
-finalizer still *waited* for it: a replica whose
-apply had stalled (its disk paused, its WAL saturated) answered `NotApplied` only after the full 400 ms
-apply wait, and every commit on the leader paid that wait for a verdict that carried nothing. In one
-observed case a follower's 30 s device pause cost a leader with an intact Raft quorum 70% of
-its throughput, and the follower's catch-up kept the cluster below half speed for minutes afterwards.
-
-The fence now carries a per-replica breaker (`ReplicaFenceLagTracker`). After three consecutive
-full-wait asks without an attestation (a timeout, a transport fault, or a serviced reply that is all
-`NotApplied`) the replica is *lagging*: it is still asked on every commit, but with a zero apply wait and
-a 100 ms call budget, so a `StaleBase` it can prove from memory still counts while the commit no longer
-waits on an apply it is not going to see. Once a second one ask is sent with the full budget as a probe;
-three consecutive attesting probes restore the replica (a relapse within 30 s doubles that requirement,
-up to 24).
-
-**A replica attests from its memory, not only from the applied prepare.** The ask carries the judged
-fields of every fenced intent (`KeyValueStagedBaseProbe`: the validated base revision and state, the
-staged revision, and whether the write stages a revision). A replica that holds the transaction's
-still-pending intent judges the intent, exactly as its apply did. A replica that does not hold it —
-the prepare has not applied there yet, or the node does not host the partition — judges the probe
-against its committed-head memory and answers `Clear` or `StaleBase` at once
-(`kahuna.durable_tx.replica_fence_memory_verdicts`), instead of waiting for the apply and then answering
-`NotApplied`. The memory verdict is sound: heads only advance, and the key's head is frozen while the
-transaction's own intent is live, so the memory now is at or past the memory at the prepare's apply
-position, and a refusal from memory is one the apply-time fence gives too. The one head that is not a
-competitor's — the transaction's own settlement, already applied on that node — answers `Clear` through
-the settled-identity memory. That memory is fed by the settle whether or not the intent is still present
-when the settle applies, and a prepare is rejected as a settled replay when any slice of the node
-remembers its identity: a key that moved between its prepare and its settle has the two in different
-logs, and a node that applies the destination's log first must not re-install the leg from the source's
-(see the [key-range sharding guide](key-range-sharding-guide.md)). So apply lag no longer leaves a commit unattested; only an unreachable
-replica (or one on a build that ignores the probes) still does, and the lag breaker still bounds how
-long such a replica can hold a commit. Under a range-split cascade, where replicas lag the prepares of
-freshly created partitions, this is what closes the window in which the detached stale-base veto raced
-the commit and lost (`kahuna.durable_tx.stale_base_vetoes_late`); the hand-off of committed heads on a
-range move (see the [key-range sharding guide](key-range-sharding-guide.md)) removes the other half of
-that window, the destination leader's missing memory of the moved keys.
-
-Probe latency alone is the wrong evidence for whether a replica can attest. A replica tens of thousands
-of entries behind the leader answers a probe instantly from state that old, and a replica whose disk is
-paused answers from memory until the entry it is asked about is the one it cannot write. After a
-leader kill a restarted replica attested three fast probes while 75,000 entries behind and
-stalling on a shared NVMe; the fence restored it and every commit then waited the full apply wait for a
-verdict it could not give. The leader already knows both facts from every Raft acknowledgement, so the
-fence reads Kommander's per-follower snapshot (`IRaft.GetFollowerProgress`, Kommander 1.6.10) on every
-ask it plans: a replica whose *durable* frontier is more than `ReplicaFenceLagTracker.MaxEntriesBehind`
-(1,000) committed entries behind the leader's commit index, or that reports a durable-write stall, is
-tripped at once without strikes, is not probed while that holds, and its recovery streak restarts — it is
-restored only by consecutive attesting probes made and answered with its frontier within the bound. The
-evidence exists only where this node leads the partition asked about; for a participant partition led
-elsewhere the probe rules alone apply.
-
-`kahuna.durable_tx.replica_fence_lagging_replicas` is the number of replicas currently held as lagging,
-`…replica_fence_lag_transitions{state,reason}` counts the episodes (`reason` on a `lagging` transition
-is `attestation`, `frontier` or `stall`), and `…replica_fence_lagging_asks{kind}` counts the zero-wait
-asks, the probes, and the asks where a due probe was `held` by the frontier evidence. One warning line
-marks each transition and says why.
 
 ---
 
@@ -464,7 +466,7 @@ marks each transition and says why.
 
 Every durable record, prepared intent, settlement delta and materialized key/value record reaches Raft
 through the **partition write aggregator**, not by proposing directly. Concurrent transactions targeting
-the same partition coalesce into one `ReplicateEntries` proposal — this is what makes cross-transaction
+the same partition coalesce into one `ReplicateEntries` proposal, which makes cross-transaction
 batching possible.
 
 A submission carries:
@@ -497,7 +499,7 @@ The executor issues one `IRaft.ReplicateEntries` per batch (`IPartitionBatchExec
 
 Either way the decision is already durable, so **recovery finishes any settlement a background run loses**.
 
-### 8.1 The window, and what lives in it
+### 8.1 The settlement window
 
 Between the durable decision and settlement, a committed transaction's value lingers as a **prepared
 intent with resolution `Pending`**. Anything touching that key in the window must resolve it correctly:
@@ -566,7 +568,7 @@ coordinator. Per partition leader, for intents whose recovery deadline has passe
   winner. An absent record past the retention horizon instead follows the receipt/hold rules in §6.7.
 - **Undecided within deadline** → skip; the live coordinator may still decide.
 
-Recovery always takes the winner the record actually became — a concurrent commit is honoured even while
+Recovery always takes the winner the record became — a concurrent commit is honoured even while
 recovery is trying to abort.
 
 ---
@@ -581,15 +583,16 @@ Once a proposal is issued, Kommander owns it:
    (`KeyValueReplicator`, the durable stores' `Replicate`), which is how followers converge and how the
    leader's ordered apply runs.
 
-Two WAL behaviours are worth knowing because they dominate commit latency:
+Two WAL behaviours dominate commit latency:
 
 - **Group commit.** A WAL worker can coalesce several partitions' writes into one storage flush —
   one `fsync` for many partitions. `MaxWalGroupBatchPartitions` bounds the batch;
   `WalGroupCommitLingerMs` optionally waits to gather a denser batch.
 - **Single-fsync commit.** By default an auto-commit proposal costs *two* serial fsyncs (propose, then the
   committed marker). `WalSingleFsyncCommit` releases the client ticket once the **propose quorum is
-  durable** and demotes the committed marker to a lazy write. It does not weaken durability —
-  propose-quorum-durable *is* the commit point — it moves one fsync off the caller's critical path.
+  durable** and demotes the committed marker to a lazy write. Durability is unchanged,
+  because propose-quorum-durable *is* the commit point; the setting moves one fsync off the caller's
+  critical path.
 
 `Kahuna.Server` exposes all three on the command line; embedded consumers set them on
 `EmbeddedKahunaOptions` (`RaftMaxWalGroupBatchPartitions`, `RaftWalGroupCommitLingerMs`,
@@ -637,7 +640,7 @@ the still-pending intent resolves it through §8.1 rather than seeing a stale va
 
 ## 12. Outcome contract
 
-Every path maps onto three outcomes, and the distinction is load-bearing:
+Every path maps onto three outcomes:
 
 | Outcome | Meaning | Caller action |
 |---|---|---|
@@ -713,7 +716,7 @@ Observability: `kahuna.durable_tx.resident_prepared_intents`, `…resident_prepa
 
 ---
 
-## 15. Mental model in one paragraph
+## 15. Mental model
 
 A transaction stages its writes as per-key MVCC entries under a write intent, touching no Raft. At commit
 the coordinator freezes an immutable description of the transaction — identity, one commit timestamp, a

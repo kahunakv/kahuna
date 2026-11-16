@@ -12,7 +12,7 @@ IF acme_is_business_day(current_time()) THEN
 END
 ```
 
-The point is to run domain logic — encoding, hashing, formatting, a business predicate — inside the
+A function runs domain logic — encoding, hashing, formatting, a business predicate — inside the
 transaction, next to the data, instead of paying a client round trip for every value.
 
 This guide covers what a function may do, how to install one, and what happens when one fails.
@@ -200,7 +200,7 @@ and a later `Register` throws `InvalidOperationException`.
 **The registry is per process. Kahuna does not replicate it.** Every node of a cluster must register
 an identical set, the same way every node must run the same binary.
 
-What a node without a function can still do is the important half:
+A function runs only where the script executes:
 
 | Path | Does the function run? |
 |---|---|

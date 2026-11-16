@@ -13,7 +13,7 @@ under a replication factor).
 
 ---
 
-## 1. What it is, in one minute
+## 1. Overview
 
 By default every Kahuna voter node hosts **every** partition — full replication. Adding a node adds
 capacity to serve reads and spread leaders, but not storage capacity: every node still stores the
@@ -43,7 +43,7 @@ RF 0 (the default) is full replication, bit-for-bit the pre-placement behavior.
 - **RF 3 is the standard choice**: survives one node failure per range, three copies of the data.
   RF 5 survives two failures at five copies.
 - **RF larger than the cluster** degrades gracefully: ranges hold one replica per available node
-  until enough nodes join (a startup warning says so). RF equal to the node count is just full
+  until enough nodes join (a startup warning says so). RF equal to the node count is full
   replication with extra bookkeeping.
 - **Zones.** Set `--raft-zone <name>` on each node (rack, availability zone) and the placement
   planner prefers spreading each range's replicas across distinct zones, so a zone outage does not
@@ -130,10 +130,10 @@ successive configurations always overlap by a quorum.
 
 ### Removing a node: it drains first
 
-`POST /v1/cluster/leave` on a placed node does **not** simply drop it from the roster. Its replicas
+`POST /v1/cluster/leave` on a placed node drains it before removing it from the roster. Its replicas
 are evacuated onto survivors first, and only then does the removal commit — otherwise every range it
 held would silently be a replica short the moment you stopped the process. The response's `drained`
-field reports whether evacuation actually happened; `--raft-decommission-drain-timeout` (default
+field reports whether evacuation happened; `--raft-decommission-drain-timeout` (default
 2 minutes) bounds the wait, and only one node may drain at a time. The full outcome table is in the
 [cluster membership guide](cluster-membership-operations-guide.md#5-removing-a-node).
 
@@ -155,11 +155,11 @@ REST: `POST /v1/cluster/replication-factor` with `{"partitionId": 3, "replicatio
   target a node with `--node`).
 - The change adjusts the **target only**. The rebalancer moves replicas toward it on later passes
   (so with the rebalancer off, the target changes and nothing else happens). Routing is unchanged
-  until replicas actually move.
+  until replicas move.
 - With the rebalancer on, a pass is kicked as soon as the change commits: watch the range's replica
   set and generation in `GET /v1/cluster/placement` to see it converge, and the losing nodes log
   `Stopped hosting`. If the target changes and the replica set never does, that is a bug, not
-  pacing — the pacing bound is in §5.
+  pacing; see [Rebalancer pacing](#rebalancer-pacing).
 
 ### Ranges created by a split
 
@@ -215,7 +215,7 @@ Client-visible effect: operations on a range whose leadership or hosting changes
 the retryable `MustRetry`; clients that follow the documented retry contract see latency, not
 errors.
 
-**How long does convergence take?** Repairs run at most `--raft-max-concurrent-replica-repairs` at
+**Convergence time.** Repairs run at most `--raft-max-concurrent-replica-repairs` at
 a time and balance moves at most `--raft-max-concurrent-replica-transfers`, and each move costs
 roughly *seed time* (data-volume dependent; the dominant term) plus the promotion stable window
 plus two map commits — and, because each stage is decided on a separate pass, at least three
@@ -276,7 +276,7 @@ Metrics (OpenTelemetry counters on the `Kahuna` meter — all flat at RF 0):
 | Metric | Healthy looks like |
 |---|---|
 | `kahuna.placement.replicas_gained` / `replicas_lost` | Moves only when you expect them (node joins/leaves, factor changes). A steady trickle with a stable roster means the planner is thrashing — check the deadband. |
-| `kahuna.placement.forwards_resolved` | Proportional to how much traffic lands on non-hosting nodes. High absolute values are fine; they just mean clients are not topology-aware. |
+| `kahuna.placement.forwards_resolved` | Proportional to how much traffic lands on non-hosting nodes. High absolute values are fine; they mean clients are not topology-aware. |
 | `kahuna.placement.forwards_unresolved` | ~0. Sustained growth means nodes cannot resolve where partitions live (placement views lagging badly). |
 | `kahuna.placement.leader_hint_hits` / `leader_hint_misses` | Miss rate (`misses/(hits+misses)`) should drop toward ~0 shortly after startup as gossip converges. A permanently high miss rate adds a redirect hop to every forwarded operation. |
 
@@ -342,7 +342,7 @@ full replication, permanently:
 What an operator should expect to see after such a restart: the startup banner reports the new
 factor, `--cluster-placement` shows every existing partition with an empty replica set
 ("all voters (full replication)") and the effective RF, and nothing moves. This **mixed mode is
-safe** — legacy ranges keep behaving exactly as before — it just does not deliver the storage
+safe** — legacy ranges keep behaving exactly as before — but it does not deliver the storage
 savings.
 
 The supported path to a placed cluster today is to **bootstrap a new cluster with the factor set**
@@ -352,7 +352,7 @@ migration — is future work in the consensus layer.
 
 ---
 
-## 10. Current limits, in one place
+## 10. Current limits
 
 - No in-place migration from full replication (§9); RF applies to clusters bootstrapped with it.
 - Whole-cluster backups under a factor come from the coordinated endpoint only (§8); a plain full

@@ -4,17 +4,16 @@ This guide explains how to operate Kahuna's **leader balancer** — what it does
 how to configure it, and what to watch. It is written for operators running a clustered Kahuna
 deployment (directly or as the storage engine behind a database such as CamusDB).
 
-No prior knowledge of the internals is assumed. Leader balancing decides which replica **leads**
-each partition; the separate [replication factor operations guide](replication-factor-guide.md)
-covers which nodes **hold** each partition at all. For the full mechanism — the planner, the suggestion
-protocol, and the safety proofs — see the upstream
-[Kommander leader balancer developer guide](https://github.com/.../leader-balancer-developer-guide.md)
+Leader balancing decides which replica **leads** each partition; the separate
+[replication factor operations guide](replication-factor-guide.md) covers which nodes **hold** each
+partition at all. For the full mechanism — the planner, the suggestion
+protocol, and the safety proofs — see the Kommander leader balancer developer guide
 (`docs/leader-balancer-developer-guide.md` in the Kommander repo); this guide is the operator-facing
 companion focused on Kahuna's flags.
 
 ---
 
-## 1. What it is, in one minute
+## 1. Overview
 
 Kahuna splits data into many **partitions**, each its own little Raft group with one **leader** that
 does all the real work for that partition (writes, replication, heartbeats). Leaders are elected
@@ -45,7 +44,7 @@ It balances on two signals: first **count** (equalize how many leaders each node
 
 ---
 
-## 2. When should I enable it?
+## 2. When to enable it
 
 Enable it when **both** of these are true:
 
@@ -59,11 +58,11 @@ Enable it when **both** of these are true:
 - You run Kahuna **standalone / embedded** (single real node). The balancer has nothing to balance —
   it only runs on the system-partition leader and there are no peers to move work to. The flags are
   ignored in this mode.
-- You have a small, already-even cluster. The balancer would simply stay quiet, but there is no
+- You have a small, already-even cluster. The balancer would stay quiet, but there is no
   benefit either.
 
 > **Decision — off by default, fully advisory.** Leader balancing is an optimization, not a
-> correctness feature. A cluster runs perfectly well without it; it just may run *lopsided*. Shipping
+> correctness feature. A cluster runs correctly without it; it may run *lopsided*. Shipping
 > it disabled means zero overhead and zero behavior change until you explicitly opt in.
 
 ---
@@ -78,7 +77,7 @@ kahuna-server \
   ... (your usual flags) ...
 ```
 
-> **Enable it on all nodes, not just one.** Each node emits a load report and acts on suggestions
+> **Enable it on all nodes.** Each node emits a load report and acts on suggestions
 > addressed to it; the planning itself runs only on the leader of the system partition (P0), which can
 > be any node and can move. If only some nodes have the feature on, balancing is partial and the
 > reports are incomplete — which the planner detects and responds to by skipping passes. Roll it out
@@ -88,7 +87,7 @@ When enabled, every node periodically gossips a small **load report** (what it l
 one is), the P0 leader runs a **planning pass** on a timer, and it dispatches **suggestions** —
 "please consider handing partition P to node C" — to the nodes that currently lead the partitions it
 wants moved. Each recipient re-validates and performs the handoff itself. Nothing is forced; nothing
-is durable; if the P0 leader changes, the new one simply starts fresh from the next round of reports.
+is durable; if the P0 leader changes, the new one starts fresh from the next round of reports.
 
 ---
 
@@ -113,17 +112,17 @@ deliberately conservative — slow and gentle. **Start with the defaults.**
 | `--raft-leader-balancer-ops-weight` | `1.0` | Weight of throughput (ops/sec) in a partition's load score. |
 | `--raft-leader-balancer-queue-weight` | `0.5` | Weight of queue depth (pending work) in a partition's load score. |
 
-Balance is reached **gradually over several passes**, never in one disruptive burst — that is what
-the deadband, cooldown, stability gate, and per-pass caps enforce together.
+Balance is reached **gradually over several passes**, never in one disruptive burst. The deadband,
+cooldown, stability gate, and per-pass caps enforce this together.
 
 ---
 
 ## 5. Tuning
 
 - **Start with defaults.** They converge slowly and gently. Only tune if you have a specific symptom.
-- **Rebalancing feels too sluggish?** Lower `--raft-leader-balancer-interval`, or raise
+- **Rebalancing too slow.** Lower `--raft-leader-balancer-interval`, or raise
   `--raft-max-moves-per-pass` / `--raft-max-concurrent-transfers`. Expect more churn in exchange.
-- **The balancer is fidgeting (moving things back and forth)?** Raise `--raft-count-deadband` and/or
+- **Moves back and forth.** Raise `--raft-count-deadband` and/or
   `--raft-load-imbalance-threshold`. These are your anti-oscillation knobs. Raising
   `--raft-move-cooldown` also helps.
 - **Keep `--raft-suggestion-timeout` comfortably larger than `--raft-leader-balancer-report-interval`
@@ -157,7 +156,7 @@ working by **metrics**, not logs. Kommander emits four instruments under its met
   `--raft-suggestion-timeout` is too tight for your gossip latency.
 - **High `skipped_passes_total`:** the view is often incomplete — a node may be silent, or the report
   TTL/interval are mismatched (TTL must comfortably exceed the report interval).
-- **Nothing moving at all:** check the two counters above, and confirm the imbalance actually exceeds
+- **Nothing moving at all:** check the two counters above, and confirm the imbalance exceeds
   `--raft-count-deadband` — if the cluster is already near even, there is correctly nothing to do.
 
 > The two imbalance gauges are meaningful **only on the current P0 leader** (other nodes report `0`).
@@ -165,8 +164,8 @@ working by **metrics**, not logs. Kommander emits four instruments under its met
 
 > **Exporting these metrics:** the instruments above are always emitted by the underlying library, but
 > Kahuna must be configured to *export* a meter for an operator to see them. If your Kahuna build does
-> not yet expose a metrics endpoint/exporter, the balancer still works — it is simply running blind
-> from the operator's side. Surfacing the `Kommander` (and Kahuna's own) meters is tracked separately
+> not yet expose a metrics endpoint/exporter, the balancer still works, but the operator
+> cannot see these instruments. Surfacing the `Kommander` (and Kahuna's own) meters is tracked separately
 > in the metrics work; consult your deployment's metrics configuration for whether an OTLP/scrape
 > exporter is enabled.
 
@@ -174,8 +173,7 @@ working by **metrics**, not logs. Kommander emits four instruments under its met
 
 ## 7. Safety and failure modes
 
-The one property worth internalizing: **the balancer can only ever cause a wasted or skipped move,
-never an unsafe one.**
+**The balancer can cause a wasted or skipped move, never an unsafe one.**
 
 - Every leadership change goes through the normal Raft handoff, which re-validates term and leadership
   at the moment of the move. The balancer only *suggests*; the node that owns the partition is the
@@ -183,13 +181,13 @@ never an unsafe one.**
   leadership of that partition).
 - There is a **single decider** (the P0 leader), so two nodes can't issue conflicting plans.
 - An **incomplete picture makes the controller wait**, not guess.
-- All balancer state is **in memory**; losing the P0 leader just means the next one starts fresh — at
+- All balancer state is **in memory**; losing the P0 leader means the next one starts fresh — at
   worst one extra pass before it re-converges.
-- During a node failure or election, a partition with no current leader simply doesn't appear in any
+- During a node failure or election, a partition with no current leader doesn't appear in any
   report, so the balancer ignores it that pass. It never starts or speeds up elections — it only
   relocates leaderships that already exist.
 
-In short, the failure modes are "didn't rebalance" or "rebalanced something pointlessly," and both
+The failure modes are "didn't rebalance" or "rebalanced something pointlessly," and both
 self-correct on the next pass.
 
 ---
@@ -209,11 +207,11 @@ Yes — see §3. Partial rollout yields incomplete reports and partial balancing
 **It's on but nothing is moving — is it broken?**
 Probably not. Check `raft.balancer.skipped_passes_total` (incomplete view — a node may be silent) and
 `raft.balancer.moves_total{outcome=timed_out}` (suggestions not landing — possibly the suggestion
-timeout is too small). Also confirm the imbalance is actually beyond `--raft-count-deadband`.
+timeout is too small). Also confirm the imbalance is beyond `--raft-count-deadband`.
 
 **Does it work in standalone / embedded mode?**
 No effect. There is a single real node and no peers to balance to; the flags are ignored.
 
 **Where does the planning run?**
-Only on the leader of the system partition (P0). Every other node just emits load reports and acts on
+Only on the leader of the system partition (P0). Every other node only emits load reports and acts on
 the suggestions it receives. The P0 leader can be any node and can change over time.

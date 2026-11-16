@@ -9,10 +9,9 @@ concurrent finalization, failures, and recovery. It is written for two audiences
 - **Developers maintaining Kahuna** who need the lifecycle, routing, durability, and cleanup
   invariants in one place.
 
-No knowledge of the coordinator internals is required. If you are new to Kahuna transactions, start
-with the example below and then read the lifecycle sections in order.
+No knowledge of the coordinator internals is required.
 
-> **Looking for the internals?** This guide covers the *interactive session API and its semantics*. For
+> **Internals.** This guide covers the *interactive session API and its semantics*. For
 > the end-to-end execution path — how a request travels from gRPC/REST/embedded through routing and
 > staging into durable-intent 2PC, out through the partition write aggregator to the Raft WAL and the
 > persistence backend, and what happens in the deferred-settlement window afterwards — read
@@ -21,12 +20,12 @@ with the example below and then read the lifecycle sections in order.
 
 ---
 
-## 1. The big picture
+## 1. Overview
 
 An interactive transaction can touch keys owned by several partitions and several nodes. The
 coordinator is the server component that turns those separate operations into one transaction.
 
-The important design choice is that **the server owns the transaction working set**. As operations
+**The server owns the transaction working set.** As operations
 complete, the coordinator records the keys that changed, the reads that may need validation or MVCC
 cleanup, and every point, prefix, and range lock that was acquired. Commit and rollback use that
 record directly; they do not accept a client-built list of work to finalize.
@@ -41,8 +40,8 @@ That gives Kahuna three useful properties:
 For persistent transactions that need a recoverable commit decision, the coordinator finalizes through
 durable-intent 2PC: a replicated canonical record decides the outcome and each modified key's committed
 value is staged as a replicated intent. If the live coordinator disappears, the participant partition
-leaders finish or presume-abort the transaction from that record — the prepared writes and the decision
-are durable, not just in-memory.
+leaders finish or presume-abort the transaction from that record, because the prepared writes and the
+decision are durable.
 
 > **Concept — coordinator and participant.** The coordinator owns the transaction-wide decision and
 > working set. A participant is a key/partition that performs one of the transaction's reads, writes,
@@ -316,7 +315,7 @@ modified working set back to commit.
 
 Commit, rollback, close, and the abandoned-session reaper share one finalize slot per session.
 Exactly one caller owns an attempt; concurrent callers wait on the same `FinalizeAttempt` and observe
-the owner's result. This is what prevents commit and rollback from independently running over the same
+the owner's result. This prevents commit and rollback from independently running over the same
 mutable transaction.
 
 The first attempt also changes the lifecycle from `AcceptingOperations` to `Finalizing`. That
@@ -417,7 +416,7 @@ this path.
 2. **Prepare retry.** A prepare rejected *only* because the key still holds a predecessor's
    committed-but-unsettled intent is retried in place a bounded number of times — idempotent for the
    partitions that already prepared — **before any decision is written**, so a healthy commit is not
-   aborted merely because the predecessor's background settlement had not caught up yet.
+   aborted because the predecessor's background settlement had not caught up yet.
 3. **Validate** the read set (revision comparison plus a concurrent-writer probe, read through the
    intent-aware path) — only meaningful once every prepare is durable.
 4. **Decision barrier** — compare-and-set the canonical record: `Commit` only when every prepare is
@@ -430,7 +429,7 @@ this path.
    requirements.
 
 The decision compare-and-set is the point of no return. Because the record is the single authority, the
-finalizer reports whatever the record actually became after apply — a concurrent recovery abort can win
+finalizer reports whatever the record became after apply — a concurrent recovery abort can win
 the race in the log — not what this attempt requested.
 
 ### The decision deadline
@@ -532,7 +531,7 @@ recovery deadline it looks up the transaction's canonical record and:
 Recovery never guesses an outcome and never resolves an intent whose record is undecided but still
 inside its window. The request path and recovery may race; initialize, prepare, decide, materialize, and
 settle are all idempotent, so correctness does not depend on choosing a winner. A deadline-expiry abort
-that actually wins increments `deadline_expiry_aborts`.
+that wins increments `deadline_expiry_aborts`.
 
 ### Resolving a commit after the session is gone
 
@@ -561,7 +560,7 @@ them and the handoff **gates cutover** — a split or merge aborts before cutove
 source range with an outstanding receipt lost. Range-lock transfer is separate and best-effort (locks
 are in-memory, non-replicated actor state); only the correctness metadata gates cutover.
 
-### What durable mode does not recover
+### Durable mode limits
 
 Durable mode has clear boundaries:
 
@@ -752,7 +751,7 @@ and completion as one protocol. Use this checklist:
 10. Exercise local and remote coordinators, duplicate IDs, lost completion, operation-versus-finalize,
     commit-versus-rollback, restart, and partial participant failure.
 
-### Invariants worth keeping close
+### Invariants
 
 - The server working set is authoritative; clients may inspect it but never supply it to finalize.
 - Registration and the accepting/finalizing transition share one lock. There must be no check-then-act
@@ -765,13 +764,13 @@ and completion as one protocol. Use this checklist:
   prepared intents belongs to resolution and recovery.
 - The canonical record moves `Undecided → Commit`/`Abort` exactly once; the commit timestamp, decision
   deadline, and participant manifest frozen at initialization never change afterward.
-- The finalizer reports whatever the record actually became after apply, never what the attempt
+- The finalizer reports whatever the record became after apply, never what the attempt
   requested — a concurrent recovery abort can win the race in the log.
 - Terminal retention is written before the active session is removed, closing the duplicate-finalize
   race.
 - Reapers and recovery use HLC time and the same routing/finalize gates as request traffic.
 
-### A practical review path
+### Review path
 
 When reviewing a coordinator change, trace one successful operation and one failure through all of
 these boundaries:
@@ -790,7 +789,7 @@ SDK or server caller
   -> recovery / reaper / split-merge receipt movement
 ```
 
-A green happy-path test is useful, but the most valuable cases are acknowledgement loss, concurrent
+Beyond a green happy-path test, cover acknowledgement loss, concurrent
 finalizers, a remote coordinator, a leader change, and a crash after the canonical record commits but
 before every prepared intent is materialized and settled.
 
@@ -885,7 +884,7 @@ the server project does not.
 
 ---
 
-## 13. Mental model in one paragraph
+## 13. Mental model
 
 A transaction begins as an in-memory server session routed by a stable coordinator key. Every
 interactive operation registers a unique declaration before touching participant state, then reports
@@ -897,4 +896,4 @@ only inside a bounded in-memory window. Durable mode finalizes an all-persistent
 durable-intent 2PC: a canonical `(TransactionId, Epoch)` record decides the outcome by compare-and-set,
 each modified key is staged as a replicated intent, and participant leaders materialize or presume-abort
 those intents from the record — so the prepared writes and the decision survive coordinator loss even
-though the active in-memory session does not. Durability begins at prepare, not at Begin.
+though the active in-memory session does not. Durability begins at prepare.

@@ -158,8 +158,9 @@ await client.ReleaseHistoryHolds([.. held.Holds.Select(h => h.HoldId)]);
   history gone. After a full restart, holds loaded from disk get a grace window before the reaper may purge them.
 - **Bounds:** `HistoryHoldMaxLeaseMs` (default one day), `HistoryHoldMaxPerHolder` (4096) and
   `HistoryHoldMaxTotal` (65536). Past a bound an acquire answers `HistoryHoldLimitReached`.
-- **Availability, not safety.** A replica that compacted before it applied a hold answers `HistoryUnavailable`;
-  it never replays a gap. Each replica keeps its log from the entry before the first one a replay from the held
+- **Availability.** A hold makes a resume more likely to succeed; correctness does not depend on it. A replica
+  that compacted before it applied a hold answers `HistoryUnavailable`; it never replays a gap. Each
+  replica keeps its log from the entry before the first one a replay from the held
   timestamp reads, because the replay reads that entry as proof that no history is missing before its start.
 
 The surfaces are `IKahuna.HistoryHold`, the gRPC rpc `HistoryHold`, `POST /v1/kv/history-holds`, the client

@@ -8,15 +8,13 @@ paying for two. It is written for two audiences:
 - **Developers** maintaining the code who need the mental model, the wiring, and the ownership rules that
   must hold.
 
-No prior RocksDB knowledge is assumed. Concepts are introduced as they come up.
-
 The feature is **opt-in and additive**: with it off (the default) Kahuna behaves byte-for-byte as before.
 It changes only in-process memory objects — never the on-disk format, WAL semantics, recovery, or wire
 behaviour.
 
 ---
 
-## 1. The big picture
+## 1. Overview
 
 A Kahuna node that persists to RocksDB runs **two independent RocksDB databases**:
 
@@ -35,8 +33,8 @@ things:
 - **memtables** — in-RAM write buffers, one set per column family, the main *write* memory cost.
 
 By default the backend keeps a private 256 MiB block cache, and the two databases never share anything:
-two block caches, two unbounded memtable footprints, two budgets. On a memory-constrained node that
-duplication is pure waste — one bounded budget would serve both.
+two block caches, two unbounded memtable footprints, two budgets. On a memory-constrained node one
+bounded budget would serve both.
 
 **Shared RocksDB memory** lets Kahuna create **one** block cache and **one** write-buffer manager (WBM)
 and hand the same pair to both databases:
@@ -55,7 +53,7 @@ The two databases keep their own paths, files, and column families. Only the *me
 
 ---
 
-## 2. What is shared — and what is not
+## 2. Shared and unshared resources
 
 | Resource | Shared? | How |
 |---|---|---|
@@ -77,8 +75,8 @@ blocks and memtable memory across *both* databases:
 Two deliberate safety choices make this stable under write load:
 
 - The cache is **soft** (not strict-capacity). With memtables charged into it, a hard cap would surface
-  as write stalls/errors on *both* databases whenever either flushed. A soft limit is a target, not a
-  brick wall.
+  as write stalls/errors on *both* databases whenever either flushed. A soft limit is a target that usage
+  can exceed.
 - The WBM is **non-stalling**. Cross-database flush coupling never turns into a write stall; size the
   budget conservatively instead of relying on stalls for back-pressure.
 
@@ -144,7 +142,7 @@ The **memtable sub-budget** bounds total memtable memory across *every column fa
 The WAL alone uses 10 column families; the backend uses 2. RocksDB's defaults are generous
 (64 MiB × up to 3 buffers per CF on the backend, similar on the WAL), so the *potential* memtable memory
 across all those CFs is far larger than any typical sub-budget. When you share a WBM, the sub-budget — not
-the per-CF sizes — is what actually caps memtable memory; ordinary write bursts that would exceed it cause
+the per-CF sizes — caps memtable memory; ordinary write bursts that would exceed it cause
 more frequent cross-CF / cross-database flushing.
 
 Practical guidance:
@@ -155,13 +153,12 @@ Practical guidance:
 - **Memtable sub-budget** should leave room for both databases' write bursts. `128` was the default before
   it became the engine-neutral `--storage-shared-memtable-budget-mb`, and is a sound start. Too
   small ⇒ constant flushing (and write coupling between the two databases); too large ⇒ less memory
-  actually reclaimed. It must be ≤ the total budget (Kahuna refuses to start otherwise).
+  reclaimed. It must be ≤ the total budget (Kahuna refuses to start otherwise).
 - If write-path coupling ever becomes a problem, the safe fallback is to **share only the cache** (the
   larger, workload-agnostic win) and leave memtables per-database — but the current wiring shares both;
   reach for that fallback only if measurement shows coupling hurting the consensus path.
 
-**This is a memory feature — measure it with memory, not a stopwatch.** Before enabling it in production,
-compare, under a representative write load on both the WAL and the KV store:
+Before enabling it in production, compare, under a representative write load on both the WAL and the KV store:
 
 - process RSS and the RocksDB cache/memtable usage counters (see §6) with sharing **off** vs **on**, to
   confirm the reduction; and
@@ -174,8 +171,7 @@ That measurement is why the feature ships **off by default**.
 
 ## 5. Ownership and lifetime (for developers)
 
-**The composition root owns the shared bundle. The databases only borrow it.** This is the single rule
-that must never be broken.
+**The composition root owns the shared bundle. The databases only borrow it.**
 
 - In **standalone / embedded** mode, `EmbeddedKahunaNode` creates the bundle (when enabled and both
   databases are RocksDB), injects the same instance into the WAL and the persistence backend, and disposes
@@ -192,22 +188,22 @@ always dispose it last.
 The wiring is a nullable, optional constructor parameter end to end
 (`RocksDbPersistenceBackend`, `KahunaManager`, `RocksDbWAL`). When it is `null`, every database follows its
 byte-for-byte default open path — no shared cache, default buffers, default column-family options. That
-null path is the default and must stay sacred.
+null path is the default and must stay unchanged.
 
 ---
 
 ## 6. Observability
 
-To confirm sharing is real (one budget, not two), watch these counters while either database writes:
+To confirm that both databases share one budget, watch these counters while either database writes:
 
 | Signal | Meaning | When it moves |
 |---|---|---|
 | WBM memtable memory usage | Live memtable bytes tracked by the shared write-buffer manager. | Rises on **writes** from *either* database — the primary proof that the budget is shared. |
 | Block-cache usage | Current block-cache occupancy. | Grows on **reads** (cached blocks) and via the WBM's cost-to-cache charge. Don't rely on it alone for a write-only workload. |
 
-The decisive check: with sharing on, writing to **only** the KV/locks backend still raises the shared
-write-buffer manager's memtable usage — proving the backend's memtables are charged to the same budget as
-the WAL's, rather than to a private per-database one.
+With sharing on, writing to **only** the KV/locks backend still raises the shared write-buffer manager's
+memtable usage. That shows the backend's memtables are charged to the same budget as the WAL's, rather
+than to a private per-database one.
 
 ---
 

@@ -7,41 +7,40 @@ those operations are safe. It is written for two audiences:
   want to understand what can be backed up, how far back they can recover, and what it costs.
 - **Developers** maintaining the code who need the mental model and the invariants that must hold.
 
-No prior knowledge of Kahuna's internals is assumed. Concepts are introduced as they come up, and the
-key design decisions are called out with the reasoning behind them.
+The guide assumes no knowledge of Kahuna's internals. Design decisions appear in **Decision** notes
+with their reasoning.
 
 ---
 
-## 1. The big picture
+## 1. Overview
 
-Three features sound different but are really one machine:
+Three features share one mechanism:
 
 - A **full backup** is a complete, restorable copy of the data as of some moment.
-- An **incremental backup** is just the *changes* since a previous backup — small and cheap.
-- **Point-in-time recovery (PITR)** rebuilds the data as it was at an *exact* chosen moment, not just
+- An **incremental backup** is the *changes* since a previous backup — small and cheap.
+- **Point-in-time recovery (PITR)** rebuilds the data as it was at an *exact* chosen moment, not only
   at backup boundaries.
 
-They are one machine because they all combine the same two ingredients:
+All three combine the same two ingredients:
 
 1. **A base image** — a snapshot of the storage engine at a known point.
 2. **An ordered, timestamped log of every change** — Kahuna already keeps this for consensus; it is
    the **Write-Ahead Log (WAL)**.
 
-Given those two, everything falls out: a snapshot is a base image at time `T`; an incremental backup
+From those two: a snapshot is a base image at time `T`; an incremental backup
 is the slice of the log since the last backup; and PITR is "load a base image, then replay the log
 forward and **stop at exactly `T`**."
 
 > **Decision — reuse the log Kahuna already has, instead of inventing a backup format.** Kahuna writes
 > a WAL for consensus regardless of backups. That log already contains every change, in exact order,
-> each stamped with a time. Building backups on top of it means PITR is almost free conceptually: no
-> separate change-capture machinery, no risk of the backup format disagreeing with the real data. The
-> log *is* the change history. This single decision shapes everything below.
+> each stamped with a time. Building backups on top of it means PITR needs no separate
+> change-capture machinery, and the backup format cannot disagree with the real data.
 
 ---
 
-## 2. The moving parts (Kahuna in 60 seconds)
+## 2. The moving parts
 
-To follow the rest of this guide, you need a rough map of how a write travels through Kahuna.
+A write travels through Kahuna as follows:
 
 ```
                     ┌──────────────────────── one partition ────────────────────────┐
@@ -83,8 +82,7 @@ What each piece is:
 > is small but real, and it is the reason full backups need the careful ordering described in §5.**
 
 So the two artifacts a backup draws from are the **WAL** (the ordered change history) and the
-**storage backend** (the on-disk state). Hold that picture; the rest of the guide is just different
-ways of combining them.
+**storage backend** (the on-disk state). Every backup kind combines these two.
 
 > **Concept — Hybrid Logical Clock (HLC).** Every committed change carries an HLC timestamp — a clock
 > that blends real wall-clock time with a logical counter so that, across the whole cluster, any two
@@ -104,8 +102,7 @@ PITR is not unlimited. Keeping every change forever would grow without bound, so
 
 The window slides: at any moment you can recover to any point between "now" and "now minus the
 window." Anything older than the window is allowed to be cleaned up, which keeps storage bounded to
-roughly *window length × write rate* — a number you can plan capacity around, not an open-ended
-liability.
+roughly *window length × write rate* — a number you can plan capacity around.
 
 ```
    past  ◄─────────────────────── time ───────────────────────►  now
@@ -147,20 +144,20 @@ tick (200 ms on the server at the defaults), and a partition that appears on a n
 restart, or after a replica move — gets its floor on the first tick that sees it. There is a brief
 window, one flush tick wide, right after a partition appears where, if cleanup runs before the floor
 is asserted, the recoverable history on that node can be slightly shorter. In normal operation the
-floor is asserted far more often than cleanup runs, so this is a minor edge, not a routine concern.
+floor is asserted far more often than cleanup runs, so this is a minor edge case.
 
 ---
 
 ## 4. Two ways to build a backup: base image vs. delta
 
-Before the mechanics, the shape of the whole system:
+The two backup shapes:
 
 ```
    full backup  =  [ base image (whole storage engine) ]  +  manifest
    incremental  =  [ log slice: changes since parent ]     +  manifest  ─── points to parent
 ```
 
-> **Decision — base image + deltas, not "a full copy every time."** A full copy of a large dataset is
+> **Decision — base image plus deltas.** A full copy of a large dataset is
 > expensive and slow. Instead an operator takes an occasional **base image** (a full backup) and then
 > captures cheap **deltas** (incrementals — log slices) between them. Restoring means "load the nearest
 > base, then replay the few deltas on top." This is the classic trade that makes frequent backups
@@ -168,7 +165,7 @@ Before the mechanics, the shape of the whole system:
 > enough that a base image is never too far behind. `BaseSnapshotInterval` does not do this for you; it
 > only bounds how long the WAL is retained so an incremental can still be cut against the last base.
 
-The next two sections are just these two shapes in detail.
+Sections 5 and 6 describe these two shapes.
 
 ---
 
@@ -192,7 +189,7 @@ A full backup has two parts written together, and a third one when durable trans
 > **Concept — checkpoint.** A "checkpoint" is a point-in-time snapshot of the storage engine that can
 > be opened independently of the live database. It is the base image a restore starts from.
 
-### The flow, and why the order is non-negotiable
+### Flow and ordering
 
 ```
    1. read M  = last committed log position (per partition)   ◄── do this FIRST
@@ -300,7 +297,7 @@ revision cleanup that the background writer runs after an ordinary flush waits f
 turn, so the capture starts sooner.
 
 > **Decision — a flush that cannot durably persist must fault, not report success.** The background
-> writer's drain now reports whether it actually persisted everything. If it can't (a backend I/O
+> writer's drain now reports whether it persisted everything. If it can't (a backend I/O
 > failure that survives its retries), it raises an error instead of returning quietly, and the backup
 > aborts with nothing published. Combined with the apply barrier, a full backup now has one honest
 > outcome contract: **either the base image provably contains every committed write up to `M`, or the
@@ -334,8 +331,8 @@ send the validator into a loop.)
 
 > **Decision — validate the whole chain before trusting any of it.** A restore is only as good as the
 > weakest link in its chain. Rather than discover a gap halfway through replaying, Kahuna proves the
-> chain is complete and contiguous *first*. The principle throughout PITR: **refuse loudly rather than
-> reconstruct a state that never existed.**
+> chain is complete and contiguous *first*. Throughout PITR, Kahuna refuses an operation rather than
+> reconstruct a state that never existed.
 
 If an incremental's starting point has already fallen below the retention floor (its parent is too
 old to still be in the WAL), Kahuna refuses it and tells you a new full backup is required — rather
@@ -371,7 +368,7 @@ Two properties make this safe to run, and safe to *re-run*:
   slice twice produces the same result. If a restore is interrupted, re-running it from the start is
   harmless.
 - **Never torn by an in-flight transaction.** Backups capture only *committed* changes. A transaction
-  that had started but not committed by `T` simply isn't in the data — the affected keys keep their
+  that had started but not committed by `T` isn't in the data — the affected keys keep their
   last committed value. There is no half-finished transaction to clean up.
 
 > **Concept — write intent.** While a transaction is preparing, it holds a *write intent* on the keys
@@ -381,9 +378,8 @@ Two properties make this safe to run, and safe to *re-run*:
 
 > **Decision — make replay idempotent so restore is restartable.** Restores can be interrupted (a
 > crash, a cancelled job). If applying a change twice could corrupt state, every interruption would
-> need careful cleanup. By making each apply an upsert keyed by `(key, revision)`, "just run it again
-> from the start" is always correct. Idempotency is what turns restore from a delicate operation into
-> a routine one.
+> need careful cleanup. Because each apply is an upsert keyed by `(key, revision)`, re-running a
+> restore from the start is always correct.
 
 ### Durable transaction replay encodings
 
@@ -457,7 +453,7 @@ therefore does two things:
    below `T`, it discards the image and tries again with a new `T`. After three attempts it fails with
    the retryable outcome `CutUnverified` (HTTP 503 / gRPC `Unavailable`), and nothing is published.
 
-> **Why the check is sound.** If any write of transaction X is in the image, X was decided before the
+> **Soundness of the check.** If any write of transaction X is in the image, X was decided before the
 > checkpoint, so every prepare of X had committed. The confirmation makes each of those prepares
 > applied on the coordinator, so the coordinator saw X's commit timestamp — unless that participant
 > had already settled before the watch started, in which case its row is in the image too. A
@@ -523,8 +519,8 @@ outcome is `PartitionCaptureFailed`, naming the partitions and the node. See the
 
 ## 9. Restoring a node vs. adding it to the cluster
 
-A common expectation is "restore a backup onto a fresh machine and it joins the cluster." It is worth
-being precise: **restore produces *data*; joining a cluster is a separate step.**
+Restoring a backup onto a fresh machine does not make that machine join the cluster. **Restore
+produces *data*; joining a cluster is a separate step.**
 
 ```
    restore  ──►  a node holding the data as of T  ──►  to the cluster it looks like a
@@ -536,7 +532,7 @@ being precise: **restore produces *data*; joining a cluster is a separate step.*
 ```
 
 A restored node holds the data as of `T`, but to a running cluster it looks like a member that is
-simply *behind*. Making it a participant still requires admitting it to cluster membership, after
+*behind*. Making it a participant still requires admitting it to cluster membership, after
 which the normal consensus catch-up brings it current. Restoring from a recent backup is a useful way
 to *seed* a node that was down for a while — so the cluster only has to ship the small remainder
 instead of the entire dataset — but the seed only helps when the restore point is still inside the
@@ -645,7 +641,7 @@ Rules of thumb:
   including a snapshot would leak stale or post-cut locks. A restored/bootstrapped node starts with no
   persisted locks and re-establishes them at runtime (from the cluster / re-acquisition).
 
-**The pruned-history floor (why an as-of cut below a point can be refused):**
+**The pruned-history floor:**
 
 Exact as-of reconstruction (§10, first bullet) depends on the *older* revisions of a key still being
 present — to roll a key back to time `T`, the revision that was current at `T` must not have been
@@ -675,8 +671,7 @@ may already be gone. A full backup whose cut falls **below `W` fails closed**
 
 ### Reclaiming backup disk: retention and the orphan sweep
 
-Backups accumulate. Two independent mechanisms keep the backup directory bounded, and it is worth
-being precise about which does what:
+Two independent mechanisms keep the backup directory bounded:
 
 - **The orphan sweep** reclaims artifacts that no valid backup accounts for — an artifact directory a
   crashed or interrupted backup left behind with no manifest, and staging/temporary remnants
@@ -716,7 +711,7 @@ and on a **periodic tick** (`BackupGcInterval`, default 1 hour) whose first firi
 startup doubles as a **startup sweep** — so crash-orphaned artifacts and age-based expiry are reclaimed
 even on a node that has stopped taking backups. GC is serialized against backup creation on each node,
 so a sweep never races a backup that is midway through writing its directory. You can also trigger a
-pass on demand, or preview one without deleting anything (see §11g).
+pass on demand, or preview one without deleting anything (see §11b–§11e).
 
 > **Note — retention is per-node and local.** Each node runs GC against its own backup directory. In a
 > multi-node cluster there is not yet a single cluster-wide retention owner; that coordination is
@@ -905,7 +900,7 @@ taking the node offline:
 - Resolve and validate a chain.
 - Trigger (or dry-run) a garbage-collection pass — orphan sweep + retention.
 
-> **Online is not free.** "Online" means these run without stopping the node — not that they are
+> **Latency cost of online operations.** "Online" means these run without stopping the node — not that they are
 > invisible to client latency. Taking the base image consumes real I/O and cache bandwidth on the
 > backup volume, and for the **SQLite** backend the `VACUUM INTO` that copies a shard holds that
 > shard's writer lock for the whole copy, so writes to that shard stall until it finishes (reads and
@@ -947,7 +942,7 @@ the local filesystem of the node receiving the request):
 > the network when it is configured with a **restore root**, and it rejects any `targetDir` that does
 > not resolve to a path inside that root. The containment check is **ordinal (case-sensitive)**: on a
 > case-sensitive filesystem `/data/restore` and `/data/Restore` are genuinely different directories,
-> so a case-insensitive comparison would accept a target that actually lands *outside* the root. The
+> so a case-insensitive comparison would accept a target that lands *outside* the root. The
 > check normalizes both paths and confirms the target equals the root or sits beneath `root +
 > separator`; anything else is refused before any file is staged. When in doubt it **fails closed** —
 > rejecting a legitimate-but-unconfined target is safe; accepting an escaping one is not.
@@ -959,7 +954,7 @@ The following is **out of scope for v1 and not supported**:
 
 ---
 
-## 12. What to expect at scale
+## 12. Behavior at scale
 
 - Backups read the WAL a page at a time and write segment files atomically. They do not stop a
   partition, but they are not latency-free: the base image consumes I/O/cache bandwidth, and the
@@ -1014,7 +1009,7 @@ checked before any file is trusted for copy or replay:
 
 ---
 
-## 13. The mental model in one paragraph
+## 13. Mental model
 
 Kahuna keeps an ordered, timestamped log of every change and a periodic base image of the storage
 engine. A **full backup** is a base image plus a manifest of what it covers; an **incremental** is

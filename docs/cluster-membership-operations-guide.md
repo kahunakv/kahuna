@@ -8,9 +8,6 @@ written for two audiences:
   recover from a failure, and see who is in the cluster right now.
 - **Developers** maintaining the code who need the mental model and the invariants that must hold.
 
-No prior knowledge of Kahuna's internals is assumed. Concepts are introduced as they come up, and the
-key design decisions are called out with the reasoning behind them.
-
 This guide covers *which nodes are in the cluster*. For *which nodes hold each partition's data* —
 running with a replication factor instead of every node hosting everything — see the
 [replication factor operations guide](replication-factor-guide.md).
@@ -20,21 +17,21 @@ running with a replication factor instead of every node hosting everything — s
 
 ---
 
-## 1. The big picture
+## 1. Overview
 
 A Kahuna cluster is a set of nodes that agree, by consensus, on both your data *and* on **who the
-members are**. That second part — the membership roster — is not a static config file you edit by
-hand. It is a **committed record inside the cluster**, changed one node at a time through the same
-consensus mechanism that protects your data.
+members are**. The membership roster is a **committed record inside the cluster**, changed one node
+at a time through the same consensus mechanism that protects your data. There is no peer list to edit
+by hand.
 
-That single idea drives everything in this guide:
+This has three consequences:
 
 - Adding a node is a *committed change* to the roster, not a restart of every peer.
 - Removing a node is a *committed change* too — whether the node leaves politely or is detected dead.
 - Because membership is consensus-backed, the cluster never loses track of who can vote, and it
   refuses any change that would break its own ability to make decisions.
 
-> **Decision — membership is a committed record, not a hand-edited peer list.** The alternative —
+> **Decision — membership is a committed record.** The alternative —
 > every node carries a static list of its peers — means adding a node requires editing and restarting
 > all of them, and any disagreement between those lists is a split-brain risk. Making the roster a
 > consensus record means there is exactly one authoritative answer to "who is in the cluster," it
@@ -42,7 +39,7 @@ That single idea drives everything in this guide:
 
 ---
 
-## 2. The moving parts (membership in 60 seconds)
+## 2. Membership concepts
 
 A few terms you need for the rest of the guide.
 
@@ -84,7 +81,7 @@ and is **automatically promoted** to Voter once it is close enough to current an
 for a short window. The existing Voters keep quorum the entire time — the new node doesn't count until
 it's ready.
 
-> **Concept — why join as a non-voting Learner first?** If a brand-new, empty node counted as a Voter
+> **Concept — joining as a non-voting Learner.** If a brand-new, empty node counted as a Voter
 > immediately, it would change the quorum math before it had any data — and could even be needed to
 > form a majority while still catching up, stalling the cluster. Entering as a Learner means a join is
 > always safe: the cluster's ability to make decisions is never weakened by a node that isn't ready.
@@ -111,7 +108,7 @@ catches up, and is promoted — while the existing Voters keep serving throughou
                 ...other flags...
 ```
 
-> **Decision — the join mode is an explicit flag, never guessed.** A node could in principle try to
+> **Decision — the join mode is an explicit flag.** A node could in principle try to
 > infer "am I forming a new cluster or joining an existing one?" from what it sees — but guessing wrong
 > is catastrophic: a node that thinks it's greenfield can seed a *second*, competing roster. Making it
 > an explicit choice (`--join-existing` or not) means a fresh node can never accidentally fork the
@@ -131,7 +128,7 @@ catches up, and is promoted — while the existing Voters keep serving throughou
 4. **Verify** with the roster read (§7): the new endpoint should appear as `Voter`, and the membership
    version should have advanced.
 
-That's the whole flow. You do **not** restart or reconfigure the existing nodes.
+You do **not** restart or reconfigure the existing nodes.
 
 ---
 
@@ -198,7 +195,7 @@ drain, since replicas already evacuated stay evacuated.
 
 > **Decision — leaving and stopping are separate steps.** Coupling them (leave, then immediately exit)
 > would put you back where the failure-detector path already is: you would never learn whether the
-> removal actually committed before the process disappeared. Keeping them apart lets the caller confirm
+> removal committed before the process disappeared. Keeping them apart lets the caller confirm
 > the committed roster *first*, and stop the node knowing the cluster has already let go of it.
 
 ### Graceful leave on shutdown (the flag)
@@ -207,17 +204,16 @@ immediately instead of waiting for failure detection. This is **off by default**
 **`--graceful-leave-on-shutdown`**. Use it when you are **retiring** a node for good and have no
 orchestrator to drive the API call above.
 
-> **Decision — graceful leave is OFF by default, and that is deliberate.** The tempting default is
-> "always leave cleanly on shutdown." But a **rolling restart** — bouncing each node to deploy a new
-> version — is also a shutdown, and you absolutely do **not** want each restart to evict the node from
-> the cluster and then re-admit it. So leave is opt-in and means one thing: *this node is going away
+> **Decision — graceful leave is OFF by default.** A **rolling restart** — bouncing each node to
+> deploy a new version — is also a shutdown, and leaving on shutdown would make each restart evict the
+> node from the cluster and then re-admit it. So leave is opt-in and means one thing: *this node is going away
 > for good.* A plain restart (the common case) leaves the roster untouched.
 
 ### The safety floor: the cluster won't let you remove the last Voter
 A leave that would drop the cluster to **zero Voters** is **refused**. Going from 2 Voters to 1 is
 allowed; going from 1 to 0 is not. Over the API the refusal comes back as `RefusedInsufficientVoters`
 (409) and the node carries on serving, unchanged — it keeps its role and its partition leaderships.
-On the shutdown-flag path the node simply stops without committing a removal.
+On the shutdown-flag path the node stops without committing a removal.
 
 > **Concept — refusing the last-Voter leave.** Committing "remove the last Voter" would leave the
 > cluster with no one able to make decisions — permanently bricked, with no quorum even to *undo* the
@@ -239,7 +235,7 @@ suspicion window, then waits a final grace period before committing the removal.
 
 ## 6. Replacing a node
 
-Replacing a failed node is just the two operations above, in order:
+Replacing a failed node is the two operations above, in order:
 
 1. The old node is gone (crashed). Either let SWIM evict it (§5), or, if you took it down on purpose,
    it may already have left.
@@ -326,7 +322,7 @@ detection requires the periodic ping to be enabled (it is, for cluster mode, by 
 > **Guidance — set the suspicion and eviction-grace timeouts generously.** A "dead" verdict is
 > irreversible. On a network with occasional latency spikes or nodes that pause under load, give
 > `--raft-suspicion-timeout` and `--raft-dead-member-eviction-grace` enough room to ride out a
-> blip. The cost of being slightly slow to evict a truly dead node is far lower than the cost of
+> blip. The cost of being slightly slow to evict a dead node is far lower than the cost of
 > evicting a healthy one mid-pause. Size the eviction grace to the longest outage the roster should
 > ride through intact, not to a routine restart: an evicted member rejoins as a learner and is a
 > voter again only once it has caught up on every partition (after a whole-partition install, minutes),
@@ -338,11 +334,11 @@ detection requires the periodic ping to be enabled (it is, for cluster mode, by 
 
 ---
 
-## 10. Operational invariants (gotchas worth memorizing)
+## 10. Operational invariants
 
 - **A rolling restart must NOT leave.** Neither `--graceful-leave-on-shutdown` nor
   `POST /v1/cluster/leave` belongs in a restart: leaving is for decommissioning. Restart a node without
-  either and the roster is untouched; the node simply rejoins its partitions when it comes back.
+  either and the roster is untouched; the node rejoins its partitions when it comes back.
 - **A node that left does not come back on its own.** Auto-rejoin exists to rescue a node evicted while
   it was down; it is deliberately suppressed once a node has been asked to leave, so a decommission is
   never quietly undone. Re-admitting the node is a fresh join (§4).
@@ -352,13 +348,13 @@ detection requires the periodic ping to be enabled (it is, for cluster mode, by 
 - **A join into a long-running cluster can hit the compaction floor** (§8). For re-introducing a
   long-down node, expect to seed it from a backup first.
 - **Adding/removing a node does not move your data.** Membership controls *who votes*; which partition
-  owns which keys is separate and does not shift just because a Voter joined or left.
+  owns which keys is separate and does not shift when a Voter joins or leaves.
 - **Embedded/standalone mode ignores all of this.** The single-node model and its flags are unchanged;
   none of the cluster flags above apply to it.
 
 ---
 
-## 11. The mental model in one paragraph
+## 11. Mental model
 
 A Kahuna cluster's membership is a consensus-committed roster, changed one node at a time. A new node
 joins a running cluster with `--join-existing` (seeding off `--initial-cluster`), enters as a
@@ -367,6 +363,6 @@ A node leaves either politely — asked to over the API (`POST /v1/cluster/leave
 committed removal before you stop the process) or on shutdown via `--graceful-leave-on-shutdown`, both
 for decommissioning only, never for restarts — or by being detected dead and evicted via SWIM, with
 suspicion and grace windows tuned to absorb transient hiccups. The cluster refuses any change that would remove the last Voter. You watch
-all of it with `kahuna-cli --cluster-members`. The one failure mode to know is the compaction
+all of it with `kahuna-cli --cluster-members`. One failure mode is the compaction
 floor: a node that needs log the cluster has already discarded can't catch up by replay alone — seed
 it from a recent backup first, then let it join.

@@ -6,10 +6,10 @@ happens when a number leaves its range, when an operand is evaluated, how `SWITC
 `NOT FOUND`, `NOT SET`, `NOT DELETED` and `NOT EXTENDED` guards ask about, and which statements a
 transaction refuses. It is not a full language reference.
 
-## Conditions are boolean, and only boolean
+## Conditions are boolean
 
 `IF`, `&&`, `||` and `!` all take a boolean. A number, a string, or a null in a condition is a script
-error that names the line, not a silent false.
+error that names the line.
 
 ```
 IF 1 THEN … END            -- error: expected a boolean, found LongType
@@ -28,7 +28,7 @@ is reported rather than guessed at.
 ## `&&` and `||` stop as soon as the answer is known
 
 A false left operand of `&&` returns false, and the right operand is never evaluated. A true left
-operand of `||` returns true, with the same effect. This is what makes the ordinary guard work:
+operand of `||` returns true, with the same effect. This makes the ordinary guard work:
 
 ```
 IF d != 0 && n / d > 1 THEN … END
@@ -135,8 +135,8 @@ RETURN 1 == 1.0           -- true
 ```
 
 An earlier version compared doubles within a fixed tolerance of 0.001, so two clearly different values
-read as equal and a script had no way to ask for an exact answer. That is a trap for counters, revisions,
-and any quantity that must match precisely.
+read as equal and a script had no way to ask for an exact answer. Counters, revisions and any quantity
+that must match precisely need an exact comparison.
 
 An integer and a double also compare by their exact values, in `==`, `!=`, `<`, `<=`, `>`, `>=` and in a
 `SWITCH` case. The integer is not converted to a double first, because that conversion loses the low
@@ -176,7 +176,7 @@ FOR i IN 0..count(items)-1 DO … END
 ```
 
 A range is materialized when it is evaluated, so its length is capped at 100,000 elements. A larger range
-is a script error. Iterate in batches if you genuinely need more.
+is a script error. Iterate in batches if you need more.
 
 ## Literals and unary minus
 
@@ -184,7 +184,7 @@ An integer literal is written in decimal or in hexadecimal with a `0x` prefix. `
 hexadecimal literal is a bit pattern, so one with the top bit set reads back negative, exactly as the
 same literal does in C#.
 
-A minus sign is an operator, never part of the literal. This means `5-3` is a subtraction whether or not
+A minus sign is an operator, never part of the literal. `5-3` is a subtraction whether or not
 it is padded with spaces, and a value or a variable can be negated:
 
 ```
@@ -285,8 +285,8 @@ second line'      -- the value is "first line\nsecond line"
 A backtick identifier must stay on one line. Other raw control characters, such as a tab, are still
 rejected inside a literal; write them as escapes.
 
-Any other escape is a script error. Whether `\q` was meant as `q` or as `\q` is unknowable, and either
-guess is wrong half the time. A literal that holds no backslash is untouched, and costs nothing.
+Any other escape is a script error. Whether `\q` was meant as `q` or as `\q` is unknowable, so neither
+reading is guessed. A literal that holds no backslash is untouched, and costs nothing.
 
 ## Script size limits
 
@@ -317,7 +317,7 @@ END
 ```
 
 An earlier version discarded every option of a list holding two or more, so such a transaction ran on
-defaults: `BEGIN (locking=optimistic, timeout=20000)` actually ran pessimistic with the default timeout.
+defaults: `BEGIN (locking=optimistic, timeout=20000)` ran pessimistic with the default timeout.
 Check any script that relies on a multi-option `BEGIN`, since it was not doing what it said.
 
 The accepted options are:
@@ -459,7 +459,7 @@ Four rules fix what `split` returns:
 3. Every empty part is kept. A leading separator, a trailing separator and two adjacent separators each
    produce an empty part, so the position of a field never depends on whether an earlier field was empty.
 4. An empty separator is a script error. One part per character and no cut at all are both plausible
-   readings of it, and either guess is wrong half the time.
+   readings of it, so neither is guessed.
 
 The parts are counted before any of them is built, so the array is sized once and a string that would
 produce more than 100,000 parts is refused before the list is allocated. That is the same limit a range
@@ -472,7 +472,7 @@ is held to, for the same reason.
 `hlc_counter()` is the logical counter of the same reading, which separates events that fall inside one
 millisecond.
 
-The rule is short. Any comparison that decides an order, an expiry or a deadline across nodes reads
+Any comparison that decides an order, an expiry or a deadline across nodes reads
 `hlc()`. A stamp a person will read is what `current_time()` is for.
 
 ```
@@ -480,7 +480,7 @@ SET lease/{@id} hlc() + 30000          -- a deadline other nodes will compare
 SET audit/{@id} current_time()         -- a stamp for a human to read
 ```
 
-The difference matters because two nodes' wall clocks disagree, and a script does not choose which node
+Two nodes' wall clocks disagree, and a script does not choose which node
 answers it. A deadline written on one node and compared on another is safe only while one node answers
 every call for that key, and it changes clock source silently on a leader change. The hybrid logical clock
 is the one both nodes advance, so a reading taken after another reading is never below it, wherever each
@@ -592,8 +592,8 @@ script error that names the line.
 
 A prefix scan fans out across every partition and carries no transaction identity, so within a
 transaction it would read a snapshot blind to the transaction's own uncommitted writes, and it would take
-no prefix lock to make the read repeatable. Refusing it is honest; returning a result that quietly
-violates both properties is not.
+no prefix lock to make the read repeatable. The refusal prevents a result that silently violates both
+properties.
 
 `GET BY BUCKET` is the prefix read that does work inside a transaction. It carries the transaction id, so
 it sees the transaction's own writes and records what it read.

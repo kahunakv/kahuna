@@ -12,7 +12,7 @@ The measured numbers are in [section 5](#5-measured-results).
 
 ---
 
-## 1. The problem
+## 1. Message count on the general path
 
 A script such as the rate-limiting counter
 
@@ -73,13 +73,14 @@ script keeps the general path when it:
 - uses a key in a range-routed key space (its operations carry a routing generation that fences them against
   a range move, which a turn would bypass).
 
-**The escape.** The shape check is a filter, not a proof. Inside a turn every statement checks that the key it
+**The escape.** The shape check can admit a script that a turn cannot run to the end. Inside a turn every
+statement checks that the key it
 names is the turn's key; anything else — a different key, a batched write, a statement that cannot run in a
 turn — ends the turn. The turn then releases the key (which also discards anything it staged), and the script
 runs again from the start on the general path as a new transaction. Nothing the first attempt did is
 observable, so a wrong guess costs one wasted attempt and nothing else.
 
-## 3. What does not change
+## 3. Unchanged behavior
 
 - **Answers.** Result type, value, revision, reason text, and the state left on the key are the same on either
   path. The test suites run every scenario with the mechanisms on and off and compare.

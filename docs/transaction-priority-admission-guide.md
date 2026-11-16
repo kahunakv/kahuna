@@ -9,15 +9,13 @@ audiences:
 - **Developers maintaining Kahuna** who need the admission lifecycle, the capacity model, and the
   correctness invariants in one place.
 
-No knowledge of the internals is required to start; the tuning and operations sections stand alone.
-
-**The feature ships dark.** Both ceilings default to `0`, which means every transaction starts
+**The feature is off by default.** Both ceilings default to `0`, which means every transaction starts
 immediately and priority is recorded but never gates. A default-configured node behaves exactly as it did
 before this existed. Turning it on is a deliberate operator decision — start with §6.
 
 ---
 
-## 1. The big picture
+## 1. Overview
 
 Without admission control, a transaction begins executing the moment it reaches `KeyValuesManager`.
 Ordering between concurrent transactions is whatever falls out of HLC timestamps and lock-acquisition
@@ -28,7 +26,7 @@ Kahuna adds a **per-node priority admission gate** in front of transaction start
 carries a `TransactionPriority`; when the node is at its configured concurrency ceiling, further
 transactions wait, and the gate starts the **highest-priority eligible** one first.
 
-Three properties are worth stating up front, because they bound what this feature is:
+Three properties bound the feature:
 
 - **It governs *start*, not execution.** Once admitted, a transaction runs exactly as it would without
   the gate. Nothing here preempts or aborts running work.
@@ -37,7 +35,7 @@ Three properties are worth stating up front, because they bound what this featur
   Priority influences *when* a transaction starts and nothing else.
 
 Below the ceiling the gate is transparent — admission completes synchronously, with no queueing and no
-reordering. That is the overwhelmingly common case and it is why an unsaturated node pays nothing.
+reordering, so an unsaturated node pays nothing.
 
 ---
 
@@ -51,7 +49,7 @@ High       = 3   Latency-critical work that should start ahead of ordinary traff
 Critical   = 4   Must not be deferred. Never aged, because it is already at the top.
 ```
 
-A small fixed scale rather than an arbitrary integer: it bounds the number of queues, keeps aging cheap
+The scale is small and fixed: it bounds the number of queues, keeps aging cheap
 to reason about, and can be widened later without a wire break.
 
 **Do not tag ordinary application traffic `Critical`.** If everything is critical the ordering carries no
@@ -112,7 +110,7 @@ END
 `timeout` is the execution deadline; `admissionWait` is the door-wait. The two are independent clocks —
 see §6. A non-numeric `admissionWait` is rejected as a malformed script.
 
-### What priority does *not* apply to
+### Operations outside the gate
 
 The gate governs **transactions**. A script that opens one — an explicit `BEGIN` block or a
 multi-statement script — is admission-gated. A script consisting of a single standalone command (`SET`,
@@ -127,10 +125,9 @@ rather than rejected, so a caller can set it once for a mixed workload without s
 
 ## 4. The capacity model
 
-This is the part worth understanding before tuning, because the interaction between the ceiling and the
-reserve is the only genuinely subtle piece.
+Tuning depends on the interaction between the ceiling and the reserve.
 
-Two independent ceilings exist, because the two transaction shapes hold a slot for very different
+Two independent ceilings exist, because the two transaction shapes hold a slot for different
 durations:
 
 | Gate | Ceiling | Slot held for |
@@ -153,7 +150,7 @@ pull in opposite directions:
   the internal work the caller needs to make progress at all.
 
 If you are not sure which shape you have, check whether the caller opens a session per user request or
-per transaction. Advice written for the first shape actively misleads for the second.
+per transaction. Sizing advice for the first shape does not apply to the second.
 
 ### Reserved slots
 
@@ -165,8 +162,8 @@ total occupancy          <= MaxConcurrent...                 (everyone)
 ordinary occupancy       <= MaxConcurrent... - Reserved      (Background / Low / Normal)
 ```
 
-"Ordinary occupancy" is tracked as its own counter, not derived from the total. That distinction is the
-whole point, and getting it wrong is subtle enough to be worth an example.
+"Ordinary occupancy" is tracked as its own counter, not derived from the total. The example below shows the
+difference.
 
 With `max=2, reserved=1` and two `High` transactions running, suppose one finishes:
 
@@ -192,19 +189,20 @@ A strict priority queue starves the bottom of the scale. Kahuna bounds that with
 compounding, capped just below `Critical`.
 
 So a `Background` transaction queued behind an endless stream of `High` work climbs to `High` after
-enough time and then wins on arrival order, because ties go to the earlier arrival. That is the bound:
-worst-case wait is roughly `(High - Background) × AgingThreshold`, not infinity.
+enough time and then wins on arrival order, because ties go to the earlier arrival. The worst-case wait
+is therefore roughly `(High - Background) × AgingThreshold`.
 
-Two properties of aging that are easy to get wrong:
+Two properties of aging:
 
-- **Aging moves a waiter's place in line, never its class.** Dispatch ordering uses the *effective*
+- **Aging moves a waiter's place in line and leaves its class unchanged.** Dispatch ordering uses the
+  *effective*
   priority; capacity eligibility uses the *base* priority. An aged `Background` transaction can overtake
-  ordinary work but can **never** consume a reserved slot. Without this split, the reserve would evaporate
-  under load, which is precisely when it matters.
+  ordinary work but can **never** consume a reserved slot. Without this split, aged waiters would consume
+  the reserve under load.
 - **`Critical` is never aged.** It already sorts above everything, and letting it climb further would
   only let it overtake other `Critical` work out of arrival order.
 
-### Why aging uses a monotonic clock, not the HLC
+### Monotonic clock for aging
 
 Elapsed waiting is measured with an injected monotonic `TimeProvider`. This is a deliberate exception to
 the repo-wide rule that cross-node ordering uses the HLC and never a wall clock.
@@ -215,8 +213,8 @@ clock could therefore drag the local HLC forward by seconds, instantly aging eve
 front at once and collapsing the priority separation the gate exists to provide.
 
 The rule's purpose is to stop wall-clock time from deciding *distributed* happened-before questions. How
-long a caller has sat in one node's local queue is not such a question — it is a local duration, and a
-monotonic source is the correct tool. Arrival *order* uses a monotonic sequence number, which is a strict
+long a caller has sat in one node's local queue is a local duration, and a monotonic source measures
+it. Arrival *order* uses a monotonic sequence number, which is a strict
 total order and so needs no timestamp tiebreak at all.
 
 ---
@@ -256,11 +254,11 @@ the REST/gRPC Begin request), or `admissionWait` inline in a script. A value `<=
 `MaxConcurrentSessions` should be considerably larger than `MaxConcurrentTransactions`: it bounds how
 many clients may have a transaction *open*, which is a connection-scale number, not a work-scale one.
 
-### Overload: the queue is bounded too
+### Overload and queue bounds
 
-A ceiling alone bounds only how much work *runs*. The queue behind it would still grow with offered
-load — each waiter retaining a continuation and a cancellation registration — consuming the very memory
-the ceiling exists to protect, precisely during the overload it is meant to survive.
+A ceiling alone bounds only how much work *runs*. Without its own bound, the queue behind it grows with
+offered load — each waiter retaining a continuation and a cancellation registration — and consumes memory
+during overload.
 
 `TransactionPriorityMaxQueued` bounds the wait queue **depth**. Past it, admission is refused immediately
 and the caller receives **`AdmissionRefused`**. Nothing was started, so a retry is always safe.
@@ -268,17 +266,16 @@ and the caller receives **`AdmissionRefused`**. Nothing was started, so a retry 
 `MaxAdmissionWaitMs` bounds the wait queue **duration**, which depth alone does not: without it a single
 patient caller can occupy a queue slot for as long as it likes while others are turned away.
 
-#### The two retryable codes, and why they are not the same
+#### Retryable admission codes
 
-Both are safe to retry. They ask for *opposite* client behaviour, which is the whole reason they are
-distinct:
+Both are safe to retry. They ask for *opposite* client behaviour:
 
 | Code | What happened | What the client should do |
 |---|---|---|
-| `AdmissionRefused` | The queue was full, or this caller's admission budget expired. The node is deliberately shedding load. | **Back off**, then retry. Retrying immediately re-queues against the very saturation the gate exists to relieve. |
+| `AdmissionRefused` | The queue was full, or this caller's admission budget expired. The node is deliberately shedding load. | **Back off**, then retry. Retrying immediately re-queues against the saturation the gate exists to relieve. |
 | `MustRetry` | A transient condition — a partition leader still being elected, a replica catching up. | **Retry promptly.** It clears on its own, usually in milliseconds. |
 
-A client that cannot tell these apart must pick one policy and be wrong half the time: a tight retry loop
+A client that treats them alike handles one of them badly: a tight retry loop
 makes an overloaded node worse, and a long back-off makes ordinary start-up look like an outage.
 
 Both admission gates — sessions and script transactions — use `AdmissionRefused`, so a client never has
@@ -299,7 +296,7 @@ All instruments are observable gauges on the `Kahuna` meter, tagged by `gate` (`
 | Instrument | What it tells you |
 |---|---|
 | `kahuna.tx_admission.in_flight` | Transactions currently holding a slot. |
-| `kahuna.tx_admission.queued` | Transactions currently waiting. **Non-zero means the gate is actually gating.** |
+| `kahuna.tx_admission.queued` | Transactions currently waiting. **Non-zero means the gate is deferring transactions.** |
 | `kahuna.tx_admission.max_queue_depth` | High-water mark of simultaneous waiters. |
 | `kahuna.tx_admission.admitted` | Transactions admitted since start. |
 | `kahuna.tx_admission.aged_promotions` | Waiters that aging promoted at least once. |
@@ -308,13 +305,13 @@ All instruments are observable gauges on the `Kahuna` meter, tagged by `gate` (`
 
 `abandoned_while_waiting` and `rejected_queue_full` remain **distinct** even though both now return the
 same `AdmissionRefused` response code. They answer different questions: the counters say *why* the node
-refused, the response code says *what the client should do about it*. The split is what tells you whether
+refused, the response code says *what the client should do about it*. The split tells you whether
 to raise the ceiling (callers are giving up at the door) or to raise the queue bound / shed upstream (the
 queue is overflowing).
 
 Reading them:
 
-- **`queued` is the headline.** Zero means the gate is transparent and your ceiling is not binding.
+- **`queued`**: zero means the gate is transparent and your ceiling is not binding.
   Sustained non-zero means transactions are being deferred and your priorities are now deciding who waits.
 - **`queued` at `High`/`Critical`** is the signal that the ceiling is too low for the offered load, or
   that a reserve is warranted. Bulk work queueing is the gate working as designed; latency-critical work
@@ -341,15 +338,15 @@ process lifetime, so release is guaranteed on every path:
   throw. Lock computation sits inside the same `try` so even a malformed script returns its slot.
 - *Interactive sessions* carry the slot on the session context. Every path that retires a session —
   commit, rollback, **and the reaper reclaiming an abandoned one** — routes through a single
-  `FinalizeSession` helper. That last one matters: a crashed client that never commits must not cost the
-  node a slot forever.
+  `FinalizeSession` helper. A crashed client that never commits therefore does not cost the node a slot
+  forever.
 - *Admission that never becomes a session* (a clock fault or teardown between taking the slot and
   publishing the session) disposes the slot rather than orphaning it.
 
 Lease release is idempotent, so overlapping completion paths cannot double-count and inflate the ceiling.
 
 **The admission wait is bounded independently of the transaction's own timeout.** These are two clocks
-that measure unrelated things, and conflating them is a bug rather than a simplification:
+that measure unrelated things:
 
 | Clock | Bounds | Enforced by |
 |---|---|---|
@@ -370,8 +367,8 @@ script's `timeout` therefore means "wall time from start" rather than "wall time
 
 > **Behaviour change on upgrade.** A caller that sets no admission budget now gets
 > `DefaultAdmissionWaitMs` (5 s), which is *shorter* than the previous effective wait — the session
-> timeout clamped to `MaxTransactionTimeout`, i.e. up to 5 minutes at stock settings. That is the point
-> of the change, but anyone who was relying on a long queue wait should set `AdmissionWaitMs` explicitly.
+> timeout clamped to `MaxTransactionTimeout`, i.e. up to 5 minutes at stock settings. Anyone who was
+> relying on a long queue wait should set `AdmissionWaitMs` explicitly.
 
 **Leader changes.** Admission sits *after* leader routing: `KeyValueLocator` forwards to the
 coordinator-partition leader before the gate runs, so followers never queue work they will not execute. A
@@ -404,7 +401,7 @@ before the field existed necessarily sends zero, and that must resolve to `Norma
   `OrdinaryWork_NeverOccupiesMoreThanTheUnreservedCapacity` and
   `AgedWaiter_StillCannotConsumeTheReservedSlot` guard the invariant that must survive it.
 - **Capacity eligibility reads base priority; dispatch ordering reads effective priority.** If you make
-  aging influence eligibility, the reserve stops being a reserve.
+  aging influence eligibility, aged ordinary work can consume the reserve.
 - **Cancellation, dispatch, and disposal all settle a waiter, and exactly one may win.** `TrySettle` is
   the arbiter and is called under the lock. The cancellation registration is necessarily created *outside*
   the lock (an already-cancelled token would re-enter it) and then published under the lock only if the
@@ -419,7 +416,7 @@ before the field existed necessarily sends zero, and that must resolve to `Norma
   but exact rather than tick-quantized, needs no extra actor, and cannot lag a dispatch — promotion only
   matters when a slot frees, which is exactly what triggers dispatch.
 - If you add a new transaction entry point, admit **before** minting the transaction id. A transaction
-  that queued must carry the HLC of when it actually started; otherwise its reads anchor to a snapshot
+  that queued must carry the HLC of when it started; otherwise its reads anchor to a snapshot
   taken before it ran.
 - **Arm the execution/lifetime deadline after admission, and give the wait its own token.** A single
   `CancellationTokenSource` spanning both phases silently charges the queue wait to the transaction's own

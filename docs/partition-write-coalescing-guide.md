@@ -9,11 +9,9 @@ audiences:
 - **Developers maintaining Kahuna** who need the write lifecycle, batching policy, and correctness
   invariants in one place.
 
-No knowledge of the internals is required to start; the tuning and operations sections stand alone.
-
 ---
 
-## 1. The big picture
+## 1. Overview
 
 A "direct write" is a persistent, non-transactional key/value mutation — a `TrySet` (including
 conditional and no-revision variants), a `TryDelete`, or a `TryExtend`. Each such write must be
@@ -80,8 +78,8 @@ delta itself — see below) and resolves the finalizer's task with that apply's 
 rather than routing `CompleteProposal` to a key actor. The batch executor issues one `ReplicateEntries`
 proposal carrying whatever mix of entry types the selected submissions contributed.
 
-The key structural point is that the **owning `KeyValueActor` stages the write and installs the
-replication intent, but does not perform the Raft call**. It serializes the committed record, hands a
+The **owning `KeyValueActor` stages the write and installs the replication intent, but does not
+perform the Raft call**. It serializes the committed record, hands a
 lean envelope to the aggregator, and frees its mailbox. The aggregator performs the Raft round trip
 off any actor mailbox and sends the outcome back as a control message.
 
@@ -203,15 +201,15 @@ clock: opening an empty buffer bumps the epoch, the lane arms a timer tagged wit
 timer wake only flushes if its epoch is still current and no batch is in flight. A count/byte flush
 therefore makes a later, stale timer harmless.
 
-Batch selection walks the buffer in admission order up to the item and byte caps. If the very first
+Batch selection walks the buffer in admission order up to the item and byte caps. If the first
 item alone exceeds the byte cap, it is dispatched **alone** — the cap is a batching target, not a
 value-size limit. A many-key request may span several batches; its per-item responses already allow
 that, and no new atomicity promise is made.
 
-**At most one batch is in flight per partition.** This is not unwanted serialization — the Raft
-partition is itself the serialization point, and Kommander otherwise reports/retries a concurrent
-proposal. The important property is that *different* partitions can have Raft calls in flight and
-complete concurrently. Completion re-drives the buffer; a full batch dispatches immediately,
+**At most one batch is in flight per partition.** The Raft partition is itself the serialization
+point, and Kommander otherwise reports/retries a concurrent proposal. *Different* partitions can have
+Raft calls in flight and complete concurrently. Completion re-drives the buffer; a full batch dispatches
+immediately,
 while a sub-threshold batch can wait for `KeyValueWritePostCompletionHoldMs` (default 0).
 
 ---
@@ -344,8 +342,8 @@ measured workload shows batch sizes pinned well below the caps at a saturated ro
 By default the hold is armed on the timer queue, which fires a millisecond-scale delay late: on Linux a
 2 ms hold was measured to wake about 1 ms after its deadline (a 1 ms hold, 1.8 ms late), so the dead time
 per cycle is the hold plus that lateness, not the hold alone. `KeyValueWritePreciseWake` moves every wake
-to one dedicated timer thread whose kernel wait lands within about a quarter of a millisecond, so the hold
-you configure is the hold you get; `kahuna.kv.write.cycle_stage` (below) shows both parts of every cycle,
+to one dedicated timer thread whose kernel wait lands within about a quarter of a millisecond, so the wake
+lands close to the configured hold; `kahuna.kv.write.cycle_stage` (below) shows both parts of every cycle,
 so choose the hold against the `hold` and `wake_late` stages together.
 
 ### Fill-or-time
@@ -356,7 +354,7 @@ the median size (in submissions) of its last sixteen timer-dispatched batches, a
 the buffer up to that target dispatches it at once, like a full batch. A target can only be learned from
 batches that waited for their timer, so a run of fill-triggered dispatches would freeze it at a stale
 value — a target learned under light load would pin a later heavy load to tiny batches. Two rules keep it
-honest: after eight consecutive fill-triggered dispatches the next batch waits for its timer again and is
+current: after eight consecutive fill-triggered dispatches the next batch waits for its timer again and is
 sampled (a probe), and a probe more than twice the current target discards the window, which falls back
 to the plain hold until eight new samples exist. Under a steady load the target settles a little below the
 hold's natural batch size (the timer-dispatched samples are the batches that did not reach it), so expect
@@ -364,7 +362,7 @@ somewhat thinner batches in exchange for a shorter wait; `kahuna.kv.write.fill_t
 `kahuna.kv.write.batch_submissions` shows the gap, and `kahuna.kv.write.cycle_trigger` shows how many
 cycles the target (`submit`) rather than the timer (`wake`) dispatched.
 
-### Key layout matters
+### Key layout
 
 Coalescing is per partition. Keys in one hash key-space route to a single partition, so a bulk insert
 whose rows share a key-space collapses into as few batches as the caps allow. Keys spread across many
@@ -424,9 +422,9 @@ outcome string — never a key, partition id, or transaction id):
   `raft.wal.oldest_pending_write_age_ms` and `raft.wal.write_duration_ms`. `PersistenceWriteStallWarnMs`
   (and Kommander's `WalStallWarnThreshold`) turn the crossing into log lines.
 
-The backlog monitor also samples itself every five seconds and writes to the log — nobody watches a
-gauge: a **warning** when the backlog crosses 75% of a budget, a **warning** when back-pressure
-actually engages ("Persistence back-pressure engaged", a budget exceeded, ordinary writes refused
+The backlog monitor also samples itself every five seconds and writes to the log: a
+**warning** when the backlog crosses 75% of a budget, a **warning** when back-pressure
+engages ("Persistence back-pressure engaged", a budget exceeded, ordinary writes refused
 retryably), a reminder every ten minutes while either condition holds, and an information line when
 it clears. Hysteresis keeps a backlog saw-toothing around the line from raising and clearing every
 sample: once raised, the warning clears only below 60% of the budget.

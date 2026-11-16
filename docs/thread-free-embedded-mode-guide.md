@@ -12,7 +12,7 @@ The mode depends on the thread-free build of Kommander (`KOMMANDER_THREAD_FREE`,
 later; 1.7.2 or later to run with reflection-based JSON off). Read the Kommander thread-free embedded mode developer guide for the Raft side: the host
 pump, the scheduler changes, and the Kommander configuration rules.
 
-## Why a separate build
+## Platform limits
 
 The single-threaded WebAssembly runtime has two hard limits:
 

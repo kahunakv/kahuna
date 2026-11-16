@@ -4,8 +4,9 @@ A circuit breaker stops a caller from sending traffic to a dependency that alrea
 counts recent outcomes. When too many of them fail, the caller rejects immediately instead of
 waiting for a timeout.
 
-Inside one process a breaker is a small array and a timestamp. Across a fleet it is not. Twenty
-replicas keep twenty windows, so the dependency absorbs roughly twenty times the damage before the
+Inside one process a breaker is a small array and a timestamp. Across a fleet each replica keeps its
+own window: twenty replicas keep twenty windows, so the dependency absorbs roughly twenty times the
+damage before the
 first breaker trips. The fix is one shared window. This guide shows how to hold that shared window
 in Kahuna, and which Kahuna tools each part of the problem needs.
 
@@ -29,7 +30,7 @@ Move a breaker out of `open` lazily. Do not schedule a timer. The call that noti
 elapsed is the same call that wants the first probe slot, so one transaction does both. A timer
 splits those two events apart, and every replica then races into the gap at once.
 
-## 2. Which Kahuna tool answers which part
+## 2. Kahuna tools for each part
 
 | Part of the problem | Kahuna tool |
 | --- | --- |
@@ -42,8 +43,8 @@ splits those two events apart, and every replica then races into the gap at once
 | Reclaim a dead replica's probe slot | the `EX` lease on the claim key |
 | Throw a stale window away | an epoch number in the state, repeated in each observation value |
 
-The script transaction is the important one. It is what makes reading, deciding and writing a single
-step. Without it a replica reads the window, computes a ratio, and writes `open` while a dozen other
+The script transaction makes reading, deciding and writing a single step. Without it a replica reads the
+window, computes a ratio, and writes `open` while a dozen other
 replicas do the same.
 
 ## 3. Key layout
@@ -64,7 +65,7 @@ Use that rule to put a whole breaker on one partition. Put the scope first and t
 | `<scope>\|cb.probe/<uuid>` | one probe claim |
 
 Every one of these keys has the placement group `<scope>`, so all of them resolve to one partition
-and one Raft leader. Three consequences follow, and all three matter:
+and one Raft leader. Three consequences follow:
 
 1. The transaction touches one partition, so it can take the one-phase commit path.
 2. One leader answers every call, so `current_time()` reads one clock.
@@ -214,8 +215,8 @@ The verdict is one of three values:
 - `probe` — call the dependency, then settle the probe with the claim key you sent.
 - `rejected` — fail immediately. Do not call the dependency.
 
-The `open → half-open` move and the probe claim sit in one transaction. This is the whole point of
-the lazy transition. No other replica can arrive between the two.
+The `open → half-open` move and the probe claim sit in one transaction, so no other replica can
+arrive between the two.
 
 The probe budget is a set of claim keys, not a counter. A counter cannot recover from a replica that
 claims a slot and then dies, because the decrement never arrives. A claim key with a lease expires
@@ -302,9 +303,8 @@ The parameters are key names, not values, apart from `@outcome`:
 The client generates the uuid. A script cannot build a key name, so the client must name every key
 the script touches. Section 8 covers the consequences.
 
-Put a timeout **inside** the breaker, around the wrapped call. Its job there is not to improve
-latency. Its job is to guarantee that every admitted attempt settles, so a hung call cannot hold a
-probe slot until the lease expires.
+Put a timeout **inside** the breaker, around the wrapped call. The timeout guarantees that every
+admitted attempt settles, so a hung call cannot hold a probe slot until the lease expires.
 
 ### Retry handling
 
@@ -313,7 +313,7 @@ safe. Retry the same admit call with the **same** claim key, so a retry cannot c
 
 ### When the cluster is unreachable
 
-Kahuna does not answer this for you, and neither does any other store. Decide it in your client:
+Kahuna cannot make this decision. Decide it in your client:
 
 - A scope the replica last saw as `open` or `half` rejects. The breaker was protecting something,
   nothing said the dependency recovered, and the only reason you cannot confirm that is the cluster

@@ -2,7 +2,7 @@
 
 Kahuna accepts every operation at every node. A node that does not own the resource an operation
 addresses resolves the owner and forwards the operation there, so a client that picks nodes at
-random still gets correct results — it just pays an extra inter-node hop for most of them.
+random still gets correct results — it pays an extra inter-node hop for most of them.
 
 This guide covers the opt-in client behaviour that removes that hop: the client learns which node
 owns a resource, and sends the next operation on that resource straight there.
@@ -48,22 +48,23 @@ KahunaClient forced = new("https://node1:8082",
     options: new KahunaOptions { Routing = KahunaRoutingMode.Learned });
 ```
 
-### Why a single-endpoint client stays on rotation
+### Single-endpoint clients
 
-It could not act on most hints. A hint names whichever node owns the resource, and only endpoints the
+A client given one endpoint stays on rotation because it could not act on most hints. A hint names
+whichever node owns the resource, and only endpoints the
 client was configured with are dialled (see §5), so hints naming the other nodes are refused. Such a
 client would keep a cache it could rarely use.
 
 Give the client every endpoint if you want it to route. `KahunaClient.EffectiveRouting` reports the
-mode actually in force, with `Auto` already resolved — read that rather than `KahunaOptions.Routing`
+mode in force, with `Auto` already resolved — read that rather than `KahunaOptions.Routing`
 when you want to know how a client behaves.
 
-### If the advertised addresses are not the ones you dial
+### Advertised addresses the client cannot dial
 
 `Auto` turns learning on for a pooled client, but §5 still governs which endpoints may be dialled. In a
 deployment where nodes advertise addresses this client cannot reach and no `RoutingEndpointMap` is
 configured, every hint is refused: the client keeps working, on rotation, and gains nothing. The
-counter `hints_rejected` with `reason=endpoint_rejected` is what makes that visible — check it before
+counter `hints_rejected` with `reason=endpoint_rejected` shows it; check it before
 concluding the feature is not helping.
 
 ---
@@ -176,7 +177,7 @@ These are tuning values to measure, not consistency guarantees. Nothing in the c
 * **Bounded work and memory.** A cache hit allocates nothing and takes no lock. Learning a resource the
   cache has not seen takes one uncontended per-shard lock.
 
-### What a failure report does not mean
+### Failure reports
 
 A transport failure says the request did not complete, not that it did not run. A failure after the
 request was submitted has an ambiguous outcome. The routing cache never decides that an operation may
@@ -215,7 +216,7 @@ node that has not finished initializing all leave the client on learned routes. 
 gap over the key, and a partition with no known leader, resolve to nothing rather than to a guess.
 
 The routing modes a node reports are its own and are not replicated, so two nodes may legitimately
-disagree about one key space. Reading the map from a different node simply produces a different, and
+disagree about one key space. Reading the map from a different node produces a different, and
 equally advisory, answer.
 
 ---
@@ -261,10 +262,10 @@ Reads gain most, and the tail gains more than the median: removing a hop removes
 not only a fixed cost.
 
 The 50 000-key row is the one to reason from when sizing `RouteCacheCapacity`. Against the default
-4 096-entry cache, every key there is evicted before it recurs, so learned routing never hits — and
-lands within 0.2% of endpoint rotation. It does not pay, and it does not cost. Metadata mode is what
-helps a working set larger than the cache, because it resolves a resource it has never seen without
-needing an entry for it at all.
+4 096-entry cache, every key there is evicted before it recurs, so learned routing never hits and
+lands within 0.2% of endpoint rotation, with neither a gain nor a cost. Metadata mode helps a working
+set larger than the cache, because it resolves a resource it has never seen without needing an entry
+for it at all.
 
 Writes gain less, which is expected: a write is dominated by consensus replication, so the hop is a
 smaller share of it. Treat the write and mixed figures as "no regression, probably a modest gain" —

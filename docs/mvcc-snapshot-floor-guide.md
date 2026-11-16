@@ -2,17 +2,15 @@
 
 This guide explains how Kahuna lets a client **pin historical versions of data so they stay readable
 at a chosen point in time**, even while the data keeps changing — and how it makes those historical
-versions actually reachable from every read path. It is written for two audiences:
+versions reachable from every read path. It is written for two audiences:
 
 - **Operators** running Kahuna (directly or as the storage engine behind a database such as CamusDB)
   who need to understand what the feature guarantees, what it costs, and what to watch.
 - **Developers** maintaining the code who need the mental model and the invariants that must hold.
 
-No prior knowledge of Kahuna's internals is assumed. Concepts are introduced as they come up.
-
 ---
 
-## 1. The big picture
+## 1. Overview
 
 Kahuna keeps a bounded history of each key's past values so that a read can ask for "the value as of
 timestamp `T`" (an **as-of read**, expressed by passing a `readTimestamp`). This is what powers, for
@@ -31,8 +29,6 @@ hold is live Kahuna refuses to reclaim the revision current at `T` (and everythi
 *every* key. The **as-of read fallbacks** provide (2): each read path that honors `readTimestamp`
 consults on-disk history when the in-memory copy no longer reaches back far enough.
 
-The rest of this guide covers both halves.
-
 ---
 
 ## 2. Where a key's history lives
@@ -48,8 +44,8 @@ A persistent key that retains revisions has its history spread across three laye
 
 Reclamation actively trims the in-memory archive on every write: once a key has been overwritten more
 than `RevisionRetention` times, its older revisions fall out of memory (they remain on disk). So the
-in-memory archive is a *cache of recent history*, not the source of truth. This is the key fact
-behind everything below: **deep history lives on disk; memory keeps only a small, recent window.**
+in-memory archive is a *cache of recent history*, and the source of truth is on disk: **deep history
+lives on disk; memory keeps only a small, recent window.**
 
 ---
 
@@ -100,8 +96,8 @@ While a protective floor is set, reclamation is constrained at **both** places i
 - **Persistent prune.** The background revision sweep never deletes, per key, the floor-boundary
   revision or anything newer than it — no matter how aggressive the persistent retention settings are.
 
-The deliberate division of labor: **the boundary lives in memory; the deep run of revisions between
-the boundary and now lives on disk.** Reads reach that deep run through the disk fallbacks in the next
+**The boundary lives in memory; the deep run of revisions between the boundary and now lives on
+disk.** Reads reach that deep run through the disk fallbacks in the next
 section. When the registry is empty the protective floor is unset. An expired but still registered hold
 continues protecting history until its removal commits.
 
@@ -262,7 +258,8 @@ Consequences for clients:
   the walk carries none, so every hold is refused on the moved range rather than answered wrongly.
 - A hold whose registration reaches the driving node only after the last walk is refused on the range, never answered wrongly.
 - A walk costs one read per distinct revision a hold needs, like an export's. Its pages are replicated whole, so a
-  single key's revisions must fit one message. A key with very large values at many holds fails the move's attempt, and the
+  single key's revisions must fit one message. A key with large values at many holds fails the move's
+  attempt, and the
   range stays on its source.
 - The pins stay on the descriptor after their holds are gone. They cost a few bytes per hold in every range map entry,
   and a later move of the range drops the ones no longer registered.
@@ -353,12 +350,12 @@ unbounded, and that line says so.
 
 The RocksDB sweep visits keys through their `~CURRENT` rows and jumps over the revision rows in
 between with the same registry-gated seek the range scans use, so a pass costs O(logical keys) plus
-the walks that actually prune — not O(history rows) — and it checks its budget every 1,024 stepped
+the walks that prune — not O(history rows) — and it checks its budget every 1,024 stepped
 rows as well as before every key.
 
 ---
 
-## 9. Limits and things to know
+## 9. Limits
 
 - **Memory-only keys past the retention window.** A key that lives only in memory (never flushed to
   disk) and is overwritten more than `RevisionRetention` times has no disk history to fall back to, so
@@ -408,7 +405,7 @@ General guidance:
   versions a hold needs, and nothing more.
 - Enabling retention on a hot key-set is cheap in steady state: the RocksDB backend memoizes, per key,
   how many history rows it has and how old its oldest non-current row is, and skips the revision walk
-  until count or age could actually delete something (the store path advances the memo as it writes;
+  until count or age could delete something (the store path advances the memo as it writes;
   a moved floor, a deleted key or a recovery reopen re-arm the walk). Without the memo every flush
   cycle re-walked every hot key's whole revision block, and on a 2,000-row bank workload that walk
   alone outgrew the one-second flush budget within two minutes.
@@ -416,7 +413,7 @@ General guidance:
 
 ---
 
-## 11. Mental model in one paragraph
+## 11. Mental model
 
 A client pins a point in time by taking a leased, refcounted **hold** at timestamp `T`; the **effective
 floor** is the lowest live hold, replicated on the system partition so it survives restart and

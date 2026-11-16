@@ -7,19 +7,17 @@ to throw away, and why those choices are safe. It is written for two audiences:
   want to understand memory behavior, tuning knobs, and what to expect at scale.
 - **Developers** maintaining the code who need the mental model and the invariants that must hold.
 
-No prior knowledge of Kahuna's internals is assumed. Concepts are introduced as they come up.
-
 ---
 
-## 1. The big picture
+## 1. Overview
 
 Kahuna is a distributed key/value store. Keys are spread across many independent **partitions**, and
 keys are also assigned to **actor shards** — single-threaded workers that process their keys one
 at a time. Actor shards and Raft partitions are different: one actor can own keys from several
 partitions, and a partition's keys can span actors. Because an actor is single-threaded, it never needs locks for its own data, but
-it also means any slow operation inside an actor stalls every other request for that partition. This
-is the single most important fact for understanding the eviction design: **all the bookkeeping below
-is built to keep per-request work small and predictable.**
+it also means any slow operation inside an actor stalls every other request for that partition. The
+eviction design follows from this: **all the bookkeeping below is built to keep per-request work small
+and predictable.**
 
 Each actor holds its keys in an **in-memory cache**. Depending on the key's durability, that cache is
 either a fast copy of data that also lives on disk, or the only place the data exists:
@@ -54,8 +52,8 @@ store's insert and remove funnels, so they always hold the same keys and the sam
 The index costs about 48 bytes per resident key (counted in the actor's byte budget) and starts at
 an eighth of `MaxEntriesPerActor`, so it reaches the cap in three doublings.
 
-> **Concept — why sorted order matters.** A database asking Kahuna to "read all rows of a table" is
-> really asking to "read every key with this prefix, in order." A sorted store answers that by
+> **Concept — sorted order.** A database asking Kahuna to "read all rows of a table" is
+> asking to "read every key with this prefix, in order." A sorted store answers that by
 > walking a contiguous slice instead of hunting all over memory.
 
 Every stored value is a `KeyValueEntry`. Beyond the obvious fields (value bytes, revision number,
@@ -100,7 +98,7 @@ requests for that single thread). Two rules keep it cheap:
    running long. The LRU walk keeps a **cursor** so each follow-up resumes where the last one stopped
    instead of re-scanning a large pinned prefix; once a full pass completes it stops re-scheduling.
 
-The crucial property is that **a single collect cycle never scans the whole store.** A naive design
+**A single collect cycle never scans the whole store.** A naive design
 would walk every cached key each cycle looking for things to remove; with hundreds of thousands of
 keys — or a store where most entries are temporarily pinned — that walk would freeze the partition
 repeatedly. Instead, the collector consults three purpose-built structures that are kept up to date as
@@ -140,7 +138,7 @@ expiration and discards the pop if it no longer matches.
 
 ### 4.3 LRU list — reclaiming cold keys to stay under budget
 
-After tombstones and expired keys are reclaimed, the actor may still be over budget simply because it
+After tombstones and expired keys are reclaimed, the actor may still be over budget because it
 is caching more *live* keys than the limit allows. Now it must evict some genuinely valid data — and
 it should evict the data least likely to be needed again. The standard heuristic is **least-recently-
 used (LRU)**: throw out whatever hasn't been touched for the longest time.
@@ -155,7 +153,7 @@ Kahuna implements LRU with an **intrusive doubly-linked list** woven through the
 - Whenever a key is read or written, it is moved to the tail (it just became the hottest).
 - To evict, the collector walks from the head (coldest) and removes entries until back under budget.
 
-> **Concept — intrusive list & why it's fast.** "Intrusive" means the link pointers live inside the
+> **Concept — intrusive list.** "Intrusive" means the link pointers live inside the
 > data objects, not in a separate container. Moving an entry to the hot end or removing the coldest
 > one is a couple of pointer updates — constant time, no searching, no sorting. This is what lets the
 > cache stay accurate *and* cheap even with hundreds of thousands of keys.
@@ -169,7 +167,7 @@ list gives true recency ordering at the same constant per-access cost.
 ## 5. The two safety rules
 
 The collector may *consider* any entry, but it will **never** evict one that violates either rule
-below. These are what make "drop data to save memory" safe rather than dangerous.
+below. These rules make "drop data to save memory" safe.
 
 ### 5.1 Never evict an entry with an in-flight intent
 
@@ -184,14 +182,12 @@ operation. The collector skips such entries entirely.
 
 ### 5.2 Never evict an entry whose latest change isn't on disk yet
 
-This is the subtle one, and the most important for correctness.
-
 When a persistent key is committed, the change is applied to the in-memory entry **immediately**, but
 the write to the durable backend happens slightly later, in batches, on a background timer. For a
 short window the in-memory copy is *newer than disk*.
 
-Now recall that evicting a persistent key is supposed to be safe because the next read re-loads it
-from disk. But during that window, disk is stale. If the collector evicted the entry right then, the
+Evicting a persistent key is safe because the next read re-loads it from disk. During that window,
+disk is stale. If the collector evicted the entry right then, the
 next read would fall back to disk and return the **old** value (or "not found" for a brand-new key).
 That's a correctness violation — a reader would not see a write that already succeeded.
 
@@ -293,9 +289,9 @@ Two read shapes interact with the cache differently, and the distinction matters
     capped (currently 4,096 entries). They're for small, known-bounded prefixes; for anything that
     might be large, use the paginated scan.
 
-A subtle but important interaction: a range scan may encounter keys that live only on disk (they were
+A range scan may encounter keys that live only on disk (they were
 evicted). It reads those without forcing them back into the cache, so a big scan doesn't blow the
-budget or disturb the recency ordering of the keys that are actually hot.
+budget or disturb the recency ordering of the keys that are hot.
 
 **What one scan cost.** Each page of a paginated range scan carries a `KeyValueScanObservation`
 (`KeyValueGetByRangeResult.Observation`) that tells you what the page cost the serving node:
@@ -393,7 +389,7 @@ General guidance:
 
 ---
 
-## 10. Mental model in one paragraph
+## 10. Mental model
 
 Each actor shard has a sorted in-memory cache with a per-actor eviction budget, separate from Raft partitions.
 Deleted keys, expired keys, and cold keys are reclaimed by a collector that consults a tombstone

@@ -1,13 +1,12 @@
-# Key-Range Sharding — Developer Guide
+# Key-range sharding guide
 
 > **Audience:** developers who will maintain or extend Kahuna's key-range sharding system.
-> This is a from-scratch explanation — it assumes you know what Kahuna is (a distributed
-> key-value / lock / sequence store built on the Kommander Raft library) but does **not**
-> assume you know anything about how ranges, splits, or descriptors work.
+> It assumes you know what Kahuna is (a distributed key-value / lock / sequence store built on
+> the Kommander Raft library) and no prior knowledge of how ranges, splits, or descriptors work.
 
 ---
 
-## 1. What problem does this solve?
+## 1. Motivation
 
 ### The starting point
 
@@ -21,29 +20,28 @@ Originally, a key was assigned to a partition by **hashing** it:
 partition = hash(key) % numberOfPartitions
 ```
 
-Hashing spreads keys evenly, which is great for balancing load. But it destroys **locality**:
+Hashing spreads keys evenly, which balances load. It also destroys **locality**:
 two keys that look adjacent to a human — `users/0001` and `users/0002` — hash to unrelated
 numbers and land on different partitions. There is no way to say "all the `users/*` keys live
 together."
 
-### Why locality matters
+### Locality
 
-Two important things become impossible without locality:
+Without locality, two features are impossible:
 
 1. **Ordered range scans.** A query like "give me every key between `users/0001` and
    `users/0500` in order" has to touch *every* partition, because the keys are scattered. You
    can't serve it from one place.
 
-2. **Range-scoped locking.** Suppose you want to lock a slice of keys so a transaction can read
-   them consistently. Under hashing, a "lock everything starting with `users/`" lock has to
+2. **Range-scoped locking.** A transaction may lock a slice of keys to read them
+   consistently. Under hashing, a "lock everything starting with `users/`" lock has to
    block the *entire* key space on its partition — because that partition holds an arbitrary
    random subset of *all* prefixes, there's no clean boundary. One transaction locking a table
    stalls every other transaction touching that partition.
 
-This is the exact wall that systems like **Google Spanner** and **CockroachDB** hit, and they
-solved it the same way: **key-range sharding**.
+**Google Spanner** and **CockroachDB** address the same limits with **key-range sharding**.
 
-### The idea: shard by key range, not by hash
+### Contiguous key ranges
 
 Instead of `hash(key)`, split the key space into **contiguous ranges**, ordered by the raw key:
 
@@ -62,16 +60,16 @@ top of the key space (`users/0998`, `users/0999`, `users/1000`…), they all hit
 range until it grows large enough to **split**. That's the tradeoff Spanner/CRDB accept, and
 the system handles it by splitting hot/large ranges automatically.
 
-### Both models coexist
+### Routing modes
 
 Kahuna did not throw away hashing. Routing mode is a **per-key-space property**:
 
 - **Hash mode** (the default) — keys spread across partitions, no locality. Good for caches,
-  system data, anything that just wants throughput.
+  system data, anything that only needs throughput.
 - **Key-range mode** (opt-in per prefix) — contiguous keys co-locate, enabling ordered scans
   and range locks.
 
-A "key space" is just a key prefix (everything before the last `/`). Each key space is
+A "key space" is a key prefix (everything before the last `/`). Each key space is
 unambiguously one mode or the other.
 
 A key space can also name a **placement group**: everything before the first `|` in the key
@@ -98,14 +96,14 @@ RangeDescriptor {
 
 Files: `Kahuna.Core/KeyValues/Ranges/RangeDescriptor.cs`, `RangeMap.cs`.
 
-A few rules you must keep in your head — they are load-bearing:
+The rest of the system depends on these rules:
 
 - **Half-open intervals.** `StartKey` is *included*, `EndKey` is *excluded*: `[StartKey, EndKey)`.
   This is what makes adjacent ranges tile perfectly with no gap and no overlap. The end of one
   range is exactly the start of the next.
 
 - **Ordinal comparison, always.** Every key comparison uses `StringComparison.Ordinal` /
-  `string.CompareOrdinal` — never culture-aware. This is non-negotiable: culture-aware sorting
+  `string.CompareOrdinal` — never culture-aware. Culture-aware sorting
   would put `"r/9"` *before* `"r/10"` in some locales, silently corrupting the ordering the
   whole system depends on. If you add a new comparison path anywhere near ranges, it must be
   ordinal.
@@ -135,7 +133,7 @@ Find("users", "users/0300"):
 
 ---
 
-## 3. Where descriptors live: the meta partition
+## 3. Descriptor storage: the meta partition
 
 The descriptor map is the source of truth for routing. If it's wrong or inconsistent, keys go
 to the wrong place. So it must itself be **consistent and replicated** — exactly the guarantee
@@ -153,14 +151,14 @@ Partition 1+ →  DATA partitions. Every user partition from 1 upward carries ha
                 key-range data also lives here (≥ partition 1). Splits allocate fresh higher ids.
 ```
 
-Why partition 0? It used to be off-limits: Kommander reserved P0 for its own coordinator and
+Partition 0 used to be off-limits: Kommander reserved P0 for its own coordinator and
 routed *every* committed P0 entry there, never to Kahuna's `OnLogRestored` /
 `OnReplicationReceived` callbacks. As of **Kommander 0.11.0**, P0 dispatches committed entries
 **by log type**: the coordinator's own `_RaftSystem` entries go to the coordinator, and any
 other log type is routed to the consumer (Kahuna) callbacks. That lets the descriptor map live
 on P0 alongside the coordinator.
 
-This collapses a coordination headache. Creating and removing the data partitions a split/merge
+This simplifies coordination. Creating and removing the data partitions a split/merge
 needs (`CreatePartitionAsync` / `RemovePartitionAsync`) requires the **P0 leader**, and the
 descriptor-map cutover requires the **meta-partition leader**. With the map on P0 those are the
 **same** leader — so a split/merge orchestrator only has to lead one partition (P0). Before the
@@ -181,7 +179,7 @@ at once — a colocation that isn't guaranteed in a multi-partition cluster (see
   lets the map coexist on P0 with the coordinator: when a committed P0 entry has the `RangeMap`
   type, it rebuilds the in-memory map instead of going through the KV path or the coordinator.
 
-- **Durable checkpoint.** Here's a subtle trap to be aware of. The descriptor map's only
+- **Durable checkpoint.** The descriptor map's only
   durable home is P0's write-ahead log. But Kommander **compacts** (trims) committed log entries
   older than the last checkpoint — and a checkpoint marker carries *no state snapshot*. So
   naively checkpointing P0 would delete the very entries that hold the map, and a restart would
@@ -244,7 +242,7 @@ its map, so a writer that races a registration never meets that window.
 
 ### DataPartitionRouter (the hash path)
 
-`DataPartitionRouter.cs` is Kahuna's *own* hash assignment. Crucially, Kahuna owns this — it no
+`DataPartitionRouter.cs` is Kahuna's *own* hash assignment. Kahuna owns this — it no
 longer delegates to Kommander's `GetPartitionKey`. It hashes a key over the user-partition pool
 `[1, N]` through `HashPlacement.BucketOfKey` (`Kahuna.Shared/Routing/HashPlacement.cs`):
 the key's key space, reduced to its placement group, digested with Kommander's jump-consistent
@@ -320,7 +318,7 @@ Three consequences to keep in mind:
   `groupSeparator` (`|`); a client that does not implement exactly that stays on learned routes
   rather than mis-hashing the keys that carry a group.
 
-### The two routing call sites (a maintenance hazard you must respect)
+### The two routing call sites
 
 There are **two** independent places that derive a partition from a key. Both must agree, or a
 split will misroute:
@@ -341,9 +339,8 @@ nothing to do with which partition owns the data. Don't confuse the two.
 
 ## 5. The generation fence: making splits safe for clients
 
-Here's the central correctness mechanism. When a range moves (split or merge), any request that
-was routed using the *old* map must not silently apply to the wrong place. The **generation**
-field is how we catch that.
+When a range moves (split or merge), any request that was routed using the *old* map must not
+silently apply to the wrong place. The **generation** field catches that.
 
 ```
 Client routes a write to key K:
@@ -366,7 +363,7 @@ The fence is checked on the leader, just before replicating a key-range write, b
 rejects with `MustRetry` if there's no covering descriptor or the routed generation no longer
 matches.
 
-**Important architectural note:** this fence is a **Kahuna-level** mechanism built on the
+This fence is a **Kahuna-level** mechanism built on the
 descriptor map's `Generation` field. It is **not** Kommander's `expectedGeneration` parameter.
 Kommander does have a partition-generation concept, but it has no API to bump it at a key-range
 cutover (it only bumps it inside its own hash-split/merge coordinator). So Kahuna runs its own
@@ -381,7 +378,7 @@ too so a batched multi-key set during a split can't slip through unfenced.
 
 ---
 
-## 6. The split lifecycle (the hard part)
+## 6. The split lifecycle
 
 Splitting range `R = [S, E)` on partition `P` at split key `K` (where `S < K < E`) into
 `[S, K) @ P` and `[K, E) @ P'`. Driven by `RangeSplitter.cs`.
@@ -419,8 +416,8 @@ Step by step:
    checksum verified on import. Import buffers the whole stream and applies only after a clean
    checksum, so a crash mid-read is a no-op.
 
-4. **Quiesce** the range during the catch-up→cutover window so no write is lost. Two layers,
-   complementary rather than redundant:
+4. **Quiesce** the range during the catch-up→cutover window so no write is lost. Two
+   complementary layers:
    - The **WriteFence range lock** on `[K, E)`. It coexists with Shared readers and plants
      no per-key write intents. It is installed by a message on the source
      partition leader's key-value actor, which is the same single-threaded mailbox every write for
@@ -496,7 +493,7 @@ Step by step:
    replica refuses a read at any other timestamp below the move: see the
    [MVCC snapshot floor guide](mvcc-snapshot-floor-guide.md#reads-of-a-range-moved-by-a-split-or-merge).
 
-   The deadline cuts both ways: once it passes, the range lock and the descriptor quiesce admit
+   Once the deadline passes, the range lock and the descriptor quiesce admit
    writes into `[K,E)` again, on P, after the catch-up copy. A split that is still running at that
    point must not cut over, because every such write would become unreachable the moment the range
    routes to P'. So the in-window steps (the settle barrier, the catch-up copy, the lock transfer
@@ -557,11 +554,10 @@ the source's older entries, and judging those entries against the seeds refused 
 vetoes that found their commits already recorded (`kahuna.durable_tx.stale_base_vetoes_late` with no
 loss behind it).
 
-### Two things to know about the current implementation
+### Node-global storage and orphan retention
 
 - **The persistence backend is node-global, keyed by the full key string** — *not* physically
-  partitioned. This is the single most important thing to understand about the current state.
-  Under **full replication**, the rows are already present on every replica, and local import
+  partitioned. Under **full replication**, the rows are already present on every replica, and local import
   writes into that same store. Under **per-partition placement**, source and destination can have
   different replica sets: the destination copy and replicated transaction-state handoff are required
   to make the upper range available on its new hosts. Shared local storage does not imply that a
@@ -607,7 +603,7 @@ locator resolves the **ordered set of descriptors** the scan spans, pages within
 **stitches** results in key order. The cursor (`KeyValueRangeCursor`) encodes
 `(rangeGeneration, lastKey)`: if a split happens mid-scan, the generation miss triggers a
 re-resolve and the scan resumes from `lastKey`. Because the cursor is **key-based**, it
-survives splits naturally — the boundaries are keys, not offsets.
+survives splits — the boundaries are keys, not offsets.
 
 ### Multi-range bucket reads (`LocateAndGetByBucket`)
 
@@ -629,14 +625,14 @@ split, so there's nothing to union.
 > and leaves any same-leader batching to the gRPC transport layer. If same-leader fan-out ever
 > shows up as a bottleneck, that's the place to optimize.
 
-### Per-range locks (the core payoff)
+### Per-range locks
 
-This is *why* the whole feature exists. `LocateAndTryAcquireExclusiveRangeLock` fans out one
-sub-lock per intersecting descriptor's partition, with clamped bounds. A lock on `[A,B)` does
-**not** block a concurrent operation on the disjoint `[B,C)` — they're on different partitions.
-That's the concurrency win hashing could never give.
+Per-range locks are the main reason key-range routing exists. `LocateAndTryAcquireExclusiveRangeLock`
+fans out one sub-lock per intersecting descriptor's partition, with clamped bounds. A lock on `[A,B)`
+does **not** block a concurrent operation on the disjoint `[B,C)` — they're on different partitions.
+Hash routing cannot provide this isolation.
 
-Implementation details worth knowing:
+Implementation details:
 
 - **Deterministic acquire order.** Sub-locks are acquired in `StartKey` order so two
   overlapping range-lock requests can never deadlock by grabbing in opposite orders.
@@ -681,7 +677,7 @@ Splits and merges don't have to be manual. Two background actors watch the range
 > the map moved to P0 this required one node to lead *both* P0 and the separate meta partition
 > simultaneously, which isn't guaranteed in a multi-partition cluster; that colocation
 > requirement is now gone.) The tests put P0 leadership on one node with
-> `ForceLeaderForTestingAsync` so the trigger actually runs.
+> `ForceLeaderForTestingAsync` so the trigger runs.
 
 ---
 
@@ -759,7 +755,7 @@ Split and merge **are** leader-only (the partition that owns the map also owns t
 lifecycle). A node that does not lead refuses with `NotLeader` and, when gossip knows one, a
 `leaderHint`; the CLI walks the endpoints for you.
 
-### Reading a split outcome honestly
+### Split outcomes
 
 `POST /v1/ranges/split` carries a `determinate` flag, and it is the field to branch on. A split is a
 multi-step transaction — create the destination partition, quiesce the source, copy, commit the
@@ -777,8 +773,8 @@ cutover — and a failure in the later steps leaves the outcome genuinely unknow
 | `TransferFailed`, `QuiesceFailed`, `CutoverFailed`, `ConcurrentSplit` | ✗ | **The map may still change.** Re-read `GET /v1/ranges` before concluding anything. |
 | `Indeterminate` | ✗ | Leadership or transport was lost mid-split. Same advice. |
 
-Treating an indeterminate outcome as "the split did not happen" is how a fault-injection harness
-manufactures a finding that was never real.
+A fault-injection harness that treats an indeterminate outcome as "the split did not happen"
+reports findings that are not real.
 
 `POST /v1/ranges/merge` runs the same pass the periodic checker runs, across **all** key spaces —
 there is no per-space variant, and the minimum size it enforces is configuration, not a request
@@ -786,7 +782,7 @@ parameter. It answers `Completed` with a count (0 means nothing was eligible) or
 never reports a count from a node that did not run the pass, which is the distinction the underlying
 trigger cannot make on its own: it returns `0` on every non-leader.
 
-### When to split by hand
+### Manual splits
 
 - Reproducing a split deterministically in a test or chaos run, instead of writing past a threshold
   and waiting out a sampling pass.
@@ -834,7 +830,7 @@ To make auto-split observable in a short run: `--range-split-threshold 20 --rang
 
 ## 10. End-to-end: the life of a ranged write
 
-Putting it all together, here's a write to a key-range space, start to finish:
+A write to a key-range space, start to finish:
 
 ```
 1. Client calls TrySet("users/0300", value).
@@ -874,7 +870,7 @@ Putting it all together, here's a write to a key-range space, start to finish:
 
 ---
 
-## 11. Current limitations and where to take this next
+## 11. Current limitations and future work
 
 The backend is still **node-global and keyed by full key string**, rather than partition-prefixed.
 That limits physical cleanup, but it no longer means that every node stores every partition.
@@ -907,7 +903,7 @@ The current un-host purge filters rows by ownership rather than issuing a partit
 
 ---
 
-## 12. Rules to internalize before you touch this code
+## 12. Rules for changing this code
 
 A condensed checklist — violating any of these silently corrupts the system:
 
@@ -927,7 +923,7 @@ A condensed checklist — violating any of these silently corrupts the system:
 7. **Key-range data lives on partition ≥ 1.** Partition 0 is the shared system + meta partition
    (coordinator + descriptor map, by log type) and never holds data. Splits allocate fresh
    higher-id partitions.
-8. **Missing Kommander primitive? Flag it upstream, don't work around it in Kahuna.**
+8. **Flag a missing Kommander primitive upstream.** Do not work around it in Kahuna.
 
 ---
 

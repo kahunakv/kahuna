@@ -39,7 +39,7 @@ read, so even during a failover — when a former owner may not yet know it lost
 owner's first reservation compare-and-swaps *above* whatever the old one holds. The two can never issue
 the same value.
 
-## What you get, and what you do not
+## Guarantees
 
 **Guaranteed.**
 
@@ -83,7 +83,7 @@ issued", never as "this value has been issued".
 ## Idempotent reserves
 
 Passing an idempotency key makes a reserve replayable: retrying the same key returns the identical
-allocation instead of consuming fresh values. This is what makes a client retry after a timeout safe.
+allocation instead of consuming fresh values. This makes a client retry after a timeout safe.
 
 Idempotent requests pay for that guarantee. The allocation is written to the durable record *before* the
 caller is answered, so a retry that lands on a different node — or on the same node after it has
@@ -101,7 +101,7 @@ map would make every write more expensive than the last:
 - `SequencerIdempotencyRetentionTtl` (default 10 minutes) drops entries older than the window.
 
 **Replay is guaranteed only within that window.** A retry arriving after the entry has been reclaimed
-allocates fresh values rather than replaying. Size the window against how long your clients actually
+allocates fresh values rather than replaying. Size the window against how long your clients
 retry for, not against how long you keep their records.
 
 ## Updating a sequence
@@ -137,11 +137,11 @@ you can read through `get`. Everything the sequence guarantees is scoped to one 
 > A value is issued at most once for the lifetime of an incarnation.
 
 Setting the current value *downwards* therefore reissues values the sequence has already handed out.
-That is what `setval` is for, and it is your decision — Kahuna will not stop you, and it will not
-pretend the old values were never issued. If you need the two ranges not to overlap, do not move the
+That is what `setval` is for. Kahuna allows it and still counts the old values as issued. If you need the
+two ranges not to overlap, do not move the
 value down into one that has been used.
 
-### Why an update takes about five seconds
+### Update latency
 
 **`update` withholds its answer for one `SequencerBlockLease`, and the sequence refuses allocations with
 `MustRetry` for the same interval.** Both are deliberate.
@@ -152,7 +152,7 @@ record changed until its lease forces a revalidation. So for one lease after the
 are potentially two live streams: the replaced incarnation's window on that node, and the new
 incarnation on the owner.
 
-Kahuna closes both sides of that window rather than documenting it:
+Kahuna closes both sides of that window:
 
 1. The update does not report success until a window reserved from the replaced incarnation can no
    longer be served anywhere.
@@ -161,8 +161,8 @@ Kahuna closes both sides of that window rather than documenting it:
    half, the workload's `nextval` calls would be served from the new stream long before the operator's
    update returned, which is exactly the collision the first half is paying to avoid.
 
-Every caller of an update is a DDL-shaped statement, not a hot path, so a bounded delay is the right
-price. An instant answer that is wrong for five seconds is the failure being avoided.
+Every caller of an update is a DDL-shaped statement rather than a hot path, so a bounded delay is
+acceptable. An immediate answer could be wrong for up to five seconds.
 
 Two consequences worth planning for:
 
@@ -175,7 +175,7 @@ Two consequences worth planning for:
 The wait assumes every node in the cluster runs the same `SequencerBlockLease`. A node configured with a
 longer one holds its window past the interval the update waited out. Keep the setting uniform.
 
-### What an update does not carry forward
+### State cleared by an update
 
 Recorded idempotency entries belong to the incarnation being replaced, so **the idempotency map is
 cleared**. A keyed reserve recorded before an update allocates fresh values after it, rather than
@@ -219,8 +219,8 @@ from memory is revalidated once its `SequencerBlockLease` (default 5 s) expires,
 incarnation and voids the stale window. Recreated-name collisions are therefore possible only inside
 that lease, on a node that is simultaneously stale about leadership.
 
-**Prefer `update` over delete-and-recreate.** It is the operation that closes that window rather than
-documenting it: it waits the lease out before reporting success, and it keeps the new incarnation quiet
+**Prefer `update` over delete-and-recreate.** An update closes that window: it waits the lease out before
+reporting success, and it keeps the new incarnation quiet
 meanwhile. Delete-and-recreate still carries the window, because a create cannot wait — a fresh sequence
 that refused its first value for five seconds would be a worse trade than the one it fixes. If you must
 recreate a name and need the result authoritative everywhere immediately, follow the create with an

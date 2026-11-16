@@ -42,7 +42,7 @@ the cut-off leader's memory.
 
 **A lock release is served for what the node holds, confirmed or not.** A release only drops state from
 the node's own memory, and a lock found there was granted there. A node whose leadership a quorum did
-not confirm still runs the release, but acknowledges only a lock of the transaction it actually holds.
+not confirm still runs the release, but acknowledges only a lock of the transaction it holds.
 This matters right after a peer fails: the leader's ack round can stall for a moment, the commit-time
 lock proof then refuses the transaction as a lost lock, and the cleanup that follows must still drop
 the locks the refused transaction holds on that leader. Gated on the same confirmation, the cleanup
@@ -231,7 +231,7 @@ budget answers `MustRetry`, never its own state. The in-memory transport used by
 and the tests always took the routing path, which is why the gap was visible only on the gRPC wire;
 `TestForwardedBatchReadLeadership` drives the gRPC handlers on a follower whose apply was held back.
 
-### What to look for in the logs
+### Log lines
 
 A node that refuses an actor-only mutation because it believes it leads but its quorum did not
 confirm logs, at warning level and at most once per partition every 5 s:
@@ -370,7 +370,7 @@ incomplete side, the split is refused with the retryable outcome `SourceStateInc
 cadence. A replica behind the leader is reported through the leader-change path and the split
 proceeds, because the copy reads the leader.
 
-### Why the leader's apply order is the log order
+### The leader's apply order
 
 The apply fingerprint detects a divergence; the rule below prevents the one in which an ex-leader alone
 rejects a bundled commit its peers admitted, seconds after a graceful handover, and one acknowledged

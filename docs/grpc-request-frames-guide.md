@@ -14,7 +14,7 @@ measured.
 
 ---
 
-## 1. The problem frames solve
+## 1. Per-message transport cost
 
 The .NET client multiplexes every key/value request to a node over one long-lived bidirectional gRPC
 stream per connection. Before frames, each request was its own stream message, and so was each response.
@@ -28,7 +28,7 @@ all (`RETURN 1`) cost about 40 µs of node CPU and 25 µs of client CPU per requ
 A **frame** is one stream message that carries several independent requests, or several independent
 responses. The fixed cost is paid once per frame instead of once per request.
 
-## 2. What a frame is, and is not
+## 2. Frame semantics
 
 - Each item in a frame is a complete single request with its own type and its own request id, exactly as
   it would be sent alone. The node runs every item through the same code path as a lone request.
@@ -45,7 +45,7 @@ responses. The fixed cost is paid once per frame instead of once per request.
 - A frame does not make its items atomic, and does not order them. It is a transport optimization only.
   Use a script or a transaction for atomicity.
 
-## 3. Negotiation: announce, never probe
+## 3. Negotiation
 
 Frames are used only between peers that both support them, decided **per stream**.
 
@@ -56,7 +56,7 @@ Frames are used only between peers that both support them, decided **per stream*
 3. The node sends response frames only on a stream that already carried a request frame. A client that
    sent a frame has proved it can read one.
 
-This is deliberately not a probe. A node built before frames does not answer a batch type it does not
+The client does not probe for support. A node built before frames does not answer a batch type it does not
 know, so a frame sent to it would leave every request inside unanswered until its deadline. Silence is
 never read as support.
 
@@ -147,7 +147,7 @@ each request sooner because each stream message carries more of them.
 
 Computed as process CPU (from `top`) divided by completed requests per second.
 
-### What frames do not fix
+### Remaining bottlenecks
 
 With frames, the `rate-limit` run has the node at about 610% CPU and the client at about 110%. The
 transport is no longer the limit for that workload; the work of the transaction itself is. An admitted

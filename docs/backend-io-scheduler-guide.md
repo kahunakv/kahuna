@@ -11,7 +11,7 @@ pool, and how to size those pools. It is written for two audiences:
 
 ---
 
-## Why dedicated pools
+## Separation from Kommander's scheduler
 
 Synchronous backend calls (a point `GetKeyValue`, a prefix/range/bucket scan page, a batched
 `StoreKeyValues` flush) must not run on Nixie actor threads or the .NET thread pool — they would

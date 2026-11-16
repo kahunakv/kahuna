@@ -2,7 +2,7 @@
 
 This guide explains how to use **`kahuna-bench`**, the load-testing tool that sends sustained traffic
 to a Kahuna cluster and reports latency percentiles (p50–p99.9) and throughput (req/s). It is written
-for operators and contributors who want to measure what a deployment can actually do — or to compare
+for operators and contributors who want to measure what a deployment can do — or to compare
 two builds, two configs, or two hardware profiles.
 
 `kahuna-bench` drives load through the normal `Kahuna.Client`, so it measures the **client-observed**
@@ -50,7 +50,7 @@ stays clean — see §7):
    `sequence`, creates the shared sequence.
 2. **Warmup** — `--warmup` seconds of load whose samples are **discarded** (lets caches, JITs and
    connections settle).
-3. **Measurement** — `--duration` seconds of load that is actually recorded and reported.
+3. **Measurement** — `--duration` seconds of load that is recorded and reported.
 
 ---
 
@@ -219,8 +219,8 @@ kahuna-bench -c http://localhost:8087 --workload txn-get --keys-per-txn 2 --read
   fields. So console `errors` = JSON `errors + timeouts`.
 - **misses** — requests the server answered correctly with "nothing here". Two workloads report it:
   - `get` / `mixed` / `delete` — a read that found no value. High misses usually means the
-    key-space is larger than what was seeded (seeding caps at 100 000 keys) — not a server problem,
-    just that the benchmark is reading keys that were never written.
+    key-space is larger than what was seeded (seeding caps at 100 000 keys): the benchmark is reading
+    keys that were never written, and the server is answering correctly.
   - `lock` — an acquisition the server answered `Busy`, because another owner held the resource.
     The `lock` workload does not wait, so it gives up at once. This is contention, not a fault, so
     it is not an error. Lower the concurrency or raise the key-space to reduce it.
@@ -243,19 +243,17 @@ time. The final table is the authoritative result.
 
 ---
 
-## 6. Closed-loop vs open-loop — and why it changes your p99
-
-This is the most important thing to get right when reading tail latency.
+## 6. Closed-loop vs open-loop
 
 **Closed-loop (`--rate 0`, default).** `--concurrency` workers each loop "send a request, wait for
 the reply, send the next." Throughput is whatever those N clients can extract. This answers *"how
 fast can N clients go?"* — but under saturation it **understates the tail**: while the server is
-slow, a closed-loop client simply isn't sending, so the slow period is under-sampled. This is
+slow, a closed-loop client isn't sending, so the slow period is under-sampled. This is
 **coordinated omission**.
 
 **Open-loop (`--rate > 0`).** Requests are scheduled at a fixed cadence (`1 / rate`), each stamped
 with an **intended start time**, and latency is measured from that intended start — not from when
-the request actually got dispatched. If the server stalls, the backlog of requests that *should*
+the request got dispatched. If the server stalls, the backlog of requests that *should*
 have gone out is counted as latency, so the tail reflects true server lag. Use open-loop with a
 target `--rate` when you have an SLA throughput in mind and want an honest p99 at that rate.
 

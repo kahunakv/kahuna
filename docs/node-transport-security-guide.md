@@ -93,7 +93,7 @@ listener. A client without a certificate cannot complete a handshake with the cl
 
 The cluster listener accepts any certificate at the TLS layer. The trust decision is the thumbprint
 allow-list, which Kommander checks on each Raft request and Kahuna checks on each node-only request.
-This is what lets self-signed per-node certificates work.
+This lets self-signed per-node certificates work.
 
 Every gRPC service is mapped on every listener, so the listener is not the only control. Each node-only
 surface checks the peer certificate itself. A node-only request that arrives on an application listener
