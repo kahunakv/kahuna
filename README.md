@@ -56,14 +56,30 @@ Repository guides cover [storage engines and extensions](docs/storage-engines-gu
 
 ## Installation
 
-The quickest way to start a node is the .NET global tool:
+On macOS or Linux, install with [Homebrew](https://brew.sh). The package installs the server
+(`kahuna-server`) and the command-line client (`kahuna-cli`). It carries its own .NET runtime, so
+you do not need to install .NET:
+
+```bash
+brew install kahunakv/tap/kahuna
+brew services start kahuna   # run a standalone node in the background, and again at login
+kahuna-cli                   # connects to the service on http://127.0.0.1:8083
+```
+
+The service stores its data in `$(brew --prefix)/var/kahuna/data` and its write-ahead log in
+`$(brew --prefix)/var/kahuna/wal`. Its log is `$(brew --prefix)/var/log/kahuna.log`. The service
+starts the node with the default options. To pass options, run `kahuna-server` in a shell, as
+described below.
+
+Kahuna also ships as a .NET global tool. With the [.NET 10 runtime or SDK](https://dotnet.microsoft.com/download)
+installed:
 
 ```bash
 dotnet tool install -g Kahuna.Server
 kahuna-server
 ```
 
-With no arguments, this command starts a standalone node on two listeners:
+With no arguments, `kahuna-server` starts a standalone node on two listeners:
 
 | Port | Protocol | Serves |
 |---|---|---|

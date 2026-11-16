@@ -1,0 +1,154 @@
+name: Release
+
+# Build the self-contained archives (the server and kahuna-cli) for a published GitHub release,
+# attach them to the release, and update the Homebrew formula in kahunakv/homebrew-tap.
+#
+# Cut a release:
+#   1. Set <Version> in Kahuna.Server/Kahuna.Server.csproj (scripts/set-version.sh), then commit and push it.
+#   2. Publish a GitHub release with tag v<Version> (gh release create v1.17.3 --notes-file ...).
+#   3. This workflow builds one archive per platform, smoke-tests each archive on a runner of its own
+#      platform, attaches the archives and the formula to the release, and pushes the formula to the tap.
+#
+# The tap push needs the repository secret HOMEBREW_TAP_TOKEN: a fine-grained token with
+# "Contents: read and write" on kahunakv/homebrew-tap only. Without it, the workflow still attaches
+# kahuna.rb to the release, and the tap stays unchanged.
+#
+# A prerelease gets its archives but does not update the tap, so `brew install` keeps the last
+# stable version. Run the workflow by hand (workflow_dispatch) to rebuild the assets of an existing tag.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build, for example v1.17.3
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+  DOTNET_NOLOGO: "1"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+
+jobs:
+  archive:
+    name: Archive ${{ matrix.rid }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - rid: osx-arm64
+            os: macos-latest
+          - rid: osx-x64
+            os: macos-15-intel
+          - rid: linux-x64
+            os: ubuntu-latest
+          - rid: linux-arm64
+            os: ubuntu-24.04-arm
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Install .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Check that the tag matches the project version
+        shell: bash
+        run: |
+          version="$(grep -oE '<Version>[^<]+</Version>' Kahuna.Server/Kahuna.Server.csproj | head -n1 | sed -E 's/<\/?Version>//g')"
+          if [[ "$TAG" != "v$version" ]]; then
+            echo "::error::Tag $TAG does not match <Version>$version</Version> in Kahuna.Server/Kahuna.Server.csproj"
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Build the archive
+        shell: bash
+        run: scripts/package-release.sh "${{ matrix.rid }}" artifacts/release
+
+      - name: Smoke-test the archive
+        shell: bash
+        run: scripts/smoke-test-release.sh "artifacts/release/kahuna-$VERSION-${{ matrix.rid }}.tar.gz"
+
+      - name: Upload the archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: kahuna-${{ matrix.rid }}
+          path: |
+            artifacts/release/*.tar.gz
+            artifacts/release/*.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Attach to the release and update the tap
+    needs: archive
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Download the archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: kahuna-*
+          path: artifacts/release
+          merge-multiple: true
+
+      - name: Render the Homebrew formula
+        shell: bash
+        run: |
+          version="${TAG#v}"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          scripts/render-homebrew-formula.sh "$version" artifacts/release > artifacts/release/kahuna.rb
+          cat artifacts/release/kahuna.rb
+
+      - name: Attach the assets to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$TAG" \
+            artifacts/release/*.tar.gz \
+            artifacts/release/*.sha256 \
+            artifacts/release/kahuna.rb \
+            --clobber
+
+      - name: Push the formula to the tap
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          # Read the flag from the release itself: a workflow_dispatch run has no release event.
+          if [[ "$(gh release view "$TAG" --json isPrerelease --jq .isPrerelease)" == "true" ]]; then
+            echo "::notice::$TAG is a prerelease. The tap stays on the last stable version."
+            exit 0
+          fi
+          if [[ -z "$TAP_TOKEN" ]]; then
+            echo "::notice::HOMEBREW_TAP_TOKEN is not set. The formula is attached to the release only."
+            exit 0
+          fi
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/kahunakv/homebrew-tap.git" tap
+          mkdir -p tap/Formula
+          cp artifacts/release/kahuna.rb tap/Formula/kahuna.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/kahuna.rb
+          if git diff --cached --quiet; then
+            echo "The tap already has this formula."
+            exit 0
+          fi
+          git commit -m "kahuna $VERSION"
+          # Name the branch: a clone of the still-empty tap has no upstream for a plain `git push`.
+          git push origin HEAD:main

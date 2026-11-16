@@ -58,3 +58,4 @@ nupkgs/
 nupkg/
 specs/
 .DS_Store
+artifacts/
