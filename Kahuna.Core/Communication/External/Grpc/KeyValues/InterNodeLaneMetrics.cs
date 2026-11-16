@@ -16,8 +16,8 @@ internal static class InterNodeLaneMetrics
 
     /// <summary>
     /// Bucket boundaries for <see cref="OrderedLaneWaitMs"/>, in milliseconds. A free lane answers in
-    /// microseconds; a lane behind a durable request waits for that request's Raft round, which is tens of
-    /// milliseconds, and a queue of them reaches hundreds.
+    /// microseconds; a lane behind a placement request waits for that request's service call, which can be a
+    /// Raft round or a range copy of tens to hundreds of milliseconds.
     /// </summary>
     private static readonly InstrumentAdvice<double> OrderedLaneWaitAdvice = new()
     {
@@ -43,11 +43,6 @@ internal static class InterNodeLaneMetrics
     private static readonly KeyValuePair<string, object?> RequestGetRangeLocks = new("request", "get_range_locks");
     private static readonly KeyValuePair<string, object?> RequestImportRangeLocks = new("request", "import_range_locks");
     private static readonly KeyValuePair<string, object?> RequestImportReceipts = new("request", "import_receipts");
-    private static readonly KeyValuePair<string, object?> RequestDurableOperation = new("request", "durable_operation");
-    private static readonly KeyValuePair<string, object?> RequestDurableBundle = new("request", "durable_bundle");
-    private static readonly KeyValuePair<string, object?> RequestDurableOnePhase = new("request", "durable_one_phase");
-    private static readonly KeyValuePair<string, object?> RequestDurableDecision = new("request", "durable_decision");
-    private static readonly KeyValuePair<string, object?> RequestLookupRecord = new("request", "lookup_record");
     private static readonly KeyValuePair<string, object?> RequestRangePage = new("request", "range_page");
     private static readonly KeyValuePair<string, object?> RequestRangeTransactionState = new("request", "range_transaction_state");
     private static readonly KeyValuePair<string, object?> RequestOther = new("request", "other");
@@ -59,11 +54,6 @@ internal static class InterNodeLaneMetrics
         GrpcServerBatchType.ServerTryGetRangeLocks => RequestGetRangeLocks,
         GrpcServerBatchType.ServerTryImportRangeLocks => RequestImportRangeLocks,
         GrpcServerBatchType.ServerImportCompletionReceipts => RequestImportReceipts,
-        GrpcServerBatchType.ServerDurableOperation => RequestDurableOperation,
-        GrpcServerBatchType.ServerDurableBundle => RequestDurableBundle,
-        GrpcServerBatchType.ServerDurableOnePhase => RequestDurableOnePhase,
-        GrpcServerBatchType.ServerDurableDecision => RequestDurableDecision,
-        GrpcServerBatchType.ServerLookupTransactionRecord => RequestLookupRecord,
         GrpcServerBatchType.ServerReplicateKeyValueRangePage => RequestRangePage,
         GrpcServerBatchType.ServerGetRangeTransactionState => RequestRangeTransactionState,
         _ => RequestOther

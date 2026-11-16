@@ -271,23 +271,23 @@ internal sealed class KeyValueServerBatcher
                 break;
 
             case GrpcServerBatchType.ServerDurableOperation:
-                _ = DurableOperationDelayed(responseWriter, lane.Next(request.Type), request, context, drain);
+                _ = DurableOperationDelayed(responseWriter, request, context, drain);
                 break;
 
             case GrpcServerBatchType.ServerDurableBundle:
-                _ = DurableBundleDelayed(responseWriter, lane.Next(request.Type), request, context, drain);
+                _ = DurableBundleDelayed(responseWriter, request, context, drain);
                 break;
 
             case GrpcServerBatchType.ServerDurableOnePhase:
-                _ = DurableOnePhaseDelayed(responseWriter, lane.Next(request.Type), request, context, drain);
+                _ = DurableOnePhaseDelayed(responseWriter, request, context, drain);
                 break;
 
             case GrpcServerBatchType.ServerDurableDecision:
-                _ = DurableDecisionDelayed(responseWriter, lane.Next(request.Type), request, context, drain);
+                _ = DurableDecisionDelayed(responseWriter, request, context, drain);
                 break;
 
             case GrpcServerBatchType.ServerLookupTransactionRecord:
-                _ = LookupTransactionRecordDelayed(responseWriter, lane.Next(request.Type), request, context, drain);
+                _ = LookupTransactionRecordDelayed(responseWriter, request, context, drain);
                 break;
 
             case GrpcServerBatchType.ServerReplicateKeyValueRangePage:
@@ -1057,13 +1057,13 @@ internal sealed class KeyValueServerBatcher
         }
     }
 
-    // The handlers below run on the stream's ordered lane: the read loop assigns each a turn in
-    // arrival order and a handler waits for its predecessor's turn before executing, so these
-    // placement/replication operations stay serialized per stream in arrival order. Keep that
-    // shape: their effects are order-sensitive (seed before import, import before receipts). The
-    // lane deliberately does not involve the response-write gate during execution — holding
-    // that across a slow service call would block the write of every already-completed unrelated
-    // response on this shared stream. The write gate is taken only for the write itself.
+    // The handlers below that take a LaneTurn run on the stream's ordered lane: the read loop
+    // assigns each a turn in arrival order and a handler waits for its predecessor's turn before
+    // executing, so these placement/replication operations stay serialized per stream in arrival
+    // order. Keep that shape: their effects are order-sensitive (seed before import, import before
+    // receipts). The lane deliberately does not involve the response-write gate during execution —
+    // holding that across a slow service call would block the write of every already-completed
+    // unrelated response on this shared stream. The write gate is taken only for the write itself.
 
     private async Task EnsureKeyRangeSeededDelayed(
         CoalescingResponseWriter responseWriter,
@@ -1235,9 +1235,18 @@ internal sealed class KeyValueServerBatcher
         }
     }
 
+    // The durable transaction handlers (operation, bundle, one-phase, decision, record lookup) take
+    // no lane turn. Each request is self-contained: it carries its own term and range fences and
+    // its transaction identity, the record and intent state machines decide duplicates and races at
+    // apply, and a coordinator awaits each step it depends on before sending the next. The sender
+    // spreads requests over every stream to the peer, so a per-stream order was never one a caller
+    // could rely on. A lane turn would be held for the whole Raft round, so forwarded durable work
+    // would run one round at a time per stream and never share a write batch; without one,
+    // concurrent forwards reach the partition write aggregator together, as a local coordinator's
+    // do, and the aggregator's admission is their back-pressure.
+
     private async Task DurableOperationDelayed(
         CoalescingResponseWriter responseWriter,
-        LaneTurn turn,
         GrpcBatchServerKeyValueRequest request,
         ServerCallContext context,
         StreamDrain drain
@@ -1245,10 +1254,6 @@ internal sealed class KeyValueServerBatcher
     {
         try
         {
-            await turn.PreviousCompleted;
-            turn.RecordWait();
-            context.CancellationToken.ThrowIfCancellationRequested();
-
             GrpcDurableOperationResponse resp = await service.DurableOperationInternal(request.DurableOperation, context);
 
             await responseWriter.WriteAsync(new GrpcBatchServerKeyValueResponse
@@ -1264,14 +1269,12 @@ internal sealed class KeyValueServerBatcher
         }
         finally
         {
-            turn.Complete();
             drain.Exit();
         }
     }
 
     private async Task DurableBundleDelayed(
         CoalescingResponseWriter responseWriter,
-        LaneTurn turn,
         GrpcBatchServerKeyValueRequest request,
         ServerCallContext context,
         StreamDrain drain
@@ -1279,10 +1282,6 @@ internal sealed class KeyValueServerBatcher
     {
         try
         {
-            await turn.PreviousCompleted;
-            turn.RecordWait();
-            context.CancellationToken.ThrowIfCancellationRequested();
-
             GrpcDurableBundleResponse resp = await service.DurableBundleInternal(request.DurableBundle, context);
 
             await responseWriter.WriteAsync(new GrpcBatchServerKeyValueResponse
@@ -1298,14 +1297,12 @@ internal sealed class KeyValueServerBatcher
         }
         finally
         {
-            turn.Complete();
             drain.Exit();
         }
     }
 
     private async Task DurableOnePhaseDelayed(
         CoalescingResponseWriter responseWriter,
-        LaneTurn turn,
         GrpcBatchServerKeyValueRequest request,
         ServerCallContext context,
         StreamDrain drain
@@ -1313,10 +1310,6 @@ internal sealed class KeyValueServerBatcher
     {
         try
         {
-            await turn.PreviousCompleted;
-            turn.RecordWait();
-            context.CancellationToken.ThrowIfCancellationRequested();
-
             GrpcDurableOnePhaseResponse resp = await service.DurableOnePhaseInternal(request.DurableOnePhase, context);
 
             await responseWriter.WriteAsync(new GrpcBatchServerKeyValueResponse
@@ -1332,14 +1325,12 @@ internal sealed class KeyValueServerBatcher
         }
         finally
         {
-            turn.Complete();
             drain.Exit();
         }
     }
 
     private async Task DurableDecisionDelayed(
         CoalescingResponseWriter responseWriter,
-        LaneTurn turn,
         GrpcBatchServerKeyValueRequest request,
         ServerCallContext context,
         StreamDrain drain
@@ -1347,10 +1338,6 @@ internal sealed class KeyValueServerBatcher
     {
         try
         {
-            await turn.PreviousCompleted;
-            turn.RecordWait();
-            context.CancellationToken.ThrowIfCancellationRequested();
-
             GrpcDurableDecisionResponse resp = await service.DurableDecisionInternal(request.DurableDecision, context);
 
             await responseWriter.WriteAsync(new GrpcBatchServerKeyValueResponse
@@ -1366,7 +1353,6 @@ internal sealed class KeyValueServerBatcher
         }
         finally
         {
-            turn.Complete();
             drain.Exit();
         }
     }
@@ -1474,7 +1460,6 @@ internal sealed class KeyValueServerBatcher
 
     private async Task LookupTransactionRecordDelayed(
         CoalescingResponseWriter responseWriter,
-        LaneTurn turn,
         GrpcBatchServerKeyValueRequest request,
         ServerCallContext context,
         StreamDrain drain
@@ -1482,10 +1467,6 @@ internal sealed class KeyValueServerBatcher
     {
         try
         {
-            await turn.PreviousCompleted;
-            turn.RecordWait();
-            context.CancellationToken.ThrowIfCancellationRequested();
-
             GrpcLookupTransactionRecordResponse resp = await service.LookupTransactionRecordInternal(request.LookupTransactionRecord, context);
 
             await responseWriter.WriteAsync(new GrpcBatchServerKeyValueResponse
@@ -1501,7 +1482,6 @@ internal sealed class KeyValueServerBatcher
         }
         finally
         {
-            turn.Complete();
             drain.Exit();
         }
     }
