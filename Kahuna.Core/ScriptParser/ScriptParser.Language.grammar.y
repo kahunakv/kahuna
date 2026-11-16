@@ -1,6 +1,7 @@
 %namespace Kahuna.Server.ScriptParser
 %partial
 %parsertype scriptParser
+%nolocations
 %visibility internal
 %tokentype Token
 

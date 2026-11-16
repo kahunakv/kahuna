@@ -1,4 +1,5 @@
 
+using System.Runtime.CompilerServices;
 using Kahuna.Server.Configuration;
 using Kahuna.Server.ScriptParser;
 using Microsoft.Extensions.Logging;
@@ -243,5 +244,36 @@ public sealed class TestKeyValueScriptParserSyntax
     public void TestMalformedSwitchIsRejected(string script)
     {
         Assert.Throws<KahunaScriptException>(() => parser.Parse(script));
+    }
+
+    /// <summary>
+    /// The processor reuses pooled parser instances, so a parse must not leave anything from an earlier parse
+    /// reachable from the parser. The parser stacks were never cleared, and each parse left the root of its
+    /// tree on them, so a pooled parser kept every tree it had built for as long as the process ran.
+    /// </summary>
+    [Fact]
+    public void TestPooledParserDoesNotKeepEarlierTrees()
+    {
+        WeakReference first = ParseAndKeepWeakReference("LET x = 1\nRETURN x");
+
+        // The pool hands the same instance back when one caller parses at a time, so these parses run on the
+        // parser that built the first tree.
+        for (int i = 0; i < 3; i++)
+            parser.Parse("RETURN 2");
+
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+
+        Assert.False(first.IsAlive);
+    }
+
+    /// <summary>
+    /// Parses in a frame of its own, so the calling test holds no strong reference to the tree.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private WeakReference ParseAndKeepWeakReference(string script)
+    {
+        return new(parser.Parse(script));
     }
 }
