@@ -119,6 +119,18 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
         // election, while protecting against nothing — no other node can be elected in its place.
         raftConfiguration.EnableCheckQuorum = false;
 
+        // Kommander's startup safety audit logs each fence that is off at Warning, unless the host
+        // marks it as intended. Both fences above protect nothing in this topology, so the audit logs
+        // them at Information with these reasons. Set before the RaftManager runs the audit.
+        raftConfiguration.IntendedFenceDeviations = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [nameof(RaftConfiguration.BackfillEnabled)] =
+                "Standalone node: the only followers are in-process witnesses that discard every entry, so no follower can fall behind.",
+            [nameof(RaftConfiguration.EnableCheckQuorum)] =
+                "Standalone node: the other voters are in-process witnesses that acknowledge every heartbeat when it is sent, " +
+                "so only a late tick of this node can trip the check, and no other node can be elected in its place."
+        };
+
         // Built before the WAL opens: the WAL and the store share the configuration's memtable budget.
         KahunaConfiguration kahunaConfiguration = CreateKahunaConfiguration(options, singleProcessRaftGroup: true);
 

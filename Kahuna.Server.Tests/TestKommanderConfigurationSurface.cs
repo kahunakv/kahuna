@@ -151,11 +151,14 @@ public sealed class TestKommanderConfigurationSurface
     /// options: they carry live objects no CLI value can express and are wired by the host
     /// (KahunaManager assigns the application-durability provider after construction, before the
     /// node joins), or they exist only to let a Deterministic Simulation Testing harness drive
-    /// time and scheduling explicitly and must never be touched in production.
+    /// time and scheduling explicitly and must never be touched in production. The intended fence
+    /// deviations are a host-code statement about the topology (the standalone constructor marks the
+    /// fences its witness quorum makes useless), so an operator flag cannot express them either.
     /// </summary>
     private static readonly HashSet<string> NonCliHookProperties =
     [
         nameof(RaftConfiguration.ApplicationDurabilityProvider),
+        nameof(RaftConfiguration.IntendedFenceDeviations),
         nameof(RaftConfiguration.TickSource),
         nameof(RaftConfiguration.EnableInternalTimers),
         nameof(RaftConfiguration.EnableInternalSchedulingThreads)

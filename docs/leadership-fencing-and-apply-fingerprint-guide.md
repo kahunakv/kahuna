@@ -93,6 +93,10 @@ or GC pauses should not depose the sole real node. The cluster constructor retai
 check-quorum setting, including `EmbeddedKahunaCluster` members. This is not additional failure tolerance
 for standalone hosts: only their own backend/WAL can preserve data through process loss.
 
+The standalone constructor marks both overrides in `RaftConfiguration.IntendedFenceDeviations`. Kommander's
+startup safety audit then logs each one at Information with the reason, not at Warning. A cluster node that
+turns either fence off still logs a Warning.
+
 The server flag takes a value: pass `--raft-enable-check-quorum false`, or set the environment variable
 `KAHUNA_CHECK_QUORUM=0`, to turn the step-down off.
 

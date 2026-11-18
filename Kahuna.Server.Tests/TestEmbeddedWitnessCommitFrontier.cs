@@ -1,8 +1,11 @@
 using System.Diagnostics.Metrics;
 using System.Text;
+using Kahuna.Server.Communication.Internode;
 using Kahuna.Shared.KeyValue;
 using Kommander;
+using Kommander.Communication.Memory;
 using Kommander.Data;
+using Kommander.Discovery;
 using Kommander.System;
 using Kommander.Time;
 using Microsoft.Extensions.Logging;
@@ -26,10 +29,13 @@ public sealed class TestEmbeddedWitnessCommitFrontier
 {
     private const string SampleKey = "tenant/table/frontier-key-0";
 
+    private readonly ITestOutputHelper outputHelper;
+
     private readonly ILoggerFactory loggerFactory;
 
     public TestEmbeddedWitnessCommitFrontier(ITestOutputHelper outputHelper)
     {
+        this.outputHelper = outputHelper;
         loggerFactory = TestLogFactory.Create(outputHelper);
     }
 
@@ -162,6 +168,116 @@ public sealed class TestEmbeddedWitnessCommitFrontier
         // A node with real peers keeps the fence: an isolated leader there must step down.
         Assert.True(EmbeddedKahunaNode.CreateRaftConfiguration(new()).EnableCheckQuorum);
     }
+
+    [Fact]
+    public async Task TestStandaloneNodeMarksItsWitnessOnlyFenceOverridesAsIntended()
+    {
+        await using EmbeddedKahunaNode node = new(new()
+        {
+            Storage = "memory",
+            WalStorage = "memory",
+            InitialPartitions = 1
+        }, loggerFactory);
+
+        RaftConfiguration configuration = node.Raft.Configuration;
+
+        Assert.Equal(
+            [nameof(RaftConfiguration.BackfillEnabled), nameof(RaftConfiguration.EnableCheckQuorum)],
+            configuration.IntendedFenceDeviations.Keys.Order(StringComparer.Ordinal));
+
+        Assert.All(configuration.IntendedFenceDeviations.Values, reason =>
+            Assert.False(string.IsNullOrWhiteSpace(reason)));
+
+        // The audit attaches each mark to the deviation it reports, so a mark that names no reported
+        // option would leave its Warning in place.
+        IReadOnlyList<RaftSafetyOptionDeviation> deviations = configuration.GetSafetyOptionDeviations();
+
+        foreach (string option in configuration.IntendedFenceDeviations.Keys)
+        {
+            RaftSafetyOptionDeviation deviation = Assert.Single(deviations, entry => entry.Option == option);
+            Assert.Equal(configuration.IntendedFenceDeviations[option], deviation.IntendedReason);
+        }
+
+        // A node with real peers carries no marks: an operator who turns a fence off there still gets
+        // the Warning.
+        Assert.Empty(EmbeddedKahunaNode.CreateRaftConfiguration(new()).IntendedFenceDeviations);
+    }
+
+    [Fact]
+    public async Task TestStandaloneStartLogsNoSafetyFenceWarning()
+    {
+        RecordingLogProvider recorder = new();
+        using ILoggerFactory recordingFactory = CreateKommanderInformationRecorder(recorder);
+
+        await using (EmbeddedKahunaNode node = new(new()
+        {
+            Storage = "memory",
+            WalStorage = "memory",
+            InitialPartitions = 1
+        }, recordingFactory))
+        {
+            await node.StartAsync(TestContext.Current.CancellationToken);
+            await node.WaitForLeaderForKeyAsync(SampleKey, TestContext.Current.CancellationToken);
+        }
+
+        Assert.Empty(recorder.Containing("fence disabled by configuration"));
+
+        IReadOnlyList<(LogLevel Level, string Message)> intended = recorder.Containing("fence off by host intent");
+
+        Assert.All(intended, line => Assert.Equal(LogLevel.Information, line.Level));
+
+        Assert.Contains(intended, line =>
+            line.Message.Contains($"{nameof(RaftConfiguration.BackfillEnabled)}=", StringComparison.Ordinal) &&
+            line.Message.Contains("Host reason: Standalone node", StringComparison.Ordinal));
+
+        Assert.Contains(intended, line =>
+            line.Message.Contains($"{nameof(RaftConfiguration.EnableCheckQuorum)}=", StringComparison.Ordinal) &&
+            line.Message.Contains("Host reason: Standalone node", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task TestClusterNodeWithCheckQuorumOffStillLogsTheFenceWarning()
+    {
+        RecordingLogProvider recorder = new();
+        using ILoggerFactory recordingFactory = CreateKommanderInformationRecorder(recorder);
+
+        // The RaftManager runs the audit in its constructor, so the node does not need to start.
+        await using (EmbeddedKahunaNode node = new(
+            new()
+            {
+                Storage = "memory",
+                WalStorage = "memory",
+                InitialPartitions = 1,
+                EnableCheckQuorum = false
+            },
+            new MemoryInterNodeCommmunication(),
+            new InMemoryCommunication(),
+            new StaticDiscovery([]),
+            recordingFactory))
+        {
+            Assert.False(node.Raft.Configuration.EnableCheckQuorum);
+        }
+
+        // Real peers can elect another leader, so an operator who turns the fence off must see the Warning.
+        (LogLevel Level, string Message) warning = Assert.Single(
+            recorder.Containing($"fence disabled by configuration: {nameof(RaftConfiguration.EnableCheckQuorum)}="));
+
+        Assert.Equal(LogLevel.Warning, warning.Level);
+        Assert.Empty(recorder.Containing("fence off by host intent"));
+    }
+
+    /// <summary>
+    /// A factory whose recorder takes the Information lines of the Kommander categories as well, so a
+    /// test sees the level of each safety-audit line. Every other category, and the test output, stay
+    /// at Warning.
+    /// </summary>
+    private ILoggerFactory CreateKommanderInformationRecorder(RecordingLogProvider recorder) =>
+        LoggerFactory.Create(builder => builder
+            .AddXUnit(outputHelper)
+            .SetMinimumLevel(LogLevel.Warning)
+            .AddProvider(recorder)
+            .AddFilter<RecordingLogProvider>(null, LogLevel.Warning)
+            .AddFilter<RecordingLogProvider>("Kommander", LogLevel.Information));
 
     private static void AssertNoWitnessCatchUpTraffic(EmbeddedKahunaNode node, int partitionId)
     {
