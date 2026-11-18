@@ -5,9 +5,9 @@
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
         <IsPackable>true</IsPackable>
-        <!-- net10.0-browser exists only so that a browser-wasm host of Kahuna.Core resolves the browser
-             assembly of Kommander, which has no ASP.NET Core reference. See Kahuna.Core.csproj. -->
-        <TargetFrameworks>net10.0;net10.0-browser</TargetFrameworks>
+        <!-- The browser targets exist only so that a browser-wasm host of Kahuna.Core resolves the
+             browser assembly of Kommander, which has no ASP.NET Core reference. See Kahuna.Core.csproj. -->
+        <TargetFrameworks>net10.0;net11.0;net10.0-browser;net11.0-browser</TargetFrameworks>
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
         <PackageId>Kahuna.Shared</PackageId>

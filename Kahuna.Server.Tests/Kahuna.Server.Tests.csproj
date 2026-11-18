@@ -2,6 +2,10 @@
 
     <PropertyGroup>
         <TargetFramework>net10.0</TargetFramework>
+        <!-- -p:KahunaTestFramework=net11.0 runs the suite against another target of the libraries.
+             The suite stays single-target by default: a multi-target dotnet test runs the frameworks
+             in parallel, and parallel runs of the in-process clusters interfere. -->
+        <TargetFramework Condition="'$(KahunaTestFramework)' != ''">$(KahunaTestFramework)</TargetFramework>
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
 

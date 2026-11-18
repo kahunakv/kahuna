@@ -18,7 +18,9 @@ cd kahuna
 
 ### Setting Up Your Development Environment
 
-1. Ensure you have the .NET 10 SDK installed. You can download it [here](https://dotnet.microsoft.com/download).
+1. Install the .NET 11 SDK and the .NET 10 runtime. You can download them [here](https://dotnet.microsoft.com/download).
+   The libraries also target .NET 11, so the .NET 10 SDK cannot build the solution. The executables
+   and the default test run use .NET 10.
 2. Restore dependencies:
 ```bash
 dotnet restore

@@ -26,9 +26,9 @@ package fails to build with `NETSDK1082`.
 
 ## How to get the thread-free build
 
-`Kahuna.Core` and `Kahuna.Shared` contain two target frameworks, `net10.0` and `net10.0-browser`.
-Only `net10.0-browser` defines `KAHUNA_THREAD_FREE`. A project gets it when its own target framework
-is `net10.0-browser`:
+`Kahuna.Core` and `Kahuna.Shared` contain four target frameworks: `net10.0`, `net11.0`,
+`net10.0-browser` and `net11.0-browser`. Only the two browser targets define `KAHUNA_THREAD_FREE`. A
+project gets it when its own target framework is `net10.0-browser` or `net11.0-browser`:
 
 ```xml
 <Project Sdk="Microsoft.NET.Sdk.WebAssembly">
@@ -42,7 +42,7 @@ is `net10.0-browser`:
 
 The target framework is necessary: **`net10.0-browser`, not `net10.0`.** A WebAssembly app that
 targets plain `net10.0` gets the normal assemblies of Kahuna and Kommander. The build then fails with
-`NETSDK1082`.
+`NETSDK1082`. The same rule applies to `net11.0-browser` and `net11.0`.
 
 A WebAssembly app turns off reflection-based `System.Text.Json` by default. Kahuna and Kommander 1.7.2
 or later serialize only with source-generated metadata, so the app can keep that default. With
@@ -206,17 +206,22 @@ off and runs it under Node.js. The app does these steps:
     the healed node.
 
 A thread start, a blocking wait, a stall, or a wrong result makes the check fail. The check needs
-the .NET 10 SDK and Node.js, but not the `wasm-tools` workload. The CI workflow runs it.
+the .NET 11 SDK and Node.js, but not the `wasm-tools` workload. It checks `net10.0-browser` by
+default. `SMOKE_FRAMEWORK=net11.0-browser` checks the other browser target. The CI workflow runs both.
 
 ```sh
 scripts/run-wasm-smoke.sh
+SMOKE_FRAMEWORK=net11.0-browser scripts/run-wasm-smoke.sh
 ```
+
+The script publishes the app and does not only build it. From .NET 11, the build output of a
+WebAssembly app has only `dotnet.js` in `wwwroot/_framework`, and Node.js cannot load the app from it.
 
 A test on normal .NET cannot replace this check. Library code resumes with
 `ConfigureAwait(false)`, so on normal .NET a blocked continuation moves to another thread and the
-test still passes. Also, the `net10.0` assembly of Kommander does not contain the host pump. The
-cluster tests in `Kahuna.Server.Tests` (`TestEmbeddedKahunaCluster`) run the same steps on normal
-.NET on a one-thread `SynchronizationContext`, but they use the normal build.
+test still passes. Also, the `net10.0` and `net11.0` assemblies of Kommander do not contain the host
+pump. The cluster tests in `Kahuna.Server.Tests` (`TestEmbeddedKahunaCluster`) run the same steps on
+normal .NET on a one-thread `SynchronizationContext`, but they use the normal build.
 
 `Kahuna.WasmSmoke` is not in `Kahuna.sln`, so the normal solution build does not change.
 
@@ -228,7 +233,7 @@ cluster tests in `Kahuna.Server.Tests` (`TestEmbeddedKahunaCluster`) run the sam
   would change the normal path, put it under `#if KAHUNA_THREAD_FREE` and keep the current code in
   `#else`.
 - A file that the browser cannot use (for example, a native backend or an ASP.NET Core type) goes in
-  the `Compile Remove` list of the `net10.0-browser` item group in `Kahuna.Core.csproj`.
+  the `Compile Remove` list of the browser item group in `Kahuna.Core.csproj`.
 - A new `Thread` start, a new blocking wait on the embedded path, or a new scheduler that starts
   worker threads breaks the smoke check. The browser target builds with no warnings, so a new
   `CA1416` warning there is a new call to an API that the browser does not support.

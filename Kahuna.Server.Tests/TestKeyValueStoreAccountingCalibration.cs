@@ -20,7 +20,7 @@ namespace Kahuna.Server.Tests;
 public class TestKeyValueStoreAccountingCalibration
 {
     // ---------------------------------------------------------------------------
-    // Hand-computed structural sizes for 64-bit .NET 8
+    // Hand-computed structural sizes for the 64-bit .NET runtime
     // ---------------------------------------------------------------------------
     //
     // HLCTimestamp (readonly record struct): int N(4) + long L(8) + uint C(4) + padding = 24 bytes

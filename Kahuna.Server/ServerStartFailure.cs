@@ -5,8 +5,10 @@ namespace Kahuna.Server;
 /// <see cref="ExitCode"/>, so a supervisor sees a failed start and not a clean stop: systemd restarts a unit
 /// with <c>Restart=on-failure</c> only on a non-zero exit, and a Kubernetes Job counts a zero exit as success.
 /// <para>
-/// A failure inside a hosted service never reaches <c>Program</c>. The host logs it, stops, and
-/// <c>WaitForShutdownAsync</c> returns the same as for a requested stop, so the service records the failure here.
+/// A failure inside a hosted service does not tell <c>Program</c> that the start failed. The host logs it and
+/// stops. On .NET 10, <c>WaitForShutdownAsync</c> then returns the same as for a requested stop. From .NET 11,
+/// it rethrows the exception, and <c>Program</c> cannot tell a start failure from another error. So the service
+/// records the failure here.
 /// Only <c>Program</c> sets the process exit code, because the services also run inside test processes.
 /// </para>
 /// </summary>

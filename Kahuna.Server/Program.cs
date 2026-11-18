@@ -439,9 +439,9 @@ try
         }
 
         if (startFailure.Failure is null)
-            await app.WaitForShutdownAsync();
+            await AwaitHostStopAsync(app.WaitForShutdownAsync(), startFailure);
         else
-            await app.StopAsync();
+            await AwaitHostStopAsync(app.StopAsync(), startFailure);
 
         if (node is not null)
             await node.DisposeAsync();
@@ -449,7 +449,7 @@ try
     else
     {
         await app.StartAsync();
-        await app.WaitForShutdownAsync();
+        await AwaitHostStopAsync(app.WaitForShutdownAsync(), startFailure);
 
         // Ordered teardown mirroring EmbeddedKahunaNode: drain the key/value write aggregator and the actor
         // system while Raft and the actors are still alive, THEN dispose KahunaManager (which stops the backend
@@ -482,6 +482,22 @@ if (startFailure.Failure is { } startError)
         Console.Error.WriteLine($"Kahuna stopped because the node could not start: {startError.Message}");
 
     Environment.ExitCode = ServerStartFailure.ExitCode;
+}
+
+// Awaits a stop of the host. From .NET 11, Host.StopAsync (and WaitForShutdownAsync through it) rethrows the
+// exception of a hosted service that stopped the host. When that exception is the recorded start failure, the
+// service recorded it and the host logged it, so this returns and the teardown after the stop still runs.
+// Any other exception propagates.
+static async Task AwaitHostStopAsync(Task stop, ServerStartFailure startFailure)
+{
+    try
+    {
+        await stop;
+    }
+    catch (Exception ex) when (ReferenceEquals(ex, startFailure.Failure))
+    {
+        // Already logged by the host. Program reports the recorded failure and sets the exit code after the teardown.
+    }
 }
 
 static RaftConfiguration CreateRaftConfiguration(KahunaCommandLineOptions opts, RaftTransportSecurityOptions transportSecurity)

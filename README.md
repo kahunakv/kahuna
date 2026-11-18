@@ -71,7 +71,8 @@ The service stores its data in `$(brew --prefix)/var/kahuna/data` and its write-
 starts the node with the default options. To pass options, run `kahuna-server` in a shell, as
 described below.
 
-Kahuna also ships as a .NET global tool. With the [.NET 10 runtime or SDK](https://dotnet.microsoft.com/download)
+Kahuna also ships as a .NET global tool. The tool targets .NET 10. When .NET 10 is not installed, it
+runs on .NET 11. With the [.NET 10 or .NET 11 runtime or SDK](https://dotnet.microsoft.com/download)
 installed:
 
 ```bash
@@ -124,6 +125,9 @@ The command-line client is a separate tool:
 dotnet tool install -g Kahuna.Control
 kahuna-cli
 ```
+
+The NuGet libraries (`Kahuna.Client`, `Kahuna.Client.AspNetCore`, `Kahuna.Core` and `Kahuna.Shared`)
+target .NET 10 and .NET 11.
 
 For a multi-node cluster, or to build from source, see the Docker images under `docker/` and the
 scripts in `scripts/`.

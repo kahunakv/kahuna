@@ -2,6 +2,14 @@
 
 <PropertyGroup>
   <TargetFramework>net10.0</TargetFramework>
+  <!-- The tool starts on the next major runtime when .NET 10 is not installed. A self-contained
+       publish (the release archives) ignores this setting. -->
+  <RollForward>Major</RollForward>
+  <!-- A test run on another framework (-p:KahunaTestFramework=net11.0) builds the server for that
+       framework too. The exit-code tests start Kahuna.Server.dll from the test output, next to the
+       libraries of that framework; a net10.0 server there runs on .NET 10 with the net11.0 libraries
+       and aborts. A normal build does not set the property. -->
+  <TargetFramework Condition="'$(KahunaTestFramework)' != ''">$(KahunaTestFramework)</TargetFramework>
   <Nullable>enable</Nullable>
   <ImplicitUsings>enable</ImplicitUsings>
   <RootNamespace>Kahuna.Server</RootNamespace>

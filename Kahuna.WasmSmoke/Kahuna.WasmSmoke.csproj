@@ -3,7 +3,7 @@
   <!--
     Smoke check for the thread-free build of Kahuna.Core (KAHUNA_THREAD_FREE). A single-node embedded
     Kahuna and then a 3-node in-memory cluster run on the default single-threaded browser-wasm runtime
-    (WasmEnableThreads off), under Node.js, so CI can run it. scripts/run-wasm-smoke.sh builds and
+    (WasmEnableThreads off), under Node.js, so CI can run it. scripts/run-wasm-smoke.sh publishes and
     runs it.
 
     The target framework is net10.0-browser, not net10.0: only a -browser target framework selects
@@ -14,6 +14,10 @@
   -->
   <PropertyGroup>
     <TargetFramework>net10.0-browser</TargetFramework>
+    <!-- SMOKE_FRAMEWORK=net11.0-browser scripts/run-wasm-smoke.sh checks the other browser target of
+         Kahuna.Core. A -p:TargetFramework override does not work here: restore then writes no assets
+         for that framework, and publish fails with NETSDK1005. -->
+    <TargetFramework Condition="'$(KahunaSmokeFramework)' != ''">$(KahunaSmokeFramework)</TargetFramework>
     <RuntimeIdentifier>browser-wasm</RuntimeIdentifier>
     <OutputType>Exe</OutputType>
     <WasmEnableThreads>false</WasmEnableThreads>

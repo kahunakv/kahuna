@@ -1,4 +1,6 @@
-FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build-env
+# The .NET 11 SDK restores the net11.0 targets of the libraries. The server targets net10.0, so the
+# runtime stage stays on the .NET 10 image.
+FROM mcr.microsoft.com/dotnet/sdk:11.0 AS build-env
 #FROM kahuna-base AS build-env
 
 RUN rm -fr /src && mkdir -p /src

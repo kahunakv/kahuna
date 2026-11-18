@@ -501,8 +501,8 @@ public sealed class EmbeddedKahunaOptions
     /// <c>RaftConfiguration.EnableHostPumpedScheduling</c>.
     ///
     /// <para>Exists only in the thread-free build (<c>KAHUNA_THREAD_FREE</c>, the <c>net10.0-browser</c>
-    /// target), which cannot start threads. Default is true there, so a browser host needs no
-    /// configuration. It requires <see cref="EnableSharedExecutorPool"/>, <c>memory</c>
+    /// and <c>net11.0-browser</c> targets), which cannot start threads. Default is true there, so a
+    /// browser host needs no configuration. It requires <see cref="EnableSharedExecutorPool"/>, <c>memory</c>
     /// <see cref="Storage"/>, and <c>memory</c> <see cref="WalStorage"/>. Set it to false only when
     /// something else pumps the node; with it false and no external driver, nothing runs.</para>
     /// </summary>

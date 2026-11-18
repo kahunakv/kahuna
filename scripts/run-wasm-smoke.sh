@@ -2,7 +2,7 @@
 #
 # Thread-free build smoke check.
 #
-# Builds Kahuna.WasmSmoke for the default single-threaded browser-wasm runtime and runs it under
+# Publishes Kahuna.WasmSmoke for the default single-threaded browser-wasm runtime and runs it under
 # Node.js. The app boots a single-node embedded Kahuna, waits for it to elect itself, runs a
 # key-value transaction and a transaction script, reads both values back, and disposes the node. It
 # then starts a 3-node in-memory cluster, writes through each node, checks that leadership stays
@@ -11,11 +11,12 @@
 # PlatformNotSupportedException (a Thread start or a blocking wait that the runtime refuses), on a
 # stall (a deadlock), on an election while no fault is injected, or on a wrong result.
 #
-# Needs the .NET 10 SDK and Node.js. It does not need the wasm-tools workload: the app does no
+# Needs the .NET 11 SDK and Node.js. It does not need the wasm-tools workload: the app does no
 # native relinking or AOT.
 #
 # Usage:
-#   scripts/run-wasm-smoke.sh              build (Release) and run
+#   scripts/run-wasm-smoke.sh              publish (Release) for net10.0-browser and run
+#   SMOKE_FRAMEWORK=net11.0-browser scripts/run-wasm-smoke.sh
 #   SMOKE_TIMEOUT=300 scripts/run-wasm-smoke.sh
 
 set -euo pipefail
@@ -24,10 +25,18 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROJECT_DIR="$REPO_ROOT/Kahuna.WasmSmoke"
 CONFIGURATION="${CONFIGURATION:-Release}"
 SMOKE_TIMEOUT="${SMOKE_TIMEOUT:-300}"
+SMOKE_FRAMEWORK="${SMOKE_FRAMEWORK:-net10.0-browser}"
 
-dotnet build "$PROJECT_DIR/Kahuna.WasmSmoke.csproj" -c "$CONFIGURATION"
+# Publish, not build: from .NET 11 the build output keeps the runtime files out of wwwroot/_framework
+# (only dotnet.js is there) and a development server supplies them, so Node.js cannot load the app
+# from it. A publish writes the complete folder on every SDK. Trimming stays off so the app runs the
+# same code as a build: the smoke check is about threads, not about what the trimmer removes.
+PUBLISH_DIR="$PROJECT_DIR/bin/$CONFIGURATION/$SMOKE_FRAMEWORK/publish"
 
-APP_DIR="$PROJECT_DIR/bin/$CONFIGURATION/net10.0-browser/wwwroot"
+dotnet publish "$PROJECT_DIR/Kahuna.WasmSmoke.csproj" -c "$CONFIGURATION" \
+  -p:KahunaSmokeFramework="$SMOKE_FRAMEWORK" -p:PublishTrimmed=false -o "$PUBLISH_DIR"
+
+APP_DIR="$PUBLISH_DIR/wwwroot"
 
 if [ ! -f "$APP_DIR/_framework/dotnet.js" ]; then
   echo "run-wasm-smoke: no _framework/dotnet.js under $APP_DIR" >&2

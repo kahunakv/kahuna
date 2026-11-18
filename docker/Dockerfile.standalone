@@ -10,7 +10,11 @@
 # publish is portable IL and bundles per-RID native assets (runtimes/linux-x64,
 # runtimes/linux-arm64, including SQLite), which each target runtime image selects
 # at load time — so one native build serves all target architectures.
-FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0 AS build-env
+#
+# The build stage uses the .NET 11 SDK because Kahuna.Core and Kahuna.Shared also target net11.0,
+# and the .NET 10 SDK cannot restore them. The server targets net10.0, so the runtime stage stays
+# on the .NET 10 image.
+FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:11.0 AS build-env
 
 RUN rm -fr /src && mkdir -p /src
 COPY Kahuna.Shared /src/Kahuna.Shared/

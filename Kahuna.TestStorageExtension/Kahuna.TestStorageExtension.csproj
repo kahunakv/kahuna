@@ -4,6 +4,9 @@
        which the extension-assembly loader tests point at. It is never packed. -->
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
+    <!-- The loader tests look for this assembly in the folder of their own target framework, so it
+         follows -p:KahunaTestFramework (see Kahuna.Server.Tests.csproj). -->
+    <TargetFramework Condition="'$(KahunaTestFramework)' != ''">$(KahunaTestFramework)</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>Kahuna.TestStorageExtension</RootNamespace>

@@ -25,16 +25,21 @@ jobs:
       - name: Install .NET
         uses: actions/setup-dotnet@v5
         with:
+          # The .NET 11 SDK builds the solution (the libraries also target net11.0). The .NET 10 runtime
+          # runs the executables and the default test run, which target net10.0.
           dotnet-version: |
-            8.0.x
-            9.0.x
             10.0.x
+            11.0.x
       - name: Thread-free browser-wasm smoke
         # A single-node embedded Kahuna on the default single-threaded browser-wasm runtime, under
         # Node.js: the net10.0-browser build of Kahuna.Core (KAHUNA_THREAD_FREE). It fails on a Thread
         # start or a blocking wait that the runtime refuses, on a deadlock, or on a wrong transaction
         # result. Normal .NET cannot catch a blocking wait: it has other threads to release it.
         run: bash scripts/run-wasm-smoke.sh
+      - name: Thread-free browser-wasm smoke (net11.0-browser)
+        # The packages ship one thread-free assembly for each browser target framework. This step
+        # checks the net11.0-browser assembly in the same way.
+        run: SMOKE_FRAMEWORK=net11.0-browser bash scripts/run-wasm-smoke.sh
       - name: Run Kahuna Server
         run: (cd scripts && chmod +x ./run-server.sh && ./run-server.sh)
       - name: Run Client Tests
@@ -47,3 +52,22 @@ jobs:
         run: docker compose -f docker/local.yml down -v
       - name: Run Server Tests
         run: (cd Kahuna.Server.Tests && dotnet test -l "console;verbosity=normal" --blame-hang --blame-hang-timeout 10m --blame-hang-dump-type none)
+  Kahuna-Server-Tests-Net11:
+    # The in-process server suite against the net11.0 target of the libraries. The job has its own
+    # runner, so its clusters do not share a machine with the suite in the other job. Only .NET 11 is
+    # installed, so a test that needs the .NET 10 runtime fails here.
+    runs-on: ubuntu-latest
+    env:
+      KAHUNA_TEST_LOG_LEVEL: Error
+      KAHUNA_TEST_TIMING_SCALE: "3"
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v5
+      - name: Install .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '11.0.x'
+      - name: Run Server Tests (net11.0)
+        # KahunaTestFramework builds the test project, Kahuna.Server and the extension fixtures for
+        # net11.0. The test project references the libraries, so the tests use their net11.0 build.
+        run: (cd Kahuna.Server.Tests && dotnet test -p:KahunaTestFramework=net11.0 -l "console;verbosity=normal" --blame-hang --blame-hang-timeout 10m --blame-hang-dump-type none)
