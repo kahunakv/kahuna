@@ -265,6 +265,18 @@ aggregator together and can share one Raft round, as the commits of a local coor
 is self-contained: it carries its own term and range fences and its transaction identity, and the record
 and intent state machines decide duplicates and races at apply.
 
+Nothing on the stream limits how many forwarded durable requests a receiver holds at once. The write
+aggregator's admission bounds the part of each request's life spent admitted to it
+(`kahuna.kv.write.queued_items`, rejections on `kahuna.kv.write.rejections{reason}`), but a request also
+spends time outside it: resolving the partition's leadership or redirecting to another leader before
+admission, waiting for the ordered apply of its committed batch, applying a commit or rollback resolution
+on the key-value actors (which never enter the aggregator), and writing its answer.
+`kahuna.internode.inbound_durable_in_flight{request}` counts the forwarded durable requests a node has
+started and not yet answered, by type (`durable_operation`, `durable_bundle`, `durable_one_phase`,
+`durable_decision`, `lookup_record`), across all of those stages. It returns to zero when the node's
+inbound durable work drains; a value that keeps rising while the senders' load is steady means the receiver
+is accepting forwarded work faster than it answers it.
+
 The placement requests on the same stream (seed or remove a key range, export and import range locks,
 import completion receipts, copy a range page, read a range's transaction state) do run on an ordered
 lane: one at a time per stream, in arrival order, each holding its turn until it answers. The receiver

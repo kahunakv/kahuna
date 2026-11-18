@@ -387,6 +387,179 @@ public sealed class TestServerBatcherMaintenanceLane
         Assert.Contains(seedWaits, ms => ms < HeldMs * 0.5);
     }
 
+    private static readonly GrpcServerBatchType[] DurableRequestTypes =
+    [
+        GrpcServerBatchType.ServerDurableOperation,
+        GrpcServerBatchType.ServerDurableBundle,
+        GrpcServerBatchType.ServerDurableOnePhase,
+        GrpcServerBatchType.ServerDurableDecision,
+        GrpcServerBatchType.ServerLookupTransactionRecord
+    ];
+
+    private static readonly string[] DurableRequestTags =
+        ["durable_operation", "durable_bundle", "durable_one_phase", "durable_decision", "lookup_record"];
+
+    /// <summary>
+    /// Five forwarded durable requests, one of each type, held inside their service calls on one stream: each is
+    /// counted once on the inbound in-flight gauge while it is held, and the count returns to zero once every
+    /// answer is written.
+    /// </summary>
+    [Fact]
+    public async Task HeldDurableRequests_StayCountedInFlightUntilAnswered()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        using InboundDurableInFlightRecorder recorder = new();
+
+        GatedDurableKahuna kahuna = new(gatedPartition: 7);
+        KeyValuesService service = new(kahuna, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
+        ChannelStreamWriter responses = new();
+
+        Task batch = recorder.Run(() => service.BatchServerKeyValueRequests(
+            new ListStreamReader<GrpcBatchServerKeyValueRequest>(
+                [.. DurableRequestTypes.Select((type, i) => DurableRequest(type, requestId: i + 1, partitionId: 7))]),
+            responses,
+            new StubServerCallContext(CancellationToken.None)));
+
+        for (int i = 0; i < DurableRequestTypes.Length; i++)
+            Assert.Equal(7, await kahuna.Entered.Reader.ReadAsync(ct).AsTask().WaitAsync(Timeout, ct));
+
+        foreach (string tag in DurableRequestTags)
+            Assert.Equal(1, recorder.InFlight(tag));
+
+        Assert.False(responses.Written.TryRead(out _));
+
+        kahuna.Gate.TrySetResult();
+
+        // The stream drains only after every handler has written its answer and left the gauge.
+        await batch.WaitAsync(Timeout, ct);
+
+        Assert.Equal([1, 2, 3, 4, 5], AnsweredRequestIds(responses.Written).Order());
+
+        foreach (string tag in DurableRequestTags)
+        {
+            Assert.Equal(0, recorder.InFlight(tag));
+            Assert.Equal(1, recorder.Started(tag));
+        }
+    }
+
+    /// <summary>
+    /// A forwarded durable request whose service call faults is refused, and its handler still leaves the inbound
+    /// in-flight gauge: a failure must not leave the count of a drained node above zero.
+    /// </summary>
+    [Fact]
+    public async Task FaultedDurableRequests_LeaveTheInFlightCount()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        using InboundDurableInFlightRecorder recorder = new();
+
+        // Implements none of the durable calls: each one throws inside its service call.
+        BlockingSeedKahuna kahuna = new();
+        KeyValuesService service = new(kahuna, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
+        ChannelStreamWriter responses = new();
+
+        await recorder.Run(() => service.BatchServerKeyValueRequests(
+            new ListStreamReader<GrpcBatchServerKeyValueRequest>(
+                [.. DurableRequestTypes.Select((type, i) => DurableRequest(type, requestId: i + 1, partitionId: 7))]),
+            responses,
+            new StubServerCallContext(CancellationToken.None))).WaitAsync(Timeout, ct);
+
+        Assert.Equal([1, 2, 3, 4, 5], AnsweredRequestIds(responses.Written).Order());
+
+        foreach (string tag in DurableRequestTags)
+        {
+            Assert.Equal(0, recorder.InFlight(tag));
+            Assert.Equal(1, recorder.Started(tag));
+        }
+    }
+
+    /// <summary>The request ids answered in everything written so far. Answers that complete together leave in one
+    /// coalesced carrier, so its inner answers are counted one by one.</summary>
+    private static List<int> AnsweredRequestIds(ChannelReader<GrpcBatchServerKeyValueResponse> written)
+    {
+        List<int> ids = [];
+
+        while (written.TryRead(out GrpcBatchServerKeyValueResponse? response))
+        {
+            if (response.Type == GrpcServerBatchType.ServerCoalesced)
+            {
+                foreach (GrpcBatchServerKeyValueResponse inner in response.Coalesced)
+                    ids.Add(inner.RequestId);
+            }
+            else
+                ids.Add(response.RequestId);
+        }
+
+        return ids;
+    }
+
+    /// <summary>
+    /// Sums the inbound durable in-flight gauge's measurements per request tag, counting only those recorded under
+    /// <see cref="Run"/>. The gauge is process-wide and other test classes forward record lookups through their
+    /// own batchers in parallel; the handlers of a stream run in the execution context of the call that started
+    /// it, so a marker set around that call separates this test's measurements from theirs.
+    /// </summary>
+    private sealed class InboundDurableInFlightRecorder : IDisposable
+    {
+        private static readonly AsyncLocal<InboundDurableInFlightRecorder?> Current = new();
+
+        private readonly MeterListener listener = new();
+
+        private readonly ConcurrentDictionary<string, long> inFlight = new();
+
+        private readonly ConcurrentDictionary<string, long> started = new();
+
+        public InboundDurableInFlightRecorder()
+        {
+            listener.InstrumentPublished = (instrument, l) =>
+            {
+                if (instrument.Name == "kahuna.internode.inbound_durable_in_flight")
+                    l.EnableMeasurementEvents(instrument);
+            };
+
+            listener.SetMeasurementEventCallback<long>((_, value, tags, _) =>
+            {
+                if (!ReferenceEquals(Current.Value, this))
+                    return;
+
+                foreach (KeyValuePair<string, object?> tag in tags)
+                {
+                    if (tag.Key != "request")
+                        continue;
+
+                    string request = (string)tag.Value!;
+                    inFlight.AddOrUpdate(request, value, (_, sum) => sum + value);
+
+                    if (value > 0)
+                        started.AddOrUpdate(request, value, (_, sum) => sum + value);
+                }
+            });
+
+            listener.Start();
+        }
+
+        /// <summary>Starts <paramref name="call"/> with this recorder's marker in its execution context.</summary>
+        public Task Run(Func<Task> call)
+        {
+            Current.Value = this;
+            try
+            {
+                return call();
+            }
+            finally
+            {
+                Current.Value = null;
+            }
+        }
+
+        public long InFlight(string request) => inFlight.TryGetValue(request, out long sum) ? sum : 0;
+
+        public long Started(string request) => started.TryGetValue(request, out long sum) ? sum : 0;
+
+        public void Dispose() => listener.Dispose();
+    }
+
     private static GrpcBatchServerKeyValueRequest DurableRequest(GrpcServerBatchType type, int requestId, int partitionId)
     {
         GrpcBatchServerKeyValueRequest request = new() { Type = type, RequestId = requestId };

@@ -1243,7 +1243,11 @@ internal sealed class KeyValueServerBatcher
     // could rely on. A lane turn would be held for the whole Raft round, so forwarded durable work
     // would run one round at a time per stream and never share a write batch; without one,
     // concurrent forwards reach the partition write aggregator together, as a local coordinator's
-    // do, and the aggregator's admission is their back-pressure.
+    // do, and the aggregator's admission is their back-pressure. Each handler counts itself on
+    // kahuna.internode.inbound_durable_in_flight from its start until its answer is written, so the
+    // forwarded durable work a node holds is visible including the parts the aggregator never sees:
+    // leadership resolution and redirects before admission, the ordered-apply wait after commit, and
+    // the resolutions applied on the key-value actors.
 
     private async Task DurableOperationDelayed(
         CoalescingResponseWriter responseWriter,
@@ -1252,6 +1256,8 @@ internal sealed class KeyValueServerBatcher
         StreamDrain drain
     )
     {
+        InterNodeInboundMetrics.DurableStarted(InterNodeInboundMetrics.DurableOperation);
+
         try
         {
             GrpcDurableOperationResponse resp = await service.DurableOperationInternal(request.DurableOperation, context);
@@ -1269,6 +1275,7 @@ internal sealed class KeyValueServerBatcher
         }
         finally
         {
+            InterNodeInboundMetrics.DurableEnded(InterNodeInboundMetrics.DurableOperation);
             drain.Exit();
         }
     }
@@ -1280,6 +1287,8 @@ internal sealed class KeyValueServerBatcher
         StreamDrain drain
     )
     {
+        InterNodeInboundMetrics.DurableStarted(InterNodeInboundMetrics.DurableBundle);
+
         try
         {
             GrpcDurableBundleResponse resp = await service.DurableBundleInternal(request.DurableBundle, context);
@@ -1297,6 +1306,7 @@ internal sealed class KeyValueServerBatcher
         }
         finally
         {
+            InterNodeInboundMetrics.DurableEnded(InterNodeInboundMetrics.DurableBundle);
             drain.Exit();
         }
     }
@@ -1308,6 +1318,8 @@ internal sealed class KeyValueServerBatcher
         StreamDrain drain
     )
     {
+        InterNodeInboundMetrics.DurableStarted(InterNodeInboundMetrics.DurableOnePhase);
+
         try
         {
             GrpcDurableOnePhaseResponse resp = await service.DurableOnePhaseInternal(request.DurableOnePhase, context);
@@ -1325,6 +1337,7 @@ internal sealed class KeyValueServerBatcher
         }
         finally
         {
+            InterNodeInboundMetrics.DurableEnded(InterNodeInboundMetrics.DurableOnePhase);
             drain.Exit();
         }
     }
@@ -1336,6 +1349,8 @@ internal sealed class KeyValueServerBatcher
         StreamDrain drain
     )
     {
+        InterNodeInboundMetrics.DurableStarted(InterNodeInboundMetrics.DurableDecision);
+
         try
         {
             GrpcDurableDecisionResponse resp = await service.DurableDecisionInternal(request.DurableDecision, context);
@@ -1353,6 +1368,7 @@ internal sealed class KeyValueServerBatcher
         }
         finally
         {
+            InterNodeInboundMetrics.DurableEnded(InterNodeInboundMetrics.DurableDecision);
             drain.Exit();
         }
     }
@@ -1465,6 +1481,8 @@ internal sealed class KeyValueServerBatcher
         StreamDrain drain
     )
     {
+        InterNodeInboundMetrics.DurableStarted(InterNodeInboundMetrics.LookupRecord);
+
         try
         {
             GrpcLookupTransactionRecordResponse resp = await service.LookupTransactionRecordInternal(request.LookupTransactionRecord, context);
@@ -1482,6 +1500,7 @@ internal sealed class KeyValueServerBatcher
         }
         finally
         {
+            InterNodeInboundMetrics.DurableEnded(InterNodeInboundMetrics.LookupRecord);
             drain.Exit();
         }
     }
