@@ -121,6 +121,8 @@ public sealed class TestMembership : BaseCluster
 
         try
         {
+            await WaitForSeededRosterAsync(raft1, raft2, raft3);
+
             long versionBefore = Math.Max(
                 raft1.GetMembership().MembershipVersion,
                 raft2.GetMembership().MembershipVersion);
@@ -485,6 +487,8 @@ public sealed class TestMembership : BaseCluster
 
         try
         {
+            await WaitForSeededRosterAsync(raft1, raft2, raft3);
+
             // 3→2: graceful leave must be committed (MembershipVersion advances).
             long v0 = raft1.GetMembership().MembershipVersion;
             await raft3.LeaveCluster(dispose: false, TestContext.Current.CancellationToken);

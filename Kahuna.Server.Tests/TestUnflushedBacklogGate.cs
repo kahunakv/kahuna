@@ -58,6 +58,20 @@ public sealed class TestUnflushedBacklogGate
         public void Release(bool transient) => Done.TrySetResult(false);
     }
 
+    private static async Task WaitForNoReservations(PartitionWriteAggregator aggregator, int partitionId, CancellationToken ct)
+    {
+        long deadline = Environment.TickCount64 + 5_000;
+
+        while (aggregator.ReservedItems(partitionId) != 0)
+        {
+            Assert.True(
+                Environment.TickCount64 < deadline,
+                $"Partition {partitionId} still holds {aggregator.ReservedItems(partitionId)} reserved item(s) after 5 s.");
+
+            await Task.Delay(1, ct);
+        }
+    }
+
     [Fact]
     public async Task OrdinaryWritesAreRefusedWhileOverBudget_TerminalPasses_AdmissionResumesWhenItClears()
     {
@@ -79,6 +93,10 @@ public sealed class TestUnflushedBacklogGate
             Submission before = new(1, 1, WriteAdmissionClass.Ordinary);
             Assert.True(aggregator.TryEnqueue(before));
             Assert.True(await before.Done.Task.WaitAsync(TimeSpan.FromSeconds(5), ct));
+
+            // The lane completes a submission before it releases the reservation of that submission.
+            // Wait for the release, so the count below shows only what the refused write holds.
+            await WaitForNoReservations(aggregator, partitionId: 1, ct);
 
             overBudget = true;
 

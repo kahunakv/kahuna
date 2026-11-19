@@ -7,6 +7,7 @@ using Kahuna.Shared.KeyValue;
 using Kommander;
 using Kommander.Communication.Memory;
 using Kommander.Discovery;
+using Kommander.System;
 using Kommander.Time;
 using Kommander.WAL;
 using Microsoft.Extensions.Logging;
@@ -1071,6 +1072,27 @@ public abstract class BaseCluster : IAsyncLifetime
         }
         throw new TimeoutException($"Timed out after {timeoutMs * TimingScale} ms waiting for condition.");
     }
+
+    /// <summary>
+    /// Waits until each node holds a committed roster that names every node a voter. The cluster
+    /// assembly returns when the partitions have leaders, which can be before a node holds the
+    /// roster. A node with no committed roster leaves with no removal, so a test that makes a node
+    /// leave immediately after the assembly calls this first.
+    /// </summary>
+    protected static Task WaitForSeededRosterAsync(params IRaft[] nodes) =>
+        WaitUntilAsync(() =>
+        {
+            foreach (IRaft node in nodes)
+            {
+                ClusterMembership roster = node.GetMembership();
+
+                if (roster.MembershipVersion == 0 ||
+                    roster.Members.Count(m => m.Role == ClusterMemberRole.Voter) != nodes.Length)
+                    return false;
+            }
+
+            return true;
+        }, timeoutMs: 30_000);
 
     /// <summary>
     /// End-of-test teardown of a whole cluster: every node is drained and disposed locally, without a

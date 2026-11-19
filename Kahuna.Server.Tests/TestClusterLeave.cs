@@ -54,6 +54,8 @@ public sealed class TestClusterLeave : BaseCluster
 
         try
         {
+            await WaitForSeededRosterAsync(raft1, raft2, raft3);
+
             long versionBefore = Math.Max(
                 raft1.GetMembership().MembershipVersion,
                 raft2.GetMembership().MembershipVersion);
@@ -135,6 +137,8 @@ public sealed class TestClusterLeave : BaseCluster
 
         try
         {
+            await WaitForSeededRosterAsync(raft1, raft2, raft3);
+
             // Shrink to a single voter first — the refusal only exists at that boundary.
             await raft3.LeaveCluster(dispose: false, TestContext.Current.CancellationToken);
             await raft2.LeaveCluster(dispose: false, TestContext.Current.CancellationToken);
