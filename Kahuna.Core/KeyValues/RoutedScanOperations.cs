@@ -305,6 +305,7 @@ internal sealed class RoutedScanOperations
 
         OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
         payload.ReadObservations = observations;
+        payload.ReadDependency = ScanReadDependency(readTimestamp, result.Type, result.Items);
         payload.Durability = durability;
         payload.CachedType = result.Type;
 
@@ -419,6 +420,7 @@ internal sealed class RoutedScanOperations
 
         OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
         payload.ReadObservations = observations;
+        payload.ReadDependency = ScanReadDependency(readTimestamp, result.Type, result.Items);
         payload.Durability = durability;
         payload.CachedType = result.Type;
 
@@ -562,6 +564,7 @@ internal sealed class RoutedScanOperations
         List<(RangeLockKey Range, RangeLockMode Mode)>? acquired = null;
         bool served = false;
         bool foldsReads = RoutedReadOperations.RecordsReadObservation(readTimestamp, readMode);
+        HLCTimestamp readDependency = readTimestamp;
 
         for (int i = 0; i < results.Length; i++)
         {
@@ -577,6 +580,7 @@ internal sealed class RoutedScanOperations
                 continue;
 
             served = true;
+            readDependency = ScanReadDependency(readDependency, result.Type, result.Items);
 
             // A plain as-of probe owns no live transactional MVCC, so its entries contribute no read dependencies;
             // a latest probe and a statement probe fold theirs (see RoutedReadOperations.RecordsReadObservation).
@@ -604,6 +608,7 @@ internal sealed class RoutedScanOperations
 
         OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
         payload.ReadObservations = observations;
+        payload.ReadDependency = readDependency;
         payload.AcquiredRangeLocks = acquired;
         payload.LockExpiresMs = acquired is null ? 0 : expiresMs;
         payload.LockGrantTerms = acquired is null ? null : grants.Take();
@@ -801,5 +806,21 @@ internal sealed class RoutedScanOperations
             cursorInclusive = false;
             pageIndex++;
         }
+    }
+
+    /// <summary>
+    /// The read dependency of one scan page (see <see cref="ReadDependencies"/>): <paramref name="current"/> raised
+    /// to the <c>LastModified</c> of every row a served page returned, tombstones included. A page that was not
+    /// served adds nothing.
+    /// </summary>
+    private static HLCTimestamp ScanReadDependency(HLCTimestamp current, KeyValueResponseType type, List<(string, ReadOnlyKeyValueEntry)> items)
+    {
+        if (type != KeyValueResponseType.Get)
+            return current;
+
+        foreach ((string _, ReadOnlyKeyValueEntry entry) in items)
+            current = ReadDependencies.Max(current, entry);
+
+        return current;
     }
 }

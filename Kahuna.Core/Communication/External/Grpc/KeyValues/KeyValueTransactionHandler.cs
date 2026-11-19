@@ -317,6 +317,7 @@ internal sealed class KeyValueTransactionHandler
         payload.CachedType = (KeyValueResponseType)request.CachedType;
         payload.CachedRevision = request.CachedRevision;
         payload.CachedTimestamp = new(request.CachedTimestampNode, request.CachedTimestampPhysical, request.CachedTimestampCounter);
+        payload.ReadDependency = new(request.ReadDependencyNode, request.ReadDependencyPhysical, request.ReadDependencyCounter);
         return payload;
     }
 

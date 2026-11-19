@@ -97,6 +97,12 @@ public sealed class TestSnapshotCommitClockFence : BaseCluster
         // A floor below the stamps changes nothing.
         HLCTimestamp lowFloor = new(3, 10, 0);
         Assert.True(TransactionCoordinator.MintDurableCommitTimestamp(lagging, 1, transactionId, staged, lowFloor) > ahead);
+
+        // The transaction read a value committed above every stamp and every floor: the commit lands above it.
+        HLCTimestamp readDependency = new(4, 90_000, 1);
+        HLCTimestamp aboveRead = TransactionCoordinator.MintDurableCommitTimestamp(lagging, 1, transactionId, staged, floor, readDependency);
+
+        Assert.True(aboveRead > readDependency, $"commit {aboveRead} is not above the read dependency {readDependency}");
     }
 
     /// <summary>Restaging a key within one transaction keeps the highest participant stamp the key took.</summary>

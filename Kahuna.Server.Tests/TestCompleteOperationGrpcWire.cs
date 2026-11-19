@@ -79,7 +79,8 @@ public sealed class TestCompleteOperationGrpcWire
             Durability = KeyValueDurability.Persistent,
             CachedType = KeyValueResponseType.Set,
             CachedRevision = 42,
-            CachedTimestamp = new HLCTimestamp(2, 300, 4)
+            CachedTimestamp = new HLCTimestamp(2, 300, 4),
+            ReadDependency = new HLCTimestamp(3, 400, 5)
         };
 
         OperationCompletionPayload restored = RoundTrip(payload);
@@ -106,6 +107,7 @@ public sealed class TestCompleteOperationGrpcWire
         Assert.Equal(payload.CachedType, restored.CachedType);
         Assert.Equal(payload.CachedRevision, restored.CachedRevision);
         Assert.Equal(payload.CachedTimestamp, restored.CachedTimestamp);
+        Assert.Equal(payload.ReadDependency, restored.ReadDependency);
     }
 
     /// <summary>
@@ -154,5 +156,6 @@ public sealed class TestCompleteOperationGrpcWire
         Assert.Null(restored.Read);
         Assert.Null(restored.ReadObservations);
         Assert.Null(restored.StagedMutations);
+        Assert.Equal(HLCTimestamp.Zero, restored.ReadDependency);
     }
 }

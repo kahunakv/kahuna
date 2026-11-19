@@ -163,6 +163,24 @@ internal abstract class BaseCommand
         }
     }
 
+    /// <summary>
+    /// Raises the transaction's read dependency floor (<see cref="TransactionContext.ReadDependencyFloor"/>) to
+    /// what a scan statement read: its read timestamp and the <c>LastModified</c> of every row it returned.
+    /// </summary>
+    internal static void RecordReadDependency(
+        ScriptTransactionContext context,
+        HLCTimestamp readTimestamp,
+        List<(string, ReadOnlyKeyValueEntry)> items
+    )
+    {
+        HLCTimestamp dependency = readTimestamp;
+
+        foreach ((string _, ReadOnlyKeyValueEntry entry) in items)
+            dependency = ReadDependencies.Max(dependency, entry);
+
+        context.RaiseReadDependencyFloor(dependency);
+    }
+
     internal static void RecordReadKey(
         ScriptTransactionContext context,
         string key,

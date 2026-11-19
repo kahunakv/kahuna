@@ -33,8 +33,9 @@ public sealed class TestDurableOutcomeConsultation
         ((KahunaManager)node.Kahuna).DurableTransactionRecordStore;
 
     // Seeds the resident canonical record for a transaction with the given terminal decision (or leaves it
-    // undecided when decision is null), mirroring what the finalize/recovery apply would install.
-    private static void Seed(EmbeddedKahunaNode node, HLCTimestamp txId, string anchor, TransactionDecision? decision)
+    // undecided when decision is null), mirroring what the finalize/recovery apply would install. Returns the
+    // commit timestamp frozen in the record.
+    private static HLCTimestamp Seed(EmbeddedKahunaNode node, HLCTimestamp txId, string anchor, TransactionDecision? decision)
     {
         HLCTimestamp commitTs = new(txId.N, txId.L + 1, txId.C);
         HLCTimestamp deadline = new(commitTs.N, commitTs.L + 100_000, commitTs.C);
@@ -54,6 +55,8 @@ public sealed class TestDurableOutcomeConsultation
                 break;
             // null → leave Undecided
         }
+
+        return commitTs;
     }
 
     [Fact]
@@ -65,14 +68,17 @@ public sealed class TestDurableOutcomeConsultation
 
         HLCTimestamp txId = node.Raft.HybridLogicalClock.TrySendOrLocalEvent(node.Raft.GetLocalNodeId());
         const string anchor = "consult-done:aaa";
-        Seed(node, txId, anchor, TransactionDecision.Commit);
+        HLCTimestamp commitTs = Seed(node, txId, anchor, TransactionDecision.Commit);
 
         // A handle for a session that does not exist in memory.
         TransactionHandle handle = new(txId, "lost-coord", anchor);
-        (KeyValueResponseType type, string? returnedAnchor) = await node.Kahuna.LocateAndCommitTransaction(handle, ct);
+        TransactionCommitAnswer answer = await node.Kahuna.LocateAndCommitTransaction(handle, ct);
 
-        Assert.Equal(KeyValueResponseType.Committed, type);
-        Assert.Equal(anchor, returnedAnchor);
+        Assert.Equal(KeyValueResponseType.Committed, answer.Type);
+        Assert.Equal(anchor, answer.RecordAnchorKey);
+
+        // The answer carries the commit timestamp frozen in the record.
+        Assert.Equal(commitTs, answer.CommitTimestamp);
     }
 
     [Fact]
@@ -87,9 +93,12 @@ public sealed class TestDurableOutcomeConsultation
         Seed(node, txId, anchor, decision: null);
 
         TransactionHandle handle = new(txId, "lost-coord", anchor);
-        (KeyValueResponseType type, _) = await node.Kahuna.LocateAndCommitTransaction(handle, ct);
+        TransactionCommitAnswer answer = await node.Kahuna.LocateAndCommitTransaction(handle, ct);
 
-        Assert.Equal(KeyValueResponseType.MustRetry, type);
+        Assert.Equal(KeyValueResponseType.MustRetry, answer.Type);
+
+        // An undecided record has no commit to report: its frozen timestamp is not returned.
+        Assert.Equal(HLCTimestamp.Zero, answer.CommitTimestamp);
     }
 
     [Fact]
@@ -104,9 +113,12 @@ public sealed class TestDurableOutcomeConsultation
         Seed(node, txId, anchor, TransactionDecision.Abort);
 
         TransactionHandle handle = new(txId, "lost-coord", anchor);
-        (KeyValueResponseType type, _) = await node.Kahuna.LocateAndCommitTransaction(handle, ct);
+        TransactionCommitAnswer answer = await node.Kahuna.LocateAndCommitTransaction(handle, ct);
 
-        Assert.Equal(KeyValueResponseType.Aborted, type);
+        Assert.Equal(KeyValueResponseType.Aborted, answer.Type);
+
+        // An aborted record has no commit to report: its frozen timestamp is not returned.
+        Assert.Equal(HLCTimestamp.Zero, answer.CommitTimestamp);
     }
 
     [Fact]

@@ -240,8 +240,10 @@ internal sealed partial class TransactionCoordinator
         // stamp on the staged write, not just the transaction id: a participant that served a snapshot read at T
         // before the write was staged advanced its clock past T, and a lagging coordinator could mint at or below
         // T. It must also exceed every commit floor the commit probe reported: a snapshot read served over the
-        // staged write answered the committed head at that floor, and the commit must not land inside it.
-        HLCTimestamp commitTimestamp = MintDurableCommitTimestamp(raft.HybridLogicalClock, raft.GetLocalNodeId(), txId, staged, context.ClaimedCommitFloor);
+        // staged write answered the committed head at that floor, and the commit must not land inside it. And it
+        // must exceed the read dependency floor, so the transaction commits after every commit whose value it read.
+        HLCTimestamp commitTimestamp = MintDurableCommitTimestamp(
+            raft.HybridLogicalClock, raft.GetLocalNodeId(), txId, staged, context.ClaimedCommitFloor, context.ReadDependencyFloor);
         HLCTimestamp decisionDeadline = new(commitTimestamp.N, commitTimestamp.L + DeriveDecisionDeadlineMarginMs(persistentKeys.Count), commitTimestamp.C);
 
         // The builder reads the session's staged values and written-base observations in place. Safe: this freeze

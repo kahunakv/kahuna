@@ -90,6 +90,14 @@ public sealed class OperationCompletionPayload
     public IReadOnlyList<KeyValueTransactionReadKey>? ReadObservations { get; set; }
 
     /// <summary>
+    /// The highest timestamp this read depends on: its read timestamp, and the <c>LastModified</c> of every entry it
+    /// served. The coordinator mints the durable commit timestamp above the highest value over the transaction's
+    /// reads (<see cref="TransactionContext.ReadDependencyFloor"/>), so a transaction commits after every commit it
+    /// read. Zero for an operation that read nothing, and from a node that predates the field.
+    /// </summary>
+    public HLCTimestamp ReadDependency { get; set; }
+
+    /// <summary>
     /// The actor-confirmed committed values for the persistent modified keys, echoed so the coordinator can stage
     /// them and take the durable-intent finalize path. Present only for persistent writes; a transaction with an
     /// unstaged persistent modified key falls back to the manual ticket path (never incorrect, just not batched).
@@ -154,6 +162,7 @@ public sealed class OperationCompletionPayload
         LockExpiresMs = 0;
         Read = null;
         ReadObservations = null;
+        ReadDependency = default;
         StagedMutations = null;
         LockGrantTerms = null;
         Durability = default;

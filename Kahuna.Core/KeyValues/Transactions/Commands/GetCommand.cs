@@ -59,6 +59,7 @@ internal sealed class GetCommand : BaseCommand
             context.StopOnStatementFailure("GET", keyName, durability, type);
 
         context.LastReadType = type;
+        context.RaiseReadDependencyFloor(ReadDependencies.Of(readTimestamp, type == KeyValueResponseType.Get ? readOnlyContext : null));
 
         if (type != KeyValueResponseType.Get || readOnlyContext is null)
         {

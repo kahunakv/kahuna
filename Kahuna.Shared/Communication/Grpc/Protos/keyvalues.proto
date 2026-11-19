@@ -1273,6 +1273,11 @@ message GrpcCompleteOperationRequest
   int32 CachedTimestampNode = 19;
   int64 CachedTimestampPhysical = 20;
   uint32 CachedTimestampCounter = 21;
+  // The highest read timestamp or served LastModified of the operation's reads. The coordinator mints the commit
+  // timestamp above the highest one over the transaction. An older sender leaves it zero.
+  int32 ReadDependencyNode = 28;
+  int64 ReadDependencyPhysical = 29;
+  uint32 ReadDependencyCounter = 30;
 }
 
 message GrpcCompleteOperationResponse

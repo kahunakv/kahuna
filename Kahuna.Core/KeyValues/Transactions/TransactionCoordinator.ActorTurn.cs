@@ -22,11 +22,16 @@ internal sealed partial class TransactionCoordinator
 
     /// <summary>
     /// Mints a durable commit timestamp on the coordinator's clock, strictly above the transaction id, every
-    /// staged write's participant stamp, and <paramref name="commitFloor"/> (the highest snapshot timestamp at
-    /// which a read was served the committed head of a staged key; Zero if none).
+    /// staged write's participant stamp, <paramref name="commitFloor"/> (the highest snapshot timestamp at
+    /// which a read was served the committed head of a staged key; Zero if none), and
+    /// <paramref name="readDependencyFloor"/> (the highest read timestamp or served <c>LastModified</c> over the
+    /// transaction's reads; Zero if none). The last bound orders a transaction after every commit it read, on any
+    /// partition: a value committed on a node whose clock runs ahead carries a timestamp that this coordinator's
+    /// clock, the clock of the leader that staged the write, and the transaction id can all be below.
     /// </summary>
     internal static HLCTimestamp MintDurableCommitTimestamp(
-        HybridLogicalClock clock, int nodeId, HLCTimestamp transactionId, Dictionary<string, StagedValue> staged, HLCTimestamp commitFloor = default)
+        HybridLogicalClock clock, int nodeId, HLCTimestamp transactionId, Dictionary<string, StagedValue> staged,
+        HLCTimestamp commitFloor = default, HLCTimestamp readDependencyFloor = default)
     {
         HLCTimestamp highest = transactionId;
 
@@ -38,6 +43,9 @@ internal sealed partial class TransactionCoordinator
 
         if (commitFloor > highest)
             highest = commitFloor;
+
+        if (readDependencyFloor > highest)
+            highest = readDependencyFloor;
 
         return clock.ReceiveEvent(nodeId, highest);
     }

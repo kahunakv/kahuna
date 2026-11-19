@@ -285,7 +285,7 @@ internal sealed partial class TransactionCoordinator
                     // rest of the working set (idempotent for keys the commit apply cleaned) and retain Committed
                     // so a late duplicate commit/rollback replays it.
                     await ReleaseWorkingSet(context);
-                    outcome = new(KeyValueResponseType.Committed, context.RecordAnchorKey);
+                    outcome = new(KeyValueResponseType.Committed, context.RecordAnchorKey, CommitTimestamp: unresolved.CommitTimestamp);
                     RetainTerminalOutcome(transactionId, outcome, now);
                     FinalizeSession(transactionId);
                     return;

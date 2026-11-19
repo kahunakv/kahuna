@@ -206,6 +206,24 @@ internal class TransactionContext
     }
 
     /// <summary>
+    /// The highest read dependency over the transaction's reads: the read timestamps and the <c>LastModified</c>
+    /// of every entry its registered reads and its script reads served (see <see cref="ReadDependencies"/>). The
+    /// commit timestamp is minted strictly above it, so a transaction that read a value commits after that value's
+    /// commit, also when the commit came from a node whose clock runs ahead and no Raft message carried that lead to
+    /// this coordinator yet. Raised under <see cref="registryLock"/> as each read completes; read by the freeze
+    /// after accepted operations drained.
+    /// </summary>
+    internal HLCTimestamp ReadDependencyFloor { get; private set; }
+
+    /// <summary>Raises <see cref="ReadDependencyFloor"/> to <paramref name="dependency"/> when that is higher.
+    /// For a read that does not complete through the operation registry, such as a script read.</summary>
+    internal void RaiseReadDependencyFloor(HLCTimestamp dependency)
+    {
+        lock (registryLock)
+            ReadDependencyFloor = ReadDependencies.Max(ReadDependencyFloor, dependency);
+    }
+
+    /// <summary>
     /// True once any finalize attempt of this transaction had its commit rejected by the record's deadline
     /// gate. Lets the coordinator count late-commit rejections once per transaction, so a client that retries
     /// the same commit several times is not counted as several lost transactions.
@@ -848,6 +866,8 @@ internal class TransactionContext
             foreach (KeyValueTransactionReadKey observed in reads)
                 FoldReadObservationLocked(observed, fromRead);
         }
+
+        ReadDependencyFloor = ReadDependencies.Max(ReadDependencyFloor, payload.ReadDependency);
 
         if (payload.LockGrantTerms is { } grants)
         {

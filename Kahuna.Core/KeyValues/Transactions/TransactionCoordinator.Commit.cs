@@ -33,12 +33,15 @@ internal sealed partial class TransactionCoordinator
     /// uncounted durable write). So absence answers <c>MustRetry</c>: a retry re-observes the settled record, and
     /// a permanently unknown transaction surfaces as indeterminate when the caller's bounded retries run out,
     /// never as a fabricated terminal failure. Found=false is returned only when there is no anchor.</para>
+    ///
+    /// <para>A commit decision also returns the commit timestamp frozen in the record, which is the timestamp every
+    /// write of the transaction carries. Every other answer returns <see cref="HLCTimestamp.Zero"/>.</para>
     /// </summary>
-    private async Task<(bool Found, KeyValueResponseType Response, CommitRefusalClass Refusal)> TryConsultDurableTransactionRecord(TransactionHandle handle)
+    private async Task<(bool Found, KeyValueResponseType Response, CommitRefusalClass Refusal, HLCTimestamp CommitTimestamp)> TryConsultDurableTransactionRecord(TransactionHandle handle)
     {
         // No anchor: no route to a canonical record. The caller decides how to report the lost session.
         if (string.IsNullOrEmpty(handle.RecordAnchorKey))
-            return (false, KeyValueResponseType.Errored, CommitRefusalClass.None);
+            return (false, KeyValueResponseType.Errored, CommitRefusalClass.None, HLCTimestamp.Zero);
 
         TransactionRecord? record;
         try
@@ -51,21 +54,21 @@ internal sealed partial class TransactionCoordinator
         {
             // The anchor leader cannot be resolved right now, so the outcome is unproven: answer the
             // retryable unknown, not a terminal Errored.
-            return (true, KeyValueResponseType.MustRetry, CommitRefusalClass.Unresolved);
+            return (true, KeyValueResponseType.MustRetry, CommitRefusalClass.Unresolved, HLCTimestamp.Zero);
         }
 
         // No resident record on the anchor leader: indeterminate, not terminal (see the summary). A retry
         // re-observes the truth.
         if (record is null)
-            return (true, KeyValueResponseType.MustRetry, CommitRefusalClass.Unresolved);
+            return (true, KeyValueResponseType.MustRetry, CommitRefusalClass.Unresolved, HLCTimestamp.Zero);
 
         return record.Decision switch
         {
-            TransactionDecision.Commit => (true, KeyValueResponseType.Committed, CommitRefusalClass.None),
+            TransactionDecision.Commit => (true, KeyValueResponseType.Committed, CommitRefusalClass.None, record.CommitTimestamp),
             // Terminal whatever the class: it can never commit.
-            TransactionDecision.Abort => (true, KeyValueResponseType.Aborted, CommitRefusals.FromAbortClass(record.AbortClass)),
+            TransactionDecision.Abort => (true, KeyValueResponseType.Aborted, CommitRefusals.FromAbortClass(record.AbortClass), HLCTimestamp.Zero),
             // Still undecided → recovery completes it.
-            _ => (true, KeyValueResponseType.MustRetry, CommitRefusalClass.Unresolved)
+            _ => (true, KeyValueResponseType.MustRetry, CommitRefusalClass.Unresolved, HLCTimestamp.Zero)
         };
     }
 
@@ -95,10 +98,12 @@ internal sealed partial class TransactionCoordinator
             // outcome survives as its canonical durable record on the data partition. Consult it via the anchor
             // leader: committed → Committed; undecided or absent → MustRetry (absence proves nothing). Only a
             // handle with no routable anchor is the unknown Errored, never a conflict Aborted.
-            (bool found, KeyValueResponseType durableRecord, CommitRefusalClass durableRefusal) = await TryConsultDurableTransactionRecord(handle);
+            (bool found, KeyValueResponseType durableRecord, CommitRefusalClass durableRefusal, HLCTimestamp durableCommitTimestamp) =
+                await TryConsultDurableTransactionRecord(handle);
             if (found)
                 return new TransactionCommitAnswer(durableRecord, handle.RecordAnchorKey, durableRefusal,
-                    durableRefusal == CommitRefusalClass.None ? null : "Outcome consulted from the canonical record after the session was lost");
+                    durableRefusal == CommitRefusalClass.None ? null : "Outcome consulted from the canonical record after the session was lost",
+                    durableCommitTimestamp);
 
             logger.LogWarning("Trying to commit unknown transaction {TransactionId}", transactionId);
 
@@ -422,7 +427,7 @@ internal sealed partial class TransactionCoordinator
             // A rollback cannot override a durable commit: for a lost session with a record anchor, return the
             // canonical record's outcome (routed to the anchor leader) instead of rolling back a commit that may
             // already be durable.
-            (bool found, KeyValueResponseType durableRecord, CommitRefusalClass _) = await TryConsultDurableTransactionRecord(handle);
+            (bool found, KeyValueResponseType durableRecord, CommitRefusalClass _, HLCTimestamp _) = await TryConsultDurableTransactionRecord(handle);
             if (found)
                 return durableRecord;
 
@@ -552,8 +557,10 @@ internal sealed partial class TransactionCoordinator
 
             if (fenced.Result == DurableFinalizeResult.Committed)
             {
+                // The outcome is retained, so a later duplicate commit replays it. It carries the frozen commit
+                // timestamp for that answer.
                 await ReleaseWorkingSet(context);
-                return new(KeyValueResponseType.Committed, context.RecordAnchorKey);
+                return new(KeyValueResponseType.Committed, context.RecordAnchorKey, CommitTimestamp: unresolved.CommitTimestamp);
             }
             // Durable Abort installed: the rollback below is safe to report.
         }

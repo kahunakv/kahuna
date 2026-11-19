@@ -252,11 +252,13 @@ internal sealed class RoutedReadOperations
         // A plain as-of read is pinned to a past timestamp: it owns no live transactional MVCC entry and so
         // contributes no read dependency to validate at commit. It still completes for finalize fencing and
         // idempotent replay, but records no observation into the read set. A latest read and a statement read
-        // record the revision they served (see RecordsReadObservation).
+        // record the revision they served (see RecordsReadObservation). Every read shape reports its read
+        // dependency, so the transaction commits after the commit of the value it was served.
         OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
         payload.Read = RecordsReadObservation(readTimestamp, readMode)
             ? new KeyValueTransactionReadKey { Key = key, Durability = durability, Exists = exists, Revision = exists ? entry!.Revision : -1 }
             : null;
+        payload.ReadDependency = ReadDependencies.Of(readTimestamp, exists ? entry : null);
         payload.Durability = durability;
         payload.CachedType = type;
         payload.CachedRevision = exists ? entry!.Revision : 0;
@@ -527,6 +529,7 @@ internal sealed class RoutedReadOperations
         List<(RangeLockKey Range, RangeLockMode Mode)>? acquired = null;
         string keySpace = KeyValueKeySpace.OfKey(keys[0]) ?? keys[0];
         bool foldsReads = RecordsReadObservation(readTimestamp, readMode);
+        HLCTimestamp readDependency = readTimestamp;
 
         for (int i = 0; i < results.Length; i++)
         {
@@ -534,6 +537,9 @@ internal sealed class RoutedReadOperations
 
             if (result.Locked)
                 (acquired ??= []).Add((new RangeLockKey(keySpace, keys[i], true, keys[i], true, durability), RangeLockMode.Shared));
+
+            if (result.Type == KeyValueResponseType.Get)
+                readDependency = ReadDependencies.Max(readDependency, result.Entry);
 
             // A plain as-of read owns no live transactional MVCC entry, so it records no observation; a latest read
             // and a statement read do (see RecordsReadObservation). Only confirmed answers fold, by the allow-list a
@@ -582,6 +588,7 @@ internal sealed class RoutedReadOperations
 
         OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
         payload.ReadObservations = observations;
+        payload.ReadDependency = readDependency;
         payload.AcquiredRangeLocks = acquired;
         payload.LockExpiresMs = acquired is null ? 0 : expiresMs;
         payload.LockGrantTerms = acquired is null ? null : grants.Take();
@@ -727,8 +734,17 @@ internal sealed class RoutedReadOperations
             }
         }
 
+        HLCTimestamp readDependency = readTimestamp;
+
+        foreach ((KeyValueResponseType type, _, _, ReadOnlyKeyValueEntry? entry) in result)
+        {
+            if (type is KeyValueResponseType.Get or KeyValueResponseType.Exists)
+                readDependency = ReadDependencies.Max(readDependency, entry);
+        }
+
         OperationCompletionPayload payload = OperationCompletionPayloadPool.Rent();
         payload.ReadObservations = observations;
+        payload.ReadDependency = readDependency;
         payload.Durability = keys.Count > 0 ? keys[0].durability : KeyValueDurability.Persistent;
         payload.CachedType = batchCachedType;
 

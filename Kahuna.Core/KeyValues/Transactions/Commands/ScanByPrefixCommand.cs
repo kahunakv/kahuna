@@ -56,6 +56,9 @@ internal sealed class ScanByPrefixCommand : BaseCommand
         // The same answer this statement returns: an empty scan is not found.
         context.LastReadType = response.Items.Count == 0 ? KeyValueResponseType.DoesNotExist : KeyValueResponseType.Get;
 
+        if (response.Type == KeyValueResponseType.Get)
+            RecordReadDependency(context, readTimestamp, response.Items);
+
         if (response.Items.Count == 0)
         {
             if (ast.rightAst is not null)

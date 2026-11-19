@@ -242,8 +242,13 @@ public sealed class TestAbandonedDurableFinalizeFence
         await Task.Delay(TransactionCoordinator.ReapGraceMs + 2500, ct);
         await kahuna.ReapAbandonedSessions();
 
-        (KeyValueResponseType replay, _) = await kahuna.LocateAndCommitTransaction(handle, ct);
-        Assert.Equal(KeyValueResponseType.Committed, replay);
+        TransactionCommitAnswer replay = await kahuna.LocateAndCommitTransaction(handle, ct);
+        Assert.Equal(KeyValueResponseType.Committed, replay.Type);
+
+        // The retained outcome carries the commit timestamp frozen in the record, like a commit the coordinator
+        // finalized itself.
+        Assert.NotEqual(HLCTimestamp.Zero, record.CommitTimestamp);
+        Assert.Equal(record.CommitTimestamp, replay.CommitTimestamp);
 
         // And the committed value is (or becomes, once recovery settles the intent) visible.
         await WaitUntil(async () =>
@@ -254,6 +259,39 @@ public sealed class TestAbandonedDurableFinalizeFence
             return read == KeyValueResponseType.Get && entry?.Value is not null &&
                    entry.Value.AsSpan().SequenceEqual("stalled-value"u8);
         }, ct);
+    }
+
+    /// <summary>
+    /// The rollback side of the same fence: a rollback of the session after the stalled bundle applied finds the
+    /// record committed and answers Committed. The retained outcome then answers a duplicate commit with the
+    /// record's commit timestamp.
+    /// </summary>
+    [Fact]
+    public async Task RolledBackStalledCommit_WhoseBundleAlreadyApplied_ReplaysTheCommitTimestamp()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        const string key = "fence/rollback/k1";
+
+        (EmbeddedKahunaNode node, StallingExecutor executor) = await StartNode(key, ct);
+        await using EmbeddedKahunaNode ownedNode = node;
+        KahunaManager kahuna = (KahunaManager)node.Kahuna;
+
+        TransactionHandle handle = await StartSessionWithStalledCommit(node, executor, key, ct);
+
+        executor.Armed = false;
+        await executor.ReplayStalledAsync(kahuna, ct);
+
+        TransactionRecord? record = kahuna.DurableTransactionRecordStore.Get(handle.TransactionId, 1);
+        Assert.NotNull(record);
+        Assert.Equal(TransactionDecision.Commit, record!.Decision);
+        Assert.NotEqual(HLCTimestamp.Zero, record.CommitTimestamp);
+
+        KeyValueResponseType rollback = await kahuna.LocateAndRollbackTransaction(handle, ct);
+        Assert.Equal(KeyValueResponseType.Committed, rollback);
+
+        TransactionCommitAnswer replay = await kahuna.LocateAndCommitTransaction(handle, ct);
+        Assert.Equal(KeyValueResponseType.Committed, replay.Type);
+        Assert.Equal(record.CommitTimestamp, replay.CommitTimestamp);
     }
 
     /// <summary>

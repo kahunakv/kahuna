@@ -56,6 +56,7 @@ internal sealed class ExistsCommand : BaseCommand
             context.StopOnStatementFailure("EXISTS", keyName, durability, type);
 
         context.LastReadType = type;
+        context.RaiseReadDependencyFloor(ReadDependencies.Of(readTimestamp, type == KeyValueResponseType.Exists ? readOnlyContext : null));
 
         if (readOnlyContext is null)
         {

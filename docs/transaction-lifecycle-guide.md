@@ -175,6 +175,55 @@ list of work to finalize. (Details in the coordinator guide.)
 If any modified key cannot be staged losslessly, the build fails and the transaction aborts rather than
 committing through a lesser path.
 
+The commit timestamp is also minted strictly above the transaction's **read dependency floor** (§6.1.1).
+
+#### 6.1.1 Commit timestamp order
+
+The coordinator mints the commit timestamp on its own clock. The clocks of two nodes do not agree. Kommander
+carries a clock lead from one node to another only in Raft appends and acknowledgements, so a node follows the
+fastest clock about one heartbeat behind (500 ms by default in `kahuna-server`, longer on a quiesced partition).
+These rules state which conflicts between two transactions T1 and T2 the commit timestamps put in order.
+
+**Write-write on one key.** Each mutation of a key has a later commit timestamp than the mutation before it. See
+[Delivery and ordering](keyvalue-watch-streams-guide.md#delivery-and-ordering) in the watch streams guide.
+
+**Write-read on any partitions.** T1 commits a write at c1. T2 reads that value and commits at c2. Then c2 is
+above c1, also when the key T2 read and the keys T2 wrote are on different partitions with different leaders.
+
+- Each read registered with the coordinator reports its read dependency on its completion: the highest of its read
+  timestamp and the `LastModified` of every entry it served (`OperationCompletionPayload.ReadDependency`). A scan
+  counts every row it served, tombstones included.
+- The coordinator keeps the highest read dependency of the transaction (`TransactionContext.ReadDependencyFloor`)
+  and mints the commit timestamp strictly above it.
+- A script transaction raises the same floor from its `GET`, `EXISTS`, `GET BY BUCKET` and `SCAN BY PREFIX`
+  statements.
+
+Without the floor, T2 can commit below c1 when T1's coordinator clock runs ahead and no Raft message carried that
+lead to T2's nodes yet. A snapshot read at a timestamp between c2 and c1 then sees T2's write and not the value T2
+read. `TestCommitTimestampReadDependency` reproduces that case: T1's commit is 3 s ahead of every clock.
+
+The floor does not cover these reads:
+
+- A read without a coordinator key. It is not registered with the coordinator.
+- A latest read that finds a deleted key. The answer carries no entry, so it has no timestamp. A read at a
+  timestamp (a statement read or an as-of read) gives its read timestamp.
+- A read retried under an operation id whose first completion already landed. The read runs again, but the floor
+  keeps the value of the first read.
+
+**Read-write anti-dependency.** T1 reads a key, T2 then overwrites that key, and T1 commits after T2. No order is
+promised: T1 can commit at a later timestamp than T2. When T1 read at a timestamp, the snapshot clock fence stamps
+a later write on the leader that served the read above that timestamp. T1's commit timestamp has no relation to
+T2's.
+
+**No persistent write.** A transaction that wrote no persistent key through the durable path has no commit
+timestamp, and its commit answer carries zero. An all-ephemeral transaction commits at a manual commit id, which
+the answer does not return.
+
+**Every commit answer of a durable commit** carries the same commit timestamp: the first answer, a duplicate
+commit that replays the retained outcome, a mirrored concurrent commit, a duplicate commit after the reaper or a
+rollback found the transaction committed, and a commit answered from the transaction's record after the
+coordinator lost the session.
+
 ### 6.2 Two replicated stores
 
 | Store | Scope | Role |

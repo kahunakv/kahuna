@@ -415,7 +415,9 @@ the partitions' unbounded commit ceilings answers `HistoryUnavailable`; take the
 
 **Commit timestamps.** A commit answers the transaction's commit timestamp, the one its writes carry and its watch
 events report (`TransactionCommitAnswer.CommitTimestamp`; the client's `KahunaTransactionSession.CommitWithTimestamp`).
-It is zero when the commit wrote no persistent key through the durable path.
+It is zero when the commit wrote no persistent key through the durable path. The transaction lifecycle guide states
+which conflicts between two transactions the commit timestamps put in order
+([Commit timestamp order](transaction-lifecycle-guide.md#611-commit-timestamp-order)).
 
 **Maintenance writes.** A transaction can name an origin at start (`KahunaTransactionOptions.Origin`, at most 64
 characters, for example `"schema-rewrite"` or `"ttl-sweep"`). The origin is stored on every prepared intent and
