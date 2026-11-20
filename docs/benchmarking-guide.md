@@ -151,7 +151,10 @@ executor read-index round when the lease had lapsed), `actor` (the step that rea
 `path=published` when the owning actor's published head record answered it on the caller's thread and
 `path=actor` when a mailbox round trip did; see the caching guide for what makes a read eligible),
 `complete` (the fold of the observation into the working set), and `total` (the whole get, tagged
-`path=registered` for a session read and `path=direct` for a plain `get`). The dashboard metrics
+`path=registered` for a session read and `path=direct` for a plain `get`). A read that took the actor
+path is also recorded in the `kahuna.kv.read.fallback` histogram (unit milliseconds, tag `reason`)
+under the guard that kept the published record from answering, with the time of the `actor` step as
+its value. The caching guide lists the reasons. The dashboard metrics
 endpoint (`/v1/dashboard/metrics`) serves it beside the write-path series, so Δtotal/Δcount over a
 scrape window gives the mean of each step. The collector behind that endpoint folds each sample into a
 per-processor stripe without a lock, so scraping this series costs the leader about 20 to 40 ns per

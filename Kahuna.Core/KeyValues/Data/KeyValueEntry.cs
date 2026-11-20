@@ -22,7 +22,7 @@ internal sealed class KeyValueEntry
     private KeyValueWriteIntent? writeIntent;
     private KeyValueReplicationIntent? replicationIntent;
     private InvalidateOrApplyData? pendingCommittedHead;
-    private Dictionary<HLCTimestamp, KeyValueMvccEntry>? mvccEntries;
+    private KeyValueMvccTable? mvccEntries;
     private KeyValueState state = KeyValueState.Set;
 
     /// <summary>
@@ -30,6 +30,12 @@ internal sealed class KeyValueEntry
     /// actor thread only (see <see cref="KeyValueContext.FlushHeadPublications"/>).
     /// </summary>
     internal PublishedHead? Published;
+
+    /// <summary>
+    /// The retracted record this entry left in its actor's table, until a new record replaces it or the entry
+    /// leaves the store. The actor records on it why no new record was published. Actor thread only.
+    /// </summary>
+    internal PublishedHead? Retired;
 
     /// <summary>
     /// The context whose store this entry is resident in, or null when it is not resident. Set by
@@ -56,6 +62,7 @@ internal sealed class KeyValueEntry
         if (Published is { } published)
         {
             published.Retract();
+            Retired = published;
             Published = null;
         }
 
@@ -261,15 +268,29 @@ internal sealed class KeyValueEntry
     /// <summary>
     /// Multiversion Concurrency Control (MVCC) values per TransactionId
     /// </summary>
-    public Dictionary<HLCTimestamp, KeyValueMvccEntry>? MvccEntries
+    public KeyValueMvccTable? MvccEntries
     {
         get => mvccEntries;
         set
         {
+            if (mvccEntries is not null && !ReferenceEquals(mvccEntries, value))
+                mvccEntries.Owner = null;
+
             mvccEntries = value;
+
+            if (value is not null)
+                value.Owner = this;
+
             HeadChanged();
         }
     }
+
+    /// <summary>
+    /// Called by <see cref="MvccEntries"/> when an entry was added, replaced or removed, or when an entry's
+    /// revision, stamp or staged state changed. The published record carries a copy of that state, so it is
+    /// retracted and republished like a head change.
+    /// </summary>
+    internal void MvccChanged() => HeadChanged();
 
     /// <summary>
     /// Current state of the key

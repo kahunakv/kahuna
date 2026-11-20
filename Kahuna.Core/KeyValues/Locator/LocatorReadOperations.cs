@@ -88,7 +88,7 @@ internal sealed class LocatorReadOperations
         {
             routing.RecordLocalKeyRoute(key, partitionId);
             LocalPointRead local = await manager.TryGetValueLocal(transactionId, key, revision, readTimestamp, durability, readMode, intentWait);
-            KeyValueReadMetrics.RecordActor(confirmEnd, Stopwatch.GetTimestamp(), local.ServedFromPublishedHead);
+            KeyValueReadMetrics.RecordActor(confirmEnd, Stopwatch.GetTimestamp(), local.ServedFromPublishedHead, local.Fallback);
 
             // A read that may wait behind a write intent can be answered long after the confirmation above. Confirm
             // again, so its answer is never older than a leadership a quorum confirmed: a node that lost the

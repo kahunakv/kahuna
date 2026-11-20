@@ -19,10 +19,11 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace Kahuna.Server.Tests;
 
 /// <summary>
-/// The published head records an actor keeps beside its store for off-actor latest reads: every change to a
-/// resident head or to its intents retracts the live record before the change lands, and the end-of-turn flush
-/// republishes a quiet <c>Set</c> head and nothing else. The checks drive the context and the handlers directly
-/// and compare the table with the store after each step.
+/// The published head records an actor keeps beside its store for off-actor point reads: every change to a
+/// resident head, to its intents, or to its MVCC table retracts the live record before the change lands, and
+/// the end-of-turn flush republishes a <c>Set</c> head that no direct write and no parked head covers, with a
+/// copy of its write intent's owner and of its MVCC table. The checks drive the context and the handlers
+/// directly and compare the table with the store after each step.
 /// </summary>
 public sealed class TestPublishedHeadTable : RaftTrackingTest
 {
@@ -79,25 +80,40 @@ public sealed class TestPublishedHeadTable : RaftTrackingTest
     }
 
     [Fact]
-    public void WriteIntent_RetractsAndStaysOffUntilCleared()
+    public void WriteIntent_RetractsAndRepublishesTheHeadWithItsOwner()
     {
         (KeyValueContext context, RaftManager raft) = CreateContext();
         HLCTimestamp now = Now(raft);
         KeyValueEntry entry = Insert(context, "k/3", "v1", 1, now);
         context.FlushHeadPublications();
         PublishedHead live = entry.Published!;
+        Assert.False(live.WriteIntentHeld);
 
         entry.WriteIntent = new KeyValueWriteIntent { TransactionId = now, Expires = now + 60_000 };
         Assert.True(live.IsRetracted);
         context.FlushHeadPublications();
-        Assert.Null(entry.Published);
-        Assert.True(context.PublishedHeads.TryGet("k/3", out PublishedHead kept) && kept.IsRetracted);
+
+        // The committed head below the intent stays published, and the record names the owner.
+        PublishedHead held = entry.Published!;
+        Assert.False(held.IsRetracted);
+        Assert.True(held.WriteIntentHeld);
+        Assert.Equal(now, held.WriteIntentOwner);
+        Assert.Equal(1L, held.Revision);
+        AssertTableMatchesStore(context);
+
+        // Another owner is another intent object: the record follows it.
+        HLCTimestamp other = Now(raft);
+        entry.WriteIntent = new KeyValueWriteIntent { TransactionId = other, Expires = other + 60_000 };
+        Assert.True(held.IsRetracted);
+        context.FlushHeadPublications();
+        Assert.Equal(other, entry.Published!.WriteIntentOwner);
         AssertTableMatchesStore(context);
 
         entry.WriteIntent = null;
         context.FlushHeadPublications();
         Assert.NotNull(entry.Published);
         Assert.False(entry.Published!.IsRetracted);
+        Assert.False(entry.Published.WriteIntentHeld);
         AssertTableMatchesStore(context);
     }
 
@@ -112,8 +128,14 @@ public sealed class TestPublishedHeadTable : RaftTrackingTest
 
         entry.ReplicationIntent = new KeyValueReplicationIntent { ProposalId = 7, Expires = now + 60_000 };
         Assert.True(live.IsRetracted);
+        Assert.Equal(PublishedReadFallback.Retracted, live.RetractCause);
         context.FlushHeadPublications();
         Assert.Null(entry.Published);
+
+        // The retracted record stays in the table and says why no new one replaced it.
+        Assert.True(context.PublishedHeads.TryGet("k/4", out PublishedHead kept));
+        Assert.Same(live, kept);
+        Assert.Equal(PublishedReadFallback.ReplicationIntent, kept.RetractCause);
 
         entry.ReplicationIntent = null;
         context.FlushHeadPublications();
@@ -124,6 +146,7 @@ public sealed class TestPublishedHeadTable : RaftTrackingTest
         Assert.True(relive.IsRetracted);
         context.FlushHeadPublications();
         Assert.Null(entry.Published);
+        Assert.Equal(PublishedReadFallback.ParkedHead, relive.RetractCause);
 
         entry.PendingCommittedHead = null;
         context.FlushHeadPublications();
@@ -132,7 +155,7 @@ public sealed class TestPublishedHeadTable : RaftTrackingTest
     }
 
     [Fact]
-    public void MvccDictionary_FlagsTheRecordHeld()
+    public void MvccTable_IsCopiedIntoTheRecord_AndEveryChangeOfItRetracts()
     {
         (KeyValueContext context, RaftManager raft) = CreateContext();
         HLCTimestamp now = Now(raft);
@@ -141,21 +164,107 @@ public sealed class TestPublishedHeadTable : RaftTrackingTest
         PublishedHead free = entry.Published!;
         Assert.False(free.MvccHeld);
 
+        HLCTimestamp reader = Now(raft);
+        HLCTimestamp writer = Now(raft);
+        HLCTimestamp late = Now(raft);
+        Assert.Equal(PublishedMvccState.None, free.MvccStateOf(reader));
+
+        // The table itself.
         entry.MvccEntries ??= new();
         Assert.True(free.IsRetracted);
-        context.FlushHeadPublications();
-        Assert.True(entry.Published!.MvccHeld);
+        PublishedHead current = Republished(context, entry);
+        Assert.True(current.MvccHeld);
+        Assert.Equal(PublishedMvccState.None, current.MvccStateOf(reader));
 
-        // A second pin added to the existing dictionary changes nothing the record must learn.
-        PublishedHead held = entry.Published!;
-        entry.MvccEntries.Add(now, new KeyValueMvccEntry { Revision = 1, State = KeyValueState.Set });
-        Assert.False(held.IsRetracted);
+        // A read pin at the head.
+        KeyValueMvccEntry pin = new() { Revision = 1, LastModified = now, State = KeyValueState.Set };
+        entry.MvccEntries.Add(reader, pin);
+        Assert.True(current.IsRetracted);
+        current = Republished(context, entry);
+        Assert.Equal(PublishedMvccState.PinAtHead, current.MvccStateOf(reader));
+        Assert.Equal(PublishedMvccState.None, current.MvccStateOf(writer));
+
+        // A second entry, through the indexer: a pin at another revision than the head.
+        entry.MvccEntries[late] = new KeyValueMvccEntry { Revision = 0, LastModified = now, State = KeyValueState.Set };
+        Assert.True(current.IsRetracted);
+        current = Republished(context, entry);
+        Assert.Equal(PublishedMvccState.PinMoved, current.MvccStateOf(late));
+        Assert.Equal(PublishedMvccState.PinAtHead, current.MvccStateOf(reader));
+
+        // A pin at the head's revision with another stamp is not at the head: an extend moved the head.
+        entry.MvccEntries[late] = new KeyValueMvccEntry { Revision = 1, LastModified = late, State = KeyValueState.Set };
+        current = Republished(context, entry);
+        Assert.Equal(PublishedMvccState.PinMoved, current.MvccStateOf(late));
+
+        // A staged write: the pin's revision and stamp change in place, then it is marked staged. Each of the
+        // three retracts on its own.
+        KeyValueMvccEntry staged = new() { Revision = 1, LastModified = now, State = KeyValueState.Set };
+        entry.MvccEntries.Add(writer, staged);
+        current = Republished(context, entry);
+        Assert.Equal(PublishedMvccState.PinAtHead, current.MvccStateOf(writer));
+
+        staged.Revision = 2;
+        Assert.True(current.IsRetracted);
+        current = Republished(context, entry);
+        Assert.Equal(PublishedMvccState.PinMoved, current.MvccStateOf(writer));
+
+        staged.LastModified = Now(raft);
+        Assert.True(current.IsRetracted);
+        current = Republished(context, entry);
+
+        staged.StagedUnder = new KeyValueWriteIntent { TransactionId = writer, Expires = writer + 60_000 };
+        Assert.True(current.IsRetracted);
+        current = Republished(context, entry);
+        Assert.Equal(PublishedMvccState.Staged, current.MvccStateOf(writer));
+        AssertTableMatchesStore(context);
+
+        // A removal.
+        Assert.True(entry.MvccEntries.Remove(late, out KeyValueMvccEntry? removed));
+        Assert.True(current.IsRetracted);
+        current = Republished(context, entry);
+        Assert.Equal(PublishedMvccState.None, current.MvccStateOf(late));
+
+        // An entry that left the table no longer reaches the record.
+        removed!.Revision = 7;
+        Assert.False(current.IsRetracted);
 
         entry.MvccEntries = null;
-        Assert.True(held.IsRetracted);
-        context.FlushHeadPublications();
-        Assert.False(entry.Published!.MvccHeld);
+        Assert.True(current.IsRetracted);
+        current = Republished(context, entry);
+        Assert.False(current.MvccHeld);
+        Assert.Equal(PublishedMvccState.None, current.MvccStateOf(reader));
         AssertTableMatchesStore(context);
+    }
+
+    [Fact]
+    public void MoreMvccEntriesThanARecordCarries_PublishesNoneOfThem()
+    {
+        (KeyValueContext context, RaftManager raft) = CreateContext();
+        HLCTimestamp now = Now(raft);
+        KeyValueEntry entry = Insert(context, "k/5b", "v1", 1, now);
+        entry.MvccEntries = new();
+
+        HLCTimestamp first = Now(raft);
+        entry.MvccEntries.Add(first, new KeyValueMvccEntry { Revision = 1, LastModified = now, State = KeyValueState.Set });
+        for (int i = 1; i < PublishedHead.MaxPins; i++)
+            entry.MvccEntries.Add(Now(raft), new KeyValueMvccEntry { Revision = 1, LastModified = now, State = KeyValueState.Set });
+
+        PublishedHead full = Republished(context, entry);
+        Assert.Equal(PublishedHead.MaxPins, full.Pins!.Length);
+        Assert.Equal(PublishedMvccState.PinAtHead, full.MvccStateOf(first));
+
+        // One more: the record says only that the key holds MVCC entries, also for a transaction with none.
+        HLCTimestamp extra = Now(raft);
+        entry.MvccEntries.Add(extra, new KeyValueMvccEntry { Revision = 1, LastModified = now, State = KeyValueState.Set });
+        PublishedHead over = Republished(context, entry);
+        Assert.True(over.MvccHeld);
+        Assert.Null(over.Pins);
+        Assert.Equal(PublishedMvccState.Unknown, over.MvccStateOf(first));
+        Assert.Equal(PublishedMvccState.Unknown, over.MvccStateOf(Now(raft)));
+        AssertTableMatchesStore(context);
+
+        Assert.True(entry.MvccEntries.Remove(extra, out _));
+        Assert.Equal(PublishedMvccState.PinAtHead, Republished(context, entry).MvccStateOf(first));
     }
 
     [Fact]
@@ -311,7 +420,8 @@ public sealed class TestPublishedHeadTable : RaftTrackingTest
         entry.WriteIntent = new KeyValueWriteIntent { TransactionId = now, Expires = now + 60_000 };
         entry.MvccEntries ??= new();
         context.FlushHeadPublications();
-        Assert.Null(entry.Published);
+        Assert.True(entry.Published!.WriteIntentHeld);
+        Assert.True(entry.Published.MvccHeld);
 
         drop.Execute(new KeyValueRequest(KeyValueRequestType.DropLeaderState, HLCTimestamp.Zero, HLCTimestamp.Zero, "d/1",
             null, null, -1, KeyValueFlags.None, 0, HLCTimestamp.Zero, KeyValueDurability.Persistent, 0, OwnerOf(context, raft, "d/1"), default));
@@ -321,6 +431,7 @@ public sealed class TestPublishedHeadTable : RaftTrackingTest
         Assert.Null(entry.MvccEntries);
         Assert.NotNull(entry.Published);
         Assert.False(entry.Published!.MvccHeld);
+        Assert.False(entry.Published.WriteIntentHeld);
         AssertTableMatchesStore(context);
     }
 
@@ -366,11 +477,61 @@ public sealed class TestPublishedHeadTable : RaftTrackingTest
         Assert.Equal(1L, pin!.Revision);
         Assert.Equal("v1", Encoding.UTF8.GetString(pin.Value!));
 
-        // A later pin for the same transaction does not replace the earlier, stricter one.
+        // The record of the moved head shows the pin behind it.
         context.FlushHeadPublications();
+        Assert.Equal(PublishedMvccState.PinMoved, entry.Published!.MvccStateOf(tx));
+
+        // A later pin for the same transaction does not replace the earlier, stricter one.
         pins.Execute(PinRequest("p/1", tx, entry.Published!));
         Assert.Equal(1L, entry.MvccEntries[tx].Revision);
         Assert.Single(entry.MvccEntries);
+    }
+
+    [Fact]
+    public void ReadPin_WhenItLands_EndsItsRegistration_OnEveryPath()
+    {
+        (KeyValueContext context, RaftManager raft) = CreateContext();
+        RecordReadPinHandler pins = new(context);
+        HLCTimestamp now = Now(raft);
+        HLCTimestamp tx = Now(raft);
+
+        KeyValueEntry entry = Insert(context, "p/3", "v1", 1, now);
+        context.FlushHeadPublications();
+        PublishedHead observed = entry.Published!;
+
+        // A second registration of the same transaction and key finds the first, with its record.
+        Assert.True(context.PublishedHeads.TryRegisterPin(tx, "p/3", observed, out _));
+        Assert.False(context.PublishedHeads.TryRegisterPin(tx, "p/3", new PublishedHead(null, 9, HLCTimestamp.Zero, now, KeyValueState.Set, 0), out PublishedHead first));
+        Assert.Same(observed, first);
+        Assert.Equal(1, context.PublishedHeads.PinsInFlightCount);
+
+        // The pin is added and the record of the key retracted before the registration ends, so the
+        // transaction shows in one of the two at any time.
+        pins.Execute(PinRequest("p/3", tx, observed));
+        Assert.Equal(0, context.PublishedHeads.PinsInFlightCount);
+        Assert.True(observed.IsRetracted);
+        context.FlushHeadPublications();
+        Assert.Equal(PublishedMvccState.PinAtHead, entry.Published!.MvccStateOf(tx));
+
+        // A pin that finds the transaction already pinned.
+        PublishedHead again = entry.Published!;
+        Assert.True(context.PublishedHeads.TryRegisterPin(tx, "p/3", again, out _));
+        pins.Execute(PinRequest("p/3", tx, again));
+        Assert.Equal(0, context.PublishedHeads.PinsInFlightCount);
+
+        // A pin that finds the entry evicted.
+        HLCTimestamp other = Now(raft);
+        Assert.True(context.PublishedHeads.TryRegisterPin(other, "p/3", again, out _));
+        context.RemoveStoreEntry("p/3");
+        pins.Execute(PinRequest("p/3", other, again));
+        Assert.Equal(0, context.PublishedHeads.PinsInFlightCount);
+
+        // A registration ends only with the pin it was made for.
+        Assert.True(context.PublishedHeads.TryRegisterPin(tx, "p/4", observed, out _));
+        context.PublishedHeads.ForgetPin(tx, "p/4", again);
+        Assert.Equal(1, context.PublishedHeads.PinsInFlightCount);
+        context.PublishedHeads.ForgetPin(tx, "p/4", observed);
+        Assert.Equal(0, context.PublishedHeads.PinsInFlightCount);
     }
 
     [Fact]
@@ -395,8 +556,9 @@ public sealed class TestPublishedHeadTable : RaftTrackingTest
     // ── helpers ──────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Every resident entry has a live record exactly when its head is a quiet <c>Set</c> head, that record is
-    /// the one in the table, and the table holds no live record for a key that is not resident.
+    /// Every resident entry has a live record exactly when its head is a <c>Set</c> head with no direct write in
+    /// flight, no parked head and no newer head pending. That record is the one in the table, and it states the
+    /// entry's head, its write intent and its MVCC table as they are now.
     /// </summary>
     private static void AssertTableMatchesStore(KeyValueContext context)
     {
@@ -404,15 +566,14 @@ public sealed class TestPublishedHeadTable : RaftTrackingTest
         {
             KeyValueEntry entry = kv.Value;
 
-            bool quiet = entry.State == KeyValueState.Set
+            bool publishable = entry.State == KeyValueState.Set
                 && entry.ReplicationIntent is null
-                && entry.WriteIntent is null
                 && entry.PendingCommittedHead is null
                 && !context.PublishedHeads.HasNewerPendingApply(kv.Key, entry.Revision, entry.LastModified);
 
             bool published = context.PublishedHeads.TryGet(kv.Key, out PublishedHead head) && !head.IsRetracted;
 
-            Assert.True(quiet == published, $"{kv.Key}: quiet={quiet} published={published}");
+            Assert.True(publishable == published, $"{kv.Key}: publishable={publishable} published={published}");
             if (!published)
             {
                 Assert.Null(entry.Published);
@@ -425,8 +586,40 @@ public sealed class TestPublishedHeadTable : RaftTrackingTest
             Assert.Equal(entry.Expires, head.Expires);
             Assert.Equal(entry.State, head.State);
             Assert.Equal(entry.Value, head.Value);
+            Assert.Equal(entry.WriteIntent is not null, head.WriteIntentHeld);
+            Assert.Equal(entry.WriteIntent?.TransactionId ?? HLCTimestamp.Zero, head.WriteIntentOwner);
             Assert.Equal(entry.MvccEntries is not null, head.MvccHeld);
+
+            if (entry.MvccEntries is not { } mvcc)
+                continue;
+
+            if (mvcc.Count > PublishedHead.MaxPins)
+            {
+                Assert.Null(head.Pins);
+                continue;
+            }
+
+            Assert.Equal(mvcc.Count, head.Pins!.Length);
+
+            foreach ((HLCTimestamp transactionId, KeyValueMvccEntry own) in mvcc)
+            {
+                PublishedMvccState expected =
+                    own.StagedUnder is not null ? PublishedMvccState.Staged
+                    : own.Revision == entry.Revision && own.LastModified == entry.LastModified ? PublishedMvccState.PinAtHead
+                    : PublishedMvccState.PinMoved;
+
+                Assert.Equal(expected, head.MvccStateOf(transactionId));
+            }
         }
+    }
+
+    /// <summary>Runs the end-of-turn flush and returns the live record of <paramref name="entry"/>.</summary>
+    private static PublishedHead Republished(KeyValueContext context, KeyValueEntry entry)
+    {
+        context.FlushHeadPublications();
+        Assert.NotNull(entry.Published);
+        Assert.False(entry.Published!.IsRetracted);
+        return entry.Published;
     }
 
     private static KeyValueRequest PinRequest(string key, HLCTimestamp tx, PublishedHead head) =>

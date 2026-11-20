@@ -26,7 +26,7 @@ public class TestKeyValueStoreAccountingCalibration
     // HLCTimestamp (readonly record struct): int N(4) + long L(8) + uint C(4) + padding = 24 bytes
     //   (measured via Unsafe.SizeOf; sequential layout pads the struct to 24)
     //
-    // KeyValueMvccEntry (sealed class): measured 112 bytes on heap
+    // KeyValueMvccEntry (sealed class): 128 bytes on heap
     //   object header        16
     //   byte[]? Value ref     8
     //   HLCTimestamp Expires 24
@@ -35,16 +35,19 @@ public class TestKeyValueStoreAccountingCalibration
     //   HLCTimestamp LastMod  24
     //   KeyValueState (int)   4
     //   bool NoRevision + pad (packed by the runtime's auto class layout)
-    //                      = 112 bytes on heap
+    //   StagedUnder ref       8
+    //   Table ref             8
+    //                      = 128 bytes on heap
     //
     // Dictionary<HLCTimestamp,KeyValueMvccEntry> slot in _entries[]:
     //   hashCode(4) + next(4) + key(HLCTimestamp=24) + value-ref(8) = 40 bytes
     //
-    // Dictionary object + initial _buckets + _entries array headers (capacity ~4):
+    // KeyValueMvccTable + its Dictionary object + initial _buckets + _entries array headers (capacity ~4):
+    //   table object         ~32
     //   dict object fields   ~96
     //   _buckets int[4]      ~32
     //   _entries header      ~16
-    //                      = ~144 bytes base (we charge DictionaryOverheadBytes=192, ~33% over)
+    //                      = ~176 bytes base (we charge DictionaryOverheadBytes=192, ~9% over)
     //
     // KeyValueRevisionEntry (readonly record struct): measured 64 bytes
     //   byte[]? Value ref     8
@@ -102,9 +105,9 @@ public class TestKeyValueStoreAccountingCalibration
     [Fact]
     public void MvccDictionary_BaseOverhead_WithinTolerance()
     {
-        // The DictionaryOverheadBytes constant should reflect the dict object +
-        // initial backing arrays. Hand-computed base: ~144 bytes (see header comment).
-        const long handComputedBase = 144;
+        // The DictionaryOverheadBytes constant should reflect the table object, the dict object and
+        // the initial backing arrays. Hand-computed base: ~176 bytes (see header comment).
+        const long handComputedBase = 176;
         AssertWithinTolerance(KeyValueStoreAccounting.DictionaryOverheadBytes, handComputedBase,
             "DictionaryOverheadBytes vs hand-computed dict+arrays base");
     }
@@ -123,8 +126,8 @@ public class TestKeyValueStoreAccountingCalibration
         long oneEntry  = KeyValueStoreAccounting.EstimateEntryBytes(key, entryOneMvcc);
         long charged   = oneEntry - baseBytes; // DictionaryOverheadBytes + MvccEntryOverheadBytes
 
-        // Hand-computed: dict base (144) + per-entry object+slot (112+40=152) = 296
-        const long handComputed = 296;
+        // Hand-computed: table and dict base (176) + per-entry object+slot (128+40=168) = 344
+        const long handComputed = 344;
         AssertWithinTolerance(charged, handComputed, "MVCC dict-base + one entry overhead");
     }
 
@@ -146,8 +149,8 @@ public class TestKeyValueStoreAccountingCalibration
         long twoBytes = KeyValueStoreAccounting.EstimateEntryBytes(key, entryTwo);
         long marginal = twoBytes - oneBytes; // MvccEntryOverheadBytes only (no second dict charge)
 
-        // Hand-computed: object(112) + slot(40) = 152
-        const long handComputed = 152;
+        // Hand-computed: object(128) + slot(40) = 168
+        const long handComputed = 168;
         AssertWithinTolerance(marginal, handComputed, "MVCC second-entry marginal cost");
     }
 

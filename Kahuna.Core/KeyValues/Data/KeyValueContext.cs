@@ -431,6 +431,7 @@ internal sealed class KeyValueContext
             entry.Published = null;
         }
 
+        entry.Retired = null;
         entry.Owner = null;
         entry.PublishQueued = false;
     }
@@ -450,15 +451,16 @@ internal sealed class KeyValueContext
     }
 
     /// <summary>
-    /// Publishes the head record of every entry whose head or intents changed during the turn, and the
-    /// prefix-lock presence. Runs once at the end of every actor turn, after the handler returned and before
+    /// Publishes the head record of every entry whose head, intents or MVCC table changed during the turn, and
+    /// the prefix-lock presence. Runs once at the end of every actor turn, after the handler returned and before
     /// the reply is sent, so a record is never older than the state that produced the reply.
     ///
-    /// <para>A record is published only for a quiet <c>Set</c> head: no replication intent, no write intent,
-    /// no parked committed head. A tombstone drops its record; a head under an intent keeps the retracted
-    /// record (the next quiet publish replaces it, one dictionary write instead of two). A head that is behind
-    /// a committed apply still pending on this actor's mailbox is not published: the apply retracts and
-    /// re-queues it when it lands, and until then every reader of the key goes to the actor.</para>
+    /// <para>A record is published only for a <c>Set</c> head with no replication intent and no parked committed
+    /// head. It carries the owner of the entry's write intent, when there is one, and a copy of its MVCC table. A
+    /// tombstone drops its record. A head under a replication intent or a parked head keeps the retracted record,
+    /// with the cause recorded on it (the next publish replaces it, one dictionary write instead of two). A head
+    /// that is behind a committed apply still pending on this actor's mailbox is not published: the apply
+    /// retracts and re-queues it when it lands, and until then every reader of the key goes to the actor.</para>
     /// </summary>
     internal void FlushHeadPublications()
     {
@@ -489,17 +491,26 @@ internal sealed class KeyValueContext
                 if (entry.State != KeyValueState.Set)
                 {
                     PublishedHeads.Remove(key);
+                    entry.Retired = null;
                     continue;
                 }
 
-                if (entry.ReplicationIntent is not null || entry.WriteIntent is not null || entry.PendingCommittedHead is not null)
+                if (entry.ReplicationIntent is not null || entry.PendingCommittedHead is not null)
+                {
+                    // The retracted record stays in the table; say why, for the read that finds it.
+                    entry.Retired?.SetRetractCause(
+                        entry.ReplicationIntent is not null ? PublishedReadFallback.ReplicationIntent : PublishedReadFallback.ParkedHead);
                     continue;
+                }
 
                 if (PublishedHeads.HasNewerPendingApply(key, entry.Revision, entry.LastModified))
                 {
                     PublishedHeads.Remove(key);
+                    entry.Retired = null;
                     continue;
                 }
+
+                entry.Retired = null;
 
                 PublishedHead head = new(
                     entry.Value,
@@ -507,9 +518,9 @@ internal sealed class KeyValueContext
                     entry.Expires,
                     entry.LastModified,
                     entry.State,
-                    mvccHeld: entry.MvccEntries is not null,
                     lastUsedMs: entry.LastUsed.L,
-                    headSinceTicks: entry.HeadSeenRevision == entry.Revision ? entry.HeadSeenTicks : 0);
+                    headSinceTicks: entry.HeadSeenRevision == entry.Revision ? entry.HeadSeenTicks : 0,
+                    holds: CopyHolds(entry));
 
                 entry.Published = head;
                 PublishedHeads.Publish(key, head);
@@ -519,6 +530,46 @@ internal sealed class KeyValueContext
         }
 
         PublishedHeads.SetPrefixLocksHeld(LocksByPrefix.Count > 0);
+    }
+
+    /// <summary>
+    /// What an entry's published record says transactions hold on the key: the owner of its write intent, and a
+    /// copy of its MVCC table with one item per transaction, saying whether its entry is a staged write, a read
+    /// pin at the entry's head (same revision and same commit stamp), or a read pin elsewhere. Null for an entry
+    /// with no write intent and no MVCC table. The copy of the table is left out when the table holds more
+    /// entries than a record carries.
+    /// </summary>
+    private static PublishedHolds? CopyHolds(KeyValueEntry entry)
+    {
+        KeyValueWriteIntent? intent = entry.WriteIntent;
+        KeyValueMvccTable? mvcc = entry.MvccEntries;
+
+        if (intent is null && mvcc is null)
+            return null;
+
+        PublishedPin[]? pins = null;
+
+        if (mvcc is not null && mvcc.Count <= PublishedHead.MaxPins)
+        {
+            pins = mvcc.Count == 0 ? [] : new PublishedPin[mvcc.Count];
+            int next = 0;
+
+            foreach ((HLCTimestamp transactionId, KeyValueMvccEntry pin) in mvcc)
+            {
+                PublishedMvccState state =
+                    pin.StagedUnder is not null ? PublishedMvccState.Staged
+                    : pin.Revision == entry.Revision && pin.LastModified == entry.LastModified ? PublishedMvccState.PinAtHead
+                    : PublishedMvccState.PinMoved;
+
+                pins[next++] = new(transactionId, state);
+            }
+        }
+
+        return new PublishedHolds(
+            writeIntentHeld: intent is not null,
+            writeIntentOwner: intent is not null ? intent.TransactionId : HLCTimestamp.Zero,
+            mvccHeld: mvcc is not null,
+            pins: pins);
     }
 
     public void AdjustEntryValueBytes(KeyValueEntry entry, int previousValueLength, int newValueLength)

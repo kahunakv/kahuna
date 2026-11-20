@@ -7,9 +7,10 @@ namespace Kahuna.Server.KeyValues;
 
 /// <summary>
 /// The state one key-value actor shares with off-actor readers: the published head records of its resident keys,
-/// the committed heads that are on their way to its mailbox but not yet applied, and whether it holds any prefix
-/// lock. One table per actor, found by the same consistent hash that routes a request to the actor, so the actor
-/// stays the only writer of the records and the readers never need a lock.
+/// the committed heads that are on their way to its mailbox but not yet applied, the read pins that are on their
+/// way to it, and whether it holds any prefix lock. One table per actor, found by the same consistent hash that
+/// routes a request to the actor, so the actor stays the only writer of the records and the readers never need
+/// a lock.
 ///
 /// <para>The pending-apply map closes the ordering gap between Kommander's applied frontier and the actor: a
 /// committed mutation is recorded here by the replicator <b>before</b> it is sent to the actor and before the
@@ -27,6 +28,10 @@ internal sealed class PublishedHeadTable
 
     private readonly ConcurrentDictionary<string, PendingApply> pendingApplies = new(StringComparer.Ordinal);
 
+    // The read pins sent to the actor and not yet processed by it, by transaction and key, each with the record
+    // it was served from. Added by the reader that sends the pin, removed by the actor when the pin lands.
+    private readonly ConcurrentDictionary<(HLCTimestamp TransactionId, string Key), PublishedHead> pinsInFlight = new();
+
     // 1 while the actor's prefix-lock table is non-empty. Written by the actor at the end of every turn that
     // changed it; a live prefix lock answers a point read with MustRetry on the actor path, so the reader
     // must defer to the actor while one exists.
@@ -40,6 +45,44 @@ internal sealed class PublishedHeadTable
 
     /// <summary>Number of pending applies not yet processed. Observability and tests.</summary>
     public int PendingApplyCount => pendingApplies.Count;
+
+    /// <summary>Number of read pins sent to the actor and not yet processed. Observability and tests.</summary>
+    public int PinsInFlightCount => pinsInFlight.Count;
+
+    /// <summary>
+    /// Registers the read pin of <paramref name="transactionId"/> on <paramref name="key"/> that the caller is
+    /// about to send for a read served from <paramref name="head"/>. True when the caller registered it and must
+    /// send the pin; false when a pin of the transaction on the key is already on its way, and
+    /// <paramref name="inFlight"/> is the record that one was served from.
+    ///
+    /// <para>Between a transaction's first read of a key from a record and the landing of its pin, the records of
+    /// the key do not show the transaction. This registration does: a second read of the key by the transaction
+    /// is answered from a record of the same head or by the actor, never from a record of a later head, so the
+    /// transaction cannot read two heads of one key without the actor's revision check.</para>
+    /// </summary>
+    public bool TryRegisterPin(HLCTimestamp transactionId, string key, PublishedHead head, out PublishedHead inFlight)
+    {
+        (HLCTimestamp, string) pin = (transactionId, key);
+
+        while (true)
+        {
+            if (pinsInFlight.TryAdd(pin, head))
+            {
+                inFlight = head;
+                return true;
+            }
+
+            if (pinsInFlight.TryGetValue(pin, out inFlight!))
+                return false;
+        }
+    }
+
+    /// <summary>
+    /// Forgets the registration of the read pin that was served from <paramref name="head"/>, once the actor
+    /// processed it or the sender could not send it.
+    /// </summary>
+    public void ForgetPin(HLCTimestamp transactionId, string key, PublishedHead head) =>
+        pinsInFlight.TryRemove(new KeyValuePair<(HLCTimestamp, string), PublishedHead>((transactionId, key), head));
 
     /// <summary>The live or retracted record for <paramref name="key"/>, when one is published.</summary>
     public bool TryGet(string key, out PublishedHead head) => heads.TryGetValue(key, out head!);

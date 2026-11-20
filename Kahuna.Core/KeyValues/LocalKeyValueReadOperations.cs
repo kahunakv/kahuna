@@ -16,9 +16,13 @@ namespace Kahuna.Server.KeyValues;
 /// <summary>
 /// The answer of a leader-local point get and which step produced it: <see cref="ServedFromPublishedHead"/> is
 /// true when the owning actor's published head record answered it on the caller's thread, false when an actor
-/// round trip did.
+/// round trip did. <see cref="Fallback"/> then names the guard that kept the record from answering.
 /// </summary>
-internal readonly record struct LocalPointRead(KeyValueResponseType Type, ReadOnlyKeyValueEntry? Entry, bool ServedFromPublishedHead);
+internal readonly record struct LocalPointRead(
+    KeyValueResponseType Type,
+    ReadOnlyKeyValueEntry? Entry,
+    bool ServedFromPublishedHead,
+    PublishedReadFallback Fallback = PublishedReadFallback.None);
 
 /// <summary>
 /// Executes key-value reads — get, exists, their many-key variants, and the write-intent probes — against
@@ -51,7 +55,8 @@ internal sealed class LocalKeyValueReadOperations
             runtime.Raft,
             runtime.Configuration.PublishedHeadReads,
             runtime.SnapshotFloorStore?.InstalledHistory,
-            runtime.RangeMapStore);
+            runtime.RangeMapStore,
+            runtime.Configuration.MaxIntentWaitMs);
     }
 
     // Aliases matching the field names the moved bodies use, so those bodies stay byte-for-byte as they were.
@@ -136,12 +141,14 @@ internal sealed class LocalKeyValueReadOperations
         KeyValueIntentWait intentWait = default
     )
     {
+        PublishedReadFallback fallback;
+
         try
         {
             if (IsGatedKey(key))
                 return new(new LocalPointRead(KeyValueResponseType.MustRetry, null, false));
 
-            if (publishedHeads.TryRead(transactionId, key, revision, readTimestamp, durability, readMode, out ReadOnlyKeyValueEntry? published))
+            if (publishedHeads.TryRead(transactionId, key, revision, readTimestamp, durability, readMode, intentWait, out ReadOnlyKeyValueEntry? published, out fallback))
                 return new(new LocalPointRead(KeyValueResponseType.Get, published, true));
         }
         catch (Exception ex)
@@ -149,7 +156,7 @@ internal sealed class LocalKeyValueReadOperations
             return ValueTask.FromException<LocalPointRead>(ex);
         }
 
-        return TryGetValueFromActor(transactionId, key, revision, readTimestamp, durability, readMode, intentWait);
+        return TryGetValueFromActor(transactionId, key, revision, readTimestamp, durability, readMode, intentWait, fallback);
     }
 
     private async ValueTask<LocalPointRead> TryGetValueFromActor(
@@ -159,7 +166,8 @@ internal sealed class LocalKeyValueReadOperations
         HLCTimestamp readTimestamp,
         KeyValueDurability durability,
         KeyValueReadMode readMode,
-        KeyValueIntentWait intentWait
+        KeyValueIntentWait intentWait,
+        PublishedReadFallback fallback
     )
     {
         KeyValueRequest request = KeyValueRequestPool.Rent(
@@ -207,10 +215,10 @@ internal sealed class LocalKeyValueReadOperations
                     response = await AskKeyValueActor(persistentKeyValuesRouter, request);
 
                 if (response is null)
-                    return new(KeyValueResponseType.Errored, null, false);
+                    return new(KeyValueResponseType.Errored, null, false, fallback);
 
                 if (response.Type != KeyValueResponseType.WaitingForReplication)
-                    return new(response.Type, response.Entry, false);
+                    return new(response.Type, response.Entry, false, fallback);
 
                 // A wait caused by a foreign prepared intent whose canonical decision is not resolvable locally (a
                 // remote anchor) would otherwise spin until settlement propagates the decision here. Route the
@@ -224,7 +232,7 @@ internal sealed class LocalKeyValueReadOperations
                 }
 
                 if (Environment.TickCount64 >= deadline)
-                    return new(KeyValueResponseType.MustRetry, null, false);
+                    return new(KeyValueResponseType.MustRetry, null, false, fallback);
 
                 Transactions.DurableTransactionMetrics.AddKvRetryWait("TryGetValue_4018");
                 await Task.Delay(ReadWaitBackoff.Next(ref backoffMs, deadline));
@@ -502,7 +510,7 @@ internal sealed class LocalKeyValueReadOperations
         {
             for (int i = 0; i < keys.Count; i++)
             {
-                if (publishedHeads.TryRead(transactionId, keys[i], -1, readTimestamp, durability, readMode, out ReadOnlyKeyValueEntry? published))
+                if (publishedHeads.TryRead(transactionId, keys[i], -1, readTimestamp, durability, readMode, intentWait, out ReadOnlyKeyValueEntry? published, out _))
                 {
                     if (results is null)
                     {

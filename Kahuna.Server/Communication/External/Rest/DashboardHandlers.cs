@@ -61,6 +61,7 @@ public static class DashboardHandlers
 
         // The point-read path per step, and the coordinator registration hops a transaction-scoped read takes.
         "kahuna.kv.read.stage",
+        "kahuna.kv.read.fallback",
         "kahuna.durable_tx.session_registration_forwards",
         "kahuna.durable_tx.session_registration_forward_ms",
 

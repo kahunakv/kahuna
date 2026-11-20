@@ -26,6 +26,8 @@ namespace Kahuna.Microbenchmarks;
 /// the calling thread. The keys are set once through the actor, so both paths read the same resident state;
 /// the actor path also touches the entry, as it does in production. <c>Readers</c> issues that many gets at
 /// once per operation, so the mailbox queueing the published path removes shows up at more than one caller.
+/// With <c>Pinned</c> the gets are the repeat reads of one transaction that read every key before: the actor
+/// answers them from the transaction's pin, and the record answers them because it shows that pin at its head.
 /// </summary>
 [MemoryDiagnoser]
 public class PublishedHeadReadBenchmark : IDisposable
@@ -34,6 +36,12 @@ public class PublishedHeadReadBenchmark : IDisposable
 
     [Params(1, 8)]
     public int Readers;
+
+    [Params(false, true)]
+    public bool Pinned;
+
+    // The transaction whose repeat reads are measured, or zero for plain gets.
+    private HLCTimestamp transaction;
 
     private IDisposable actorSystemLifetime = null!;
     private RaftManager raft = null!;
@@ -127,6 +135,25 @@ public class PublishedHeadReadBenchmark : IDisposable
                 throw new InvalidOperationException("record not published for " + keys[i]);
         }
 
+        if (Pinned)
+        {
+            // One transaction reads every key once. Each read sends a pin to the actor; the gets measured below
+            // are its repeat reads, after every pin landed.
+            transaction = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+            for (int i = 0; i < Keys; i++)
+            {
+                if (!reader.TryRead(transaction, keys[i], -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out _))
+                    throw new InvalidOperationException("first read not served for " + keys[i]);
+            }
+
+            for (int i = 0; i < Keys; i++)
+            {
+                while (!(table.TryGet(keys[i], out PublishedHead head) && !head.IsRetracted && head.MvccStateOf(transaction) == PublishedMvccState.PinAtHead))
+                    Thread.Sleep(1);
+            }
+        }
+
         inFlight = new Task<KeyValueResponse?>[8];
     }
 
@@ -157,7 +184,7 @@ public class PublishedHeadReadBenchmark : IDisposable
         long revisions = 0;
         for (int i = 0; i < Readers; i++)
         {
-            if (!reader.TryRead(HLCTimestamp.Zero, NextKey(), -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out ReadOnlyKeyValueEntry? entry))
+            if (!reader.TryRead(transaction, NextKey(), -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out ReadOnlyKeyValueEntry? entry))
                 throw new InvalidOperationException("record not served");
 
             revisions += entry!.Revision;
@@ -169,7 +196,7 @@ public class PublishedHeadReadBenchmark : IDisposable
     private async ValueTask<KeyValueResponse?> AskActor(string key)
     {
         KeyValueRequest request = KeyValueRequestPool.Rent(
-            KeyValueRequestType.TryGet, HLCTimestamp.Zero, HLCTimestamp.Zero, key, null, null, -1,
+            KeyValueRequestType.TryGet, transaction, HLCTimestamp.Zero, key, null, null, -1,
             KeyValueFlags.None, 0, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, 0, 0, default);
 
         try

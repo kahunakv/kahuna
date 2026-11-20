@@ -39,10 +39,10 @@ internal static class KeyValueStoreAccounting
 
     /// <summary>
     /// Charged once when the first entry is added to <c>entry.MvccEntries</c> (a
-    /// <c>Dictionary&lt;HLCTimestamp, KeyValueMvccEntry&gt;</c>). Covers the Dictionary object
-    /// itself (~96 bytes) plus its lazily-allocated initial backing arrays at minimum capacity:
-    /// _buckets int[4] (~32 bytes) and the _entries array object header (~16 bytes) plus
-    /// prime-capacity slack. Intentionally rounded up to err on the side of earlier eviction.
+    /// <see cref="KeyValueMvccTable"/> over a <c>Dictionary&lt;HLCTimestamp, KeyValueMvccEntry&gt;</c>). Covers
+    /// the table object (~32 bytes), the Dictionary object (~96 bytes) and its lazily-allocated initial backing
+    /// arrays at minimum capacity: _buckets int[4] (~32 bytes) and the _entries array object header (~16 bytes).
+    /// Rounded up to err on the side of earlier eviction.
     /// </summary>
     internal const int DictionaryOverheadBytes = 192;
 
@@ -74,12 +74,12 @@ internal static class KeyValueStoreAccounting
     /// <summary>
     /// Per-entry cost in a <c>Dictionary&lt;HLCTimestamp, KeyValueMvccEntry&gt;</c>: the slot in
     /// the _entries array (hashCode 4 + next 4 + key HLCTimestamp 24 + value-ref 8 = 40 bytes)
-    /// plus the <c>KeyValueMvccEntry</c> heap object (measured 112 bytes: header 16 + Value-ref 8 +
-    /// Expires 24 + Revision 8 + LastUsed 24 + LastModified 24 + State 4 + NoRevision 1 + padding),
-    /// for 152 bytes; rounded up to 160 to bias toward earlier eviction. The Value byte array itself
-    /// is charged separately via snapshotValue.Length. (HLCTimestamp measures 24 bytes.)
+    /// plus the <c>KeyValueMvccEntry</c> heap object (128 bytes: header 16 + Value-ref 8 +
+    /// Expires 24 + Revision 8 + LastUsed 24 + LastModified 24 + State 4 + NoRevision 1 + StagedUnder-ref 8 +
+    /// Table-ref 8 + padding), for 168 bytes; rounded up to 176 to bias toward earlier eviction. The Value
+    /// byte array itself is charged separately via snapshotValue.Length. (HLCTimestamp measures 24 bytes.)
     /// </summary>
-    private const int MvccEntryOverheadBytes = 160;
+    private const int MvccEntryOverheadBytes = 176;
 
     /// <summary>
     /// Heap cost of a parked <see cref="InvalidateOrApplyData"/> record beyond its Value bytes:
@@ -169,7 +169,7 @@ internal static class KeyValueStoreAccounting
         return bytes;
     }
 
-    private static long EstimateMvccBytes(Dictionary<HLCTimestamp, KeyValueMvccEntry>? mvccEntries)
+    private static long EstimateMvccBytes(KeyValueMvccTable? mvccEntries)
     {
         if (mvccEntries is null || mvccEntries.Count == 0)
             return 0;

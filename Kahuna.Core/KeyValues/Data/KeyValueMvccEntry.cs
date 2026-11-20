@@ -22,10 +22,30 @@ internal sealed class KeyValueMvccEntry
     /// </summary>
     public HLCTimestamp Expires { get; set; }
     
+    // The backing fields of the properties a published head record is derived from. Their setters tell the table
+    // the entry is filed in, which retracts the record of the key (see KeyValueMvccTable).
+    private long revision;
+    private HLCTimestamp lastModified;
+    private KeyValueWriteIntent? stagedUnder;
+
+    /// <summary>
+    /// The table this entry is filed in, or null while it is in none. Set and cleared by
+    /// <see cref="KeyValueMvccTable"/>.
+    /// </summary>
+    internal KeyValueMvccTable? Table;
+
     /// <summary>
     /// Current modification revision
     /// </summary>
-    public long Revision { get; set; }
+    public long Revision
+    {
+        get => revision;
+        set
+        {
+            revision = value;
+            Table?.Changed();
+        }
+    }
     
     /// <summary>
     /// HLC timestamp of the last time the key/value was used (read or written)
@@ -35,7 +55,15 @@ internal sealed class KeyValueMvccEntry
     /// <summary>
     /// HLC timestamp of the last time the key/value was modified
     /// </summary>
-    public HLCTimestamp LastModified { get; set; }
+    public HLCTimestamp LastModified
+    {
+        get => lastModified;
+        set
+        {
+            lastModified = value;
+            Table?.Changed();
+        }
+    }
     
     /// <summary>
     /// State of the key
@@ -54,5 +82,13 @@ internal sealed class KeyValueMvccEntry
     /// probe proves the transaction never lost the key, and learns every floor, by finding this exact intent
     /// still in place and never lapsed (see <see cref="KeyValueWriteIntent.Lapsed"/>).
     /// </summary>
-    public KeyValueWriteIntent? StagedUnder { get; set; }
+    public KeyValueWriteIntent? StagedUnder
+    {
+        get => stagedUnder;
+        set
+        {
+            stagedUnder = value;
+            Table?.Changed();
+        }
+    }
 }

@@ -21,11 +21,12 @@ using Nixie;
 namespace Kahuna.Server.Tests;
 
 /// <summary>
-/// The off-actor latest read: a quiet resident key is answered from the owning actor's published head record
-/// with no actor message, and every state the actor path treats specially — an intent, a prefix lock, an
-/// expired or absent head, a newer head still on its way to the actor, a durable intent, a transaction that
-/// already holds a snapshot — sends the read back to the actor. Driven against a real spawned actor through the
-/// reader, and end to end through an embedded node.
+/// The off-actor point read: a resident key is answered from the owning actor's published head record with no
+/// actor message, and every state the actor path treats specially sends the read back to the actor: a direct
+/// write in flight, a prefix lock, an expired or absent head, a newer head still on its way to the actor, a
+/// durable intent the head does not include, a transaction that staged a write or whose pin is not at the head,
+/// a read that must wait for a write intent. Driven against a real spawned actor through the reader, and end to
+/// end through an embedded node.
 /// </summary>
 public sealed class TestPublishedHeadReads : RaftTrackingTest
 {
@@ -121,7 +122,11 @@ public sealed class TestPublishedHeadReads : RaftTrackingTest
         Assert.Equal(KeyValueResponseType.Locked, locked!.Type);
 
         // The actor decides what a snapshot above a staged write does (wait, or push the commit above it).
-        Assert.False(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, rig.Now(), KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out _));
+        Assert.False(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, rig.Now(), KeyValueDurability.Ephemeral, KeyValueReadMode.Default, default, out _, out PublishedReadFallback fallback));
+        Assert.Equal(PublishedReadFallback.WriteIntent, fallback);
+
+        // A latest read of the same key is not held back by the intent.
+        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out _));
 
         await rig.AskAsync(Request(KeyValueRequestType.TryReleaseExclusiveLock, key, writer));
         Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, rig.Now(), KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out _));
@@ -178,7 +183,7 @@ public sealed class TestPublishedHeadReads : RaftTrackingTest
     }
 
     [Fact]
-    public async Task StatementRead_IsServedFromTheRecord_LeavesNoPin_AndYieldsToAnMvccHolder()
+    public async Task StatementRead_IsServedFromTheRecord_LeavesNoPin_AndIsNotBoundByAPin()
     {
         await using ActorRig rig = await ActorRig.CreateAsync(this);
         const string key = "pub/statement";
@@ -195,22 +200,26 @@ public sealed class TestPublishedHeadReads : RaftTrackingTest
         Assert.Equal(KeyValueResponseType.Get, viaActor!.Type);
         AssertSameHead(viaActor.Entry!, published);
 
-        // Neither path left a pin: the entry has no MVCC dictionary and the record still says so.
+        // Neither path left a pin: the entry has no MVCC table and the record still says so.
         KeyValueEntry resident = rig.Context.Store.Get(key)!;
         Assert.Null(resident.MvccEntries);
         Assert.True(rig.Context.PublishedHeads.TryGet(key, out PublishedHead live) && !live.IsRetracted && !live.MvccHeld);
+        Assert.Equal(0, rig.Context.PublishedHeads.PinsInFlightCount);
 
-        // A transaction that pins the key flags the record; a statement read then goes to the actor, which
-        // alone can tell a pin from a staged write of the reading transaction.
+        // A read pin does not bind a statement read, on the actor or here: not the pin of another transaction, and
+        // not a pin an earlier latest read of the same transaction left.
         HLCTimestamp pinner = rig.Now();
         Assert.True(rig.Reader.TryRead(pinner, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out _));
-        await WaitUntil(() => rig.Context.PublishedHeads.TryGet(key, out PublishedHead h) && !h.IsRetracted && h.MvccHeld);
-        Assert.False(rig.Reader.TryRead(tx, key, -1, rig.Now(), KeyValueDurability.Ephemeral, KeyValueReadMode.StatementSnapshot, out _), "MVCC held");
+        await WaitUntil(() => rig.MvccStateOf(key, pinner) == PublishedMvccState.PinAtHead);
+
+        Assert.True(rig.Reader.TryRead(tx, key, -1, rig.Now(), KeyValueDurability.Ephemeral, KeyValueReadMode.StatementSnapshot, out _), "pin of another transaction");
+        Assert.True(rig.Reader.TryRead(pinner, key, -1, rig.Now(), KeyValueDurability.Ephemeral, KeyValueReadMode.StatementSnapshot, out _), "own pin");
         Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, rig.Now(), KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out _), "plain snapshot read");
+        Assert.Single(resident.MvccEntries!);
     }
 
     [Fact]
-    public async Task WriteIntentAndPrefixLock_RouteTheReadToTheActor_UntilReleased()
+    public async Task PrefixLock_RoutesTheReadToTheActor_UntilReleased()
     {
         await using ActorRig rig = await ActorRig.CreateAsync(this);
         const string key = "lk/key";
@@ -219,21 +228,100 @@ public sealed class TestPublishedHeadReads : RaftTrackingTest
 
         Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out _));
 
-        KeyValueResponse? locked = await rig.AskAsync(Request(KeyValueRequestType.TryAcquireExclusiveLock, key, tx, expiresMs: 60_000));
-        Assert.Equal(KeyValueResponseType.Locked, locked!.Type);
-        Assert.False(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out _), "write intent");
-
-        await rig.AskAsync(Request(KeyValueRequestType.TryReleaseExclusiveLock, key, tx));
-        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out _), "released");
-
         KeyValueResponse? prefixLocked = await rig.AskAsync(Request(KeyValueRequestType.TryAcquireExclusivePrefixLock, "lk", tx, expiresMs: 60_000));
         Assert.Equal(KeyValueResponseType.Locked, prefixLocked!.Type);
         Assert.True(rig.Context.PublishedHeads.PrefixLocksHeld);
-        Assert.False(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out _), "prefix lock");
+        Assert.False(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, default, out _, out PublishedReadFallback fallback), "prefix lock");
+        Assert.Equal(PublishedReadFallback.PrefixLock, fallback);
 
         await rig.AskAsync(Request(KeyValueRequestType.TryReleaseExclusivePrefixLock, "lk", tx));
         Assert.False(rig.Context.PublishedHeads.PrefixLocksHeld);
         Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out _), "prefix lock released");
+    }
+
+    /// <summary>
+    /// A write intent of another transaction does not hold back a latest read on the actor, so it does not hold
+    /// back the record either: a plain read and a transaction's first read are answered with the committed head
+    /// below the intent, with the bytes the actor answers.
+    /// </summary>
+    [Fact]
+    public async Task LatestRead_UnderAForeignWriteIntent_IsServedFromTheRecord_AndEqualsTheActorAnswer()
+    {
+        await using ActorRig rig = await ActorRig.CreateAsync(this);
+        const string key = "wi/key";
+        await rig.AskAsync(Set(key, "v1"));
+        HLCTimestamp writer = rig.Now();
+        HLCTimestamp reader = rig.Now();
+
+        KeyValueResponse? staged = await rig.AskAsync(TxSet(key, "staged", writer));
+        Assert.Equal(KeyValueResponseType.Set, staged!.Type);
+
+        Assert.True(rig.Context.PublishedHeads.TryGet(key, out PublishedHead flagged) && !flagged.IsRetracted);
+        Assert.True(flagged.WriteIntentHeld);
+        Assert.Equal(writer, flagged.WriteIntentOwner);
+        Assert.Equal(PublishedMvccState.Staged, flagged.MvccStateOf(writer));
+
+        // A plain read: the committed head, not the staged write.
+        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out ReadOnlyKeyValueEntry? plain));
+        Assert.Equal("v1", Encoding.UTF8.GetString(plain!.Value!));
+        KeyValueResponse? plainViaActor = await rig.AskAsync(Get(key));
+        AssertSameHead(plainViaActor!.Entry!, plain);
+
+        // The first read of another transaction: the same head, and a pin at it.
+        Assert.True(rig.Reader.TryRead(reader, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out ReadOnlyKeyValueEntry? first));
+        AssertSameHead(plain, first!);
+        await WaitUntil(() => rig.MvccStateOf(key, reader) == PublishedMvccState.PinAtHead);
+
+        KeyValueResponse? firstViaActor = await rig.AskAsync(Get(key, reader));
+        Assert.Equal(KeyValueResponseType.Get, firstViaActor!.Type);
+        AssertSameHead(firstViaActor.Entry!, first!);
+
+        // The writer reads its own staged write, and only the actor has it.
+        Assert.False(rig.Reader.TryRead(writer, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, default, out _, out PublishedReadFallback fallback));
+        Assert.Equal(PublishedReadFallback.MvccStaged, fallback);
+        KeyValueResponse? own = await rig.AskAsync(Get(key, writer));
+        Assert.Equal("staged", Encoding.UTF8.GetString(own!.Entry!.Value!));
+
+        // The release of the intent publishes the head again without the flag.
+        await rig.AskAsync(Request(KeyValueRequestType.TryReleaseExclusiveLock, key, writer));
+        Assert.True(rig.Context.PublishedHeads.TryGet(key, out PublishedHead released) && !released.IsRetracted && !released.WriteIntentHeld);
+    }
+
+    /// <summary>
+    /// The first read of a key by a transaction that asked to wait parks on the actor behind a live write intent
+    /// of another transaction, so the record leaves that read to the actor. The owner of the intent, a
+    /// transaction that already holds a pin on the key, a read that did not ask to wait, and a server with the
+    /// wait turned off are not parked, and the record answers them.
+    /// </summary>
+    [Fact]
+    public async Task ReadThatAsksToWait_UnderAForeignWriteIntent_GoesToTheActor()
+    {
+        await using ActorRig rig = await ActorRig.CreateAsync(this);
+        const string key = "wait/key";
+        await rig.AskAsync(Set(key, "v1"));
+        KeyValueIntentWait wait = new(100, false);
+
+        // A transaction pins the key while it is free of intents.
+        HLCTimestamp pinned = rig.Now();
+        Assert.True(rig.Reader.TryRead(pinned, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, wait, out _, out _));
+        await WaitUntil(() => rig.MvccStateOf(key, pinned) == PublishedMvccState.PinAtHead);
+
+        HLCTimestamp writer = rig.Now();
+        KeyValueResponse? locked = await rig.AskAsync(Request(KeyValueRequestType.TryAcquireExclusiveLock, key, writer, expiresMs: 60_000));
+        Assert.Equal(KeyValueResponseType.Locked, locked!.Type);
+
+        HLCTimestamp waiter = rig.Now();
+        Assert.False(rig.Reader.TryRead(waiter, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, wait, out _, out PublishedReadFallback fallback));
+        Assert.Equal(PublishedReadFallback.IntentWait, fallback);
+        Assert.Equal(0, rig.Context.PublishedHeads.PinsInFlightCount);
+
+        Assert.True(rig.Reader.TryRead(pinned, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, wait, out _, out _), "a transaction with a pin does not park");
+        Assert.True(rig.Reader.TryRead(writer, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, wait, out _, out _), "the owner of the intent");
+        Assert.True(rig.Reader.TryRead(rig.Now(), key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, default, out _, out _), "a read that did not ask to wait");
+        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, wait, out _, out _), "a plain read");
+
+        PublishedHeadReader noWaitServer = rig.NewReader(maxIntentWaitMs: 0);
+        Assert.True(noWaitServer.TryRead(rig.Now(), key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, wait, out _, out _), "the server parks no read");
     }
 
     [Fact]
@@ -255,8 +343,13 @@ public sealed class TestPublishedHeadReads : RaftTrackingTest
         Assert.False(rig.Context.PublishedHeads.TryGet("del/key", out _));
     }
 
+    /// <summary>
+    /// A transaction's first read pins the head. Its next read of the key finds its own pin at the head of the
+    /// record and is answered from the record, with the bytes the actor answers and no second pin. A head that
+    /// moved since the pin goes to the actor, which answers <c>Aborted</c>.
+    /// </summary>
     [Fact]
-    public async Task TransactionalRead_PinsOnce_ThenAnswersFromTheActor_AndAbortsAfterAWrite()
+    public async Task TransactionalRead_PinsOnce_RepeatReadIsServedFromTheRecord_AndAHeadThatMovedGoesToTheActor()
     {
         await using ActorRig rig = await ActorRig.CreateAsync(this);
         const string key = "tx/key";
@@ -267,26 +360,272 @@ public sealed class TestPublishedHeadReads : RaftTrackingTest
         Assert.True(rig.Reader.TryRead(tx, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out ReadOnlyKeyValueEntry? first));
         Assert.Equal("v1", Encoding.UTF8.GetString(first!.Value!));
 
-        // The pin lands on the actor as a control message and flags the record as held.
-        await WaitUntil(() => rig.Context.PublishedHeads.TryGet(key, out PublishedHead h) && !h.IsRetracted && h.MvccHeld);
+        // The pin lands on the actor as a control message, and the next record shows it.
+        await WaitUntil(() => rig.MvccStateOf(key, tx) == PublishedMvccState.PinAtHead);
+        Assert.Equal(0, rig.Context.PublishedHeads.PinsInFlightCount);
         KeyValueEntry resident = rig.Context.Store.Get(key)!;
         Assert.True(resident.MvccEntries!.ContainsKey(tx));
         Assert.Equal(first.Revision, resident.MvccEntries[tx].Revision);
 
-        // Transactional reads now go to the actor; non-transactional reads keep the record.
-        Assert.False(rig.Reader.TryRead(tx, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out _), "own repeat read");
-        Assert.False(rig.Reader.TryRead(otherTx, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out _), "other transaction");
-        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out _), "plain read");
+        // The repeat read is answered from the record, with no message to the actor: no pin is sent and the
+        // record is not replaced.
+        Assert.True(rig.Context.PublishedHeads.TryGet(key, out PublishedHead pinnedRecord));
+        Assert.True(rig.Reader.TryRead(tx, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out ReadOnlyKeyValueEntry? repeat), "own repeat read");
+        AssertSameHead(first, repeat!);
+        Assert.Equal(0, rig.Context.PublishedHeads.PinsInFlightCount);
+        Assert.True(rig.Context.PublishedHeads.TryGet(key, out PublishedHead stillPinnedRecord));
+        Assert.Same(pinnedRecord, stillPinnedRecord);
 
-        KeyValueResponse? repeat = await rig.AskAsync(Get(key, tx));
-        Assert.Equal(KeyValueResponseType.Get, repeat!.Type);
-        Assert.Equal(first.Revision, repeat.Entry!.Revision);
+        KeyValueResponse? repeatViaActor = await rig.AskAsync(Get(key, tx));
+        Assert.Equal(KeyValueResponseType.Get, repeatViaActor!.Type);
+        AssertSameHead(repeatViaActor.Entry!, repeat!);
         Assert.Single(resident.MvccEntries);
+
+        // The first read of another transaction is not held back by that pin, and leaves its own.
+        Assert.True(rig.Reader.TryRead(otherTx, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out _), "other transaction");
+        await WaitUntil(() => rig.MvccStateOf(key, otherTx) == PublishedMvccState.PinAtHead);
+        Assert.Equal(2, resident.MvccEntries.Count);
+        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out _), "plain read");
 
         await rig.AskAsync(Set(key, "v2"));
 
+        // The head moved past the pin: the record says so and the actor answers Aborted.
+        Assert.Equal(PublishedMvccState.PinMoved, rig.MvccStateOf(key, tx));
+        Assert.False(rig.Reader.TryRead(tx, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, default, out _, out PublishedReadFallback fallback));
+        Assert.Equal(PublishedReadFallback.MvccPinMoved, fallback);
+
         KeyValueResponse? afterWrite = await rig.AskAsync(Get(key, tx));
         Assert.Equal(KeyValueResponseType.Aborted, afterWrite!.Type);
+    }
+
+    /// <summary>
+    /// A transaction that staged a write on a key reads its own write, which only the actor holds. The staging
+    /// turn replaces the record, so the read that follows the write's answer cannot find the old one.
+    /// </summary>
+    [Fact]
+    public async Task TransactionWithAStagedWrite_GoesToTheActor_AndReadsItsWrite()
+    {
+        await using ActorRig rig = await ActorRig.CreateAsync(this);
+        const string key = "tx/staged";
+        await rig.AskAsync(Set(key, "v1"));
+        HLCTimestamp tx = rig.Now();
+
+        // The transaction reads the key, then writes it: the pin becomes a staged write.
+        Assert.True(rig.Reader.TryRead(tx, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out _));
+        await WaitUntil(() => rig.MvccStateOf(key, tx) == PublishedMvccState.PinAtHead);
+
+        KeyValueResponse? staged = await rig.AskAsync(TxSet(key, "mine", tx));
+        Assert.Equal(KeyValueResponseType.Set, staged!.Type);
+        Assert.Equal(PublishedMvccState.Staged, rig.MvccStateOf(key, tx));
+
+        Assert.False(rig.Reader.TryRead(tx, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, default, out _, out PublishedReadFallback fallback));
+        Assert.Equal(PublishedReadFallback.MvccStaged, fallback);
+
+        KeyValueResponse? own = await rig.AskAsync(Get(key, tx));
+        Assert.Equal(KeyValueResponseType.Get, own!.Type);
+        Assert.Equal("mine", Encoding.UTF8.GetString(own.Entry!.Value!));
+
+        // A statement read of the transaction also reads the staged write, so it goes to the actor too.
+        Assert.False(rig.Reader.TryRead(tx, key, -1, rig.Now(), KeyValueDurability.Ephemeral, KeyValueReadMode.StatementSnapshot, out _));
+    }
+
+    /// <summary>
+    /// Two reads of a key by one transaction, the second before the pin of the first landed. The second is
+    /// answered from the same head, and one pin is sent for the two.
+    /// </summary>
+    [Fact]
+    public async Task SecondReadBeforeThePinLands_IsServedFromTheSameHead_WithOnePin()
+    {
+        await using ActorRig rig = await ActorRig.CreateAsync(this);
+        const string key = "tx/early";
+        await rig.AskAsync(Set(key, "v1"));
+        HLCTimestamp tx = rig.Now();
+
+        HoldTurn hold = await rig.HoldActorAsync(key);
+
+        Assert.True(rig.Reader.TryRead(tx, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out ReadOnlyKeyValueEntry? first));
+        Assert.Equal(1, rig.Context.PublishedHeads.PinsInFlightCount);
+
+        Assert.True(rig.Reader.TryRead(tx, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, out ReadOnlyKeyValueEntry? second));
+        AssertSameHead(first!, second!);
+        Assert.Equal(1, rig.Context.PublishedHeads.PinsInFlightCount);
+
+        hold.Release.SetResult();
+        await hold.Turn;
+
+        await WaitUntil(() => rig.MvccStateOf(key, tx) == PublishedMvccState.PinAtHead);
+        Assert.Equal(0, rig.Context.PublishedHeads.PinsInFlightCount);
+        KeyValueEntry resident = rig.Context.Store.Get(key)!;
+        Assert.Single(resident.MvccEntries!);
+    }
+
+    /// <summary>
+    /// A transaction read a head and its pin has not landed. The head then moves, and the new record does not show
+    /// the transaction. Its next read must not be answered from that record: it would read two heads with no
+    /// revision check. The registration of the pin sends the read to the actor, which processes the pin first and
+    /// answers <c>Aborted</c>.
+    /// </summary>
+    [Fact]
+    public async Task ReadWhileAPinFromAnotherHeadIsInFlight_GoesToTheActor_WhichAnswersAborted()
+    {
+        await using ActorRig rig = await ActorRig.CreateAsync(this);
+        const string key = "tx/late";
+        await rig.AskAsync(Set(key, "v1"));
+        HLCTimestamp tx = rig.Now();
+
+        // The first read is served and its pin is registered, and the actor is held so the pin cannot land.
+        // The message that moves the head is already in the mailbox, ahead of nothing the pin can pass: both
+        // wait for the held turn, and the head change is delivered here by hand before the pin.
+        Assert.True(rig.Context.PublishedHeads.TryGet(key, out PublishedHead observed));
+        Assert.True(rig.Context.PublishedHeads.TryRegisterPin(tx, key, observed, out _));
+
+        await rig.AskAsync(Set(key, "v2"));
+        Assert.True(rig.Context.PublishedHeads.TryGet(key, out PublishedHead moved) && !moved.IsRetracted);
+        Assert.Equal(PublishedMvccState.None, moved.MvccStateOf(tx));
+
+        Assert.False(rig.Reader.TryRead(tx, key, -1, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, KeyValueReadMode.Default, default, out _, out PublishedReadFallback fallback));
+        Assert.Equal(PublishedReadFallback.PinInFlight, fallback);
+
+        // The pin lands late, at the revision the transaction read.
+        rig.Ring.Send(KeyValueRequestPool.RentReadPin(key, tx, KeyValueDurability.Ephemeral, observed));
+        await WaitUntil(() => rig.MvccStateOf(key, tx) == PublishedMvccState.PinMoved);
+        Assert.Equal(0, rig.Context.PublishedHeads.PinsInFlightCount);
+
+        KeyValueResponse? viaActor = await rig.AskAsync(Get(key, tx));
+        Assert.Equal(KeyValueResponseType.Aborted, viaActor!.Type);
+    }
+
+    /// <summary>
+    /// A record is judged against guards that are read after the record itself. A head installed in between
+    /// retracts the record, and what announced that head can be gone again by the time the guards are read. The
+    /// record is checked once more after the guards, so a record that was replaced after it was taken is not
+    /// served.
+    /// </summary>
+    [Fact]
+    public async Task RecordReplacedAfterItWasTaken_IsNotServed()
+    {
+        await using ActorRig rig = await ActorRig.CreateAsync(this);
+        const string key = "tx/replaced";
+        await rig.AskAsync(Set(key, "v1"));
+
+        Assert.True(rig.Context.PublishedHeads.TryGet(key, out PublishedHead taken) && !taken.IsRetracted);
+
+        // Served while it is the head.
+        Assert.True(rig.Reader.TryServe(rig.Ring, rig.Context.PublishedHeads, taken, HLCTimestamp.Zero, key, HLCTimestamp.Zero,
+            KeyValueDurability.Ephemeral, default, rig.Now(), 0, out ReadOnlyKeyValueEntry? served, out _));
+        Assert.Equal("v1", Encoding.UTF8.GetString(served!.Value!));
+
+        // The head moves. Every other guard is clear again: nothing is pending, no intent, no lock.
+        await rig.AskAsync(Set(key, "v2"));
+        Assert.Equal(0, rig.Context.PublishedHeads.PendingApplyCount);
+
+        Assert.False(rig.Reader.TryServe(rig.Ring, rig.Context.PublishedHeads, taken, HLCTimestamp.Zero, key, HLCTimestamp.Zero,
+            KeyValueDurability.Ephemeral, default, rig.Now(), 0, out _, out PublishedReadFallback fallback));
+        Assert.Equal(PublishedReadFallback.Retracted, fallback);
+
+        // A transaction's first read of the replaced record is refused too. Its pin was registered before the
+        // second look, so it is still sent, at the head the record held, and the registration ends with it. The
+        // actor then answers the read as it answers any read that was concurrent with the write.
+        HLCTimestamp tx = rig.Now();
+        Assert.False(rig.Reader.TryServe(rig.Ring, rig.Context.PublishedHeads, taken, tx, key, HLCTimestamp.Zero,
+            KeyValueDurability.Ephemeral, default, rig.Now(), 0, out _, out _));
+        await WaitUntil(() => rig.MvccStateOf(key, tx) == PublishedMvccState.PinMoved);
+        Assert.Equal(0, rig.Context.PublishedHeads.PinsInFlightCount);
+
+        KeyValueResponse? viaActor = await rig.AskAsync(Get(key, tx));
+        Assert.Equal(KeyValueResponseType.Aborted, viaActor!.Type);
+    }
+
+    /// <summary>
+    /// A durable prepared intent on the key. An intent that is not decided, or that is committed and not installed
+    /// in the head yet, is the actor's to answer: it waits for the decision or serves the intent's value. An
+    /// intent whose write the head already includes stays in the store until its settlement removes it, and the
+    /// actor answers such a key with the bytes of the head, so the record answers it too.
+    /// </summary>
+    [Fact]
+    public async Task PersistentKey_PreparedIntent_IsServedOnlyWhenTheHeadIncludesIt()
+    {
+        await using ActorRig rig = await ActorRig.CreateAsync(this, persistent: true);
+        const string key = "pi/key";
+        HLCTimestamp now = rig.Now();
+        rig.InsertResident(key, "v1", 1, now);
+
+        HLCTimestamp writer = rig.Now();
+        HLCTimestamp commitAt = rig.Now();
+        PreparedIntent intent = Intent(key, writer, "v2", revision: 2, commitAt);
+
+        // Prepared, not decided.
+        rig.Intents.Apply(new PrepareIntentCommand(intent));
+        Assert.False(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, KeyValueReadMode.Default, default, out _, out PublishedReadFallback fallback), "undecided");
+        Assert.Equal(PublishedReadFallback.PreparedIntent, fallback);
+        KeyValueResponse? undecided = await rig.AskAsync(Get(key, durability: KeyValueDurability.Persistent));
+        Assert.Equal(KeyValueResponseType.WaitingForReplication, undecided!.Type);
+
+        // Committed, and the head does not hold it yet: the actor serves the intent's value.
+        rig.Intents.Apply(new ResolveIntentCommand(writer, intent.Epoch, key, Commit: true));
+        Assert.False(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, KeyValueReadMode.Default, out _), "committed, not installed");
+        KeyValueResponse? fromIntent = await rig.AskAsync(Get(key, durability: KeyValueDurability.Persistent));
+        Assert.Equal(KeyValueResponseType.Get, fromIntent!.Type);
+        Assert.Equal("v2", Encoding.UTF8.GetString(fromIntent.Entry!.Value!));
+
+        // The commit reaches the head, as the settlement installs it: the intent's revision and commit timestamp.
+        // The intent is still in the store.
+        rig.Ring.NotePendingApply(key, 2, commitAt);
+        rig.Ring.Send(KeyValueRequestPool.RentInvalidateOrApply(
+            key, 2, "v2"u8.ToArray(), HLCTimestamp.Zero, commitAt, commitAt, KeyValueState.Set,
+            forceResident: false, transactionId: writer, partitionId: 0, noRevision: false,
+            isRollback: false, returnToPoolOnReceive: true));
+        await WaitUntil(() => rig.Context.PublishedHeads.TryGet(key, out PublishedHead h) && !h.IsRetracted && h.Revision == 2);
+        Assert.NotNull(rig.Intents.Get(key));
+
+        Assert.True(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, KeyValueReadMode.Default, out ReadOnlyKeyValueEntry? included), "the head includes the intent");
+        Assert.Equal("v2", Encoding.UTF8.GetString(included!.Value!));
+        KeyValueResponse? includedViaActor = await rig.AskAsync(Get(key, durability: KeyValueDurability.Persistent));
+        Assert.Equal(KeyValueResponseType.Get, includedViaActor!.Type);
+        AssertSameHead(includedViaActor.Entry!, included);
+
+        // A transaction's first read pins that head on both paths.
+        HLCTimestamp reader = rig.Now();
+        Assert.True(rig.Reader.TryRead(reader, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, KeyValueReadMode.Default, out ReadOnlyKeyValueEntry? pinned));
+        AssertSameHead(included, pinned!);
+        await WaitUntil(() => rig.MvccStateOf(key, reader) == PublishedMvccState.PinAtHead);
+        KeyValueResponse? pinnedViaActor = await rig.AskAsync(Get(key, reader, KeyValueDurability.Persistent));
+        Assert.Equal(KeyValueResponseType.Get, pinnedViaActor!.Type);
+        AssertSameHead(pinnedViaActor.Entry!, pinned!);
+
+        // The transaction that owns the intent is left to the actor.
+        Assert.False(rig.Reader.TryRead(writer, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, KeyValueReadMode.Default, out _), "own intent");
+
+        // A later intent on the key is ahead of the head again.
+        rig.Intents.Apply(new RemoveIntentCommand(writer, intent.Epoch, key));
+        Assert.Null(rig.Intents.Get(key));
+        HLCTimestamp next = rig.Now();
+        rig.Intents.Apply(new PrepareIntentCommand(Intent(key, next, "v3", revision: 3, rig.Now())));
+        Assert.False(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, KeyValueReadMode.Default, out _), "a newer intent");
+    }
+
+    /// <summary>
+    /// A committed delete keeps the revision of the value it deletes. At that revision the head does not include
+    /// the delete, whatever its stamp, so the read goes to the actor, which answers that the key does not exist.
+    /// </summary>
+    [Fact]
+    public async Task PersistentKey_CommittedDeleteIntentAtTheHeadRevision_GoesToTheActor()
+    {
+        await using ActorRig rig = await ActorRig.CreateAsync(this, persistent: true);
+        const string key = "pi/deleted";
+        HLCTimestamp now = rig.Now();
+        rig.InsertResident(key, "v1", 1, now);
+
+        HLCTimestamp writer = rig.Now();
+        PreparedIntent delete = Intent(key, writer, null, revision: 1, rig.Now()) with { State = KeyValueState.Deleted };
+        rig.Intents.Apply(new PrepareIntentCommand(delete));
+        rig.Intents.Apply(new ResolveIntentCommand(writer, delete.Epoch, key, Commit: true));
+
+        Assert.False(rig.Reader.TryRead(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, KeyValueReadMode.Default, default, out _, out PublishedReadFallback fallback));
+        Assert.Equal(PublishedReadFallback.PreparedIntent, fallback);
+
+        KeyValueResponse? viaActor = await rig.AskAsync(Get(key, durability: KeyValueDurability.Persistent));
+        Assert.Equal(KeyValueResponseType.DoesNotExist, viaActor!.Type);
     }
 
     [Fact]
@@ -442,6 +781,82 @@ public sealed class TestPublishedHeadReads : RaftTrackingTest
         (KeyValueResponseType t4, ReadOnlyKeyValueEntry? e4) = await node.Kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
         Assert.Equal(KeyValueResponseType.Get, t4);
         Assert.Equal("two"u8.ToArray(), e4!.Value);
+    }
+
+    /// <summary>
+    /// One transaction on an embedded node, through the routed read path: its first read and its repeat read of a
+    /// key are answered from the published record, and after it wrote the key its read takes the actor, which
+    /// returns the staged value. The actor-path sample names the guard that refused the record.
+    /// </summary>
+    [Fact]
+    public async Task EmbeddedNode_RepeatReadOfATransaction_IsServedFromThePublishedRecord_AndAnActorReadNamesItsReason()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using EmbeddedKahunaNode node = new(Options(), loggerFactory);
+        await node.StartAsync(ct);
+        string key = "e2e/repeat/" + Guid.NewGuid().ToString("N")[..8];
+        await node.WaitForLeaderForKeyAsync(key, ct);
+
+        using MetricCapture paths = new("path", "kahuna.kv.read.stage");
+        using MetricCapture reasons = new("reason", "kahuna.kv.read.fallback", "kahuna.kv.read.stage");
+
+        await node.Kahuna.LocateAndTrySetKeyValue(HLCTimestamp.Zero, key, "one"u8.ToArray(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
+
+        (KeyValueResponseType started, TransactionHandle handle) = await node.Kahuna.LocateAndStartTransaction(
+            new KeyValueTransactionOptions { CoordinatorKey = key, Locking = KeyValueTransactionLocking.Optimistic, Timeout = 10_000 }, ct);
+        Assert.Equal(KeyValueResponseType.Set, started);
+
+        (KeyValueResponseType t1, ReadOnlyKeyValueEntry? e1) = await node.Kahuna.LocateAndTryGetValue(
+            handle.TransactionId, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct,
+            coordinatorKey: handle.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
+        Assert.Equal(KeyValueResponseType.Get, t1);
+        Assert.Equal("one"u8.ToArray(), e1!.Value);
+
+        PublishedHeadTable table = ((KahunaManager)node.Kahuna).KeyValueRouters.Persistent.PublishedHeadsFor(key);
+        await WaitUntil(() => table.TryGet(key, out PublishedHead h) && !h.IsRetracted && h.MvccStateOf(handle.TransactionId) == PublishedMvccState.PinAtHead);
+
+        int publishedBefore = paths.Samples("kahuna.kv.read.stage", "published").Count;
+
+        (KeyValueResponseType t2, ReadOnlyKeyValueEntry? e2) = await node.Kahuna.LocateAndTryGetValue(
+            handle.TransactionId, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct,
+            coordinatorKey: handle.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
+        Assert.Equal(KeyValueResponseType.Get, t2);
+        AssertSameHead(e1, e2!);
+        Assert.True(paths.Samples("kahuna.kv.read.stage", "published").Count > publishedBefore);
+        Assert.Equal(0, table.PinsInFlightCount);
+
+        (KeyValueResponseType setType, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+            handle.TransactionId, key, "two"u8.ToArray(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct,
+            coordinatorKey: handle.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
+        Assert.Equal(KeyValueResponseType.Set, setType);
+
+        int stagedBefore = reasons.Samples("kahuna.kv.read.fallback", "mvcc_staged").Count;
+
+        (KeyValueResponseType t3, ReadOnlyKeyValueEntry? e3) = await node.Kahuna.LocateAndTryGetValue(
+            handle.TransactionId, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct,
+            coordinatorKey: handle.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
+        Assert.Equal(KeyValueResponseType.Get, t3);
+        Assert.Equal("two"u8.ToArray(), e3!.Value);
+        Assert.True(reasons.Samples("kahuna.kv.read.fallback", "mvcc_staged").Count > stagedBefore);
+
+        // The stage series keeps its two tags: an actor-path sample carries no reason there.
+        Assert.Empty(reasons.Samples("kahuna.kv.read.stage", "mvcc_staged"));
+
+        // Another reader still gets the committed value while the write is staged.
+        (KeyValueResponseType t4, ReadOnlyKeyValueEntry? e4) = await node.Kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+        Assert.Equal(KeyValueResponseType.Get, t4);
+        Assert.Equal("one"u8.ToArray(), e4!.Value);
+
+        TransactionCommitAnswer commit = await node.Kahuna.LocateAndCommitTransaction(handle, ct);
+        Assert.Equal(KeyValueResponseType.Committed, commit.Type);
+
+        // After the commit answer every read returns the new value, from the record or from the actor.
+        for (int i = 0; i < 20; i++)
+        {
+            (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await node.Kahuna.LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.Get, type);
+            Assert.Equal("two"u8.ToArray(), entry!.Value);
+        }
     }
 
     [Fact]
@@ -613,6 +1028,18 @@ public sealed class TestPublishedHeadReads : RaftTrackingTest
         new(KeyValueRequestType.TrySet, HLCTimestamp.Zero, HLCTimestamp.Zero, key, Encoding.UTF8.GetBytes(value), null, -1,
             KeyValueFlags.Set, expiresMs, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, 0, 0, default);
 
+    private static KeyValueRequest TxSet(string key, string value, HLCTimestamp transactionId) =>
+        new(KeyValueRequestType.TrySet, transactionId, HLCTimestamp.Zero, key, Encoding.UTF8.GetBytes(value), null, -1,
+            KeyValueFlags.Set, 0, HLCTimestamp.Zero, KeyValueDurability.Ephemeral, 0, 0, default);
+
+    private static PreparedIntent Intent(string key, HLCTimestamp transactionId, string? value, long revision, HLCTimestamp commitTimestamp) =>
+        new(
+            TransactionId: transactionId, Epoch: 1, Key: key, ManifestHash: 0, RecordAnchorKey: key,
+            CommitTimestamp: commitTimestamp,
+            State: KeyValueState.Set, Value: value is null ? null : Encoding.UTF8.GetBytes(value), Bucket: null, Revision: revision,
+            Expires: HLCTimestamp.Zero, NoRevision: false, BaseRevision: revision - 1, BaseState: KeyValueState.Set,
+            RecoveryDeadline: new HLCTimestamp(0, long.MaxValue, 0), Resolution: PreparedIntentResolution.Pending);
+
     private static KeyValueRequest Get(string key, HLCTimestamp transactionId = default, KeyValueDurability durability = KeyValueDurability.Ephemeral) =>
         new(KeyValueRequestType.TryGet, transactionId, HLCTimestamp.Zero, key, null, null, -1, KeyValueFlags.None, 0, HLCTimestamp.Zero, durability, 0, 0, default);
 
@@ -629,6 +1056,9 @@ public sealed class TestPublishedHeadReads : RaftTrackingTest
         public readonly TaskCompletionSource Started = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public readonly TaskCompletionSource Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        /// <summary>The ask that carries this turn, when a rig started it.</summary>
+        public Task<KeyValueResponse?> Turn = Task.FromResult<KeyValueResponse?>(null);
+
         public async ValueTask RunAsync(IKeyValueInlineDispatcher actor)
         {
             Started.TrySetResult();
@@ -638,8 +1068,8 @@ public sealed class TestPublishedHeadReads : RaftTrackingTest
 
     /// <summary>
     /// One real key-value actor behind a one-actor ring, with the reader wired to that ring's table, a bare
-    /// unflushed-writes overlay, and an empty prepared-intent store. The same actor serves as both rings so a
-    /// read of the wrong durability finds a table with nothing in it for the key.
+    /// unflushed-writes overlay, and a prepared-intent store that the actor and the reader share. The same actor
+    /// serves as both rings so a read of the wrong durability finds a table with nothing in it for the key.
     /// </summary>
     private sealed class ActorRig : IAsyncDisposable
     {
@@ -647,9 +1077,13 @@ public sealed class TestPublishedHeadReads : RaftTrackingTest
         public KeyValueContext Context = null!;
         public PublishedHeadReader Reader = null!;
         public UnflushedKeyValueWritesIndex Unflushed = new();
+        public PreparedIntentStore Intents = new();
         private RaftManager raft = null!;
         private IDisposable actorSystemLifetime = null!;
         private bool persistent;
+        private KeyValueActorRing otherRing = null!;
+        private InstalledHistoryFence? installed;
+        private int maxIntentWaitMs;
 
         public static async Task<ActorRig> CreateAsync(TestPublishedHeadReads owner, bool persistent = false, InstalledHistoryFence? installedHistory = null)
         {
@@ -702,7 +1136,11 @@ public sealed class TestPublishedHeadReads : RaftTrackingTest
                     new KeySpaceRegistry(),
                     new RangeMapStore(rig.raft, null, null, logger),
                     config,
-                    logger);
+                    logger,
+                    null!,
+                    null!,
+                    rig.Intents,
+                    null!);
 
             KeyValueActor? instance = null;
             for (int i = 0; i < 500 && instance is null; i++)
@@ -716,17 +1154,43 @@ public sealed class TestPublishedHeadReads : RaftTrackingTest
             rig.Ring = new KeyValueActorRing([actorRef], [rig.Context.PublishedHeads]);
 
             // An empty table stands in for the ring the test does not use.
-            KeyValueActorRing other = new([actorRef], [new PublishedHeadTable()]);
-            rig.Reader = new PublishedHeadReader(
-                persistent ? other : rig.Ring,
-                persistent ? rig.Ring : other,
-                rig.Unflushed,
-                new PreparedIntentStore(),
-                rig.raft,
-                enabled: true,
-                installedHistory: installedHistory);
+            rig.otherRing = new([actorRef], [new PublishedHeadTable()]);
+            rig.installed = installedHistory;
+            rig.maxIntentWaitMs = config.MaxIntentWaitMs;
+            rig.Reader = rig.NewReader(config.MaxIntentWaitMs);
 
             return rig;
+        }
+
+        /// <summary>A reader over this rig's rings and stores, for a server whose cap on an intent wait is
+        /// <paramref name="maxIntentWaitMs"/>.</summary>
+        public PublishedHeadReader NewReader(int maxIntentWaitMs) =>
+            new(
+                persistent ? otherRing : Ring,
+                persistent ? Ring : otherRing,
+                Unflushed,
+                Intents,
+                raft,
+                enabled: true,
+                installedHistory: installed,
+                maxIntentWaitMs: maxIntentWaitMs);
+
+        /// <summary>What the live record of <paramref name="key"/> says <paramref name="transactionId"/> holds
+        /// on it, or <see cref="PublishedMvccState.Unknown"/> when the key has no live record.</summary>
+        public PublishedMvccState MvccStateOf(string key, HLCTimestamp transactionId) =>
+            Context.PublishedHeads.TryGet(key, out PublishedHead head) && !head.IsRetracted
+                ? head.MvccStateOf(transactionId)
+                : PublishedMvccState.Unknown;
+
+        /// <summary>Parks the actor inside a turn until the returned hold is released.</summary>
+        public async Task<HoldTurn> HoldActorAsync(string key)
+        {
+            HoldTurn hold = new();
+            KeyValueRequest turnRequest = Request(KeyValueRequestType.RunActorTurn, key, HLCTimestamp.Zero);
+            turnRequest.Turn = hold;
+            hold.Turn = Ring.Ask(turnRequest);
+            await hold.Started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            return hold;
         }
 
         public HLCTimestamp Now() => raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());

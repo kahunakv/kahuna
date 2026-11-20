@@ -314,33 +314,62 @@ paging, retries or results.
 
 ### 7.1 Point reads that skip the actor: published head records
 
-A latest point read of a resident key does about a microsecond of work on the actor, and pays a
-mailbox round trip for it: one thread-pool item to wake the actor, one to resume the caller. On a
-busy leader the wait in that queue is most of the read's service time. The actor therefore
-**publishes** a copy of each quiet resident head beside its store, and the read path answers from
-that copy on the caller's thread when it can prove the actor would answer the same.
+A point read of a resident key does about a microsecond of work on the actor, and pays a mailbox
+round trip for it: one thread-pool item to wake the actor, one to resume the caller. On a busy
+leader the wait in that queue is most of the read's service time. The actor therefore **publishes**
+a copy of each resident head beside its store, and the read path answers from that copy on the
+caller's thread when it can prove the actor would answer the same.
 
-- **What is published.** An immutable record per resident key with a `Set` head and no in-flight
-  state: no replication intent (direct write in flight), no write intent (a transaction's lock or
-  staged write), no parked committed head. The record carries the value, revision, expiry, commit
-  stamp, and whether any transaction holds an MVCC snapshot on the key. Tombstones and undefined
-  stubs have no record.
+- **What is published.** An immutable record per resident key with a `Set` head, no replication
+  intent (direct write in flight) and no parked committed head. The record carries the value,
+  revision, expiry and commit stamp. It also carries the owner of the write intent on the key, when
+  there is one, and a copy of the key's MVCC table: for each transaction with an entry there,
+  whether the entry is a read pin at this head, a read pin at another revision, or a staged write.
+  A key with more than 16 MVCC entries publishes none of them. Tombstones and undefined stubs have
+  no record.
 - **When it changes.** Every setter of a head or intent field on the resident entry retracts the live
-  record first (one flag), so a reader never sees a torn or superseded head. The actor republishes
-  at the end of the turn, after the handler finished and before the reply leaves, so a record is
-  never older than the state a reply was built from.
-- **What sends a read back to the actor.** A by-revision or snapshot read; a read issued from inside
-  an actor turn; a retracted or missing record; a live prefix lock on the actor; a committed head the
+  record first (one flag), so a reader never sees a torn or superseded head. So does every change of
+  the MVCC table: an entry added, replaced or removed, and a change of an entry's revision, stamp or
+  staged state. The actor republishes at the end of the turn, after the handler finished and before
+  the reply leaves, so a record is never older than the state a reply was built from.
+- **What sends a read back to the actor.** A by-revision read; a read issued from inside an actor
+  turn; a snapshot read below the head's commit time, or at a timestamp the node's clock has not
+  passed; a retracted or missing record; a live prefix lock on the actor; a committed head the
   replicator has sent to the actor but the actor has not processed yet (noted per key before the
   applied frontier moves, so the lease check cannot outrun the actor); a newer head in the
-  unflushed-writes overlay; a durable prepared intent on the key; an expired head; and, for a read
-  inside a transaction, a key on which any transaction already holds an MVCC snapshot.
-- **Transactional reads.** A read inside a transaction that is served from the record sends the
-  actor a `RecordReadPin` control message carrying the record, so the actor leaves behind exactly the
-  MVCC pin the actor path would have created. The message takes the mailbox ahead of the transaction's
-  next request for the key, so a later write of the key is still validated against the revision the
-  transaction read. Once a pin exists, the key's record says so and transactional reads of that key go
-  back to the actor until the transaction settles.
+  unflushed-writes overlay; a durable prepared intent that the head does not include; an expired
+  head. The reader checks the record a second time after these guards, because a head installed
+  while it read them retracts the record.
+- **Durable prepared intents.** An intent that is not decided makes the actor wait for the decision,
+  and a committed intent that is not installed yet is served from the intent, so both go to the
+  actor. An intent stays in the store after its commit reached the head, until its settlement removes
+  it. For such a key the actor answers with the head, and so does the record. The head includes the
+  intent when it is at a later revision, or at the intent's revision with the intent's commit
+  timestamp or a later stamp.
+- **Write intents.** A write intent (a point lock, a staged write, a prepared write) does not hold
+  back a latest read on the actor, and the record under it is the committed head. Two reads go to
+  the actor under a write intent. A read at a timestamp, because the actor waits for the intent or
+  records the timestamp on it as a commit floor. The first read of the key by a transaction that
+  asked to wait for the intent of another transaction (`KeyValueIntentWait`), because the actor
+  parks that read.
+- **Transactional reads.** The record states what the reading transaction holds on the key.
+  - Nothing: a latest read is the transaction's first read of the key. The read is served, and the
+    actor receives a `RecordReadPin` control message that carries the record, so it leaves behind the
+    MVCC pin the actor path would have created. The message takes the mailbox ahead of the
+    transaction's next request for the key, so a later write of the key is still validated against
+    the revision the transaction read.
+  - A read pin at the head of the record: the actor answers the pinned bytes, which are the bytes
+    of the head. The record answers the read, and no message goes to the actor.
+  - A staged write, or a read pin at another revision: the actor answers. It returns the staged
+    value, or `Aborted` for a head that moved past the pin.
+
+  A statement read owns only its staged writes, so a pin does not send it to the actor.
+- **Pins on their way to the actor.** Between a first read and the landing of its pin, no record
+  shows the transaction. The reader registers the pin before it sends it, and the actor ends the
+  registration when the pin is in the MVCC table. A second read of the key by the transaction finds
+  the registration. It is answered from a record of the same head without a second pin, or by the
+  actor when the head changed. The transaction cannot read two heads of one key without the actor's
+  revision check.
 - **The collector.** A read served from the record stamps the record, not the entry, so a key that is
   hot only through published reads would look idle in the LRU list. The collector folds the record's
   stamp in before it judges an entry idle or cold, and moves such an entry to the hot end instead of
@@ -351,6 +380,32 @@ The path is on by default (`PublishedHeadReads`; `--disable-published-head-reads
 every point read takes the mailbox. The `kahuna.kv.read.stage` histogram tags its `actor` stage
 with `path=published` or `path=actor`, so the share of reads each path serves and the cost of each
 are visible per node.
+
+The `kahuna.kv.read.fallback` histogram records each read that took the actor path under the guard
+that refused the record, in the tag `reason`. Its value is the time of the actor step, so the count
+of a reason is its share of the actor path and the mean is the cost of that kind of read.
+
+| `reason` | The guard that refused the record |
+|---|---|
+| `disabled` | Published head reads are off on the node. |
+| `read_kind` | A by-revision read, a read from inside an actor turn, or a transactional snapshot read in the default read mode. |
+| `snapshot_bound` | A timestamp at or ahead of the node's clock, or one that an installed partition or a moved range may not hold the history for. |
+| `snapshot_below_head` | A timestamp below the commit time of the head. |
+| `absent` | No record: the key is not resident, is a tombstone, or was never published. |
+| `retracted` | The actor is changing the key in its current turn. |
+| `replication_intent` | A direct write of the key is in flight. |
+| `parked_head` | A committed head is parked on the entry. |
+| `prefix_lock` | The actor holds a prefix lock. |
+| `pending_apply` | A newer committed head waits on the actor's mailbox. |
+| `unflushed` | The unflushed-writes overlay holds a newer head. |
+| `prepared_intent` | A durable prepared intent that the head does not include. |
+| `write_intent` | A read at a timestamp, under a write intent. |
+| `intent_wait` | A transaction's first read that asked to wait for the write intent of another transaction. |
+| `mvcc_staged` | The reading transaction staged a write on the key. |
+| `mvcc_pin_moved` | The reading transaction holds a pin that is not at the head. |
+| `mvcc_held` | The key holds more MVCC entries than a record carries. |
+| `pin_in_flight` | A pin of the reading transaction, from another head, has not landed. |
+| `expired` | The head is past its expiry. |
 
 ---
 

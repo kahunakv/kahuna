@@ -557,7 +557,7 @@ public sealed class TestKeyValueMvccSnapshotReap : RaftTrackingTest
 
         long preInsertBytes = seedEntry.CachedBytes;
 
-        seedEntry.MvccEntries = new Dictionary<HLCTimestamp, KeyValueMvccEntry>
+        seedEntry.MvccEntries = new KeyValueMvccTable
         {
             [readerTx] = new() { State = KeyValueState.Set, Revision = 0, Value = Encoding.UTF8.GetBytes("snap"), Expires = HLCTimestamp.Zero }
         };
@@ -647,7 +647,7 @@ public sealed class TestKeyValueMvccSnapshotReap : RaftTrackingTest
 
         long preInsertBytes = entry.CachedBytes;
 
-        entry.MvccEntries = new Dictionary<HLCTimestamp, KeyValueMvccEntry>
+        entry.MvccEntries = new KeyValueMvccTable
         {
             [committerTx] = new()
             {
@@ -698,7 +698,7 @@ public sealed class TestKeyValueMvccSnapshotReap : RaftTrackingTest
 
         long preInsertBytes = entry.CachedBytes;
 
-        entry.MvccEntries = new Dictionary<HLCTimestamp, KeyValueMvccEntry>
+        entry.MvccEntries = new KeyValueMvccTable
         {
             [rollbackTx] = new()
             {
@@ -849,7 +849,7 @@ public sealed class TestKeyValueMvccSnapshotReap : RaftTrackingTest
         };
         context.InsertStoreEntry(key, entry);
 
-        entry.MvccEntries = new Dictionary<HLCTimestamp, KeyValueMvccEntry>
+        entry.MvccEntries = new KeyValueMvccTable
         {
             [readerTx] = new()
             {
@@ -885,7 +885,7 @@ public sealed class TestKeyValueMvccSnapshotReap : RaftTrackingTest
         };
         context.InsertStoreEntry(key, entry);
 
-        entry.MvccEntries = new Dictionary<HLCTimestamp, KeyValueMvccEntry>
+        entry.MvccEntries = new KeyValueMvccTable
         {
             [readerTx] = new()
             {
