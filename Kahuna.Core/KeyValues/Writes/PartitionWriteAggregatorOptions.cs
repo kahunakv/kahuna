@@ -14,16 +14,19 @@ internal sealed record PartitionWriteAggregatorOptions
     /// re-dispatches immediately — every batch carries only what arrived during the previous Raft round and
     /// the linger never engages. A full batch (item/byte threshold) always dispatches immediately and
     /// overrides the hold; queue-age releases are unaffected. 0 (the default) keeps the immediate
-    /// re-dispatch. Trades up to the hold in extra write latency for fewer, larger Raft rounds.</summary>
+    /// re-dispatch. Trades up to the hold in extra write latency for fewer, larger Raft rounds. A buffer
+    /// that opens while no batch is in flight waits for <see cref="LingerMs"/>, with or without a hold.</summary>
     public int PostCompletionHoldMs { get; init; }
 
     /// <summary>Fires the aggregator's wakes (post-completion hold, linger and queue-age) from one dedicated
     /// timer thread (<see cref="PartitionWriteWakeTimer"/>) instead of a <see cref="Task.Delay(TimeSpan, TimeProvider)"/>
-    /// per wake. The timer queue fires a millisecond-scale delay 1-3 ms late — its granularity plus a
-    /// thread-pool hop — which a 1-2 ms hold pays on every cycle; a kernel wait on a thread of its own lands
-    /// within about a quarter of a millisecond, and only a sub-millisecond remainder is ever spun. Off by
-    /// default.</summary>
-    public bool PreciseWake { get; init; }
+    /// per wake. The timer queue measures a delay with <see cref="Environment.TickCount64"/>, which on Linux
+    /// advances once per kernel tick (4 ms on a 250 Hz kernel), so a 1-2 ms wake fires at the next tick and a
+    /// held cycle lasts a whole number of ticks. A kernel wait on a thread of its own lands within about a
+    /// quarter of a millisecond, and only a sub-millisecond remainder is ever spun. On by default. The
+    /// dedicated thread waits in real time, so a lane that runs on a manual clock must turn this off to keep
+    /// its wakes on that clock's timers.</summary>
+    public bool PreciseWake { get; init; } = true;
 
     /// <summary>Fill-or-time dispatch: a held or lingering buffer dispatches as soon as it reaches the learned
     /// fill target — the median size of the batches the timer has recently dispatched for that partition —

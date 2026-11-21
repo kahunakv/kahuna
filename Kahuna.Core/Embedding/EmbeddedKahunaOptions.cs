@@ -442,12 +442,16 @@ public sealed class EmbeddedKahunaOptions
 
     /// <summary>Hold after each aggregator batch completion before the next sub-threshold batch for that
     /// partition may dispatch, so arrivals accumulate into a denser batch. A full batch always dispatches
-    /// immediately; 0 (the default) keeps the immediate re-dispatch on completion.</summary>
+    /// immediately; 0 (the default) keeps the immediate re-dispatch on completion. A write that opens an empty
+    /// buffer while no batch is in flight waits for <see cref="KeyValueWriteLingerMs"/>, so a partition
+    /// dispatches at once from idle only when the hold and the linger are both 0.</summary>
     public int KeyValueWritePostCompletionHoldMs { get; set; }
 
-    /// <summary>Fires the aggregator's wakes from one dedicated timer thread instead of the timer queue, so a
-    /// millisecond-scale hold is not lengthened by the timer queue's lateness. Off by default.</summary>
-    public bool KeyValueWritePreciseWake { get; set; }
+    /// <summary>Fires the aggregator's wakes from one dedicated timer thread instead of the timer queue. On
+    /// Linux the timer queue fires a delay at the next kernel tick (4 ms on a 250 Hz kernel), so a 1 ms linger
+    /// or hold lasts up to one tick there. On by default; false returns the wakes to the timer queue. The
+    /// thread-free build always uses the timer queue.</summary>
+    public bool KeyValueWritePreciseWake { get; set; } = true;
 
     /// <summary>Fill-or-time dispatch: a held or lingering partition buffer dispatches once it reaches the
     /// learned fill target (median of recent timer-dispatched batch sizes) instead of waiting out the hold.

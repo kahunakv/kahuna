@@ -140,7 +140,7 @@ public static class EmbeddedOptionsFactory
         CacheEntriesToRemove = opts.CacheEntriesToRemove,
         KeyValueWriteLingerMs = opts.KeyValueWriteLingerMs,
         KeyValueWritePostCompletionHoldMs = opts.KeyValueWritePostCompletionHoldMs,
-        KeyValueWritePreciseWake = opts.KeyValueWritePreciseWake,
+        KeyValueWritePreciseWake = opts.KeyValueWritePreciseWake ?? true,
         KeyValueWriteFillTargetTrigger = opts.KeyValueWriteFillTargetTrigger,
         KeyValueWriteMaxBatchItems = opts.KeyValueWriteMaxBatchItems,
         KeyValueWriteMaxInFlightBatchesPerPartition = opts.KeyValueWriteMaxInFlightBatchesPerPartition,

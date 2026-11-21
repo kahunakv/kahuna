@@ -284,8 +284,8 @@ options and on `EmbeddedKahunaOptions` for the embedded/standalone engine):
 | Setting | Default | Meaning |
 |---|---:|---|
 | `KeyValueWriteLingerMs` | `1` | Delay from the oldest queued item before a partition batch is proposed. `0` dispatches an idle partition immediately (still batching work that accumulates behind an in-flight batch). |
-| `KeyValueWritePostCompletionHoldMs` | `0` | Hold after each batch completion before the next sub-threshold batch may dispatch, so arrivals accumulate into a denser batch. A full batch always dispatches at once, and queue-age releases are unaffected. `0` re-dispatches on completion immediately. |
-| `KeyValueWritePreciseWake` | `false` | Fire the aggregator's wakes (post-completion hold, linger, queue-age) from one dedicated timer thread instead of the timer queue. The timer queue fires a millisecond-scale delay 1–3 ms late (its granularity plus a thread-pool hop for the continuation); a kernel timed wait on a thread of its own returns within about a quarter of a millisecond, so the thread sleeps the whole milliseconds and spins only a sub-millisecond remainder. One thread per node, started on first use. |
+| `KeyValueWritePostCompletionHoldMs` | `0` | Hold after each batch completion before the next sub-threshold batch may dispatch, so arrivals accumulate into a denser batch. A full batch always dispatches at once, and queue-age releases are unaffected. `0` re-dispatches on completion immediately. The hold applies after a completion only. A write to an idle partition waits for `KeyValueWriteLingerMs`, so set both to `0` to dispatch at once from idle. |
+| `KeyValueWritePreciseWake` | `true` | Fire the aggregator's wakes (post-completion hold, linger, queue-age) from one dedicated timer thread instead of the timer queue. A kernel timed wait on a thread of its own returns within about a quarter of a millisecond, so the thread sleeps the whole milliseconds and spins only a sub-millisecond remainder. One thread per node, started on first use. `false` returns the wakes to the timer queue, which on Linux fires a millisecond-scale delay at the next kernel tick (see [Wake timer](#wake-timer)). On the command line the flag takes a value: `--kv-write-precise-wake false`. |
 | `KeyValueWriteFillTargetTrigger` | `false` | Fill-or-time dispatch: a held or lingering partition buffer dispatches as soon as it reaches the learned fill target — the median size of that partition's recent timer-dispatched batches — instead of waiting out the hold. After eight consecutive fill-triggered dispatches the next batch waits for its timer again (a probe) so the target follows the load, and a probe more than twice the target discards the samples and relearns. A full batch still dispatches at once. |
 | `KeyValueWriteMaxBatchItems` | `512` | Maximum log entries per Raft call. |
 | `KeyValueWriteMaxBatchBytes` | `4 MiB` | Target serialized bytes per Raft call; an oversized single item dispatches alone. |
@@ -328,6 +328,12 @@ saving comes from. There is no benefit to a large linger unless writes arrive fa
 flush; a rising queue-delay with batch sizes near one usually indicates a routing, leader, or
 partition-health problem rather than a linger that is too short.
 
+The linger and the post-completion hold are separate waits. The hold delays the batch that follows a
+completion. The linger delays a write that opens an empty buffer while no batch is in flight. With a
+hold of `0` and a linger of `1`, a completion re-dispatches at once, but each write to an idle partition
+still waits 1 ms. Set `KeyValueWriteLingerMs = 0` and `KeyValueWritePostCompletionHoldMs = 0` together
+to dispatch at once from idle.
+
 ### Choosing the post-completion hold
 
 Under sustained load the linger stops mattering: a completed batch immediately re-dispatches whatever
@@ -339,12 +345,37 @@ dispatch, which raises entries per batch at the cost of up to the hold in extra 
 hold never delays a full batch and never extends the queue-age release deadline. Keep it `0` unless a
 measured workload shows batch sizes pinned well below the caps at a saturated round rate.
 
-By default the hold is armed on the timer queue, which fires a millisecond-scale delay late: on Linux a
-2 ms hold was measured to wake about 1 ms after its deadline (a 1 ms hold, 1.8 ms late), so the dead time
-per cycle is the hold plus that lateness, not the hold alone. `KeyValueWritePreciseWake` moves every wake
-to one dedicated timer thread whose kernel wait lands within about a quarter of a millisecond, so the wake
-lands close to the configured hold; `kahuna.kv.write.cycle_stage` (below) shows both parts of every cycle,
-so choose the hold against the `hold` and `wake_late` stages together.
+`kahuna.kv.write.cycle_stage` (below) shows the `hold` and `wake_late` stages of every cycle. Choose the
+hold against the two stages together.
+
+### Wake timer
+
+The linger, hold and queue-age wakes fire from one dedicated timer thread per node
+(`KeyValueWritePreciseWake`, default `true`). The thread uses a kernel timed wait, which returns within
+about a quarter of a millisecond of its deadline, so a 1 ms hold lasts about 1 ms.
+
+`KeyValueWritePreciseWake = false` arms each wake on the .NET timer queue (`Task.Delay`). The timer queue
+measures a delay with `Environment.TickCount64`. On Linux that clock is `CLOCK_MONOTONIC_COARSE`, which
+advances once per kernel tick: 4 ms on a kernel built with `CONFIG_HZ=250` (the Debian and Ubuntu
+default), 1 ms with `CONFIG_HZ=1000`. A delay shorter than one tick fires at the next tick. A held cycle
+starts at the wake of the cycle before it, which is on a tick, so a Raft round plus a hold that together
+are shorter than one tick last one whole tick. On a 250 Hz kernel, with a 0.3 ms round:
+
+| Hold | Timer queue: cycle, `wake_late` | Dedicated timer: cycle |
+|---:|---|---|
+| 1 ms | 4.0 ms, 2.7 ms | round + 1 ms + about 0.3 ms |
+| 2 ms | 4.0 ms, 1.7 ms | round + 2 ms + about 0.3 ms |
+
+The same applies to the linger: a write to an idle partition with a 1 ms linger waits up to 4 ms on the
+timer queue of a 250 Hz kernel. The lateness changes with the kernel, so a hold or a linger that was
+tuned on the timer queue does not carry to another kernel. A hold that was tuned on the timer queue was
+longer than its configured value; tune it again on the dedicated timer.
+
+The dedicated timer makes more Raft rounds per second than a tick-bound timer queue did at the same
+settings, because each cycle is shorter. Each round has a fixed CPU cost, and a host process that runs
+the .NET garbage collector in its dynamic adaptation mode can collect more often when the rounds are
+more frequent. Compare `kahuna.kv.write.batches` per second and the collection rate before and after a
+change of the timer or of the hold.
 
 ### Fill-or-time
 

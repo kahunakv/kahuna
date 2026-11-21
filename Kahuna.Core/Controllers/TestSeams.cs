@@ -23,6 +23,9 @@ public sealed partial class KahunaManager
     /// <summary>The lock subsystem, for in-process tests that drive internal maintenance paths.</summary>
     internal LockManager Locks => locks;
 
+    /// <summary>True once this node's write aggregator armed a wake on its dedicated timer thread.</summary>
+    internal bool WriteWakeTimerStarted => keyValues.WriteAggregator.DedicatedWakeTimerStarted;
+
     /// <summary>
     /// The fingerprint of this node's user-defined function registry. Two nodes of one cluster must
     /// report the same value; a difference means they loaded different extension builds.

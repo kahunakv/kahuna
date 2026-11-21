@@ -101,6 +101,35 @@ public sealed class TestServerConfigurationSurface
         Assert.Contains("--max-concurrent-connections", Assert.Throws<KahunaServerException>(() => ServerConfigurationFactory.Create(opts)).Message);
     }
 
+    /// <summary>
+    /// The write aggregator fires its wakes from the dedicated timer thread on both node shapes unless the flag
+    /// turns that off. The timer queue fires a millisecond-scale delay at the next kernel tick on Linux, so no
+    /// node shape may get it by default.
+    /// </summary>
+    [Theory]
+    [InlineData(null, true)]
+    [InlineData("true", true)]
+    [InlineData("false", false)]
+    public void PreciseWriteWake_IsOnByDefaultOnBothNodeShapes_AndTakesTheValueGiven(string? value, bool expected)
+    {
+        string[] args = value is null
+            ? ["--storage-revision", "v1"]
+            : ["--storage-revision", "v1", "--kv-write-precise-wake", value];
+
+        CommandLine.ParserResult<KahunaCommandLineOptions> result = CommandLine.Parser.Default.ParseArguments<KahunaCommandLineOptions>(args);
+        Assert.Equal(CommandLine.ParserResultType.Parsed, result.Tag);
+
+        KahunaConfiguration server = ServerConfigurationFactory.Create(result.Value);
+        KahunaConfiguration embedded = EmbeddedKahunaNode.CreateKahunaConfiguration(
+            EmbeddedOptionsFactory.CreateEmbeddedOptions(result.Value), singleProcessRaftGroup: false);
+
+        Assert.Equal(expected, server.KeyValueWritePreciseWake);
+        Assert.Equal(expected, embedded.KeyValueWritePreciseWake);
+
+        // An embedding host that sets nothing gets the same default.
+        Assert.True(new EmbeddedKahunaOptions().KeyValueWritePreciseWake);
+    }
+
     [Fact]
     public void FlagsTheClusterUsedToIgnore_ReachTheServerConfiguration()
     {

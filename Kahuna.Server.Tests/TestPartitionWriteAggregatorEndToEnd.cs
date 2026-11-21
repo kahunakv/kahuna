@@ -277,6 +277,33 @@ public sealed class TestPartitionWriteAggregatorEndToEnd
         });
     }
 
+    // ── wake timer selection through the real entry point ────────────────────────
+
+    [Theory]
+    [InlineData(null, true)]
+    [InlineData(true, true)]
+    [InlineData(false, false)]
+    public async Task WriteWakes_UseTheDedicatedTimerByDefault_AndTheTimerQueueWhenTurnedOff(bool? preciseWake, bool expectTimerThread)
+    {
+        // The option reaches the aggregator through the embedded options and the node configuration. A write to
+        // an idle partition waits for its linger, and that wake is armed on the dedicated timer thread unless
+        // the option turns it off. On the timer queue the same wake fires at the next kernel tick on Linux.
+        EmbeddedKahunaOptions options = MemoryNode(lingerMs: 20);
+        if (preciseWake is { } value)
+            options.KeyValueWritePreciseWake = value;
+
+        await WithRecorder(options, async (node, recorder, ct) =>
+        {
+            (KeyValueResponseType type, _, _) = await node.Kahuna.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, "wake/k1", Encoding.UTF8.GetBytes("v1"), null, -1, KeyValueFlags.Set, 0,
+                KeyValueDurability.Persistent, ct);
+
+            Assert.Equal(KeyValueResponseType.Set, type);
+            Assert.NotEmpty(recorder.Calls);
+            Assert.Equal(expectTimerThread, ((KahunaManager)node.Kahuna).WriteWakeTimerStarted);
+        });
+    }
+
     // ── 7. per-partition queue saturation → MustRetry, then writable ─────────────
 
     [Fact]

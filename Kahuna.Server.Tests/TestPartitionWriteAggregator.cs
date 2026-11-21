@@ -544,6 +544,7 @@ public sealed class TestPartitionWriteAggregator
         public int ReservedItems(int partitionId) => aggregator.ReservedItems(partitionId);
         public int TrackedPartitionCount => aggregator.TrackedPartitionCount;
         public Meter GaugeMeter => aggregator.GaugeMeter;
+        public bool DedicatedWakeTimerStarted => aggregator.DedicatedWakeTimerStarted;
 
         public void Dispose()
         {
@@ -553,8 +554,10 @@ public sealed class TestPartitionWriteAggregator
         }
     }
 
+    // A lane on a manual clock keeps its wakes on that clock's timers: the dedicated timer thread waits in real
+    // time, so it would not see the clock advance until its real-time wait ended.
     private static AggregatorHarness Build(RecordingExecutor exec, PartitionWriteAggregatorOptions options, IWriteRangeFence? fence = null, TimeProvider? timeProvider = null) =>
-        new(exec, options, fence, timeProvider);
+        new(exec, timeProvider is null ? options : options with { PreciseWake = false }, fence, timeProvider);
 
     /// <summary>Minimal controllable <see cref="TimeProvider"/>: <see cref="GetTimestamp"/> advances only on
     /// <see cref="Advance"/>, and timers created by <c>Task.Delay(delay, provider)</c> fire when advanced past
@@ -1102,6 +1105,63 @@ public sealed class TestPartitionWriteAggregator
         exec.Release(13);
         await WaitUntil(() => router.Completed.Count == 2); // only the completion re-dispatch can flush item 2
         Assert.Equal(2, exec.Calls.Count);
+    }
+
+    [Fact]
+    public async Task Aggregator_DefaultOptions_ArmTheLingerAndHoldWakesOnTheDedicatedTimer()
+    {
+        // The timer queue measures a delay with a clock that advances once per kernel tick on Linux, so a 1 ms
+        // linger or hold armed there fires at the next tick (4 ms on a 250 Hz kernel). The default wake path
+        // must therefore be the dedicated timer thread, for the linger of an idle buffer and for the hold.
+        Assert.True(new PartitionWriteAggregatorOptions().PreciseWake);
+
+        RecordingExecutor exec = new();
+        RecordingRouter router = new();
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
+        {
+            MaxBatchItems = 64,
+            LingerMs = 20,
+            PostCompletionHoldMs = 20,
+            MaxQueueDelayMs = 10_000,
+            MaxQueuedItemsPerPartition = 1024
+        });
+
+        Assert.False(agg.DedicatedWakeTimerStarted); // no thread until a lane arms a wake
+
+        Assert.True(agg.TryEnqueue(Item(81, 1, sink: router))); // opens an idle buffer: only the linger wake can flush it
+        await WaitUntil(() => router.Completed.ContainsKey(1));
+        Assert.True(agg.DedicatedWakeTimerStarted);
+        Assert.Single(exec.Calls);
+
+        Assert.True(agg.TryEnqueue(Item(81, 2, sink: router))); // waits for the hold's end or its own linger, whichever is later
+        await WaitUntil(() => router.Completed.Count == 2);
+        Assert.Equal(2, exec.Calls.Count);
+    }
+
+    [Fact]
+    public async Task Aggregator_PreciseWakeOff_KeepsEveryWakeOnTheTimerQueue()
+    {
+        // Turning the precise wake off is the way back to the timer queue: the same linger and hold flush, and
+        // the aggregator never starts the timer thread.
+        RecordingExecutor exec = new();
+        RecordingRouter router = new();
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
+        {
+            MaxBatchItems = 64,
+            LingerMs = 20,
+            PostCompletionHoldMs = 20,
+            PreciseWake = false,
+            MaxQueueDelayMs = 10_000,
+            MaxQueuedItemsPerPartition = 1024
+        });
+
+        Assert.True(agg.TryEnqueue(Item(82, 1, sink: router)));
+        await WaitUntil(() => router.Completed.ContainsKey(1));
+        Assert.True(agg.TryEnqueue(Item(82, 2, sink: router)));
+        await WaitUntil(() => router.Completed.Count == 2);
+
+        Assert.Equal(2, exec.Calls.Count);
+        Assert.False(agg.DedicatedWakeTimerStarted);
     }
 
     [Fact]

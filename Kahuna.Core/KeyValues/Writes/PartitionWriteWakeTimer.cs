@@ -6,13 +6,16 @@ namespace Kahuna.Server.KeyValues.Writes;
 
 /// <summary>
 /// One dedicated thread that fires the aggregator lanes' partition wakes at their deadline, replacing a
-/// <see cref="Task.Delay(TimeSpan, TimeProvider)"/> per wake. The timer queue fires a millisecond-scale delay
-/// 1-3 ms late — its own granularity plus a thread-pool hop for the continuation — and a post-completion hold
-/// pays that on every cycle. A kernel timed wait on a thread of its own returns 0.07-0.25 ms after its
-/// whole-millisecond timeout, so this thread sleeps the whole milliseconds that wait can honor and spins only
-/// a sub-millisecond remainder, bounded to well under a millisecond per wake and shared by every partition on
-/// the node. Compared with spinning the last 2 ms of each wake on a thread-pool thread, that is the same
-/// lateness at a fraction of the CPU.
+/// <see cref="Task.Delay(TimeSpan, TimeProvider)"/> per wake. The timer queue measures a delay with
+/// <see cref="Environment.TickCount64"/>. On Linux that clock is <c>CLOCK_MONOTONIC_COARSE</c>, which advances
+/// once per kernel tick: 4 ms on a 250 Hz kernel. A delay shorter than a tick fires at the next tick, and the
+/// continuation takes a thread-pool hop. A held cycle starts at the wake of the cycle before it, which is on a
+/// tick, so a round plus a hold shorter than a tick lasts one whole tick: a 1 ms hold and a 2 ms hold both
+/// give a 4 ms cycle. A kernel timed wait on a thread of its own is not bound to the tick and returns
+/// 0.07-0.25 ms after its whole-millisecond timeout, so this thread sleeps the whole milliseconds that wait
+/// can honor and spins only a sub-millisecond remainder, bounded to well under a millisecond per wake and
+/// shared by every partition on the node. Compared with spinning the last 2 ms of each wake on a thread-pool
+/// thread, that is the same lateness at a fraction of the CPU.
 ///
 /// <para>Each partition owns one <see cref="Wake"/> handle; arming it again replaces the outstanding
 /// deadline (superseded entries are skipped when they surface), so a partition never has two wakes in flight
@@ -61,6 +64,16 @@ internal sealed class PartitionWriteWakeTimer : IDisposable
 
     // Started by the first arm, so an aggregator whose lanes never use the timer owns no thread.
     private Thread? thread;
+
+    /// <summary>True once a wake was armed and the timer thread exists. Test and observability only.</summary>
+    internal bool Started
+    {
+        get
+        {
+            lock (gate)
+                return thread is not null;
+        }
+    }
 
     private bool stopped;
 
@@ -128,6 +141,7 @@ internal sealed class PartitionWriteWakeTimer : IDisposable
             long fireId = 0;
             long due = 0;
             long spinUntil = 0;
+            int seen = 0;
 
             lock (gate)
             {
@@ -167,8 +181,11 @@ internal sealed class PartitionWriteWakeTimer : IDisposable
                         continue;
                     }
 
-                    // Sub-millisecond remainder: spin outside the gate so lanes can still arm meanwhile.
+                    // Sub-millisecond remainder: spin outside the gate so lanes can still arm meanwhile. The
+                    // generation is read under the gate, so an arm that lands after the gate is released
+                    // changes it and ends the spin.
                     spinUntil = due;
+                    seen = generation;
                     break;
                 }
             }
@@ -181,7 +198,6 @@ internal sealed class PartitionWriteWakeTimer : IDisposable
                 continue;
             }
 
-            int seen = Volatile.Read(ref generation);
             while (clock.GetTimestamp() < spinUntil && Volatile.Read(ref generation) == seen && !Volatile.Read(ref stopped))
                 Thread.SpinWait(32);
         }

@@ -426,14 +426,18 @@ public sealed class KahunaConfiguration
     /// batch carries only what arrived during the previous Raft round and the linger never engages; the hold
     /// lets arrivals accumulate into a denser batch at the cost of up to the hold in extra write latency. A
     /// full batch (item/byte threshold) always dispatches immediately, and queue-age releases are unaffected.
-    /// 0 (the default) keeps the immediate re-dispatch.</summary>
+    /// 0 (the default) keeps the immediate re-dispatch. The hold applies after a completion only: a write that
+    /// opens an empty buffer while no batch is in flight waits for <see cref="KeyValueWriteLingerMs"/>, so a
+    /// partition dispatches at once from idle only when the hold and the linger are both 0.</summary>
     public int KeyValueWritePostCompletionHoldMs { get; set; }
 
     /// <summary>Fires the aggregator's wakes (post-completion hold, linger, queue-age) from one dedicated
-    /// timer thread instead of the timer queue, whose granularity and thread-pool hop make a millisecond-scale
-    /// hold fire 1-3 ms late on every cycle; a kernel wait on its own thread lands within about a quarter of a
-    /// millisecond. Off by default.</summary>
-    public bool KeyValueWritePreciseWake { get; set; }
+    /// timer thread instead of the timer queue. The timer queue measures a delay with
+    /// <see cref="Environment.TickCount64"/>, which on Linux advances once per kernel tick (4 ms on a 250 Hz
+    /// kernel), so a 1 ms linger or hold fires at the next tick and a held cycle lasts a whole number of ticks.
+    /// A kernel wait on its own thread lands within about a quarter of a millisecond. On by default; false
+    /// returns the wakes to the timer queue.</summary>
+    public bool KeyValueWritePreciseWake { get; set; } = true;
 
     /// <summary>Fill-or-time dispatch for the aggregator: a held or lingering partition buffer dispatches as
     /// soon as it reaches the learned fill target (the median size of that partition's recent timer-dispatched

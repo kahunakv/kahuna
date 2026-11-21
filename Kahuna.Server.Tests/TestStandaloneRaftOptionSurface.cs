@@ -124,6 +124,7 @@ public sealed class TestStandaloneRaftOptionSurface
     [InlineData("--raft-fan-out-before-local-write", nameof(KahunaCommandLineOptions.RaftFanOutBeforeLocalWrite))]
     [InlineData("--raft-follower-apply-in-own-turn", nameof(KahunaCommandLineOptions.RaftFollowerApplyInOwnTurn))]
     [InlineData("--fail-fast-on-oom", nameof(KahunaCommandLineOptions.FailFastOnOutOfMemory))]
+    [InlineData("--kv-write-precise-wake", nameof(KahunaCommandLineOptions.KeyValueWritePreciseWake))]
     public void AFlagThatIsOnByDefault_CanBeTurnedOffOnTheCommandLine(string flag, string property)
     {
         Assert.Null(ReadFlag(property));

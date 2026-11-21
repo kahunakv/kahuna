@@ -43,8 +43,8 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
 
     private readonly TimeProvider timeProvider;
 
-    // The dedicated wake timer shared by the node's lanes, used when the precise wake is configured; wakes
-    // go to the timer queue otherwise.
+    // The dedicated wake timer shared by the node's lanes. Wakes go to the timer queue when the precise wake
+    // is turned off, and in the browser build, which cannot start a thread.
     private readonly PartitionWriteWakeTimer wakeTimer;
 
     private readonly long stampsPerMs;

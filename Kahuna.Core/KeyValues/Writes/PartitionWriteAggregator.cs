@@ -34,8 +34,8 @@ internal sealed class PartitionWriteAggregator : IDisposable
     /// so a disposed node's admission registry is not kept reachable by gauge callbacks.</summary>
     private readonly Meter gaugeMeter;
 
-    /// <summary>The dedicated wake timer every lane arms its partition wakes on when the precise wake is
-    /// configured; its thread starts on the first arm, so it stays inert otherwise. Stopped with the aggregator.</summary>
+    /// <summary>The dedicated wake timer every lane arms its partition wakes on unless the precise wake is
+    /// turned off; its thread starts on the first arm, so it stays inert otherwise. Stopped with the aggregator.</summary>
     private readonly PartitionWriteWakeTimer wakeTimer;
 
     private volatile bool stopping;
@@ -235,6 +235,11 @@ internal sealed class PartitionWriteAggregator : IDisposable
     /// <summary>The instance-owned gauge meter (test-only) so a listener can assert it stops publishing after
     /// <see cref="Stop"/> disposes it.</summary>
     internal Meter GaugeMeter => gaugeMeter;
+
+    /// <summary>True once a lane armed a wake on the dedicated timer thread; false while every wake of this
+    /// aggregator went to the timer queue (test/observability — a meter listener cannot tell one aggregator's
+    /// wakes from another's).</summary>
+    internal bool DedicatedWakeTimerStarted => wakeTimer.Started;
 
     private int LaneIndex(int partitionId) => (partitionId & int.MaxValue) % laneCount;
 }

@@ -55,6 +55,7 @@ serialize the partition map with reflection, and without the property `StartAsyn
 | --- | --- | --- |
 | Raft scheduling | Kommander worker threads | Kommander host pump (`EnableHostPumpedScheduling`, default true) |
 | Backend read and write schedulers | Worker threads | Each operation runs inline on the caller |
+| Write aggregator wakes (linger, hold, queue age) | One dedicated timer thread (`KeyValueWritePreciseWake`, default `true`) | The timer queue. `KeyValueWritePreciseWake` has no effect. |
 | Persistence backend (`Storage`) | `memory`, `sqlite`, `rocksdb` | `memory` only |
 | Raft WAL (`WalStorage`) | `memory`, `sqlite`, `rocksdb` | `memory` only |
 | RocksDB shared memory bundle and WAL shard tuning | Included | Not included |

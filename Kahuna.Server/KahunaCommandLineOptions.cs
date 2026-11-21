@@ -679,11 +679,12 @@ public sealed class KahunaCommandLineOptions
     [Option("kv-write-linger-ms", Required = false, HelpText = "Delay from the oldest queued direct write before its partition batch is proposed; 0 = immediate (low-latency escape hatch)", Default = 1)]
     public int KeyValueWriteLingerMs { get; set; } = 1;
 
-    [Option("kv-write-post-completion-hold-ms", Required = false, HelpText = "Hold after each partition batch completion before the next sub-threshold batch dispatches, so arrivals accumulate into denser batches; a full batch always dispatches at once; 0 = immediate re-dispatch", Default = 0)]
+    [Option("kv-write-post-completion-hold-ms", Required = false, HelpText = "Hold after each partition batch completion before the next sub-threshold batch dispatches, so arrivals accumulate into denser batches; a full batch always dispatches at once; 0 = immediate re-dispatch. An idle partition still waits for --kv-write-linger-ms, so set both to 0 to dispatch at once from idle", Default = 0)]
     public int KeyValueWritePostCompletionHoldMs { get; set; }
 
-    [Option("kv-write-precise-wake", Required = false, HelpText = "Fire the write aggregator's wakes (hold, linger, queue-age) from one dedicated timer thread instead of the timer queue, whose granularity and thread-pool hop make a millisecond-scale hold fire 1-3 ms late on every cycle", Default = false)]
-    public bool KeyValueWritePreciseWake { get; set; }
+    // Nullable so it takes an explicit value: a bare switch cannot turn a true default off.
+    [Option("kv-write-precise-wake", Required = false, HelpText = "Fire the write aggregator's wakes (hold, linger, queue-age) from one dedicated timer thread instead of the timer queue, which on Linux fires a millisecond-scale delay at the next kernel tick (4 ms on a 250 Hz kernel): true or false (default true)")]
+    public bool? KeyValueWritePreciseWake { get; set; }
 
     [Option("kv-write-fill-target-trigger", Required = false, HelpText = "Fill-or-time dispatch: a held or lingering partition buffer dispatches once it reaches the learned fill target (median of its recent timer-dispatched batch sizes) instead of waiting out the hold; probe cycles keep the target following the load", Default = false)]
     public bool KeyValueWriteFillTargetTrigger { get; set; }
