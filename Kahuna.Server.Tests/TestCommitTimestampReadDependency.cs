@@ -26,6 +26,11 @@ namespace Kahuna.Server.Tests;
 /// validates its reads, a latest read of one that does not, a statement read at a timestamp at or above c1, a range
 /// scan, a bucket scan, a batch get, a batched probe and a batched range probe. T2 is started before T1 commits
 /// and after it.</para>
+///
+/// <para>T2 reads T1's write in each of the two states a committed write has on its leader: the committed prepared
+/// intent is its only copy, or the leader's store holds the row. A node that applies a committed intent with no
+/// row behind it installs the row from the intent on a background task, so each test case fixes the state before
+/// the read: it turns that task off, or it waits for the row.</para>
 /// </summary>
 public sealed class TestCommitTimestampReadDependency : BaseCluster
 {
@@ -74,21 +79,29 @@ public sealed class TestCommitTimestampReadDependency : BaseCluster
     }
 
     [Theory]
-    [InlineData(ReadShape.ValidatedLatest, true, false)]
-    [InlineData(ReadShape.ValidatedLatest, false, false)]
-    [InlineData(ReadShape.Latest, true, false)]
-    [InlineData(ReadShape.Latest, false, false)]
-    [InlineData(ReadShape.Statement, true, false)]
-    [InlineData(ReadShape.Statement, false, false)]
-    [InlineData(ReadShape.ValidatedLatest, true, true)]
-    [InlineData(ReadShape.Latest, true, true)]
-    [InlineData(ReadShape.Statement, true, true)]
-    [InlineData(ReadShape.RangeScan, true, false)]
-    [InlineData(ReadShape.GetMany, true, false)]
-    [InlineData(ReadShape.Probe, true, false)]
-    [InlineData(ReadShape.BucketScan, true, false)]
-    [InlineData(ReadShape.RangeProbe, true, false)]
-    public async Task ReadThenWriteOnAnotherPartition_CommitsAboveTheCommitItRead(ReadShape shape, bool startedBeforeT1Committed, bool coordinatorOnWriteLeader)
+    [InlineData(ReadShape.ValidatedLatest, true, false, false)]
+    [InlineData(ReadShape.ValidatedLatest, false, false, false)]
+    [InlineData(ReadShape.Latest, true, false, false)]
+    [InlineData(ReadShape.Latest, false, false, false)]
+    [InlineData(ReadShape.Statement, true, false, false)]
+    [InlineData(ReadShape.Statement, false, false, false)]
+    [InlineData(ReadShape.ValidatedLatest, true, true, false)]
+    [InlineData(ReadShape.Latest, true, true, false)]
+    [InlineData(ReadShape.Statement, true, true, false)]
+    [InlineData(ReadShape.RangeScan, true, false, false)]
+    [InlineData(ReadShape.GetMany, true, false, false)]
+    [InlineData(ReadShape.Probe, true, false, false)]
+    [InlineData(ReadShape.BucketScan, true, false, false)]
+    [InlineData(ReadShape.RangeProbe, true, false, false)]
+    [InlineData(ReadShape.ValidatedLatest, true, false, true)]
+    [InlineData(ReadShape.Latest, true, false, true)]
+    [InlineData(ReadShape.Statement, true, false, true)]
+    [InlineData(ReadShape.RangeScan, true, false, true)]
+    [InlineData(ReadShape.GetMany, true, false, true)]
+    [InlineData(ReadShape.Probe, true, false, true)]
+    [InlineData(ReadShape.BucketScan, true, false, true)]
+    [InlineData(ReadShape.RangeProbe, true, false, true)]
+    public async Task ReadThenWriteOnAnotherPartition_CommitsAboveTheCommitItRead(ReadShape shape, bool startedBeforeT1Committed, bool coordinatorOnWriteLeader, bool rowInstalled)
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
@@ -119,7 +132,7 @@ public sealed class TestCommitTimestampReadDependency : BaseCluster
             if (startedBeforeT1Committed)
                 t2 = await StartTransaction(session, coordinatorPartition, shape, ct);
 
-            HLCTimestamp c1 = InstallCommittedWrite(managers[readLeader], rafts, keyA, "t1-value");
+            HLCTimestamp c1 = await InstallCommittedWrite(managers[readLeader], rafts, keyA, "t1-value", rowInstalled);
 
             if (!startedBeforeT1Committed)
                 t2 = await StartTransaction(session, coordinatorPartition, shape, ct);
@@ -169,7 +182,7 @@ public sealed class TestCommitTimestampReadDependency : BaseCluster
             await MoveLeadershipTo(rafts, readPartition, 0, ct);
             await MoveLeadershipTo(rafts, writePartition, 1, ct);
 
-            HLCTimestamp c1 = InstallCommittedWrite(managers[0], rafts, keyA, "t1-value");
+            HLCTimestamp c1 = await InstallCommittedWrite(managers[0], rafts, keyA, "t1-value", rowInstalled: false);
 
             const string script = """
             BEGIN (locking=pessimistic, timeout=20000)
@@ -202,8 +215,13 @@ public sealed class TestCommitTimestampReadDependency : BaseCluster
     /// <summary>
     /// Installs T1's committed write of <paramref name="key"/> on the key's leader, with a commit timestamp
     /// <see cref="LeadMs"/> ahead of the highest clock in the cluster. Only the stores change: no clock is moved.
+    ///
+    /// <para>The write is a committed prepared intent with no key value record behind it. The leader's store
+    /// reports such an intent to the node, which installs the row from it on a background task. With
+    /// <paramref name="rowInstalled"/> the method returns after the leader's backend holds the row. Without it the
+    /// report is turned off first, so the intent stays the only copy of the write for the whole test.</para>
     /// </summary>
-    private static HLCTimestamp InstallCommittedWrite(KahunaManager leader, IRaft[] rafts, string key, string value)
+    private static async Task<HLCTimestamp> InstallCommittedWrite(KahunaManager leader, IRaft[] rafts, string key, string value, bool rowInstalled)
     {
         HLCTimestamp highest = HLCTimestamp.Zero;
         foreach (IRaft raft in rafts)
@@ -223,8 +241,15 @@ public sealed class TestCommitTimestampReadDependency : BaseCluster
             RecoveryDeadline: new HLCTimestamp(0, long.MaxValue, 0), Resolution: PreparedIntentResolution.Pending);
 
         PreparedIntentStore store = leader.DurablePreparedIntentStore;
+
+        if (!rowInstalled)
+            store.AttachCommittedSettleObserver(static _ => { });
+
         store.Apply(new PrepareIntentCommand(intent));
         store.Apply(new ResolveIntentCommand(transactionId, intent.Epoch, key, Commit: true));
+
+        if (rowInstalled)
+            await WaitUntilAsync(() => leader.PersistenceBackend.GetKeyValue(key) is { Value: not null }, timeoutMs: 30_000);
 
         return commitTimestamp;
     }

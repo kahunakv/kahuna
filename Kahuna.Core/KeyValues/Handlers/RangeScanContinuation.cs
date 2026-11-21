@@ -575,11 +575,17 @@ internal sealed class RangeScanContinuation : ReadContinuation
             IReadOnlyList<PreparedIntent> ranged = CollectPageIntents(intentStore, intentEnd, intentEndIncl);
             if (ranged.Count > 0)
             {
+                // A latest page judges an intent as a latest point read does: a committed intent is the head of its
+                // key whatever its commit timestamp, and an undecided one makes the page retry. snapshotTs is this
+                // node's clock for such a page, and a commit timestamp minted on a faster coordinator clock is above
+                // it, so judging at snapshotTs left a committed write out of the page until it settled.
+                HLCTimestamp intentReadTs = isSnapshotRead ? snapshotTs : HLCTimestamp.Zero;
+
                 PreparedIntentScanMerge.ScanMergeResult merge = PreparedIntentScanMerge.Merge(
-                    accumulated, ranged, snapshotTs, currentTime, limit, kvHasMore, kvCeilingKey,
+                    accumulated, ranged, intentReadTs, currentTime, limit, kvHasMore, kvCeilingKey,
                     i => DurableReadVisibility.ScanDecision(context, routedDecisions, i),
                     k => DurableSnapshotSource.ReaderHasOwnVersion(context, k, transactionId, stagedWritesOnly),
-                    i => DurableSnapshotSource.HeadSupersedesIntent(context, i, excludedHeads, isSnapshotRead ? snapshotTs : HLCTimestamp.Zero));
+                    i => DurableSnapshotSource.HeadSupersedesIntent(context, i, excludedHeads, intentReadTs));
                 if (merge.MustRetry)
                     return new(KeyValueResponseType.MustRetry,
                         new KeyValueGetByRangeResult(KeyValueResponseType.MustRetry, [], null, false, Observation));

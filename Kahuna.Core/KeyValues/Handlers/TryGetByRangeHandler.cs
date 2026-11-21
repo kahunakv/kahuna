@@ -155,12 +155,15 @@ internal sealed class TryGetByRangeHandler : BaseHandler
                 intentStore.SnapshotScanWindow(memStart, memStartIncl, intentEnd, intentEndIncl);
             if (ranged.Count > 0)
             {
+                // A latest page judges an intent as a latest point read does, whatever its commit timestamp;
+                // snapshotTs is this node's clock for such a page (see RangeScanContinuation.MergePage).
+                HLCTimestamp intentReadTs = message.ReadTimestamp.IsNull() ? HLCTimestamp.Zero : message.ReadTimestamp;
+
                 PreparedIntentScanMerge.ScanMergeResult merge = PreparedIntentScanMerge.Merge(
-                    items, ranged, snapshotTs, currentTime, limit, kvHasMore, kvCeilingKey,
+                    items, ranged, intentReadTs, currentTime, limit, kvHasMore, kvCeilingKey,
                     i => DurableReadVisibility.ScanDecision(context, message.ForeignScanDecisions, i),
                     k => DurableSnapshotSource.ReaderHasOwnVersion(context, k, message.TransactionId, statementRead),
-                    i => DurableSnapshotSource.HeadSupersedesIntent(
-                        context, i, excludedHeads: null, message.ReadTimestamp.IsNull() ? HLCTimestamp.Zero : message.ReadTimestamp));
+                    i => DurableSnapshotSource.HeadSupersedesIntent(context, i, excludedHeads: null, intentReadTs));
                 if (merge.MustRetry)
                     return new(KeyValueResponseType.MustRetry,
                         new KeyValueGetByRangeResult(KeyValueResponseType.MustRetry, [], null, false, tally.ToObservation(diskFallback: false)));

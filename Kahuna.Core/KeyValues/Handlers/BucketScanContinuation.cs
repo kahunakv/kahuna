@@ -236,14 +236,17 @@ internal sealed class BucketScanContinuation : ReadContinuation
         if (bucketIntents.Count == 0)
             return (items, false);
 
-        HLCTimestamp snapshotTs = readTimestamp.IsNull() ? currentTime : readTimestamp;
+        // A latest scan judges an intent as a latest point read does: a committed intent is the head of its key
+        // whatever its commit timestamp, and an undecided one makes the scan retry. Judged at this node's clock, a
+        // write committed at a timestamp from a faster coordinator clock stayed out of the scan until it settled.
+        HLCTimestamp intentReadTs = readTimestamp.IsNull() ? HLCTimestamp.Zero : readTimestamp;
 
         PreparedIntentScanMerge.ScanMergeResult merge = PreparedIntentScanMerge.Merge(
-            items, bucketIntents, snapshotTs, currentTime,
+            items, bucketIntents, intentReadTs, currentTime,
             limit: KeyValueScanLimits.MaxPrefixScanResults, kvHasMore: false, kvCeilingKey: null,
             i => DurableReadVisibility.ScanDecision(context, routedDecisions, i),
             k => DurableSnapshotSource.ReaderHasOwnVersion(context, k, transactionId),
-            i => DurableSnapshotSource.HeadSupersedesIntent(context, i, excludedHeads, readTimestamp.IsNull() ? HLCTimestamp.Zero : readTimestamp));
+            i => DurableSnapshotSource.HeadSupersedesIntent(context, i, excludedHeads, intentReadTs));
 
         return (merge.Items, merge.MustRetry);
     }
