@@ -705,11 +705,13 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
     /// The install proper, in two passes over a seekable snapshot so that its memory is bounded by a page of rows
     /// and one durable-store entry, never by the size of the partition. Phase 1 reads the whole stream, verifies
     /// every checksum and decodes every entry, keeping nothing but counts, the store payloads' positions and the
-    /// intent section. Phase 2 rewinds and streams the rows and entries into the backend and the stores. Both
-    /// the key-value/lock pages and the three durable payloads are therefore read once to verify and once to
-    /// apply; the only state held whole is the intent section, whose replacement of the partition's intents and
-    /// committed-head ledger must be atomic, and whose size is bounded by in-flight transactions and the ledger's
-    /// retention window rather than by throughput.
+    /// scalar fields of the intent section. Phase 2 rewinds and streams the rows and entries into the backend and
+    /// the stores. Both the key-value/lock pages and the three durable payloads are therefore read once to verify
+    /// and once to apply. The intent section is decoded entry by entry in both phases: its ledger slice holds
+    /// one settled identity for each key written in the last minute, a million at a few thousand transactions a
+    /// second, and a decoded copy of the section next to the slice it becomes is hundreds of megabytes on a node
+    /// that is already near its heap limit. The replacement of the partition's intents and committed-head ledger
+    /// stays atomic: the new slice is built outside the gate and swapped in with the intents.
     /// </summary>
     private async Task ImportSeekableAsync(int partitionId, Stream input, CancellationToken ct)
     {
@@ -739,19 +741,19 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
 
         // An empty section is an exporter that predates the ledger (it wrote nothing when it had no intents);
         // it decodes as no intents and no ledger, which the install below refuses when the ledger is required.
-        PreparedIntentStore.PartitionIntentSection intentSection;
+        PreparedIntentStore.SnapshotHeader intentHeader;
         try
         {
-            intentSection = layout.Intents.Length > 0
-                ? PreparedIntentStore.DeserializePartitionIntents(new PayloadStream(input, layout.Intents))
-                : new PreparedIntentStore.PartitionIntentSection([], null, HLCTimestamp.Zero);
+            intentHeader = layout.Intents.Length > 0
+                ? PreparedIntentStore.VerifyPartitionSection(new PayloadStream(input, layout.Intents))
+                : default;
         }
         catch (InvalidProtocolBufferException ex)
         {
             throw new KahunaServerException($"ImportPartitionState: corrupt snapshot at prepared intents — {ex.Message}");
         }
 
-        if (requireLedgerOnInstall && intentSection.Ledger is null)
+        if (requireLedgerOnInstall && !intentHeader.LedgerPresent)
             throw new KahunaServerException(
                 $"ImportPartitionState: the snapshot for partition {partitionId} carries no committed-head ledger (exported by a build that predates it); " +
                 "refusing to install it while OnePhaseApplyTimeValidation is enabled.");
@@ -824,7 +826,8 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
             // Each entry is decoded off the staged snapshot and folded into its store before the next is read.
             completionReceiptStore.ImportRange(CompletionReceiptStore.ReadReceipts(new PayloadStream(input, layout.Receipts)));
             transactionRecordStore.ImportRecords(TransactionRecordStore.ReadRecords(new PayloadStream(input, layout.Records)));
-            preparedIntentStore.ReplacePartitionIntents(partitionId, intentSection, requireLedgerOnInstall, isOwned);
+            preparedIntentStore.ReplacePartitionIntents(
+                partitionId, new PayloadStream(input, layout.Intents), intentHeader, requireLedgerOnInstall, isOwned);
 
             storesTicks = EndPhase(ref phaseStartedAt);
 
@@ -900,7 +903,7 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
             if (logger.IsEnabled(LogLevel.Warning))
                 logger.LogSlowPartitionStateImport(
                     partitionId, header.UpToIndex, totalMs, (long)SlowInstallThreshold.TotalMilliseconds,
-                    keyValueCount, lockCount, recordCount, receiptCount, intentSection.Intents.Count, input.Length,
+                    keyValueCount, lockCount, recordCount, receiptCount, intentHeader.Intents, input.Length,
                     Ms(verifyTicks), Ms(gateTicks), Ms(drainTicks), Ms(purgeRowsTicks), purge.PurgedPages, purge.ScannedPages, purge.ScannedRows, Ms(purgeStoresTicks),
                     Ms(rowsTicks), Ms(storesTicks), Ms(snapshotsTicks), Ms(floorTicks), Ms(hooksTicks));
         }
@@ -908,7 +911,7 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
         if (logger.IsEnabled(LogLevel.Information))
             logger.LogImportedPartitionState(
                 partitionId, header.UpToIndex, totalMs,
-                keyValueCount, lockCount, recordCount, receiptCount, intentSection.Intents.Count, input.Length,
+                keyValueCount, lockCount, recordCount, receiptCount, intentHeader.Intents, input.Length,
                 Ms(verifyTicks), Ms(gateTicks), Ms(drainTicks), Ms(purgeRowsTicks), purge.PurgedPages, purge.ScannedPages, purge.ScannedRows, Ms(purgeStoresTicks),
                 Ms(rowsTicks), Ms(storesTicks), Ms(snapshotsTicks), Ms(floorTicks), Ms(hooksTicks));
     }

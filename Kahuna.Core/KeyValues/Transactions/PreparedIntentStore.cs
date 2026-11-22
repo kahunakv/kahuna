@@ -6,6 +6,7 @@ using Kahuna.Server.KeyValues.Writes;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
 using Kahuna.Shared.KeyValue;
+using Kahuna.Utils;
 using Kommander.Data;
 using Kommander.Time;
 using Microsoft.Extensions.Logging;
@@ -295,7 +296,10 @@ internal sealed partial class PreparedIntentStore
     /// </summary>
     private sealed class PartitionLedger
     {
-        public readonly ConcurrentDictionary<string, CommittedHead> Heads = new();
+        // A sharded map: one concurrent dictionary of a slice at its head budget replaces a bucket array of
+        // megabytes, and makes a new node for every head, at each doubling on the apply path. One lock for each
+        // shard is enough, because the apply gate admits one writer.
+        public readonly ShardedConcurrentMap<CommittedHead> Heads = new(HeadMapShards, concurrencyLevel: 1);
 
         // Settled-identity memory: every (TransactionId, Epoch, Key) whose resolved intent was REMOVED through
         // this partition's log, or whose settle applied through it while the intent was absent here (the key
@@ -330,8 +334,9 @@ internal sealed partial class PreparedIntentStore
         // Approximate retained bytes (keys plus entries), for the ledger gauge. Maintained under applyGate.
         public long Bytes;
 
-        // Number of heads the slice holds. The size bound compares it with the budget on every record, and
-        // ConcurrentDictionary.Count takes every bucket lock. Maintained under applyGate.
+        // Number of heads the slice holds: the size bound compares it with the budget on every record, and the
+        // gauges and the apply fingerprint read it. The map keeps no count of its own. Maintained under
+        // applyGate with every head added or removed, read lock-free.
         public long HeadCount;
 
         // Heads per second of commit time (CommittedAt.L / LedgerSizeBucketMs). The size bound reads it to find
@@ -448,9 +453,13 @@ internal sealed partial class PreparedIntentStore
 
     private const int LedgerBoundLogIntervalMs = 60_000;
 
-    /// <summary>Approximate bytes one ledger entry retains: the key's characters plus the entry struct and
-    /// the dictionary slot around it.</summary>
-    private static long LedgerEntryBytes(string key) => 2L * key.Length + 64;
+    /// <summary>Approximate bytes one ledger entry retains: the key's characters plus the entry struct, the
+    /// stored hash of the key and the dictionary slot around them.</summary>
+    private static long LedgerEntryBytes(string key) => 2L * key.Length + 72;
+
+    // Shards of one slice's head map. At the default head budget a shard holds about 16,000 heads, and its
+    // bucket array is about 140 KB.
+    private const int HeadMapShards = 32;
 
     /// <summary>
     /// How long (in commit-timestamp time, measured from the slice's watermark) the settled-identity memory
@@ -1452,8 +1461,20 @@ internal sealed partial class PreparedIntentStore
             ? intent
             : null;
 
-    /// <summary>Every intent currently held on this partition — the input to the recovery sweep.</summary>
+    /// <summary>Every intent currently held on this partition, as one copy that is atomic across keys.</summary>
     public IReadOnlyCollection<PreparedIntent> Snapshot() => intents.Values.ToArray();
+
+    /// <summary>
+    /// Walks every intent without a copy of the map. <see cref="Snapshot"/> copies the map twice into arrays of
+    /// one reference for each intent; a caller that runs on a timer uses this walk. The walk is not a
+    /// point-in-time cut: a key that holds an intent for the whole walk is returned once, in a state it had at
+    /// some instant of the walk, and an intent installed or removed during the walk is returned or not.
+    /// </summary>
+    public IEnumerable<PreparedIntent> EnumerateIntents()
+    {
+        foreach (KeyValuePair<string, PreparedIntent> kv in intents)
+            yield return kv.Value;
+    }
 
     /// <summary>
     /// Every intent this node holds, together with each of <paramref name="partitionIds"/>'s applied log position

@@ -120,8 +120,11 @@ internal sealed record TransactionRecord(
             + StringOverheadBytes + 2L * RecordAnchorKey.Length
             + ListOverheadBytes;
 
-        foreach (TransactionParticipantRef participant in Participants)
-            bytes += ParticipantStructBytes + StringOverheadBytes + 2L * participant.Key.Length;
+        // By index: this runs for every apply of a record, and a foreach over the list's interface allocates an
+        // enumerator each time.
+        IReadOnlyList<TransactionParticipantRef> participants = Participants;
+        for (int i = 0; i < participants.Count; i++)
+            bytes += ParticipantStructBytes + StringOverheadBytes + 2L * participants[i].Key.Length;
 
         if (RejectedBundledCommitOpIds is { Count: > 0 } rejected)
             bytes += ListOverheadBytes + 16L * rejected.Count;

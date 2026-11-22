@@ -305,6 +305,19 @@ internal sealed class TransactionRecordStore
 
     public IReadOnlyCollection<TransactionRecord> Snapshot() => records.Values.ToArray();
 
+    /// <summary>
+    /// Walks every record without a copy of the map. <see cref="Snapshot"/> copies the map twice into arrays of
+    /// one reference for each record, 9 MiB at half a million records; a caller that runs on a timer uses this
+    /// walk. The walk is not a point-in-time cut: a record present for the whole walk is returned once, in a
+    /// state it had at some instant of the walk, and a record created or removed during the walk is returned or
+    /// not. The caller may await between two records.
+    /// </summary>
+    public IEnumerable<TransactionRecord> EnumerateRecords()
+    {
+        foreach (KeyValuePair<(HLCTimestamp TransactionId, long Epoch), TransactionRecord> kv in records)
+            yield return kv.Value;
+    }
+
     public int Count => records.Count;
 
     /// <summary>Estimated heap bytes retained by the resident records (see <see cref="TransactionRecord.EstimateBytes"/>).
@@ -607,6 +620,13 @@ internal sealed class TransactionRecordStore
             // field's tag. Materializing one protobuf object per retained record plus one byte[] for the
             // whole set made every checkpoint's allocation proportional to the store size, which dominated
             // the node's allocation profile whenever the retained set was large.
+            //
+            // The map is walked directly. Its Values property copies every record reference into one list
+            // under every bucket lock: 4.5 MiB at 560,000 records in one allocation, with every apply of a
+            // record waiting for the copy. The walk is not a point-in-time cut, and the capture does not need
+            // one: a record applied before the capture began is in the map for the whole walk, so it is
+            // written in a state at or after that apply, and the entries applied during the walk are above
+            // the position this capture certifies, so a restart replays them on top of the file.
             lock (fileLock)
             {
                 string tmp = path + ".tmp";
@@ -617,8 +637,10 @@ internal sealed class TransactionRecordStore
                     TransactionRecordSnapshotEntry entry = new();
                     List<TransactionParticipantRefMessage> participantPool = [];
 
-                    foreach (TransactionRecord record in records.Values)
+                    foreach (KeyValuePair<(HLCTimestamp TransactionId, long Epoch), TransactionRecord> kv in records)
                     {
+                        TransactionRecord record = kv.Value;
+
                         if (resolveAnchorPartition(record.RecordAnchorKey).PartitionId != partitionId)
                             continue;
 
@@ -909,8 +931,14 @@ internal sealed class TransactionRecordStore
 
         entry.Participants.Clear();
         int pooled = 0;
-        foreach (TransactionParticipantRef p in r.Participants)
+
+        // By index: a foreach over the list's interface allocates an enumerator for each record, and a capture
+        // fills one entry for each record of the store.
+        IReadOnlyList<TransactionParticipantRef> participants = r.Participants;
+        for (int i = 0; i < participants.Count; i++)
         {
+            TransactionParticipantRef p = participants[i];
+
             if (pooled >= participantPool.Count)
                 participantPool.Add(new TransactionParticipantRefMessage());
 

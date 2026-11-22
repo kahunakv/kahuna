@@ -7,6 +7,7 @@ using Kahuna.Server.KeyValues.Writes;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
 using Kahuna.Shared.KeyValue;
+using Kahuna.Utils;
 using Kommander.Data;
 using Kommander.Time;
 using Microsoft.Extensions.Logging;
@@ -81,7 +82,7 @@ internal sealed partial class PreparedIntentStore
             {
                 string tmp = path + ".tmp";
 
-                List<PreparedIntent> pendingBeforeCapture = OwnedIntentsBeforeCapture(key => resolvePartition(key) == partitionId);
+                ChunkedList<PreparedIntent> pendingBeforeCapture = OwnedIntentsBeforeCapture(key => resolvePartition(key) == partitionId);
 
                 using (FileStream file = new(tmp, FileMode.Create, FileAccess.Write, FileShare.None, 64 * 1024))
                 using (CodedOutputStream output = new(file))
@@ -102,8 +103,18 @@ internal sealed partial class PreparedIntentStore
 
                     PreparedIntentCommandMessage entry = new();
 
-                    foreach (PreparedIntent intent in intents.Values)
+                    // The map is walked directly, as the whole-partition export walks it (see
+                    // WritePartitionSection). Its Values property copies every intent reference into one list
+                    // under every bucket lock. Each key is written in a state it had at some instant of the
+                    // walk, and an intent prepared or settled during the walk is written or not. Every entry
+                    // applied during the walk is above the position this file certifies as fully reflected, so
+                    // a restart replays it on top of the file: a prepare the walk missed installs, a settle
+                    // of an intent the walk still wrote settles it, and the head of an intent that settled
+                    // before the walk reached it is added below.
+                    foreach (KeyValuePair<string, PreparedIntent> kv in intents)
                     {
+                        PreparedIntent intent = kv.Value;
+
                         if (resolvePartition(intent.Key) != partitionId)
                             continue;
 
@@ -155,20 +166,57 @@ internal sealed partial class PreparedIntentStore
         lock (fileLock)
             files = Directory.GetFiles(snapshotDirectory, $"{snapshotPrefix}_p*.snapshot");
 
+        // Each file is decoded one entry at a time straight off the file, and each entry goes to its place
+        // before the next is read. The whole-message parser held one protobuf object for every intent, head and
+        // settled identity of the file at once, in repeated fields whose arrays grow by doubling: at a million
+        // settled identities, arrays of up to 8 MiB next to the slice they were about to become. A failure
+        // part-way through leaves a partial set, which is harmless: the constructor throws and the node refuses
+        // to start, as it did when the whole file failed to parse up front.
         foreach (string path in files)
         {
-            // Parsed straight off the file rather than read into one array first, so loading a file never holds
-            // its bytes and its decoded message at once. The message itself is kept whole: the ledger slice it
-            // carries is installed as one unit, and the file's size is bounded by in-flight intents and the
-            // ledger's retention window rather than by throughput.
-            PreparedIntentSnapshotMessage message;
+            int filePartition = TryParsePartitionFromSnapshotPath(path, out int parsedPartition) ? parsedPartition : UnattributedPartition;
 
             try
             {
                 lock (fileLock)
                 {
                     using FileStream file = new(path, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024);
-                    message = PreparedIntentSnapshotMessage.Parser.ParseFrom(file);
+
+                    // The slice is filled as its heads and settled identities are decoded, and it takes its
+                    // scalar state (the watermark, the positions, the size floor) at the end of the file: a
+                    // writer can put those fields anywhere, and one pass over the file is enough this way. The
+                    // slice has no watermark while it is filled, so every settled identity of the file is
+                    // loaded; the sweep removes one that the watermark does not retain.
+                    PartitionLedger ledger = new();
+
+                    SnapshotHeader header = ReadSnapshot(
+                        file, verify: false,
+                        onIntent: loaded =>
+                        {
+                            MergeLoad(loaded, filePartition);
+                            (loadedIntentPartitions ??= new(StringComparer.Ordinal))[loaded.Key] = filePartition;
+                        },
+                        // Retained settled intents reload into their own set — never into the live set, where a
+                        // settled intent would hold its key as a phantom. Nothing is queued yet, so no probe
+                        // applies here; the partition's restore completion re-checks them (see
+                        // ReleaseSettledIntentsWithDurableRows).
+                        onSettledAwaitingFlush: retained =>
+                        {
+                            lock (settledGate)
+                                AddSettledAwaitingFlushLocked(retained);
+                        },
+                        onHead: (key, head) => AddInstalledHead(ledger, key, head),
+                        onSettled: entry => AddInstalledSettled(ledger, entry));
+
+                    if (header.LedgerPresent)
+                    {
+                        SetInstalledState(ledger, header.LedgerWatermark, header.ReflectedThroughIndex, header.FullyReflectedThroughIndex, header.LedgerSizeFloor);
+
+                        lock (applyGate)
+                            InstallLedgerLocked(header.LedgerPartitionId, ledger);
+                    }
+                    else if (filePartition != UnattributedPartition)
+                        ledgerMissingPartitions.Add(filePartition);
                 }
             }
             catch (InvalidProtocolBufferException ex)
@@ -179,33 +227,138 @@ internal sealed partial class PreparedIntentStore
             {
                 throw new IOException($"Failed to read prepared-intent snapshot {path}; refusing to start with a possibly incomplete intent set", ex);
             }
-
-            int filePartition = TryParsePartitionFromSnapshotPath(path, out int parsedPartition) ? parsedPartition : UnattributedPartition;
-
-            foreach (PreparedIntentCommandMessage entry in message.Intents)
-            {
-                PreparedIntent loaded = IntentOf(entry);
-                MergeLoad(loaded, filePartition);
-                (loadedIntentPartitions ??= new(StringComparer.Ordinal))[loaded.Key] = filePartition;
-            }
-
-            // Retained settled intents reload into their own set — never into the live set, where a settled
-            // intent would hold its key as a phantom. Nothing is queued yet, so no probe applies here; the
-            // partition's restore completion re-checks them (see ReleaseSettledIntentsWithDurableRows).
-            if (message.SettledIntentsAwaitingFlush.Count > 0)
-            {
-                lock (settledGate)
-                {
-                    foreach (PreparedIntentCommandMessage entry in message.SettledIntentsAwaitingFlush)
-                        AddSettledAwaitingFlushLocked(IntentOf(entry));
-                }
-            }
-
-            if (message.LedgerPresent)
-                InstallLedger(message.LedgerPartitionId, LedgerEntriesOf(message), LedgerWatermarkOf(message), message.LedgerReflectedThroughIndex, SettledEntriesOf(message), message.LedgerFullyReflectedThroughIndex, message.LedgerSizeFloorPhysical);
-            else if (TryParsePartitionFromSnapshotPath(path, out int partitionId))
-                ledgerMissingPartitions.Add(partitionId);
         }
+    }
+
+    /// <summary>The scalar fields of a prepared-intent snapshot stream and the number of its entries: what a
+    /// reader knows after one pass, and what an install needs before it decodes the entries.</summary>
+    internal readonly record struct SnapshotHeader(
+        bool LedgerPresent, int LedgerPartitionId, HLCTimestamp LedgerWatermark,
+        long ReflectedThroughIndex, long FullyReflectedThroughIndex, long LedgerSizeFloor,
+        int Intents, int Heads, int SettledIdentities);
+
+    /// <summary>
+    /// Reads a snapshot stream to its end, one field at a time, and returns its scalar fields. The stream is a
+    /// <see cref="PreparedIntentSnapshotMessage"/> with its fields in any order: a checkpoint file, or the
+    /// prepared-intent payload of a whole-partition section.
+    ///
+    /// <para>Each entry is decoded into a message of its own and handed to the handler of its kind before the
+    /// next is read, so a pass holds one entry at a time whatever the size of the stream. An entry kind with no
+    /// handler is decoded and dropped when <paramref name="verify"/> is set (a pass that checks that every
+    /// entry decodes), and skipped with no decode when it is not (a pass that needs the scalar fields only).</para>
+    ///
+    /// <para>The scalar fields are written by the generated serializer as varints. The reader copies each one
+    /// to a small buffer and parses that buffer with the generated parser, so a scalar field added to the
+    /// message later needs no change here.</para>
+    /// </summary>
+    private static SnapshotHeader ReadSnapshot(
+        Stream payload, bool verify,
+        Action<PreparedIntent>? onIntent, Action<PreparedIntent>? onSettledAwaitingFlush,
+        Action<string, CommittedHead>? onHead, Action<SettledIdentityEntry>? onSettled)
+    {
+        CodedInputStream input = new(payload, leaveOpen: true);
+
+        using MemoryStream scalarBytes = new(64);
+        CodedOutputStream scalars = new(scalarBytes, leaveOpen: true);
+
+        int intents = 0;
+        int heads = 0;
+        int settled = 0;
+
+        uint tag;
+        while ((tag = input.ReadTag()) != 0)
+        {
+            WireFormat.WireType wireType = WireFormat.GetTagWireType(tag);
+
+            if (wireType == WireFormat.WireType.Varint)
+            {
+                scalars.WriteTag(tag);
+                scalars.WriteUInt64(input.ReadUInt64());
+                continue;
+            }
+
+            if (wireType != WireFormat.WireType.LengthDelimited)
+            {
+                input.SkipLastField();
+                continue;
+            }
+
+            switch (WireFormat.GetTagFieldNumber(tag))
+            {
+                case PreparedIntentSnapshotMessage.IntentsFieldNumber:
+                    intents++;
+                    ReadIntentEntry(input, verify, onIntent);
+                    break;
+
+                case PreparedIntentSnapshotMessage.SettledIntentsAwaitingFlushFieldNumber:
+                    ReadIntentEntry(input, verify, onSettledAwaitingFlush);
+                    break;
+
+                case PreparedIntentSnapshotMessage.CommittedHeadsFieldNumber:
+                    heads++;
+
+                    if (onHead is null && !verify)
+                    {
+                        input.SkipLastField();
+                        break;
+                    }
+
+                    CommittedHeadLedgerEntryMessage head = new();
+                    input.ReadMessage(head);
+                    onHead?.Invoke(
+                        head.Key,
+                        new CommittedHead(head.Revision, (KeyValueState)head.State,
+                            new HLCTimestamp(head.CommittedAtNode, head.CommittedAtPhysical, head.CommittedAtCounter)));
+                    break;
+
+                case PreparedIntentSnapshotMessage.SettledTransactionsFieldNumber:
+                    settled++;
+
+                    if (onSettled is null && !verify)
+                    {
+                        input.SkipLastField();
+                        break;
+                    }
+
+                    SettledTransactionLedgerEntryMessage identity = new();
+                    input.ReadMessage(identity);
+                    onSettled?.Invoke(new SettledIdentityEntry(
+                        new HLCTimestamp(identity.TransactionIdNode, identity.TransactionIdPhysical, identity.TransactionIdCounter),
+                        identity.Epoch,
+                        identity.Key,
+                        new HLCTimestamp(identity.SettledAtNode, identity.SettledAtPhysical, identity.SettledAtCounter)));
+                    break;
+
+                default:
+                    input.SkipLastField();
+                    break;
+            }
+        }
+
+        scalars.Flush();
+
+        PreparedIntentSnapshotMessage message = PreparedIntentSnapshotMessage.Parser.ParseFrom(scalarBytes.GetBuffer(), 0, (int)scalarBytes.Length);
+
+        return new SnapshotHeader(
+            message.LedgerPresent, message.LedgerPartitionId, LedgerWatermarkOf(message),
+            message.LedgerReflectedThroughIndex, message.LedgerFullyReflectedThroughIndex, message.LedgerSizeFloorPhysical,
+            intents, heads, settled);
+    }
+
+    private static void ReadIntentEntry(CodedInputStream input, bool verify, Action<PreparedIntent>? handler)
+    {
+        if (handler is null && !verify)
+        {
+            input.SkipLastField();
+            return;
+        }
+
+        PreparedIntentCommandMessage entry = new();
+        input.ReadMessage(entry);
+
+        // The conversion runs in a verify pass too: it is part of what a later pass does with the entry.
+        PreparedIntent intent = IntentOf(entry);
+        handler?.Invoke(intent);
     }
 
     // A per-partition snapshot file is named "{prefix}_p{partitionId}.snapshot".
@@ -434,7 +587,7 @@ internal sealed partial class PreparedIntentStore
         // where a missed intent must still install on replay.
         long fullyReflected = Math.Max(AppliedLogIndexOf(partitionId), GetLedgerReflectedThroughIndex(partitionId));
 
-        List<PreparedIntent> pendingBeforeCapture = OwnedIntentsBeforeCapture(isOwnedKey);
+        ChunkedList<PreparedIntent> pendingBeforeCapture = OwnedIntentsBeforeCapture(isOwnedKey);
 
         using CodedOutputStream coded = new(output, leaveOpen: true);
 
@@ -472,9 +625,10 @@ internal sealed partial class PreparedIntentStore
     /// <summary>Test seam, invoked between a section's ledger capture and its intent walk. Never set in production.</summary>
     internal Action? AfterLedgerCaptureForTesting { get; set; }
 
-    private List<PreparedIntent> OwnedIntentsBeforeCapture(Func<string, bool> isOwnedKey)
+    // A chunked list: at the live intents of a restart under load, one list is an array above 1 MiB.
+    private ChunkedList<PreparedIntent> OwnedIntentsBeforeCapture(Func<string, bool> isOwnedKey)
     {
-        List<PreparedIntent> owned = [];
+        ChunkedList<PreparedIntent> owned = new();
 
         foreach (KeyValuePair<string, PreparedIntent> kv in intents)
         {
@@ -497,7 +651,7 @@ internal sealed partial class PreparedIntentStore
     /// pending intent from before the capture until its settle, so no other commit of the key lies between the capture's
     /// position and that head, and no replayed entry is judged against a head from its future.</para>
     /// </summary>
-    private void AddHeadsSettledDuringCapture(int partitionId, LedgerCapture? ledger, List<PreparedIntent> pendingBeforeCapture)
+    private void AddHeadsSettledDuringCapture(int partitionId, LedgerCapture? ledger, ChunkedList<PreparedIntent> pendingBeforeCapture)
     {
         if (ledger is null || !ledgers.TryGetValue(partitionId, out PartitionLedger? slice))
             return;
@@ -744,14 +898,11 @@ internal sealed partial class PreparedIntentStore
     internal long GetAppliedLogIndex(int partitionId) => AppliedLogIndexOf(partitionId);
 
     /// <summary>Decodes a section written by <see cref="SerializePartitionIntents"/> (or, with a null ledger,
-    /// by the ledgerless <see cref="SerializeIntents"/> of an older build).</summary>
+    /// by the ledgerless <see cref="SerializeIntents"/> of an older build) into one object that holds every
+    /// entry. The install of a whole-partition snapshot does not use it: it reads the section one entry at a
+    /// time (see <see cref="ReplacePartitionIntents(int, Stream, SnapshotHeader, bool, Func{string, bool})"/>).</summary>
     public static PartitionIntentSection DeserializePartitionIntents(byte[] data) =>
         PartitionIntentSectionOf(ReplicationSerializer.UnserializePreparedIntentSnapshotMessage(data));
-
-    /// <summary>Decodes a section written by <see cref="SerializePartitionIntents"/> straight off
-    /// <paramref name="payload"/> (read to its end), without first copying the section into one array.</summary>
-    public static PartitionIntentSection DeserializePartitionIntents(Stream payload) =>
-        PartitionIntentSectionOf(PreparedIntentSnapshotMessage.Parser.ParseFrom(payload));
 
     private static PartitionIntentSection PartitionIntentSectionOf(PreparedIntentSnapshotMessage message)
     {
@@ -818,6 +969,60 @@ internal sealed partial class PreparedIntentStore
                 $"Partition {partitionId} snapshot carries no committed-head ledger (written by a build that predates it); " +
                 "refusing to install it while OnePhaseApplyTimeValidation is enabled, because this node would judge bundled commits differently from its replicas.");
 
+        int purged = PurgeBeforeInstall(partitionId, isOwned, out PartitionLedger? previousLedger);
+
+        PartitionLedger? ledger = section.Ledger is null
+            ? null
+            : BuildLedger(section.Ledger, section.LedgerWatermark, section.ReflectedThroughIndex, section.Settled, section.FullyReflectedThroughIndex, section.LedgerSizeFloor);
+
+        CompleteInstall(partitionId, ledger, previousLedger, section.Intents, purged, section.Intents.Count, section.ReflectedThroughIndex);
+    }
+
+    /// <summary>Decodes every entry of a whole-partition section and keeps none: the pass of an install that
+    /// checks the section before anything is purged. Returns the section's scalar fields and entry counts,
+    /// which <see cref="ReplacePartitionIntents(int, Stream, SnapshotHeader, bool, Func{string, bool})"/> takes.
+    /// Throws <see cref="InvalidProtocolBufferException"/> for a section that does not decode.</summary>
+    internal static SnapshotHeader VerifyPartitionSection(Stream payload) =>
+        ReadSnapshot(payload, verify: true, null, null, null, null);
+
+    /// <summary>
+    /// The form of <see cref="ReplacePartitionIntents(int, PartitionIntentSection, bool, Func{string, bool})"/>
+    /// that reads the section from <paramref name="payload"/> one entry at a time: each head and each settled
+    /// identity goes into the new slice as it is decoded, so the install holds the slice it builds and one entry,
+    /// and never a decoded copy of the section next to it. <paramref name="header"/> is what
+    /// <see cref="VerifyPartitionSection"/> returned for the same bytes. The contract and the order of the steps
+    /// (purge, build outside the gate, swap) are those of the other form.
+    /// </summary>
+    public void ReplacePartitionIntents(int partitionId, Stream payload, SnapshotHeader header, bool requireLedger, Func<string, bool> isOwned)
+    {
+        if (!header.LedgerPresent && requireLedger)
+            throw new InvalidDataException(
+                $"Partition {partitionId} snapshot carries no committed-head ledger (written by a build that predates it); " +
+                "refusing to install it while OnePhaseApplyTimeValidation is enabled, because this node would judge bundled commits differently from its replicas.");
+
+        int purged = PurgeBeforeInstall(partitionId, isOwned, out PartitionLedger? previousLedger);
+
+        PartitionLedger? ledger = header.LedgerPresent
+            ? NewInstalledLedger(header.LedgerWatermark, header.ReflectedThroughIndex, header.FullyReflectedThroughIndex, header.LedgerSizeFloor)
+            : null;
+
+        // The intents wait in a chunked list: they are installed with the slice, in one critical section.
+        ChunkedList<PreparedIntent> installed = new();
+
+        ReadSnapshot(
+            payload, verify: false,
+            onIntent: installed.Add,
+            onSettledAwaitingFlush: null,
+            onHead: ledger is null ? null : (key, head) => AddInstalledHead(ledger, key, head),
+            onSettled: ledger is null ? null : entry => AddInstalledSettled(ledger, entry));
+
+        CompleteInstall(partitionId, ledger, previousLedger, installed, purged, installed.Count, header.ReflectedThroughIndex);
+    }
+
+    /// <summary>The first step of a replacing install: drops every intent of the partition and takes its ledger
+    /// slice out. Returns how many intents were dropped.</summary>
+    private int PurgeBeforeInstall(int partitionId, Func<string, bool> isOwned, out PartitionLedger? previousLedger)
+    {
         int purged = 0;
 
         // The slice this node held for the partition is released BEFORE the installed one is built: the
@@ -830,15 +1035,15 @@ internal sealed partial class PreparedIntentStore
         // and their import; the partition's apply stream is quiescent for the whole install (the install owns
         // its executor), so no replicated verdict is judged in that window. The reflected positions are
         // carried over by the swap below, which never regresses them.
-        PartitionLedger? previousLedger;
-
         lock (applyGate)
         {
-            List<string>? owned = null;
+            // A chunked list: a node that restarted under load holds enough intents to make one list an array
+            // above 1 MiB, allocated here under the gate.
+            ChunkedList<string>? owned = null;
             foreach (KeyValuePair<string, PreparedIntent> kv in intents)
             {
                 if (isOwned(kv.Key))
-                    (owned ??= []).Add(kv.Key);
+                    (owned ??= new()).Add(kv.Key);
             }
 
             if (owned is not null)
@@ -861,10 +1066,15 @@ internal sealed partial class PreparedIntentStore
             ledgers.TryRemove(partitionId, out previousLedger);
         }
 
-        PartitionLedger? ledger = section.Ledger is null
-            ? null
-            : BuildLedger(section.Ledger, section.LedgerWatermark, section.ReflectedThroughIndex, section.Settled, section.FullyReflectedThroughIndex, section.LedgerSizeFloor);
+        return purged;
+    }
 
+    /// <summary>The last step of a replacing install: swaps the built slice in and installs the intents, in one
+    /// critical section.</summary>
+    private void CompleteInstall(
+        int partitionId, PartitionLedger? ledger, PartitionLedger? previousLedger, IEnumerable<PreparedIntent> installedIntents,
+        int purged, int installedCount, long reflectedThroughIndex)
+    {
         lock (applyGate)
         {
             if (ledger is not null)
@@ -884,7 +1094,7 @@ internal sealed partial class PreparedIntentStore
             else
                 RecomputeLedgerSizeFloorLocked();
 
-            foreach (PreparedIntent intent in section.Intents)
+            foreach (PreparedIntent intent in installedIntents)
                 MergeLoad(intent, partitionId);
 
             StampAllDirty();
@@ -895,7 +1105,7 @@ internal sealed partial class PreparedIntentStore
         if (purged > 0 && logger is not null && logger.IsEnabled(LogLevel.Information))
             logger.LogInformation(
                 "Snapshot install for partition {PartitionId} replaced {Purged} locally held intent(s) with the {Installed} the snapshot carries (reflected through log index {ReflectedThroughIndex})",
-                partitionId, purged, section.Intents.Count, section.ReflectedThroughIndex);
+                partitionId, purged, installedCount, reflectedThroughIndex);
     }
 
     /// <summary>

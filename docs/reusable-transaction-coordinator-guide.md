@@ -762,6 +762,25 @@ removes the expired identities of one shard at each settlement, and it waits whi
 prepared-intent snapshot and in a whole-partition section the settled identities come before the
 intents. A reader parses the same message for either order.
 
+**Large allocations of the retained state.** A node near its heap limit cannot always make one
+allocation of megabytes, so the work that a loaded node repeats makes no single allocation above 1 MiB:
+
+- The checkpoint capture of the records, the receipts and the prepared intents walks each store with no
+  copy of its map.
+- The retention sweep, which runs on each maintenance tick, walks the records and the intents in the
+  same way.
+- The load of a prepared-intent file at a restart, and the install of a whole-partition section, decode
+  the snapshot one entry at a time. Each head and each settled identity goes into the slice before the
+  next entry is read.
+- The committed heads of a slice are in a map of 32 shards. At the default head budget of 500,000 a
+  shard holds about 16,000 heads, and its largest array is about 140 KB. The prune of the heads removes
+  each expired head as it walks the map.
+
+Three maps keep one bucket array for all of their entries and replace it at each doubling, on the apply
+path: the transaction records (5.4 MiB at 560,000 records), the completion receipts (11.2 MiB at
+1,120,000 receipts) and the live prepared intents (2.6 MiB at 170,000 intents). A store makes these
+allocations while it grows, and not again at a steady size.
+
 **The out-of-memory restart breaker.** A node whose heap limit cannot hold its restart baseline dies of
 an out-of-memory fail-fast on every start, inside its restore or its first snapshot install, and under an
 orchestrator it crash-loops while costing the leader a snapshot export per loop. The fail-fast policy

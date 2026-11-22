@@ -44,10 +44,10 @@ internal sealed partial class PreparedIntentStore
     {
         get
         {
-            int count = 0;
+            long count = 0;
             foreach (PartitionLedger ledger in ledgers.Values)
-                count += ledger.Heads.Count;
-            return count;
+                count += Volatile.Read(ref ledger.HeadCount);
+            return (int)Math.Min(count, int.MaxValue);
         }
     }
 
@@ -55,7 +55,7 @@ internal sealed partial class PreparedIntentStore
     /// node holds no slice for it. Feeds the per-partition apply fingerprint, where two replicas at the same
     /// applied log id must report the same count.</summary>
     internal int CommittedHeadCountForPartition(int partitionId) =>
-        ledgers.TryGetValue(partitionId, out PartitionLedger? ledger) ? ledger.Heads.Count : 0;
+        ledgers.TryGetValue(partitionId, out PartitionLedger? ledger) ? (int)Math.Min(Volatile.Read(ref ledger.HeadCount), int.MaxValue) : 0;
 
     /// <summary>Approximate bytes retained by every committed-head ledger slice (gauge).</summary>
     internal long CommittedHeadLedgerBytes
@@ -76,7 +76,7 @@ internal sealed partial class PreparedIntentStore
     {
         List<(int, long, long, long)> sizes = new(ledgers.Count);
         foreach (KeyValuePair<int, PartitionLedger> slice in ledgers)
-            sizes.Add((slice.Key, slice.Value.Heads.Count, Volatile.Read(ref slice.Value.Bytes), slice.Value.Settled.Count));
+            sizes.Add((slice.Key, Volatile.Read(ref slice.Value.HeadCount), Volatile.Read(ref slice.Value.Bytes), slice.Value.Settled.Count));
         return sizes;
     }
 
@@ -812,18 +812,18 @@ internal sealed partial class PreparedIntentStore
     {
         long cutoff = Math.Max(ledger.Watermark.L - stagedBaseFenceRetentionMs, ledger.SizeFloor);
 
-        List<KeyValuePair<string, CommittedHead>>? expired = null;
+        // Each expired head is removed as the walk meets it: the map permits a removal during an enumeration.
+        // A list of the expired heads was one array of megabytes when a prune dropped tens of thousands of
+        // them, allocated here under the gate.
+        bool expired = false;
+
         foreach (KeyValuePair<string, CommittedHead> entry in ledger.Heads)
         {
-            if (entry.Value.CommittedAt.L < cutoff)
-                (expired ??= []).Add(entry);
-        }
+            if (entry.Value.CommittedAt.L >= cutoff)
+                continue;
 
-        if (expired is null)
-            return;
+            expired = true;
 
-        foreach (KeyValuePair<string, CommittedHead> entry in expired)
-        {
             if (!ledger.Heads.TryRemove(entry.Key, out _))
                 continue;
 
@@ -832,7 +832,8 @@ internal sealed partial class PreparedIntentStore
             RemoveFromHeadBucket(ledger, entry.Value.CommittedAt);
         }
 
-        ledger.PruneGeneration++;
+        if (expired)
+            ledger.PruneGeneration++;
     }
 
     /// <summary>The settled identity entries a ledger section or snapshot carries for one slice.</summary>
@@ -860,44 +861,66 @@ internal sealed partial class PreparedIntentStore
         HLCTimestamp watermark, long reflectedThroughIndex, IReadOnlyList<SettledIdentityEntry>? settled, long fullyReflectedThroughIndex,
         long sizeFloor)
     {
-        long reflected = Math.Max(0, reflectedThroughIndex);
-        PartitionLedger ledger = new()
-        {
-            Watermark = watermark,
-            PrunedBucket = watermark.L / LedgerPruneBucketMs,
-            SettledPrunedBucket = watermark.L / SettledIdentityPruneBucketMs,
-            ReflectedThroughIndex = reflected,
-            FullyReflectedThroughIndex = Math.Clamp(fullyReflectedThroughIndex, 0, reflected),
-            SizeFloor = Math.Max(0, sizeFloor)
-        };
+        PartitionLedger ledger = NewInstalledLedger(watermark, reflectedThroughIndex, fullyReflectedThroughIndex, sizeFloor);
 
         foreach ((string key, long revision, KeyValueState state, HLCTimestamp committedAt) in heads)
-        {
-            if (!ledger.Heads.TryAdd(key, new CommittedHead(revision, state, committedAt)))
-                continue;
-
-            ledger.Bytes += LedgerEntryBytes(key);
-            ledger.HeadCount++;
-            AddToHeadBucket(ledger, committedAt);
-        }
+            AddInstalledHead(ledger, key, new CommittedHead(revision, state, committedAt));
 
         if (settled is not null)
         {
-            long retainedFromL = watermark.L - SettledIdentityRetentionMs;
-
             foreach (SettledIdentityEntry entry in settled)
-            {
-                // An identity outside the window of the installed watermark is absent to every verdict, and
-                // the watermark only advances. It is not installed.
-                if (entry.SettledAt.L < retainedFromL)
-                    continue;
-
-                if (ledger.Settled.Record(new SettledIdentity(entry.TransactionId, entry.Epoch, entry.Key), entry.SettledAt, replace: false, retainedFromL))
-                    ledger.Bytes += SettledIdentityBytes(entry.Key);
-            }
+                AddInstalledSettled(ledger, entry);
         }
 
         return ledger;
+    }
+
+    /// <summary>An empty slice with the scalar state of an installed one. A reader that decodes a snapshot one
+    /// entry at a time fills it with <see cref="AddInstalledHead"/> and <see cref="AddInstalledSettled"/>
+    /// outside the gate, then swaps it in. The fully reflected position is clamped to the reflected one.</summary>
+    private PartitionLedger NewInstalledLedger(HLCTimestamp watermark, long reflectedThroughIndex, long fullyReflectedThroughIndex, long sizeFloor)
+    {
+        PartitionLedger ledger = new();
+        SetInstalledState(ledger, watermark, reflectedThroughIndex, fullyReflectedThroughIndex, sizeFloor);
+        return ledger;
+    }
+
+    /// <summary>Gives a slice that is not installed yet the scalar state of an installed one. The prune buckets
+    /// follow from the watermark, so a loaded slice prunes on the schedule of a live one.</summary>
+    private void SetInstalledState(PartitionLedger ledger, HLCTimestamp watermark, long reflectedThroughIndex, long fullyReflectedThroughIndex, long sizeFloor)
+    {
+        long reflected = Math.Max(0, reflectedThroughIndex);
+
+        ledger.Watermark = watermark;
+        ledger.PrunedBucket = watermark.L / LedgerPruneBucketMs;
+        ledger.SettledPrunedBucket = watermark.L / SettledIdentityPruneBucketMs;
+        ledger.ReflectedThroughIndex = reflected;
+        ledger.FullyReflectedThroughIndex = Math.Clamp(fullyReflectedThroughIndex, 0, reflected);
+        ledger.SizeFloor = Math.Max(0, sizeFloor);
+    }
+
+    /// <summary>Adds one head to a slice that is not installed yet. The first head of a key stays.</summary>
+    private static void AddInstalledHead(PartitionLedger ledger, string key, CommittedHead head)
+    {
+        if (!ledger.Heads.TryAdd(key, head))
+            return;
+
+        ledger.Bytes += LedgerEntryBytes(key);
+        ledger.HeadCount++;
+        AddToHeadBucket(ledger, head.CommittedAt);
+    }
+
+    /// <summary>Adds one settled identity to a slice that is not installed yet. An identity outside the window of
+    /// the slice's watermark is absent to every verdict, and the watermark only advances, so it is left out.</summary>
+    private static void AddInstalledSettled(PartitionLedger ledger, in SettledIdentityEntry entry)
+    {
+        long retainedFromL = ledger.Watermark.L - SettledIdentityRetentionMs;
+
+        if (entry.SettledAt.L < retainedFromL)
+            return;
+
+        if (ledger.Settled.Record(new SettledIdentity(entry.TransactionId, entry.Epoch, entry.Key), entry.SettledAt, replace: false, retainedFromL))
+            ledger.Bytes += SettledIdentityBytes(entry.Key);
     }
 
     /// <summary>Swaps a built slice in. The reflected position never regresses across the swap: a re-delivered

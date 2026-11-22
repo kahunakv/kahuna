@@ -418,8 +418,14 @@ internal sealed class DurableMaintenanceService
         // than the retention horizon and holds it instead (see DurableTransactionRecovery). A cluster-wide
         // settlement acknowledgment on the record would let the purge wait for proof instead; until then the
         // hold is the backstop.
+        //
+        // Both stores are walked with no copy of their maps: this sweep runs on every maintenance tick, and a
+        // copy is an array of megabytes at the record count of a loaded node. Neither walk is a point-in-time
+        // cut, and the sweep does not need one. It reclaims a record only past the retention floor, and an
+        // intent of such a record that is still unsettled was prepared long before this walk began, so the
+        // walk returns it.
         HashSet<(HLCTimestamp, long)> settlementPending = [];
-        foreach (PreparedIntent intent in preparedIntentStore.Snapshot())
+        foreach (PreparedIntent intent in preparedIntentStore.EnumerateIntents())
             settlementPending.Add((intent.TransactionId, intent.Epoch));
 
         int cap = durableRecordGcMaxPerPass;
@@ -451,8 +457,6 @@ internal sealed class DurableMaintenanceService
         // once all are seen.
         List<(TransactionRecord Record, int AnchorPartition)>? budgetCandidates = pressure.OverBudget ? [] : null;
 
-        IReadOnlyCollection<TransactionRecord> snapshot = transactionRecordStore.Snapshot();
-
         // For the proportional share: among the terminal records old enough to reclaim at all (past the floor),
         // how many this node leads vs. how many are resident here. Records inside the floor are skipped before
         // any routing or leadership lookup — the common case on a healthy node must stay a couple of field reads
@@ -461,7 +465,7 @@ internal sealed class DurableMaintenanceService
         int reclaimableLed = 0;
         int expiredSelected = 0;
 
-        foreach (TransactionRecord record in snapshot)
+        foreach (TransactionRecord record in transactionRecordStore.EnumerateRecords())
         {
             if (cancellationToken.IsCancellationRequested)
                 break;
