@@ -194,7 +194,7 @@ internal sealed partial class PreparedIntentStore
                         onIntent: loaded =>
                         {
                             MergeLoad(loaded, filePartition);
-                            (loadedIntentPartitions ??= new(StringComparer.Ordinal))[loaded.Key] = filePartition;
+                            (loadedIntentPartitions ??= new(IntentMapShards, concurrencyLevel: 1))[loaded.Key] = filePartition;
                         },
                         // Retained settled intents reload into their own set — never into the live set, where a
                         // settled intent would hold its key as a phantom. Nothing is queued yet, so no probe
@@ -534,8 +534,8 @@ internal sealed partial class PreparedIntentStore
     // ── state transfer (split/merge) ────────────────────────────────────────────────
 
     /// <summary>Intents whose key routes into <c>[startKey, endKey)</c> (ordinal, half-open) — the set a range
-    /// split/merge hands to the destination partition. Deliberately a consistent cut (<c>Values</c> copies the map
-    /// under every bucket lock): the moved keys' log entries stay on the source partition, so the destination has
+    /// split/merge hands to the destination partition. Deliberately a consistent cut (the walk runs under the
+    /// apply gate, which every writer of the map holds): the moved keys' log entries stay on the source partition, so the destination has
     /// no replay tail to converge a torn capture with. The whole-partition export does have that tail and streams
     /// its slice lock-free instead (<see cref="WritePartitionSection"/>); the scan captures read the ordered key
     /// index per key instead — see <see cref="SnapshotScanWindow"/>.</summary>
@@ -543,15 +543,21 @@ internal sealed partial class PreparedIntentStore
     {
         List<PreparedIntent> result = [];
 
-        foreach (PreparedIntent intent in intents.Values)
+        // Under the apply gate, which every writer of the map holds: the walk is then one cut across keys.
+        lock (applyGate)
         {
-            if (startKey is not null && string.CompareOrdinal(intent.Key, startKey) < 0)
-                continue;
+            foreach (KeyValuePair<string, PreparedIntent> kv in intents)
+            {
+                PreparedIntent intent = kv.Value;
 
-            if (endKey is not null && string.CompareOrdinal(intent.Key, endKey) >= 0)
-                continue;
+                if (startKey is not null && string.CompareOrdinal(intent.Key, startKey) < 0)
+                    continue;
 
-            result.Add(intent);
+                if (endKey is not null && string.CompareOrdinal(intent.Key, endKey) >= 0)
+                    continue;
+
+                result.Add(intent);
+            }
         }
 
         return result;
@@ -820,8 +826,13 @@ internal sealed partial class PreparedIntentStore
     /// authority).</summary>
     public void ImportIntents(IEnumerable<PreparedIntent> incoming, int partitionId)
     {
+        // Under the apply gate, as every other writer of the map: a copy taken under the gate is then one cut
+        // across keys. The gate is taken for each intent, so an import of many does not hold it for long.
         foreach (PreparedIntent intent in incoming)
-            MergeLoad(intent, partitionId);
+        {
+            lock (applyGate)
+                MergeLoad(intent, partitionId);
+        }
 
         SignalFenceWaiters();
     }

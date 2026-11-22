@@ -772,14 +772,26 @@ allocation of megabytes, so the work that a loaded node repeats makes no single 
 - The load of a prepared-intent file at a restart, and the install of a whole-partition section, decode
   the snapshot one entry at a time. Each head and each settled identity goes into the slice before the
   next entry is read.
-- The committed heads of a slice are in a map of 32 shards. At the default head budget of 500,000 a
-  shard holds about 16,000 heads, and its largest array is about 140 KB. The prune of the heads removes
-  each expired head as it walks the map.
+- The stores keep their entries in sharded maps: a fixed number of small concurrent maps, selected by
+  a hash of the key. One concurrent dictionary replaces one bucket array for all of its entries at each
+  doubling, on the apply path, and makes a new node for every entry at the same time. With shards, a
+  resize is that of one shard. The prune of the heads removes each expired head as it walks the map.
 
-Three maps keep one bucket array for all of their entries and replace it at each doubling, on the apply
-path: the transaction records (5.4 MiB at 560,000 records), the completion receipts (11.2 MiB at
-1,120,000 receipts) and the live prepared intents (2.6 MiB at 170,000 intents). A store makes these
-allocations while it grows, and not again at a steady size.
+| Map | Shards | Largest array, one dictionary | Largest array, sharded |
+|---|---:|---:|---:|
+| Completion receipts (1,120,000) | 256 | 11.2 MiB | 67 KB |
+| Transaction records (560,000) | 128 | 5.4 MiB | 67 KB |
+| Committed heads of a slice (500,000) | 32 | 5.4 MiB | 140 KB |
+| Live prepared intents (170,000) | 64 | 2.6 MiB | 32 KB |
+
+A sharded map has no atomic copy and no count across its shards. A range move and a backup need one
+copy that is atomic across entries, so the stores take it under their apply gate, which every writer
+of the map holds. Each store counts its own inserts and removes.
+
+A lookup in a sharded map costs more than in one dictionary, because it selects a shard first: about
+5 to 13 ns more for an intent lookup when the store holds intents, 12 ns for a receipt check and 2 ns
+for a record lookup (`DurableStoreLookupBenchmark`). A store that holds no intent answers an intent
+lookup from its live count, with no hash of the key: 0.4 ns, against 6 ns with one dictionary.
 
 **The out-of-memory restart breaker.** A node whose heap limit cannot hold its restart baseline dies of
 an out-of-memory fail-fast on every start, inside its restore or its first snapshot install, and under an

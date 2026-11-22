@@ -9,10 +9,10 @@ namespace Kahuna.Microbenchmarks;
 /// committed heads of a ledger slice: one write for each key a transaction settles, and lookups on the apply
 /// path and on advisory reads.
 ///
-/// <para><b>Shape:</b> <see cref="Entries"/> 30-character keys and a 40-byte value, with one writer. The
-/// lookups use keys that the benchmark did not hash before, as a request does: the string hash is inside the
-/// numbers. The memory diagnoser shows what a fill allocates: the single map's total includes the bucket
-/// array and the nodes it makes again at each doubling.</para>
+/// <para><b>Shape:</b> <see cref="Entries"/> 30-character keys and a 40-byte value, with one writer. Each
+/// lookup hashes the key for the choice of the shard and the shard's map hashes it again, so both hashes are
+/// inside the numbers. The memory diagnoser shows what a fill allocates: the single map's total includes the
+/// bucket array and the nodes it makes again at each doubling.</para>
 /// </summary>
 [MemoryDiagnoser]
 public class ShardedConcurrentMapBenchmark
@@ -28,7 +28,7 @@ public class ShardedConcurrentMapBenchmark
     private string[] absent = null!;
 
     private ConcurrentDictionary<string, Head> single = null!;
-    private ShardedConcurrentMap<Head> sharded = null!;
+    private ShardedConcurrentMap<string, Head, OrdinalShardHasher> sharded = null!;
 
     [GlobalSetup]
     public void Setup()
@@ -54,9 +54,9 @@ public class ShardedConcurrentMapBenchmark
         return map;
     }
 
-    private ShardedConcurrentMap<Head> FillSharded()
+    private ShardedConcurrentMap<string, Head, OrdinalShardHasher> FillSharded()
     {
-        ShardedConcurrentMap<Head> map = new(Shards, concurrencyLevel: 1);
+        ShardedConcurrentMap<string, Head, OrdinalShardHasher> map = new(Shards, concurrencyLevel: 1);
         for (int i = 0; i < keys.Length; i++)
             map[keys[i]] = new Head(i, 1, i, 0, 0);
         return map;

@@ -7,6 +7,7 @@ using Kommander.Time;
 
 using Kahuna.Server.Replication;
 using Kahuna.Shared.KeyValue;
+using Kahuna.Utils;
 
 namespace Kahuna.Server.KeyValues;
 
@@ -32,7 +33,18 @@ namespace Kahuna.Server.KeyValues;
 /// </summary>
 internal sealed class CompletionReceiptStore
 {
-    private readonly ConcurrentDictionary<ReceiptKey, CompletionReceipt> receipts = new();
+    // A sharded map: a loaded node holds two receipts for each retained transaction, and one concurrent
+    // dictionary of a million receipts replaces a bucket array of 11 MiB, and makes a new node for every
+    // receipt, at each doubling on the apply path. A shard has one lock: two writers wait for each other only
+    // when they write to the same shard.
+    private readonly ShardedConcurrentMap<ReceiptKey, CompletionReceipt, KeyHashShardHasher<ReceiptKey>> receipts =
+        new(ReceiptMapShards, concurrencyLevel: 1);
+
+    // At 1,120,000 receipts a shard holds about 4,400 of them, and its bucket array is 67 KB.
+    private const int ReceiptMapShards = 256;
+
+    // Number of retained receipts. The sharded map keeps no count. Maintained with every add and remove.
+    private int receiptCount;
 
     // Running estimate of the heap the resident receipts retain, maintained on every record/forget so the
     // retention memory budget reads a counter instead of scanning two million entries.
@@ -216,6 +228,7 @@ internal sealed class CompletionReceiptStore
 
         if (receipts.TryAdd(new ReceiptKey(transactionId, key), new CompletionReceipt(recordAnchorKey, durability)))
         {
+            Interlocked.Increment(ref receiptCount);
             Interlocked.Add(ref estimatedBytes, EstimateBytes(key, recordAnchorKey));
             StampDirty(key);
         }
@@ -252,6 +265,7 @@ internal sealed class CompletionReceiptStore
         if (!receipts.TryRemove(new ReceiptKey(transactionId, key), out CompletionReceipt removed))
             return false;
 
+        Interlocked.Decrement(ref receiptCount);
         Interlocked.Add(ref estimatedBytes, -EstimateBytes(key, removed.RecordAnchorKey));
         StampDirty(key);
         return true;
@@ -268,9 +282,11 @@ internal sealed class CompletionReceiptStore
     {
         int removed = 0;
 
-        foreach (CompletionReceiptRecord record in SnapshotRange(null, null))
+        // The map is walked directly, and each matching receipt is removed as the walk meets it. A list of
+        // every receipt of the store, to filter after, is an array of megabytes on a loaded node.
+        foreach (KeyValuePair<ReceiptKey, CompletionReceipt> receipt in receipts)
         {
-            if (shouldRemove(record.Key) && Forget(record.TransactionId, record.Key))
+            if (shouldRemove(receipt.Key.Key) && Forget(receipt.Key.TransactionId, receipt.Key.Key))
                 removed++;
         }
 
@@ -312,6 +328,7 @@ internal sealed class CompletionReceiptStore
             // under the same key is left for the next pass rather than dropped on stale information.
             if (receipts.TryRemove(receipt))
             {
+                Interlocked.Decrement(ref receiptCount);
                 Interlocked.Add(ref estimatedBytes, -EstimateBytes(receipt.Key.Key, receipt.Value.RecordAnchorKey));
                 removed++;
             }
@@ -324,7 +341,7 @@ internal sealed class CompletionReceiptStore
     }
 
     /// <summary>Current number of retained receipts. Diagnostic only.</summary>
-    public int Count => receipts.Count;
+    public int Count => Volatile.Read(ref receiptCount);
 
     /// <summary>Estimated heap bytes retained by the resident receipts — a running counter for the retention
     /// memory budget, which reads it every tick.</summary>
@@ -727,8 +744,47 @@ internal sealed class CompletionReceiptStore
         }
     }
 
-    /// <summary>Composite receipt key. String keys compare with ordinal semantics (default for string).</summary>
-    private readonly record struct ReceiptKey(HLCTimestamp TransactionId, string Key);
+    /// <summary>
+    /// Composite receipt key. String keys compare with ordinal semantics.
+    ///
+    /// <para>The key computes its hash once, when it is built, and keeps it: the map reads the hash to select a
+    /// shard and the shard's map reads it again. The fields are laid out so that the stored hash adds no bytes
+    /// to an entry.</para>
+    /// </summary>
+    private readonly struct ReceiptKey : IEquatable<ReceiptKey>
+    {
+        private readonly long transactionL;
+
+        private readonly uint transactionC;
+
+        private readonly int transactionN;
+
+        private readonly int hash;
+
+        public ReceiptKey(HLCTimestamp transactionId, string key)
+        {
+            transactionL = transactionId.L;
+            transactionC = transactionId.C;
+            transactionN = transactionId.N;
+            Key = key;
+            hash = TransactionKeyHash.Combine(key, transactionId);
+        }
+
+        public HLCTimestamp TransactionId => new(transactionN, transactionL, transactionC);
+
+        public string Key { get; }
+
+        public bool Equals(ReceiptKey other) =>
+            hash == other.hash
+            && transactionL == other.transactionL
+            && transactionC == other.transactionC
+            && transactionN == other.transactionN
+            && string.Equals(Key, other.Key);
+
+        public override bool Equals(object? obj) => obj is ReceiptKey other && Equals(other);
+
+        public override int GetHashCode() => hash;
+    }
 
     // The pair of stamps a partition's snapshot file was written under: the mutation tick it covered and the
     // routing stamp it routed with. A checkpoint skips the rewrite only when both still match.

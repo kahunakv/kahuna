@@ -4,6 +4,7 @@ using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
 using Kahuna.Shared.KeyValue;
+using Kahuna.Utils;
 using Kommander.Data;
 using Kommander.Time;
 using Microsoft.Extensions.Logging;
@@ -20,7 +21,17 @@ namespace Kahuna.Server.KeyValues.Transactions;
 /// </summary>
 internal sealed class TransactionRecordStore
 {
-    private readonly ConcurrentDictionary<(HLCTimestamp TransactionId, long Epoch), TransactionRecord> records = new();
+    // A sharded map: at the record count of a loaded node, one concurrent dictionary replaces a bucket array
+    // of megabytes, and makes a new node for every record, at each doubling on the apply path. Every writer
+    // holds applyGate, so one lock for each shard is enough.
+    private readonly ShardedConcurrentMap<(HLCTimestamp TransactionId, long Epoch), TransactionRecord, KeyHashShardHasher<(HLCTimestamp TransactionId, long Epoch)>> records =
+        new(RecordMapShards, concurrencyLevel: 1);
+
+    // At 560,000 records a shard holds about 4,400 of them, and its bucket array is 67 KB.
+    private const int RecordMapShards = 128;
+
+    // Number of resident records. The sharded map keeps no count. Maintained with every insert and remove.
+    private int recordCount;
 
     // Running estimate of the heap the resident records retain (see TransactionRecord.EstimateBytes), maintained
     // at every insert/replace/remove so the retention memory budget reads a counter instead of scanning.
@@ -303,7 +314,20 @@ internal sealed class TransactionRecordStore
     public TransactionRecord? Get(HLCTimestamp transactionId, long epoch) =>
         records.TryGetValue((transactionId, epoch), out TransactionRecord? record) ? record : null;
 
-    public IReadOnlyCollection<TransactionRecord> Snapshot() => records.Values.ToArray();
+    /// <summary>Every record, as one copy that is atomic across records: the copy is taken under the apply
+    /// gate, which every writer holds. A caller that runs on a timer uses <see cref="EnumerateRecords"/>.</summary>
+    public IReadOnlyCollection<TransactionRecord> Snapshot()
+    {
+        lock (applyGate)
+        {
+            List<TransactionRecord> snapshot = new(Count);
+
+            foreach (KeyValuePair<(HLCTimestamp TransactionId, long Epoch), TransactionRecord> kv in records)
+                snapshot.Add(kv.Value);
+
+            return snapshot;
+        }
+    }
 
     /// <summary>
     /// Walks every record without a copy of the map. <see cref="Snapshot"/> copies the map twice into arrays of
@@ -318,7 +342,7 @@ internal sealed class TransactionRecordStore
             yield return kv.Value;
     }
 
-    public int Count => records.Count;
+    public int Count => Volatile.Read(ref recordCount);
 
     /// <summary>Estimated heap bytes retained by the resident records (see <see cref="TransactionRecord.EstimateBytes"/>).
     /// A running counter, so the retention budget can read it every tick without a scan.</summary>
@@ -328,6 +352,11 @@ internal sealed class TransactionRecordStore
     // <paramref name="after"/> (either may be null: insert, replace, remove).
     private void AccountReplaced(TransactionRecord? before, TransactionRecord? after)
     {
+        if (before is null && after is not null)
+            Interlocked.Increment(ref recordCount);
+        else if (before is not null && after is null)
+            Interlocked.Decrement(ref recordCount);
+
         long delta = (after?.EstimateBytes() ?? 0) - (before?.EstimateBytes() ?? 0);
         if (delta != 0)
             Interlocked.Add(ref estimatedBytes, delta);
@@ -751,18 +780,24 @@ internal sealed class TransactionRecordStore
     // ── state transfer (split/merge) ────────────────────────────────────────────────
 
     /// <summary>Records whose anchor currently routes into <c>[startKey, endKey)</c> (ordinal, half-open) — the
-    /// set a range split/merge hands to the destination partition.</summary>
+    /// set a range split/merge hands to the destination partition. One cut that is atomic across records: the
+    /// walk runs under the apply gate, which every writer holds.</summary>
     public IReadOnlyList<TransactionRecord> SnapshotRange(string? startKey, string? endKey)
     {
         List<TransactionRecord> result = [];
-        foreach (TransactionRecord record in records.Values)
+
+        lock (applyGate)
         {
-            string anchor = record.RecordAnchorKey;
-            if (startKey is not null && string.CompareOrdinal(anchor, startKey) < 0)
-                continue;
-            if (endKey is not null && string.CompareOrdinal(anchor, endKey) >= 0)
-                continue;
-            result.Add(record);
+            foreach (KeyValuePair<(HLCTimestamp TransactionId, long Epoch), TransactionRecord> kv in records)
+            {
+                TransactionRecord record = kv.Value;
+                string anchor = record.RecordAnchorKey;
+                if (startKey is not null && string.CompareOrdinal(anchor, startKey) < 0)
+                    continue;
+                if (endKey is not null && string.CompareOrdinal(anchor, endKey) >= 0)
+                    continue;
+                result.Add(record);
+            }
         }
 
         return result;
@@ -844,8 +879,13 @@ internal sealed class TransactionRecordStore
     /// decoded source (<see cref="ReadRecords"/>) is never materialised.</summary>
     public void ImportRecords(IEnumerable<TransactionRecord> incoming)
     {
+        // The gate is taken for each record and released for the decode of the next one: every writer of the
+        // map holds it, which is what makes a copy taken under it atomic, and a decode can read a file.
         foreach (TransactionRecord record in incoming)
-            MergeLoad(record);
+        {
+            lock (applyGate)
+                MergeLoad(record);
+        }
     }
 
     public static byte[] SerializeRecords(IEnumerable<TransactionRecord> records)

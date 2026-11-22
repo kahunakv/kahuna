@@ -1,34 +1,42 @@
 using System.Collections;
 using System.Collections.Concurrent;
+using System.IO.Hashing;
+using System.Runtime.InteropServices;
 
 namespace Kahuna.Utils;
 
 /// <summary>
-/// A string key together with its hash, computed once. A caller that probes several maps for one key builds
-/// the hashed key once and passes it to each probe.
+/// Gives the hash that a <see cref="ShardedConcurrentMap{TKey,TValue,THasher}"/> selects a shard from. The
+/// hash decides only how evenly the keys spread over the shards: a poor one makes some shards larger and
+/// changes no result, because each shard is a complete map with the key's own comparer.
 /// </summary>
-internal readonly struct HashedKey : IEquatable<HashedKey>
+internal interface IShardHasher<TKey> where TKey : notnull
 {
-    public readonly string Key;
+    static abstract int ShardHash(TKey key);
+}
 
-    public readonly int Hash;
-
-    public HashedKey(string key)
-    {
-        Key = key;
-        Hash = key.GetHashCode();
-    }
-
-    public bool Equals(HashedKey other) => Hash == other.Hash && string.Equals(Key, other.Key);
-
-    public override bool Equals(object? obj) => obj is HashedKey other && Equals(other);
-
-    public override int GetHashCode() => Hash;
+/// <summary>Selects a shard from the key's own hash. For a key whose hash is cheap: a tuple of numbers, or a
+/// key that stores its hash.</summary>
+internal readonly struct KeyHashShardHasher<TKey> : IShardHasher<TKey> where TKey : notnull
+{
+    public static int ShardHash(TKey key) => key.GetHashCode();
 }
 
 /// <summary>
-/// A concurrent map from string keys to values that is stored as a fixed number of small concurrent maps
-/// (shards), selected by the hash of the key.
+/// Selects a shard for a string key from a fast hash of all of its characters, seeded once for the process.
+/// The randomized hash of <see cref="string.GetHashCode()"/> costs several times more, and the shard's map
+/// hashes the string again with its own comparer, so the choice of a shard must be cheap.
+/// </summary>
+internal readonly struct OrdinalShardHasher : IShardHasher<string>
+{
+    private static readonly long Seed = Random.Shared.NextInt64();
+
+    public static int ShardHash(string key) => (int)XxHash3.HashToUInt64(MemoryMarshal.AsBytes(key.AsSpan()), Seed);
+}
+
+/// <summary>
+/// A concurrent map that is stored as a fixed number of small concurrent maps (shards), selected by a hash of
+/// the key.
 ///
 /// <para>One <see cref="ConcurrentDictionary{TKey,TValue}"/> keeps one bucket array for all of its entries and
 /// replaces it at each doubling: at half a million entries that is an array of 5 MiB, and the dictionary also
@@ -36,28 +44,31 @@ internal readonly struct HashedKey : IEquatable<HashedKey>
 /// those allocations there, where a failed allocation ends the process. With shards, a resize is that of one
 /// shard: its array and its nodes are the total divided by the number of shards.</para>
 ///
-/// <para>The key is hashed once for an operation. The shard is selected from that hash, and the shard's map
-/// reads the same hash from the <see cref="HashedKey"/> it stores, where a plain string key is hashed again
-/// by the inner map. The stored hash adds 8 bytes to an entry.</para>
+/// <para>Each shard is a <see cref="ConcurrentDictionary{TKey,TValue}"/> with the default comparer of the key,
+/// so a key is found by the same equality as in one dictionary, and a string key keeps the dictionary's fast
+/// path for strings. <typeparamref name="THasher"/> gives the hash for the choice of the shard.</para>
 ///
 /// <para>The concurrency contract is that of <see cref="ConcurrentDictionary{TKey,TValue}"/> for each
 /// operation: reads take no lock and can run with writes. An enumeration walks the shards in order and is not
 /// a point-in-time cut: an entry present for the whole walk is returned once, and one added or removed during
-/// the walk is returned or not. The map has no count: a count over the shards is not atomic, so an owner that
-/// needs one keeps it with its writes.</para>
+/// the walk is returned or not. The map has no count and no atomic copy: both would read every shard, and
+/// neither is atomic across shards. An owner that needs a count keeps it with its writes, and an owner that
+/// needs an atomic copy walks the map under the lock that its writers hold.</para>
 /// </summary>
-internal sealed class ShardedConcurrentMap<TValue> : IEnumerable<KeyValuePair<string, TValue>>
+internal sealed class ShardedConcurrentMap<TKey, TValue, THasher> : IEnumerable<KeyValuePair<TKey, TValue>>
+    where TKey : notnull
+    where THasher : IShardHasher<TKey>
 {
     // Created on the first write to a shard, so a map with few entries holds few shards.
-    private readonly ConcurrentDictionary<HashedKey, TValue>?[] shards;
+    private readonly ConcurrentDictionary<TKey, TValue>?[] shards;
 
     private readonly int shardShift;
 
     private readonly int concurrencyLevel;
 
     /// <param name="shardCount">Number of shards; a power of two.</param>
-    /// <param name="concurrencyLevel">Writers expected on one shard at a time. 1 for a map with one writer,
-    /// which then holds one lock object for each shard.</param>
+    /// <param name="concurrencyLevel">Locks of one shard. 1 holds one lock object for each shard: two writers
+    /// wait for each other only when they write to the same shard.</param>
     public ShardedConcurrentMap(int shardCount, int concurrencyLevel)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(shardCount, 2);
@@ -66,16 +77,22 @@ internal sealed class ShardedConcurrentMap<TValue> : IEnumerable<KeyValuePair<st
         if (!int.IsPow2(shardCount))
             throw new ArgumentOutOfRangeException(nameof(shardCount), shardCount, "The number of shards must be a power of two.");
 
-        shards = new ConcurrentDictionary<HashedKey, TValue>?[shardCount];
+        shards = new ConcurrentDictionary<TKey, TValue>?[shardCount];
         shardShift = 32 - int.Log2(shardCount);
         this.concurrencyLevel = concurrencyLevel;
     }
 
-    public bool TryGetValue(string key, out TValue value) => TryGetValue(new HashedKey(key), out value);
+    /// <summary>The hash that selects the shard of <paramref name="key"/>. A caller that probes several maps of
+    /// this type for one key computes it once and passes it to each probe.</summary>
+    public static int ShardHashOf(TKey key) => THasher.ShardHash(key);
 
-    public bool TryGetValue(in HashedKey key, out TValue value)
+    public bool TryGetValue(TKey key, out TValue value) => TryGetValue(key, THasher.ShardHash(key), out value);
+
+    /// <summary>The form of <see cref="TryGetValue(TKey, out TValue)"/> for a caller that already has the
+    /// result of <see cref="ShardHashOf"/> for the key.</summary>
+    public bool TryGetValue(TKey key, int shardHash, out TValue value)
     {
-        ConcurrentDictionary<HashedKey, TValue>? shard = Volatile.Read(ref shards[ShardOf(key.Hash)]);
+        ConcurrentDictionary<TKey, TValue>? shard = Volatile.Read(ref shards[ShardOf(shardHash)]);
 
         if (shard is not null)
             return shard.TryGetValue(key, out value!);
@@ -84,62 +101,70 @@ internal sealed class ShardedConcurrentMap<TValue> : IEnumerable<KeyValuePair<st
         return false;
     }
 
-    public TValue this[string key]
+    public TValue this[TKey key]
     {
-        set
-        {
-            HashedKey hashed = new(key);
-            ShardForWrite(hashed.Hash)[hashed] = value;
-        }
+        set => ShardForWrite(key)[key] = value;
     }
 
-    public bool TryAdd(string key, TValue value)
+    public bool TryAdd(TKey key, TValue value) => ShardForWrite(key).TryAdd(key, value);
+
+    /// <summary>Replaces the value of <paramref name="key"/> when it is still <paramref name="comparisonValue"/>.</summary>
+    public bool TryUpdate(TKey key, TValue newValue, TValue comparisonValue)
     {
-        HashedKey hashed = new(key);
-        return ShardForWrite(hashed.Hash).TryAdd(hashed, value);
+        ConcurrentDictionary<TKey, TValue>? shard = ShardForRead(key);
+        return shard is not null && shard.TryUpdate(key, newValue, comparisonValue);
     }
 
-    public bool TryRemove(string key, out TValue value)
+    public bool TryRemove(TKey key, out TValue value)
     {
-        HashedKey hashed = new(key);
-        ConcurrentDictionary<HashedKey, TValue>? shard = Volatile.Read(ref shards[ShardOf(hashed.Hash)]);
+        ConcurrentDictionary<TKey, TValue>? shard = ShardForRead(key);
 
         if (shard is not null)
-            return shard.TryRemove(hashed, out value!);
+            return shard.TryRemove(key, out value!);
 
         value = default!;
         return false;
     }
 
-    public IEnumerator<KeyValuePair<string, TValue>> GetEnumerator()
+    /// <summary>Removes the entry when its value is still the one of <paramref name="item"/>.</summary>
+    public bool TryRemove(KeyValuePair<TKey, TValue> item)
+    {
+        ConcurrentDictionary<TKey, TValue>? shard = ShardForRead(item.Key);
+        return shard is not null && shard.TryRemove(item);
+    }
+
+    public IEnumerator<KeyValuePair<TKey, TValue>> GetEnumerator()
     {
         for (int i = 0; i < shards.Length; i++)
         {
-            ConcurrentDictionary<HashedKey, TValue>? shard = Volatile.Read(ref shards[i]);
+            ConcurrentDictionary<TKey, TValue>? shard = Volatile.Read(ref shards[i]);
             if (shard is null)
                 continue;
 
-            foreach (KeyValuePair<HashedKey, TValue> entry in shard)
-                yield return new KeyValuePair<string, TValue>(entry.Key.Key, entry.Value);
+            foreach (KeyValuePair<TKey, TValue> entry in shard)
+                yield return entry;
         }
     }
 
     IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
 
-    // The high bits of the multiplied hash select the shard. The shard's map selects a bucket from the hash
-    // modulo its bucket count, so the two choices do not follow each other.
-    private int ShardOf(int hash) => (int)(((uint)hash * 2654435769u) >> shardShift);
+    // The high bits of the multiplied hash select the shard. The shard's map selects a bucket from its own hash
+    // of the key modulo its bucket count, so the two choices do not follow each other.
+    private int ShardOf(int shardHash) => (int)(((uint)shardHash * 2654435769u) >> shardShift);
 
-    private ConcurrentDictionary<HashedKey, TValue> ShardForWrite(int hash)
+    private ConcurrentDictionary<TKey, TValue>? ShardForRead(TKey key) =>
+        Volatile.Read(ref shards[ShardOf(THasher.ShardHash(key))]);
+
+    private ConcurrentDictionary<TKey, TValue> ShardForWrite(TKey key)
     {
-        ref ConcurrentDictionary<HashedKey, TValue>? slot = ref shards[ShardOf(hash)];
+        ref ConcurrentDictionary<TKey, TValue>? slot = ref shards[ShardOf(THasher.ShardHash(key))];
 
-        ConcurrentDictionary<HashedKey, TValue>? shard = Volatile.Read(ref slot);
+        ConcurrentDictionary<TKey, TValue>? shard = Volatile.Read(ref slot);
         if (shard is not null)
             return shard;
 
         // Two first writers can meet here: one map is installed and both use it.
-        ConcurrentDictionary<HashedKey, TValue> created = new(concurrencyLevel, capacity: 31);
+        ConcurrentDictionary<TKey, TValue> created = new(concurrencyLevel, capacity: 31);
         return Interlocked.CompareExchange(ref slot, created, null) ?? created;
     }
 }

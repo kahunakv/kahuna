@@ -27,8 +27,16 @@ namespace Kahuna.Server.KeyValues.Transactions;
 internal sealed partial class PreparedIntentStore
 {
     /// <summary>The live intents by key. Written only through <see cref="InstallLive"/> and <see cref="RemoveLive"/>,
-    /// which keep <see cref="orderedKeys"/> in step; point lookups read it lock-free.</summary>
-    private readonly ConcurrentDictionary<string, PreparedIntent> intents = new();
+    /// which keep <see cref="orderedKeys"/> in step; point lookups read it lock-free.
+    ///
+    /// <para>A sharded map: a node that restarted under load holds enough intents for one concurrent
+    /// dictionary to replace a bucket array of megabytes, and to make a new node for every intent, at a
+    /// doubling on the apply path. Every writer holds <see cref="applyGate"/>, so one lock for each shard is
+    /// enough, and a walk under that gate is one cut that is atomic across keys.</para></summary>
+    private readonly ShardedConcurrentMap<string, PreparedIntent, OrdinalShardHasher> intents = new(IntentMapShards, concurrencyLevel: 1);
+
+    // At 170,000 live intents a shard holds about 2,700 of them, and its bucket array is 32 KB.
+    private const int IntentMapShards = 64;
 
     /// <summary>
     /// The live intents' keys in ordinal order, beside the map, so a scan window
@@ -44,25 +52,29 @@ internal sealed partial class PreparedIntentStore
     private readonly object orderedKeysGate = new();
 
     /// <summary>Installs or replaces the live intent at <paramref name="key"/>: the map first, so a key the index
-    /// names has its intent, then the index. Safe under concurrent writers (the apply gate serializes most, the
-    /// snapshot import runs outside it); a reader between the two steps misses an intent whose apply has not
+    /// names has its intent, then the index. Every caller holds the apply gate, except the load of the
+    /// snapshot files at construction; a reader between the two steps misses an intent whose apply has not
     /// completed, which is the state before the apply. <paramref name="partitionId"/> is the partition whose log
     /// (or snapshot) installed the intent. Returns true when the install resolved the last pending intent of its
     /// transaction on that partition (tracked only while the commit admission window is on).</summary>
     private bool InstallLive(string key, PreparedIntent intent, int partitionId)
     {
-        // Add or replace, counting only an add: the live count is kept beside the map so that reading it does not
-        // take the map's bucket locks.
+        // Add or replace, counting only an add: the live count is kept beside the map, which has no count of its
+        // own. The count is raised before the add and lowered again when the key was already held, so it is
+        // never below the number of intents in the map: a point lookup reads it to answer "no intent" for a
+        // store that holds none, with no hash and no lookup.
+        Interlocked.Increment(ref liveCount);
+
         while (true)
         {
             if (intents.TryAdd(key, intent))
-            {
-                Interlocked.Increment(ref liveCount);
                 break;
-            }
 
             if (intents.TryGetValue(key, out PreparedIntent? existing) && intents.TryUpdate(key, intent, existing))
+            {
+                Interlocked.Decrement(ref liveCount);
                 break;
+            }
         }
 
         lock (orderedKeysGate)
@@ -127,7 +139,8 @@ internal sealed partial class PreparedIntentStore
 
     // The partition of each intent the on-disk snapshots loaded, kept from construction until the commit admission
     // window is configured, which runs after the load.
-    private Dictionary<string, int>? loadedIntentPartitions;
+    // A sharded map: one dictionary of the intents of a restart under load is an array of megabytes.
+    private ShardedConcurrentMap<string, int, OrdinalShardHasher>? loadedIntentPartitions;
 
     // Moves the key's entry in the index from its previous pending intent (if any) to the new one (if pending).
     // Returns true when that took the previous intent's transaction to zero pending intents on its partition.
@@ -191,7 +204,7 @@ internal sealed partial class PreparedIntentStore
     {
         lock (applyGate)
         {
-            Dictionary<string, int>? loaded = loadedIntentPartitions;
+            ShardedConcurrentMap<string, int, OrdinalShardHasher>? loaded = loadedIntentPartitions;
             loadedIntentPartitions = null;
 
             lock (pendingCommitsGate)
@@ -299,7 +312,7 @@ internal sealed partial class PreparedIntentStore
         // A sharded map: one concurrent dictionary of a slice at its head budget replaces a bucket array of
         // megabytes, and makes a new node for every head, at each doubling on the apply path. One lock for each
         // shard is enough, because the apply gate admits one writer.
-        public readonly ShardedConcurrentMap<CommittedHead> Heads = new(HeadMapShards, concurrencyLevel: 1);
+        public readonly ShardedConcurrentMap<string, CommittedHead, OrdinalShardHasher> Heads = new(HeadMapShards, concurrencyLevel: 1);
 
         // Settled-identity memory: every (TransactionId, Epoch, Key) whose resolved intent was REMOVED through
         // this partition's log, or whose settle applied through it while the intent was absent here (the key
@@ -453,9 +466,9 @@ internal sealed partial class PreparedIntentStore
 
     private const int LedgerBoundLogIntervalMs = 60_000;
 
-    /// <summary>Approximate bytes one ledger entry retains: the key's characters plus the entry struct, the
-    /// stored hash of the key and the dictionary slot around them.</summary>
-    private static long LedgerEntryBytes(string key) => 2L * key.Length + 72;
+    /// <summary>Approximate bytes one ledger entry retains: the key's characters plus the entry struct and
+    /// the dictionary slot around it.</summary>
+    private static long LedgerEntryBytes(string key) => 2L * key.Length + 64;
 
     // Shards of one slice's head map. At the default head budget a shard holds about 16,000 heads, and its
     // bucket array is about 140 KB.
@@ -1445,24 +1458,46 @@ internal sealed partial class PreparedIntentStore
     }
 
     /// <summary>The current intent at <paramref name="key"/>, or null. This runs on every point read/write
-    /// in the actor hot path, so it is a single lock-free lookup. It must not be guarded by an emptiness
-    /// pre-check: <see cref="ConcurrentDictionary{TKey,TValue}.IsEmpty"/> answers "empty" only after taking
-    /// every bucket lock of the map, so on a workload with no durable transactions — the one case the check
-    /// was meant to shortcut — every actor thread serialized on those locks for every read.</summary>
-    public PreparedIntent? Get(string key) =>
-        intents.TryGetValue(key, out PreparedIntent? intent) ? intent : null;
+    /// in the actor hot path, so it is a single lock-free lookup.
+    ///
+    /// <para>A store that holds no intent answers from the live count alone, with no hash of the key: the case
+    /// of every read and write of a workload with no durable transaction in flight. The count is a field kept
+    /// beside the map and is never below the number of intents in it (see <see cref="InstallLive"/>), so zero
+    /// means that the map is empty. The check must stay a read of that field: a count or an emptiness test of
+    /// a concurrent map takes every bucket lock, and every actor thread would serialize on those locks for
+    /// every read.</para></summary>
+    public PreparedIntent? Get(string key)
+    {
+        if (Volatile.Read(ref liveCount) == 0)
+            return null;
+
+        return intents.TryGetValue(key, out PreparedIntent? intent) ? intent : null;
+    }
 
     /// <summary>The intent at <paramref name="key"/> only when it belongs to the given transaction attempt.
     /// Lock-free for the same reason as <see cref="Get"/>.</summary>
     public PreparedIntent? GetByIdentity(HLCTimestamp transactionId, long epoch, string key) =>
-        intents.TryGetValue(key, out PreparedIntent? intent)
+        Get(key) is { } intent
         && intent.TransactionId == transactionId
         && intent.Epoch == epoch
             ? intent
             : null;
 
-    /// <summary>Every intent currently held on this partition, as one copy that is atomic across keys.</summary>
-    public IReadOnlyCollection<PreparedIntent> Snapshot() => intents.Values.ToArray();
+    /// <summary>Every intent currently held on this partition, as one copy that is atomic across keys: the copy
+    /// is taken under the apply gate, which every writer of the map holds. A caller that runs on a timer uses
+    /// <see cref="EnumerateIntents"/>.</summary>
+    public IReadOnlyCollection<PreparedIntent> Snapshot()
+    {
+        lock (applyGate)
+        {
+            List<PreparedIntent> snapshot = new(Count);
+
+            foreach (KeyValuePair<string, PreparedIntent> kv in intents)
+                snapshot.Add(kv.Value);
+
+            return snapshot;
+        }
+    }
 
     /// <summary>
     /// Walks every intent without a copy of the map. <see cref="Snapshot"/> copies the map twice into arrays of
@@ -1488,7 +1523,7 @@ internal sealed partial class PreparedIntentStore
         foreach (int partitionId in partitionIds)
             appliedThrough[partitionId] = AppliedLogIndexOf(partitionId);
 
-        return new LiveIntentWalk(intents.Values.ToArray(), appliedThrough);
+        return new LiveIntentWalk(Snapshot(), appliedThrough);
     }
 
     /// <summary>Pending (undecided) intents whose recovery deadline is at or before <paramref name="now"/> —

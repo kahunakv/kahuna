@@ -180,7 +180,7 @@ internal sealed partial class PreparedIntentStore
 
     /// <summary>Number of live prepared intents currently held. Observability only — logged in the
     /// leadership-change fingerprint alongside <see cref="CommittedHeadCount"/>.</summary>
-    internal int LiveIntentCount => intents.Count;
+    internal int LiveIntentCount => Count;
 
     /// <summary>
     /// Number of live prepared intents whose key routes to <paramref name="partitionId"/>. Feeds the per-partition
@@ -196,7 +196,7 @@ internal sealed partial class PreparedIntentStore
     {
         Func<string, int>? resolver = resolvePartition;
         if (resolver is null)
-            return intents.Count;
+            return Count;
 
         int count = 0;
 

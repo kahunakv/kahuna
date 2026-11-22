@@ -4,6 +4,7 @@ using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Kahuna.Server.Tests;
 
@@ -14,9 +15,9 @@ namespace Kahuna.Server.Tests;
 /// load of the checkpoint file, and the install of a whole-partition section. Each must make no single
 /// allocation above 1 MiB.
 ///
-/// <para>The growth of the committed heads of a slice is here too: the heads are written on the apply path,
-/// where a failed allocation ends the process. The maps of the records, the receipts and the live intents are
-/// outside these tests: each is one concurrent dictionary, which allocates its bucket array again at each
+/// <para>The growth of the stores' maps is here too: the committed heads of a slice, the transaction records,
+/// the completion receipts and the live intents are written on the apply path, where a failed allocation ends
+/// the process. One concurrent dictionary of these sizes replaces a bucket array of megabytes at each
 /// doubling.</para>
 /// </summary>
 [Collection("ExclusiveAllocationMeasurement")]
@@ -131,6 +132,74 @@ public sealed class TestRetainedStoreAllocations : IDisposable
         Assert.Equal(1, store.CommittedHeadCount);
         Assert.Single(store.SnapshotLedger(Partition));
         Assert.False(store.TryGetLedgerHead(Partition, "ranged1/heads/k000000123456", out _, out _, out _));
+    }
+
+    [Fact]
+    public void TheRecords_GrowAndLoad_WithNoArrayAboveOneMebibyte()
+    {
+        TransactionRecordStore? records = null;
+        AssertNoLargeAllocation($"apply of {Records} records", () => records = RecordStore());
+
+        Assert.Equal(Records, records!.Count);
+        Assert.NotNull(records.Get(Ts(1_000_000 + Records - 1), 1));
+        Assert.True(records.PersistSnapshot(Partition));
+
+        // A restart fills the map again from the file.
+        TransactionRecordStore? loaded = null;
+        AssertNoLargeAllocation("load of the record file", () => loaded = new TransactionRecordStore(dir, "rev", null));
+
+        Assert.Equal(Records, loaded!.Count);
+        Assert.Equal(TransactionDecision.Commit, loaded.Get(Ts(1_000_000 + Records / 2), 1)!.Decision);
+    }
+
+    [Fact]
+    public void TheReceipts_GrowLoadAndPurge_WithNoArrayAboveOneMebibyte()
+    {
+        const int receiptCount = 400_000;
+
+        CompletionReceiptStore receipts = new(dir, "rev", NullLogger<IKahuna>.Instance);
+        receipts.AttachPartitionResolver(_ => Partition);
+
+        AssertNoLargeAllocation($"record of {receiptCount} receipts", () =>
+        {
+            for (int i = 0; i < receiptCount; i++)
+                receipts.Record(Ts(5_000_000 + i / 2), $"ranged1/accounts/k{i:D12}", "ranged1/accounts/anchor0000000", KeyValueDurability.Persistent);
+        });
+
+        Assert.Equal(receiptCount, receipts.Count);
+        Assert.True(receipts.Contains(Ts(5_000_000 + 123_456 / 2), "ranged1/accounts/k000000123456", KeyValueDurability.Persistent));
+        Assert.True(receipts.PersistSnapshot(Partition));
+
+        CompletionReceiptStore? loaded = null;
+        AssertNoLargeAllocation("load of the receipt file", () => loaded = new CompletionReceiptStore(dir, "rev", NullLogger<IKahuna>.Instance));
+        Assert.Equal(receiptCount, loaded!.Count);
+
+        // The purge of a partition that the node no longer hosts, and of an install, removes every receipt of
+        // the partition: it walks the map and collects nothing.
+        int purged = 0;
+        AssertNoLargeAllocation("purge of the receipts", () => purged = receipts.PurgeWhere(static _ => true));
+
+        Assert.Equal(receiptCount, purged);
+        Assert.Equal(0, receipts.Count);
+        Assert.False(receipts.Contains(Ts(5_000_000 + 123_456 / 2), "ranged1/accounts/k000000123456", KeyValueDurability.Persistent));
+    }
+
+    [Fact]
+    public void TheLiveIntents_GrowAndLoad_WithNoArrayAboveOneMebibyte()
+    {
+        PreparedIntentStore? intents = null;
+        AssertNoLargeAllocation($"apply of {LiveIntents} prepares", () => intents = IntentStore(settledIdentities: 0, LiveIntents));
+
+        Assert.Equal(LiveIntents, intents!.Count);
+        Assert.NotNull(intents.Get($"ranged1/live/k{LiveIntents - 1:D12}"));
+        Assert.True(intents.PersistSnapshot(Partition));
+
+        // A restart loads every intent, and remembers the partition of the file each one came from.
+        PreparedIntentStore? loaded = null;
+        AssertNoLargeAllocation("load of the intents", () => loaded = new PreparedIntentStore(dir, "rev", null));
+
+        Assert.Equal(LiveIntents, loaded!.Count);
+        Assert.NotNull(loaded.Get("ranged1/live/k000000000000"));
     }
 
     [Fact]

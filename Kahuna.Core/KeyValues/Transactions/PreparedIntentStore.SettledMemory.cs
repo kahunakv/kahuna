@@ -1,3 +1,4 @@
+using Kahuna.Utils;
 using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues.Transactions;
@@ -33,7 +34,7 @@ internal sealed partial class PreparedIntentStore
             transactionN = transactionId.N;
             Epoch = epoch;
             Key = key;
-            hash = HashCode.Combine(transactionL, transactionC, transactionN, epoch, key);
+            hash = TransactionKeyHash.Combine(key, transactionId, epoch);
         }
 
         public HLCTimestamp TransactionId => new(transactionN, transactionL, transactionC);

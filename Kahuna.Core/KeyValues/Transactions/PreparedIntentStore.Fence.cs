@@ -247,24 +247,24 @@ internal sealed partial class PreparedIntentStore
     /// head across every slice (<see cref="TryFindHead"/>). Lock-free, like the probes it serves.</summary>
     private bool TryFindHeadFor(int? sliceOf, string key, out CommittedHead head)
     {
-        HashedKey hashed = new(key);
+        int shardHash = OrdinalShardHasher.ShardHash(key);
 
         if (sliceOf is int partitionId
             && ledgers.TryGetValue(partitionId, out PartitionLedger? slice)
-            && slice.Heads.TryGetValue(hashed, out head))
+            && slice.Heads.TryGetValue(key, shardHash, out head))
             return true;
 
-        return TryFindHead(hashed, out head);
+        return TryFindHead(key, shardHash, out head);
     }
 
     /// <summary>Finds a key's committed head across every ledger slice (the highest revision when several
     /// slices remember the key — a range that moved between partitions leaves its history behind). Lock-free;
     /// the advisory reads probe it per operation.</summary>
-    private bool TryFindHead(string key, out CommittedHead head) => TryFindHead(new HashedKey(key), out head);
+    private bool TryFindHead(string key, out CommittedHead head) => TryFindHead(key, OrdinalShardHasher.ShardHash(key), out head);
 
-    /// <summary>The form of <see cref="TryFindHead(string, out CommittedHead)"/> for a key that is already
-    /// hashed: the probe of every slice then hashes the key once.</summary>
-    private bool TryFindHead(in HashedKey key, out CommittedHead head)
+    /// <summary>The form of <see cref="TryFindHead(string, out CommittedHead)"/> for a caller that already has
+    /// the shard hash of the key: every slice selects its shard from the same hash.</summary>
+    private bool TryFindHead(string key, int shardHash, out CommittedHead head)
     {
         head = default;
         bool found = false;
@@ -274,7 +274,7 @@ internal sealed partial class PreparedIntentStore
         // apply under the apply gate.
         foreach (KeyValuePair<int, PartitionLedger> slice in ledgers)
         {
-            if (slice.Value.Heads.TryGetValue(key, out CommittedHead candidate) && (!found || candidate.Revision > head.Revision))
+            if (slice.Value.Heads.TryGetValue(key, shardHash, out CommittedHead candidate) && (!found || candidate.Revision > head.Revision))
             {
                 head = candidate;
                 found = true;
