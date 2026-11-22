@@ -109,6 +109,57 @@ public sealed class TestCheckpointSnapshotGate : IDisposable
     }
 
     [Fact]
+    public void Gate_SkipsACaptureThatRanOutOfMemory_CountsIt_AndCapturesAtTheNextPass()
+    {
+        TransactionRecordStore records = new(dir, "rev", null);
+        records.AttachAnchorResolver(_ => (PartitionId, 0L));
+        SeedTerminalRecord(records);
+
+        PreparedIntentStore intents = new(dir, "rev", null);
+        intents.AttachPartitionResolver(_ => PartitionId);
+        intents.Apply(new PrepareIntentCommand(PendingIntent("acct/pending")));
+
+        CompletionReceiptStore receipts = new(dir, "rev", NullLogger<IKahuna>.Instance);
+        receipts.AttachPartitionResolver(_ => PartitionId);
+        receipts.Record(Ts(1000), "acct/pending", "anchor", KeyValueDurability.Persistent);
+
+        // The receipt capture meets an out-of-memory once. The first-chance observer is driven through the
+        // form that cannot end the test host; inside the capture it must note the fault and not escalate.
+        Kahuna.Server.Diagnostics.ProcessFaultDisposition observed = default;
+        int faults = 1;
+        receipts.PersistSnapshotFault = _ =>
+        {
+            if (Interlocked.Exchange(ref faults, 0) == 0)
+                return false;
+
+            observed = Kahuna.Server.Diagnostics.ProcessFaults.Observe(new OutOfMemoryException(), terminate: false);
+            return true;
+        };
+
+        using IDisposable lifetime = TestActorSystemLifetime.Create(out ActorSystem actorSystem);
+        IRaft raft = CreateRaft("bg-ckpt-oom");
+        IActorRef<BackgroundWriterActor, BackgroundWriteRequest> bg = actorSystem.Spawn<BackgroundWriterActor, BackgroundWriteRequest>(
+            "bg-ckpt-oom", raft, raft.ReadScheduler, new MemoryPersistenceBackend(),
+            null!, receipts, records, intents,
+            Config(), NullLogger<IKahuna>.Instance, new FlushNotificationSink(), null!);
+        BackgroundWriterActor writer = (bg.Runner.Actor as BackgroundWriterActor)!;
+
+        using MetricCapture capture = new("partition", "kahuna.persistence.checkpoint_capture_out_of_memory_total");
+
+        // The capture that ran out of memory is not durable, so the checkpoint does not advance. The other two
+        // stores were still captured.
+        Assert.False(writer.TryCaptureCheckpointSnapshots(PartitionId));
+        Assert.Equal(Kahuna.Server.Diagnostics.ProcessFaultDisposition.RecoverableWork, observed);
+        Assert.True(capture.Total("kahuna.persistence.checkpoint_capture_out_of_memory_total") >= 1);
+        Assert.NotNull(new PreparedIntentStore(dir, "rev", null).Get("acct/pending"));
+        Assert.False(new CompletionReceiptStore(dir, "rev", NullLogger<IKahuna>.Instance).Contains(Ts(1000), "acct/pending", KeyValueDurability.Persistent));
+
+        // The next pass captures the store that failed.
+        Assert.True(writer.TryCaptureCheckpointSnapshots(PartitionId));
+        Assert.True(new CompletionReceiptStore(dir, "rev", NullLogger<IKahuna>.Instance).Contains(Ts(1000), "acct/pending", KeyValueDurability.Persistent));
+    }
+
+    [Fact]
     public void Gate_ReturnsFalse_WhenARecordSnapshotCannotBeWritten()
     {
         // Point the record store's storage at a path that is a file, not a directory, so its snapshot write fails.

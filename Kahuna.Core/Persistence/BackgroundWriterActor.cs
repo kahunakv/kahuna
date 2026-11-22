@@ -949,6 +949,10 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
     /// checkpoint could compact away the only durable copy of a committed decision or an unresolved intent, and a
     /// cold restart could not reconstruct it. Every snapshot is attempted (no short-circuit) so a transient
     /// failure in one does not mask the others; the checkpoint is skipped unless all three succeed.
+    ///
+    /// <para>Each capture runs as recoverable work (see <see cref="Diagnostics.ProcessFaults.RunRecoverable"/>):
+    /// a capture reads its store and writes a temporary file, so one that runs out of memory is counted and
+    /// reported as not durable, and the next pass captures again. The process does not end for it.</para>
     /// </summary>
     internal bool TryCaptureCheckpointSnapshots(int partitionId)
     {
@@ -959,7 +963,9 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         long recordCeiling = durabilityTracker?.GetHighestApplied(partitionId, DurabilityChannel.TransactionRecords) ?? -1;
         long intentCeiling = durabilityTracker?.GetHighestApplied(partitionId, DurabilityChannel.PreparedIntents) ?? -1;
 
-        bool receipts = completionReceiptStore?.PersistSnapshot(partitionId) ?? true;
+        bool receipts = CaptureRecoverably(
+            partitionId, 0, "completion receipts",
+            static (actor, partition, _) => actor.completionReceiptStore?.PersistSnapshot(partition) ?? true);
 
         // Intents (with the partition's committed-head ledger) BEFORE records, and the order is load-bearing:
         // a bundled commit replayed after a restart is judged again against the intent set and ledger the
@@ -975,8 +981,12 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
         // channel lags on a slow disk), and the entries between the two must replay as history the reloaded
         // set already reflects — a prepare the live apply refused because a competitor held its key must not
         // install a phantom holder now that the competitor has settled (see PreparedIntentStore.PersistSnapshot).
-        bool intents = preparedIntentStore?.PersistSnapshot(partitionId, Math.Max(0, intentCeiling)) ?? true;
-        bool records = transactionRecordStore?.PersistSnapshot(partitionId) ?? true;
+        bool intents = CaptureRecoverably(
+            partitionId, Math.Max(0, intentCeiling), "prepared intents",
+            static (actor, partition, ceiling) => actor.preparedIntentStore?.PersistSnapshot(partition, ceiling) ?? true);
+        bool records = CaptureRecoverably(
+            partitionId, 0, "transaction records",
+            static (actor, partition, _) => actor.transactionRecordStore?.PersistSnapshot(partition) ?? true);
 
         if (receipts)
             durabilityTracker?.ResolveUpTo(partitionId, DurabilityChannel.Receipts, receiptCeiling);
@@ -986,6 +996,38 @@ internal sealed class BackgroundWriterActor : IActor<BackgroundWriteRequest>
             durabilityTracker?.ResolveUpTo(partitionId, DurabilityChannel.PreparedIntents, intentCeiling);
 
         return receipts && records && intents;
+    }
+
+    /// <summary>
+    /// Runs one store's checkpoint capture as recoverable work and returns whether the snapshot is durable. A
+    /// capture that ran out of memory is counted and logged, and answers false as any failed capture does. The
+    /// report runs as recoverable work too: at the heap limit the log line itself can fail to allocate.
+    /// </summary>
+    private bool CaptureRecoverably(int partitionId, long ceiling, string store, Func<BackgroundWriterActor, int, long, bool> capture)
+    {
+        bool durable = Diagnostics.ProcessFaults.RunRecoverable(
+            (Actor: this, PartitionId: partitionId, Ceiling: ceiling, Capture: capture),
+            static state => state.Capture(state.Actor, state.PartitionId, state.Ceiling),
+            out bool outOfMemory);
+
+        if (!outOfMemory)
+            return durable;
+
+        Diagnostics.ProcessFaults.RunRecoverable(
+            (Actor: this, PartitionId: partitionId, Store: store),
+            static state =>
+            {
+                PersistenceMetrics.CheckpointCaptureOutOfMemory.Add(1);
+
+                state.Actor.logger.LogWarning(
+                    "Checkpoint capture of the {Store} of partition #{PartitionId} ran out of memory and was skipped; the next pass captures again. The node is at its managed heap limit: see kahuna.durable_tx.retained_state_heap_share",
+                    state.Store, state.PartitionId);
+
+                return true;
+            },
+            out _);
+
+        return false;
     }
 
     /// <summary>

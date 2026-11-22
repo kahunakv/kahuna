@@ -623,6 +623,12 @@ internal sealed class KeyValuesManagerBuilder
             () => gaugeMaintenance.RetentionOverBudget ? 1 : 0,
             description: "1 while the last retention sweep found the resident-metadata budget (DurableRecordRetentionMax / MaxBytes) exceeded, else 0.");
 
+        // The retained transaction state against the managed heap limit, refreshed on each maintenance tick. The
+        // node warns when it passes DurableRetainedStateHeapShare; the gauge is the continuous signal.
+        durableGaugeMeter.CreateObservableGauge("kahuna.durable_tx.retained_state_heap_share",
+            () => gaugeMaintenance.RetainedStateHeapShare,
+            description: "Estimated bytes of resident transaction records, completion receipts, and the committed-head ledger with its settled identities, over the managed heap limit (0..1; 0 when the runtime reports no limit).");
+
         // Replica stale-base veto: when THIS node's fence memory proves a replicated validated-base prepare's
         // base moved, the verdict is deterministically correct — but the acknowledgement folds only the
         // LEADER's verdict, and a leader whose memory is frozen admits exactly the prepares the healthy

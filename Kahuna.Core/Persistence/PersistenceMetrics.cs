@@ -41,6 +41,15 @@ internal static class PersistenceMetrics
         Meter.CreateCounter<long>("kahuna.persistence.store_replaced_at_start_total",
             description: "Times the node started over an empty key-value store while its Raft log held history (the store was lost or replaced).");
 
+    /// <summary>
+    /// Checkpoint captures of one store that ran out of memory. The capture is skipped, the partition's WAL
+    /// retention floor stays where it is, and the next pass captures again. A value that keeps rising means
+    /// the node is at its managed heap limit.
+    /// </summary>
+    internal static readonly Counter<long> CheckpointCaptureOutOfMemory =
+        Meter.CreateCounter<long>("kahuna.persistence.checkpoint_capture_out_of_memory_total",
+            description: "Checkpoint snapshot captures of one store that ran out of memory and were skipped until the next pass.");
+
     internal static readonly KeyValuePair<string, object?> KindKeyValues = new("kind", "key_values");
     internal static readonly KeyValuePair<string, object?> KindLocks = new("kind", "locks");
     internal static readonly KeyValuePair<string, object?> KindFloors = new("kind", "floors");

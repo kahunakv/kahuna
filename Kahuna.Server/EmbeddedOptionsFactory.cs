@@ -210,6 +210,7 @@ public static class EmbeddedOptionsFactory
         DurableRecordRetentionMax = opts.DurableRecordRetentionMax,
         DurableRecordRetentionMaxBytes = opts.DurableRecordRetentionMaxBytes,
         DurableRecordRetentionHeapPressure = opts.DurableRecordRetentionHeapPressure,
+        DurableRetainedStateHeapShare = opts.DurableRetainedStateHeapShare,
         DurableRecordRetentionFloor = TimeSpan.FromSeconds(opts.DurableRecordRetentionFloorSeconds),
         DurableMaintenanceInterval = TimeSpan.FromSeconds(opts.DurableMaintenanceIntervalSeconds),
         FailFastOnOutOfMemory = opts.FailFastOnOutOfMemory ?? true,

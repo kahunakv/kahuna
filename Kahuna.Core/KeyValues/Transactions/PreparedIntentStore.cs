@@ -302,12 +302,18 @@ internal sealed partial class PreparedIntentStore
         // moved between its prepare and its settle, and this node applied the destination's log first), with
         // the intent's commit timestamp as the time base of its retention (the log entry's time when a settle
         // over an absent intent carries none). Fed and read only under applyGate (a prepare apply consults it
-        // before the state machine runs), so a plain map. See IsSettledIdentityOnThisNode for what it decides
-        // and why the slice of the carrying log is consulted first.
-        public readonly Dictionary<SettledIdentity, HLCTimestamp> Settled = new();
+        // before the state machine runs), so it needs no synchronization of its own. See
+        // IsSettledIdentityOnThisNode for what it decides and why the slice of the carrying log is consulted
+        // first.
+        public readonly SettledIdentityMemory Settled = new();
 
-        // The settled-memory prune bucket (Watermark.L / SettledIdentityPruneBucketMs) the last prune ran in.
+        // The settled-memory prune bucket (Watermark.L / SettledIdentityPruneBucketMs) the last sweep started in.
         public long SettledPrunedBucket;
+
+        // Captures that read the settled memory at this moment. A capture reads it in chunks and releases the
+        // gate between them, and the sweep waits while this is above zero: a removal between two chunks would
+        // leave the capture without an identity that its watermark still retains. Guarded by applyGate.
+        public int SettledCaptures;
 
         // Highest commit timestamp among the heads this slice ever recorded. Mutated under applyGate.
         public HLCTimestamp Watermark = HLCTimestamp.Zero;
@@ -446,12 +452,6 @@ internal sealed partial class PreparedIntentStore
     /// the dictionary slot around it.</summary>
     private static long LedgerEntryBytes(string key) => 2L * key.Length + 64;
 
-    /// <summary>One leg — a transaction attempt's identity on one key — as the settled-identity memory keys it.
-    /// Per key, not per transaction: a decided multi-key transaction can have one leg settled here while a
-    /// range move hands another of its legs, still pending, to this partition; that leg must install, and only
-    /// a prepare of a key that itself settled here is a replay.</summary>
-    private readonly record struct SettledIdentity(HLCTimestamp TransactionId, long Epoch, string Key);
-
     /// <summary>
     /// How long (in commit-timestamp time, measured from the slice's watermark) the settled-identity memory
     /// keeps rejecting a re-driven prepare of a settled transaction. The duplicate this guards against is a
@@ -466,13 +466,21 @@ internal sealed partial class PreparedIntentStore
     /// </summary>
     internal const int SettledIdentityRetentionMs = 60_000;
 
-    // Physical prunes of the settled memory run when the slice's watermark crosses into a new bucket of this
-    // many milliseconds — one scan per quarter window per partition.
+    // A physical sweep of the settled memory starts when the slice's watermark crosses into a new bucket of
+    // this many milliseconds: one pass over the memory per quarter window per partition.
     private const int SettledIdentityPruneBucketMs = SettledIdentityRetentionMs / 4;
 
     /// <summary>Approximate bytes one settled-identity entry retains: the key's characters (the string is the
     /// removed intent's, kept alive by the entry) plus the identity, the timestamp and the dictionary slot.</summary>
-    private static long SettledIdentityBytes(string key) => 2L * key.Length + 80;
+    private static long SettledIdentityBytes(string key) => SettledIdentityBytes(key.Length, 1);
+
+    /// <summary>The same estimate for <paramref name="entries"/> entries whose keys total
+    /// <paramref name="keyChars"/> characters.</summary>
+    private static long SettledIdentityBytes(long keyChars, int entries) => 2L * keyChars + 80L * entries;
+
+    // Entries one step of a settled-memory capture copies under the gate. The buffer of a step stays below
+    // the large object threshold.
+    private const int SettledCaptureChunkEntries = 1_024;
 
     // Monotonic tick source for the dirty stamps below: each mutation mints one tick, so stamps taken
     // from it order mutations against the pre-scan capture in <see cref="PersistSnapshot"/>.

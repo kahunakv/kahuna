@@ -616,6 +616,20 @@ public sealed class KahunaConfiguration
     public double DurableRecordRetentionHeapPressure { get; set; } = 0.85;
 
     /// <summary>
+    /// Share (0..1) of the managed heap limit above which the node warns that its retained transaction state
+    /// is too large for its heap. The retained state is the estimated bytes of the resident transaction
+    /// records, the completion receipts, and the committed-head ledger with its settled identities. It grows
+    /// with the write commit rate: records and receipts stay for <see cref="DurableRecordRetentionFloor"/> at
+    /// least, and settled identities for 60 to 75 seconds. The heap limit is the runtime's available memory,
+    /// which honors a configured heap hard limit. The node checks the share when it starts and on each
+    /// maintenance tick, logs a warning when the share is passed (with a reminder every ten minutes while it
+    /// stays passed), and reports the share on <c>kahuna.durable_tx.retained_state_heap_share</c>. The setting
+    /// changes no retention: it gives the warning that today is the process running out of heap. A value
+    /// &lt;= 0 disables the warning.
+    /// </summary>
+    public double DurableRetainedStateHeapShare { get; set; } = 0.4;
+
+    /// <summary>
     /// Minimum age (since its decision) below which a terminal transaction record is <b>never</b> reclaimed by
     /// the memory budgets or the heap-pressure valve — only the full <see cref="TransactionOutcomeRetentionTtl"/>
     /// applies to younger records. This is the effective retention horizon whenever a budget is enabled, and it

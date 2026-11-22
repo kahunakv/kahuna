@@ -37,6 +37,7 @@ public sealed class TestServerConfigurationSurface
         DurableRecordRetentionMax = 1_234,
         DurableRecordRetentionMaxBytes = 5_678_901,
         DurableRecordRetentionHeapPressure = 0.5,
+        DurableRetainedStateHeapShare = 0.25,
         DurableRecordRetentionFloorSeconds = 45,
         DurableMaintenanceIntervalSeconds = 4,
         PitrBackupDir = "/srv/kahuna/backups",
@@ -138,6 +139,7 @@ public sealed class TestServerConfigurationSurface
         Assert.Equal(1_234, configuration.DurableRecordRetentionMax);
         Assert.Equal(5_678_901, configuration.DurableRecordRetentionMaxBytes);
         Assert.Equal(0.5, configuration.DurableRecordRetentionHeapPressure);
+        Assert.Equal(0.25, configuration.DurableRetainedStateHeapShare);
         Assert.Equal(TimeSpan.FromSeconds(45), configuration.DurableRecordRetentionFloor);
         Assert.Equal(TimeSpan.FromSeconds(4), configuration.DurableMaintenanceInterval);
 

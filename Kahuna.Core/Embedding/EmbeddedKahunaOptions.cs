@@ -339,6 +339,15 @@ public sealed class EmbeddedKahunaOptions
     public double DurableRecordRetentionHeapPressure { get; set; } = 0.85;
 
     /// <summary>
+    /// Share (0..1) of the managed heap limit above which the node warns that its retained transaction state
+    /// (resident records, completion receipts, and the committed-head ledger with its settled identities) is
+    /// too large for its heap. Checked at start and on each maintenance tick, and reported on
+    /// <c>kahuna.durable_tx.retained_state_heap_share</c>. It changes no retention. A value &lt;= 0 disables
+    /// the warning.
+    /// </summary>
+    public double DurableRetainedStateHeapShare { get; set; } = 0.4;
+
+    /// <summary>
     /// Minimum age since its decision below which a terminal record is never reclaimed early by a budget or the
     /// pressure valve. It is the effective retention horizon prepared-intent recovery reasons with, so it is
     /// raised (with a warning) to at least the decision-deadline ceiling plus two maintenance ticks.

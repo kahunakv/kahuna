@@ -19,6 +19,10 @@ namespace Kahuna.Server.Diagnostics;
 /// (<see cref="Survivable"/>) is the belt for Kahuna's own catch-alls: it never lets a fatal fault be swallowed,
 /// and when fail-fast is disabled it records the fault so the readiness probe can report the node unhealthy
 /// instead of leaving it indistinguishable from an idle follower.</para>
+///
+/// <para><b>Recoverable work</b> (<see cref="RunRecoverable"/>) is the one exemption. A checkpoint capture
+/// reads the stores, writes a file and changes no state the node serves from, and the next pass does it again.
+/// An out-of-memory raised by the thread that runs it fails that capture and nothing else.</para>
 /// </summary>
 public static class ProcessFaults
 {
@@ -30,6 +34,14 @@ public static class ProcessFaults
 
     [ThreadStatic]
     private static bool escalating;
+
+    // Depth of RunRecoverable calls on this thread, and whether an out-of-memory was observed inside the
+    // outermost one that is still open.
+    [ThreadStatic]
+    private static int recoverableWorkDepth;
+
+    [ThreadStatic]
+    private static bool recoverableOutOfMemory;
 
     private static OutOfMemoryExitRecorder? exitRecorder;
 
@@ -80,22 +92,87 @@ public static class ProcessFaults
         AppDomain.CurrentDomain.FirstChanceException += OnFirstChanceException;
     }
 
-    private static void OnFirstChanceException(object? sender, FirstChanceExceptionEventArgs e)
+    private static void OnFirstChanceException(object? sender, FirstChanceExceptionEventArgs e) =>
+        Observe(e.Exception, terminate: true);
+
+    /// <summary>
+    /// What the first-chance observer does with <paramref name="exception"/> on the calling thread. With
+    /// <paramref name="terminate"/> false the decision is returned and a fatal fault is neither escalated nor
+    /// recorded: the form a test uses, which must not end its host.
+    /// </summary>
+    internal static ProcessFaultDisposition Observe(Exception exception, bool terminate)
     {
-        if (!IsFatal(e.Exception) || escalating)
-            return;
+        if (!IsFatal(exception) || escalating)
+            return ProcessFaultDisposition.Survivable;
+
+        // Inside recoverable work the fault belongs to that work: note it for the caller and let the
+        // exception reach the catch that fails the work.
+        if (recoverableWorkDepth > 0)
+        {
+            recoverableOutOfMemory = true;
+            return ProcessFaultDisposition.RecoverableWork;
+        }
+
+        if (!terminate)
+            return Classify(exception, failFastEnabled);
 
         // Re-entrancy guard: the escalation itself allocates (a message), and under real heap exhaustion that
         // allocation can throw again on this thread, which would re-enter this handler recursively.
         escalating = true;
         try
         {
-            Escalate(e.Exception, "first-chance exception");
+            Escalate(exception, "first-chance exception");
         }
         finally
         {
             escalating = false;
         }
+
+        return ProcessFaultDisposition.PropagateAndMarkUnhealthy;
+    }
+
+    /// <summary>Whether the calling thread is inside <see cref="RunRecoverable"/>.</summary>
+    internal static bool InRecoverableWork => recoverableWorkDepth > 0;
+
+    /// <summary>
+    /// Runs <paramref name="work"/> as recoverable work and returns its result. An out-of-memory raised by the
+    /// calling thread while it runs does not end the process: the call returns false,
+    /// <paramref name="outOfMemory"/> is set, and the caller does the work again later. This also applies when
+    /// a catch inside the work handled the exception and the work returned true: the first-chance observer
+    /// sees the exception first, and work that met one is not trusted.
+    ///
+    /// <para>Use it only for work that can fail at any allocation and leave the node correct: work that reads
+    /// shared state and writes only what it owns (a capture buffer, a temporary file). An apply, a WAL write or
+    /// any step that changes state in several moves must stay outside. The exemption covers the calling thread
+    /// only, so an out-of-memory on another thread at the same moment is fatal as before.</para>
+    /// </summary>
+    public static bool RunRecoverable<TState>(TState state, Func<TState, bool> work, out bool outOfMemory)
+    {
+        bool observedOutside = recoverableOutOfMemory;
+        recoverableOutOfMemory = false;
+        recoverableWorkDepth++;
+
+        bool completed = false;
+
+        try
+        {
+            completed = work(state);
+        }
+        catch (OutOfMemoryException)
+        {
+            recoverableOutOfMemory = true;
+        }
+        finally
+        {
+            recoverableWorkDepth--;
+        }
+
+        outOfMemory = recoverableOutOfMemory;
+
+        // An enclosing call keeps what it observed, and learns of a fault inside this one.
+        recoverableOutOfMemory = observedOutside || outOfMemory;
+
+        return completed && !outOfMemory;
     }
 
     /// <summary>
@@ -116,10 +193,13 @@ public static class ProcessFaults
 
     /// <summary>The pure decision behind <see cref="Survivable"/>, for tests that must not throw a real
     /// <see cref="OutOfMemoryException"/> inside a process with the first-chance policy installed.</summary>
-    internal static ProcessFaultDisposition Classify(Exception exception, bool failFast)
+    internal static ProcessFaultDisposition Classify(Exception exception, bool failFast, bool recoverableWork = false)
     {
         if (!IsFatal(exception))
             return ProcessFaultDisposition.Survivable;
+
+        if (recoverableWork)
+            return ProcessFaultDisposition.RecoverableWork;
 
         return failFast ? ProcessFaultDisposition.FailFast : ProcessFaultDisposition.PropagateAndMarkUnhealthy;
     }
@@ -172,5 +252,8 @@ internal enum ProcessFaultDisposition
     FailFast = 1,
 
     /// <summary>A fatal fault with fail-fast disabled: it propagates, and the node reports unhealthy.</summary>
-    PropagateAndMarkUnhealthy = 2
+    PropagateAndMarkUnhealthy = 2,
+
+    /// <summary>A fatal fault raised inside recoverable work: that work fails, and the node continues.</summary>
+    RecoverableWork = 3
 }

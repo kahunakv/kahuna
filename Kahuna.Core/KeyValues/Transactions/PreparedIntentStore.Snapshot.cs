@@ -1,5 +1,7 @@
+using System.Collections;
 using System.Collections.Concurrent;
 using Google.Protobuf;
+using Google.Protobuf.Collections;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.KeyValues.Writes;
 using Kahuna.Server.Replication;
@@ -63,11 +65,12 @@ internal sealed partial class PreparedIntentStore
 
         try
         {
-            // Entries stream straight into the temp file through one reused PREPARE-kind message, producing
-            // the same bytes as serializing a whole PreparedIntentSnapshotMessage: each entry is written
-            // length-delimited under the repeated field's tag. Materializing one protobuf object per retained
-            // intent plus one byte[] for the whole set made every checkpoint's allocation proportional to the
-            // store size, which dominated the node's allocation profile whenever the retained set was large.
+            // Entries stream straight into the temp file through one reused PREPARE-kind message: each entry
+            // is written length-delimited under the repeated field's tag, and a reader parses the file as one
+            // PreparedIntentSnapshotMessage whatever the order of its fields. Materializing one protobuf object
+            // per retained intent plus one byte[] for the whole set made every checkpoint's allocation
+            // proportional to the store size, which dominated the node's allocation profile whenever the
+            // retained set was large.
             //
             // The partition's committed-head ledger slice rides in the same file, captured BEFORE the intent
             // scan: a bundled commit replayed from the WAL after a restart is judged against the reloaded
@@ -80,21 +83,23 @@ internal sealed partial class PreparedIntentStore
 
                 List<PreparedIntent> pendingBeforeCapture = OwnedIntentsBeforeCapture(key => resolvePartition(key) == partitionId);
 
-                LedgerCapture? ledger = CaptureLedger(partitionId);
-
-                // The position the file certifies as fully reflected: what the caller certified, never below
-                // what the slice was installed with. Read BEFORE the walk (the caller's ceiling is raised only
-                // after an apply returns, so every intent an entry at or below it prepared is in the map when
-                // the walk starts) — the same cut a whole-partition export takes (see WritePartitionSection).
-                long fullyReflected = Math.Max(certifiedThroughIndex, ledger?.FullyReflectedThroughIndex ?? 0);
-
-                // Settled intents whose materialized row is still queued for the flush ride in the same file, in
-                // their own field: a reader must never install them as live intents.
-                List<PreparedIntent>? settledAwaitingFlushSlice = CollectSettledAwaitingFlush(partitionId, resolvePartition);
-
                 using (FileStream file = new(tmp, FileMode.Create, FileAccess.Write, FileShare.None, 64 * 1024))
                 using (CodedOutputStream output = new(file))
                 {
+                    // The capture writes the slice's settled identities to the file as it reads them, so they
+                    // are the first field of the file and the capture holds one chunk of them at a time.
+                    LedgerCapture? ledger = CaptureLedger(partitionId, SettledIdentityWriter(output));
+
+                    // The position the file certifies as fully reflected: what the caller certified, never below
+                    // what the slice was installed with. Read BEFORE the walk (the caller's ceiling is raised only
+                    // after an apply returns, so every intent an entry at or below it prepared is in the map when
+                    // the walk starts) — the same cut a whole-partition export takes (see WritePartitionSection).
+                    long fullyReflected = Math.Max(certifiedThroughIndex, ledger?.FullyReflectedThroughIndex ?? 0);
+
+                    // Settled intents whose materialized row is still queued for the flush ride in the same file, in
+                    // their own field: a reader must never install them as live intents.
+                    List<PreparedIntent>? settledAwaitingFlushSlice = CollectSettledAwaitingFlush(partitionId, resolvePartition);
+
                     PreparedIntentCommandMessage entry = new();
 
                     foreach (PreparedIntent intent in intents.Values)
@@ -212,30 +217,44 @@ internal sealed partial class PreparedIntentStore
         return marker >= 0 && int.TryParse(name.AsSpan(marker + 2), out partitionId);
     }
 
-    /// <summary>Streams a partition's ledger slice (or an explicitly empty one) after the intents, in the
-    /// message's field order so the bytes equal a whole-message serialization: each head under the repeated
-    /// field's tag, the scalar trailer, each settled identity under its tag, then the fully reflected position.
-    /// The writer always marks the ledger present so a reader can tell "empty ledger" from "written before the
-    /// ledger existed".</summary>
+    /// <summary>Streams a partition's ledger slice (or an explicitly empty one) after the intents: each head
+    /// under the repeated field's tag, then the scalar fields. The settled identities of the slice are already
+    /// in the stream: the capture wrote them (see <see cref="SettledIdentityWriter"/>). The writer always marks
+    /// the ledger present so a reader can tell "empty ledger" from "written before the ledger existed".</summary>
     private static void WriteLedgerSection(CodedOutputStream output, int partitionId, LedgerCapture? ledger, long reflectedThroughIndex, long fullyReflectedThroughIndex)
     {
         HLCTimestamp watermark = HLCTimestamp.Zero;
 
-        if (ledger is { } captured)
+        if (ledger is not null)
         {
-            watermark = captured.Watermark;
+            watermark = ledger.Watermark;
 
             CommittedHeadLedgerEntryMessage head = new();
-            foreach (KeyValuePair<string, CommittedHead> entry in captured.Heads)
+
+            foreach (KeyValuePair<string, CommittedHead> entry in ledger.Heads)
             {
+                if (ledger.IsReplaced(entry.Key))
+                    continue;
+
                 FillLedgerEntry(head, entry.Key, entry.Value);
                 output.WriteTag(PreparedIntentSnapshotMessage.CommittedHeadsFieldNumber, WireFormat.WireType.LengthDelimited);
                 output.WriteMessage(head);
+            }
+
+            if (ledger.ReplacedHeads is not null)
+            {
+                foreach (KeyValuePair<string, CommittedHead> entry in ledger.ReplacedHeads)
+                {
+                    FillLedgerEntry(head, entry.Key, entry.Value);
+                    output.WriteTag(PreparedIntentSnapshotMessage.CommittedHeadsFieldNumber, WireFormat.WireType.LengthDelimited);
+                    output.WriteMessage(head);
+                }
             }
         }
 
         long reflected = Math.Max(0, reflectedThroughIndex);
 
+        // A zero is omitted exactly as the message serializer omits it.
         PreparedIntentSnapshotMessage trailer = new()
         {
             LedgerPresent = true,
@@ -243,30 +262,29 @@ internal sealed partial class PreparedIntentStore
             LedgerWatermarkNode = watermark.N,
             LedgerWatermarkPhysical = watermark.L,
             LedgerWatermarkCounter = watermark.C,
-            LedgerReflectedThroughIndex = reflected
-        };
-
-        trailer.WriteTo(output);
-
-        if (ledger is { } withSettled)
-        {
-            SettledTransactionLedgerEntryMessage settled = new();
-            foreach (SettledIdentityEntry entry in withSettled.Settled)
-            {
-                FillSettledEntry(settled, entry);
-                output.WriteTag(PreparedIntentSnapshotMessage.SettledTransactionsFieldNumber, WireFormat.WireType.LengthDelimited);
-                output.WriteMessage(settled);
-            }
-        }
-
-        // Written last, as the highest-numbered fields; a zero is omitted exactly as the message serializer omits it.
-        PreparedIntentSnapshotMessage positionTrailer = new()
-        {
+            LedgerReflectedThroughIndex = reflected,
             LedgerFullyReflectedThroughIndex = Math.Clamp(fullyReflectedThroughIndex, 0, reflected),
             LedgerSizeFloorPhysical = ledger?.SizeFloor ?? 0
         };
 
-        positionTrailer.WriteTo(output);
+        trailer.WriteTo(output);
+    }
+
+    /// <summary>The sink a capture hands its settled identities to when the slice goes to a stream: each
+    /// identity is written under the repeated field's tag through one reused message.</summary>
+    private static Action<List<SettledIdentityEntry>> SettledIdentityWriter(CodedOutputStream output)
+    {
+        SettledTransactionLedgerEntryMessage message = new();
+
+        return chunk =>
+        {
+            foreach (SettledIdentityEntry entry in chunk)
+            {
+                FillSettledEntry(message, entry);
+                output.WriteTag(PreparedIntentSnapshotMessage.SettledTransactionsFieldNumber, WireFormat.WireType.LengthDelimited);
+                output.WriteMessage(message);
+            }
+        };
     }
 
     private static void FillLedgerEntry(CommittedHeadLedgerEntryMessage m, string key, CommittedHead head)
@@ -279,13 +297,29 @@ internal sealed partial class PreparedIntentStore
         m.CommittedAtCounter = head.CommittedAt.C;
     }
 
-    private static List<(string Key, long Revision, KeyValueState State, HLCTimestamp CommittedAt)> LedgerEntriesOf(PreparedIntentSnapshotMessage message)
-    {
-        List<(string, long, KeyValueState, HLCTimestamp)> entries = new(message.CommittedHeads.Count);
-        foreach (CommittedHeadLedgerEntryMessage head in message.CommittedHeads)
-            entries.Add((head.Key, head.Revision, (KeyValueState)head.State,
+    /// <summary>The heads of a decoded message. Each head is converted when it is read: a list of every head
+    /// of a full slice is one array of tens of megabytes next to the decoded message.</summary>
+    private static IReadOnlyList<(string Key, long Revision, KeyValueState State, HLCTimestamp CommittedAt)> LedgerEntriesOf(PreparedIntentSnapshotMessage message) =>
+        new DecodedList<CommittedHeadLedgerEntryMessage, (string Key, long Revision, KeyValueState State, HLCTimestamp CommittedAt)>(
+            message.CommittedHeads,
+            static head => (head.Key, head.Revision, (KeyValueState)head.State,
                 new HLCTimestamp(head.CommittedAtNode, head.CommittedAtPhysical, head.CommittedAtCounter)));
-        return entries;
+
+    /// <summary>A read-only list over a decoded repeated field that converts a message each time it is read.
+    /// It holds no copy of the field.</summary>
+    private sealed class DecodedList<TMessage, T>(RepeatedField<TMessage> messages, Func<TMessage, T> convert) : IReadOnlyList<T>
+    {
+        public int Count => messages.Count;
+
+        public T this[int index] => convert(messages[index]);
+
+        public IEnumerator<T> GetEnumerator()
+        {
+            foreach (TMessage message in messages)
+                yield return convert(message);
+        }
+
+        IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
     }
 
     private static HLCTimestamp LedgerWatermarkOf(PreparedIntentSnapshotMessage message) =>
@@ -303,17 +337,16 @@ internal sealed partial class PreparedIntentStore
         m.SettledAtCounter = entry.SettledAt.C;
     }
 
-    private static List<SettledIdentityEntry> SettledEntriesOf(PreparedIntentSnapshotMessage message)
-    {
-        List<SettledIdentityEntry> entries = new(message.SettledTransactions.Count);
-        foreach (SettledTransactionLedgerEntryMessage m in message.SettledTransactions)
-            entries.Add(new SettledIdentityEntry(
+    /// <summary>The settled identities of a decoded message, converted when they are read (see
+    /// <see cref="LedgerEntriesOf"/>).</summary>
+    private static IReadOnlyList<SettledIdentityEntry> SettledEntriesOf(PreparedIntentSnapshotMessage message) =>
+        new DecodedList<SettledTransactionLedgerEntryMessage, SettledIdentityEntry>(
+            message.SettledTransactions,
+            static m => new SettledIdentityEntry(
                 new HLCTimestamp(m.TransactionIdNode, m.TransactionIdPhysical, m.TransactionIdCounter),
                 m.Epoch,
                 m.Key,
                 new HLCTimestamp(m.SettledAtNode, m.SettledAtPhysical, m.SettledAtCounter)));
-        return entries;
-    }
 
     // Load-time merge across (possibly overlapping) per-partition files: at most one live intent per key. A more
     // resolved intent for the same identity is authoritative; a different transaction on the same key is a
@@ -403,13 +436,15 @@ internal sealed partial class PreparedIntentStore
 
         List<PreparedIntent> pendingBeforeCapture = OwnedIntentsBeforeCapture(isOwnedKey);
 
-        LedgerCapture? ledger = CaptureLedger(partitionId);
+        using CodedOutputStream coded = new(output, leaveOpen: true);
+
+        // The capture writes the slice's settled identities to the section as it reads them.
+        LedgerCapture? ledger = CaptureLedger(partitionId, SettledIdentityWriter(coded));
 
         AfterLedgerCaptureForTesting?.Invoke();
 
         int written = 0;
 
-        using CodedOutputStream coded = new(output, leaveOpen: true);
         PreparedIntentCommandMessage entry = new();
 
         foreach (KeyValuePair<string, PreparedIntent> kv in intents)
@@ -464,7 +499,7 @@ internal sealed partial class PreparedIntentStore
     /// </summary>
     private void AddHeadsSettledDuringCapture(int partitionId, LedgerCapture? ledger, List<PreparedIntent> pendingBeforeCapture)
     {
-        if (ledger is not { } captured || !ledgers.TryGetValue(partitionId, out PartitionLedger? slice))
+        if (ledger is null || !ledgers.TryGetValue(partitionId, out PartitionLedger? slice))
             return;
 
         Dictionary<string, CommittedHead>? settled = null;
@@ -480,11 +515,8 @@ internal sealed partial class PreparedIntentStore
                 (settled ??= new(StringComparer.Ordinal))[intent.Key] = head;
         }
 
-        if (settled is null)
-            return;
-
-        captured.Heads.RemoveAll(entry => settled.ContainsKey(entry.Key));
-        captured.Heads.AddRange(settled);
+        // The writers take these heads in place of the scanned heads of the same keys.
+        ledger.ReplacedHeads = settled;
     }
 
     /// <summary>The reflected position a whole-partition section advertises: the highest log index applied through
@@ -667,36 +699,37 @@ internal sealed partial class PreparedIntentStore
     /// against a position; the section then advertises no fully reflected window.</param>
     public byte[] SerializePartitionIntents(int partitionId, IReadOnlyList<PreparedIntent> partitionIntents, long fullyReflectedThroughIndex = 0)
     {
-        LedgerCapture? ledger = CaptureLedger(partitionId);
-
         PreparedIntentSnapshotMessage message = new()
         {
             LedgerPresent = true,
             LedgerPartitionId = partitionId
         };
 
-        foreach (PreparedIntent intent in partitionIntents)
-            message.Intents.Add(PrepareProtoOf(intent));
-
-        if (ledger is { } captured)
+        LedgerCapture? ledger = CaptureLedger(partitionId, chunk =>
         {
-            message.LedgerWatermarkNode = captured.Watermark.N;
-            message.LedgerWatermarkPhysical = captured.Watermark.L;
-            message.LedgerWatermarkCounter = captured.Watermark.C;
-            message.LedgerSizeFloorPhysical = captured.SizeFloor;
-
-            foreach (KeyValuePair<string, CommittedHead> entry in captured.Heads)
-            {
-                CommittedHeadLedgerEntryMessage head = new();
-                FillLedgerEntry(head, entry.Key, entry.Value);
-                message.CommittedHeads.Add(head);
-            }
-
-            foreach (SettledIdentityEntry entry in captured.Settled)
+            foreach (SettledIdentityEntry entry in chunk)
             {
                 SettledTransactionLedgerEntryMessage settled = new();
                 FillSettledEntry(settled, entry);
                 message.SettledTransactions.Add(settled);
+            }
+        });
+
+        foreach (PreparedIntent intent in partitionIntents)
+            message.Intents.Add(PrepareProtoOf(intent));
+
+        if (ledger is not null)
+        {
+            message.LedgerWatermarkNode = ledger.Watermark.N;
+            message.LedgerWatermarkPhysical = ledger.Watermark.L;
+            message.LedgerWatermarkCounter = ledger.Watermark.C;
+            message.LedgerSizeFloorPhysical = ledger.SizeFloor;
+
+            foreach (KeyValuePair<string, CommittedHead> entry in ledger.Heads)
+            {
+                CommittedHeadLedgerEntryMessage head = new();
+                FillLedgerEntry(head, entry.Key, entry.Value);
+                message.CommittedHeads.Add(head);
             }
         }
 

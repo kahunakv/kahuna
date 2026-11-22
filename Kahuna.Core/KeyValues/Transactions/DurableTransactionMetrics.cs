@@ -740,6 +740,17 @@ internal static class DurableTransactionMetrics
             description: "Warnings that a committed-head ledger slice stays over its head budget at the minimum horizon.");
 
     /// <summary>
+    /// The longest time one capture of a ledger slice held the apply gate in one step, one sample for each
+    /// capture (a checkpoint or a whole-partition export). The capture reads the settled identities in chunks,
+    /// so the value stays near the time of one chunk whatever the size of the slice; the value rises when a
+    /// head prune tears the capture four times and the heads are scanned under the gate.
+    /// </summary>
+    internal static readonly Histogram<double> LedgerCaptureGateHold =
+        Meter.CreateHistogram<double>(
+            "kahuna.durable_tx.ledger_capture_gate_hold", unit: "ms",
+            description: "Longest single hold of the apply gate by one capture of a committed-head ledger slice.");
+
+    /// <summary>
     /// Fence-wedge watchdog escalations: a key refused a run of consecutive validated-base prepares at an
     /// unchanged (validated base, committed head) pair, meaning this node's visible entry stopped converging
     /// with its committed head — the key is effectively read-only until the entry reconciles. Healthy refusals
@@ -2196,7 +2207,7 @@ internal static class DurableTransactionMetrics
         Func<long> preparedIntentCount,
         Func<long> preparedIntentBytes,
         Func<long> outstandingDurable,
-        Func<IReadOnlyList<(int PartitionId, long Entries, long Bytes)>>? committedHeadLedgerSizes = null,
+        Func<IReadOnlyList<(int PartitionId, long Entries, long Bytes, long SettledIdentities)>>? committedHeadLedgerSizes = null,
         Func<long>? recordBytes = null,
         Func<long>? receiptBytes = null)
     {
@@ -2219,7 +2230,10 @@ internal static class DurableTransactionMetrics
                 description: "Keys retained by the committed-head ledger, per partition (bounded by the staged-base fence retention and the head budget).");
             gaugeMeter.CreateObservableGauge("kahuna.durable_tx.committed_head_ledger_bytes",
                 () => LedgerMeasurements(committedHeadLedgerSizes(), static size => size.Bytes),
-                unit: "By", description: "Approximate bytes retained by the committed-head ledger, per partition.");
+                unit: "By", description: "Approximate bytes retained by the committed-head ledger and its settled identities, per partition.");
+            gaugeMeter.CreateObservableGauge("kahuna.durable_tx.settled_identity_entries",
+                () => LedgerMeasurements(committedHeadLedgerSizes(), static size => size.SettledIdentities),
+                description: "Settled identities held by the committed-head ledger, per partition: one for each key settled in the last 60 to 75 seconds of commit time.");
         }
         gaugeMeter.CreateObservableGauge("kahuna.durable_tx.resident_records", recordCount,
             description: "Canonical transaction records resident on this node (awaiting retention GC).");
@@ -2235,11 +2249,11 @@ internal static class DurableTransactionMetrics
     }
 
     private static IEnumerable<Measurement<long>> LedgerMeasurements(
-        IReadOnlyList<(int PartitionId, long Entries, long Bytes)> sizes,
-        Func<(int PartitionId, long Entries, long Bytes), long> select)
+        IReadOnlyList<(int PartitionId, long Entries, long Bytes, long SettledIdentities)> sizes,
+        Func<(int PartitionId, long Entries, long Bytes, long SettledIdentities), long> select)
     {
         List<Measurement<long>> measurements = new(sizes.Count);
-        foreach ((int PartitionId, long Entries, long Bytes) size in sizes)
+        foreach ((int PartitionId, long Entries, long Bytes, long SettledIdentities) size in sizes)
             measurements.Add(new Measurement<long>(select(size), new KeyValuePair<string, object?>("partition", size.PartitionId)));
         return measurements;
     }

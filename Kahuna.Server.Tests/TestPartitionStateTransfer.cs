@@ -873,7 +873,8 @@ public sealed class TestPartitionStateTransfer : IDisposable
 
     /// <summary>The store section built the materialising way — whole-store snapshots filtered into lists, each
     /// list serialised to one array, the arrays wrapped in a section message — which is the wire format the
-    /// receiver parses. The exporter must produce exactly these bytes without any of those copies.</summary>
+    /// receiver parses. The exporter must produce a section with this content without any of those copies
+    /// (see <see cref="AssertSameStoreSection"/>).</summary>
     private static byte[] MaterialisedStoreSection(Node node, int partitionId)
     {
         RangeMap map = BuildMap();
@@ -907,8 +908,49 @@ public sealed class TestPartitionStateTransfer : IDisposable
         return output.ToArray();
     }
 
+    /// <summary>
+    /// Asserts that the streamed store section has the content of the materialised one. The receipts and the
+    /// records are compared byte for byte. The prepared-intent payloads are compared as parsed messages and by
+    /// length: the exporter writes the settled identities of the ledger slice before the intents (its capture
+    /// writes them as it reads them), and the message serializer writes them after the heads. A parser reads
+    /// both orders as the same message. The checksum covers the payload bytes, so the streamed section is
+    /// checked against its own bytes.
+    ///
+    /// <para>The two sections must also have the same size, so that a field the exporter writes and the
+    /// materialised shape omits (an empty payload) fails the comparison. The size is compared without the
+    /// checksum value: the checksum is a varint of a hash, the two hashes differ because the payload bytes
+    /// differ in order, and their encoded lengths differ by a byte in about half of the runs.</para>
+    /// </summary>
+    private static void AssertSameStoreSection(byte[] materialised, byte[] streamed)
+    {
+        PartitionStateStoreSection expected = PartitionStateStoreSection.Parser.ParseDelimitedFrom(new MemoryStream(materialised));
+        PartitionStateStoreSection actual = PartitionStateStoreSection.Parser.ParseDelimitedFrom(new MemoryStream(streamed));
+
+        Assert.Equal(BodyLengthWithoutChecksum(materialised, expected), BodyLengthWithoutChecksum(streamed, actual));
+        Assert.Equal(expected.CompletionReceipts, actual.CompletionReceipts);
+        Assert.Equal(expected.TransactionRecords, actual.TransactionRecords);
+
+        Assert.Equal(expected.PreparedIntents.Length, actual.PreparedIntents.Length);
+        Assert.Equal(
+            PreparedIntentSnapshotMessage.Parser.ParseFrom(expected.PreparedIntents),
+            PreparedIntentSnapshotMessage.Parser.ParseFrom(actual.PreparedIntents));
+
+        KvStateMachineTransfer.FnvHashStream hasher = new();
+        hasher.Write(actual.CompletionReceipts.Span);
+        hasher.Write(actual.TransactionRecords.Span);
+        hasher.Write(actual.PreparedIntents.Span);
+        Assert.Equal(hasher.Hash, actual.Checksum);
+    }
+
+    /// <summary>The length of a delimited section's body, less the bytes of its checksum value.</summary>
+    private static int BodyLengthWithoutChecksum(byte[] delimited, PartitionStateStoreSection section)
+    {
+        Assert.NotEqual(0UL, section.Checksum);
+        return new CodedInputStream(delimited).ReadLength() - CodedOutputStream.ComputeUInt64Size(section.Checksum);
+    }
+
     [Fact]
-    public async Task Export_StreamsTheStoreSection_ByteForByteAsTheMaterialisedShape()
+    public async Task Export_StreamsTheStoreSection_WithTheContentOfTheMaterialisedShape()
     {
         Node source = MakeNode();
 
@@ -921,7 +963,7 @@ public sealed class TestPartitionStateTransfer : IDisposable
         byte[] section = StoreSectionOf(snapshot);
 
         Assert.True(section.Length > 2 * SegmentedBufferStream.SegmentSize);
-        Assert.Equal(MaterialisedStoreSection(source, 2), section);
+        AssertSameStoreSection(MaterialisedStoreSection(source, 2), section);
 
         // The receiver installs exactly the owned slice from the streamed section.
         Node target = MakeNode();
@@ -945,8 +987,8 @@ public sealed class TestPartitionStateTransfer : IDisposable
         PopulateStores(source, ownedIntents: 3, ownedRecords: 0, ownedReceipts: 0, foreignPerSpace: 50);
 
         // Partition 2 owns intents only; partition 4 owns nothing at all (the section still carries its ledger marker).
-        Assert.Equal(MaterialisedStoreSection(source, 2), StoreSectionOf(await Export(source, 2)));
-        Assert.Equal(MaterialisedStoreSection(source, 4), StoreSectionOf(await Export(source, 4)));
+        AssertSameStoreSection(MaterialisedStoreSection(source, 2), StoreSectionOf(await Export(source, 2)));
+        AssertSameStoreSection(MaterialisedStoreSection(source, 4), StoreSectionOf(await Export(source, 4)));
     }
 
     private static (long Intents, long Records, long Receipts) MeasureSliceWriters(int foreignRows)

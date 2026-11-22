@@ -118,6 +118,24 @@ internal sealed class DurableMaintenanceService
     /// <summary>Test seam: overrides the managed-heap load reading (0..1) the pressure valve compares against.</summary>
     internal Func<double>? HeapLoadProbe { get; set; }
 
+    // Share of the managed heap limit above which the retained transaction state earns a warning (see
+    // CheckRetainedStateHeapShare); non-positive turns the warning off.
+    private readonly double retainedStateHeapShareLimit;
+
+    private readonly RetentionBudgetLogGate heapShareLogGate = new(BudgetLogInterval);
+
+    private bool heapShareBudgetLogged;
+
+    private double retainedStateHeapShare;
+
+    /// <summary>The retained transaction state over the managed heap limit at the last check, 0 when the
+    /// runtime reports no limit (the <c>kahuna.durable_tx.retained_state_heap_share</c> gauge). Written by the
+    /// maintenance tick, read by the gauge callback.</summary>
+    internal double RetainedStateHeapShare => Volatile.Read(ref retainedStateHeapShare);
+
+    /// <summary>Test seam: overrides the managed heap limit, in bytes, that the retained state is compared with.</summary>
+    internal Func<long>? HeapLimitProbe { get; set; }
+
     internal DurableMaintenanceService(
         KeyValuesRuntime runtime,
         KeyValuesManager manager,
@@ -142,6 +160,7 @@ internal sealed class DurableMaintenanceService
         retentionMaxBytes = configuration.DurableRecordRetentionMaxBytes;
         retentionHeapPressure = configuration.DurableRecordRetentionHeapPressure;
         retentionFloor = ResolveRetentionFloor(configuration, runtime.Logger);
+        retainedStateHeapShareLimit = configuration.DurableRetainedStateHeapShare;
 
         EffectiveMinimumRetention = RetentionBudgetEnabled && durableRecordRetentionTtl > TimeSpan.Zero
             ? (retentionFloor < durableRecordRetentionTtl ? retentionFloor : durableRecordRetentionTtl)
@@ -378,6 +397,8 @@ internal sealed class DurableMaintenanceService
     {
         HeapPressureObserved = false;
 
+        CheckRetainedStateHeapShare();
+
         if (transactionRecordStore.Count == 0)
             return;
 
@@ -584,6 +605,81 @@ internal sealed class DurableMaintenanceService
         }
 
         return new RetentionPressure(recordOverage, byteOverage, heapPressure, heapLoad);
+    }
+
+    /// <summary>
+    /// Compares the retained transaction state with the managed heap limit and warns when it passes
+    /// <see cref="KahunaConfiguration.DurableRetainedStateHeapShare"/> of it. The retained state is the estimated
+    /// bytes of the resident transaction records, the completion receipts, and the committed-head ledger with
+    /// its settled identities. All three grow with the write commit rate and none of them reads the heap limit:
+    /// the records and receipts stay for the retention floor whatever the budgets say, and the settled
+    /// identities for a fixed window. Without this check the first sign that the rate is too high for the heap
+    /// is the process running out of memory.
+    ///
+    /// <para>Runs on each maintenance tick, the first one a few seconds after the node starts, so a node that
+    /// reloaded a large state from its checkpoint warns before it serves load. The first check also logs the
+    /// byte value of the share once. The warning follows the cadence of the budget warning: one line when the
+    /// share is passed, a reminder every <see cref="BudgetLogInterval"/>, one line when the state is back
+    /// under it. The check changes no retention.</para>
+    /// </summary>
+    internal void CheckRetainedStateHeapShare()
+    {
+        long heapLimit = HeapLimitProbe?.Invoke() ?? Diagnostics.OutOfMemoryRestartBreaker.HeapLimitBytes();
+
+        long recordBytes = transactionRecordStore.EstimatedBytes;
+        long receiptBytes = completionReceiptStore.EstimatedBytes;
+        long ledgerBytes = preparedIntentStore.CommittedHeadLedgerBytes;
+        long retainedBytes = recordBytes + receiptBytes + ledgerBytes;
+
+        double share = heapLimit > 0 ? (double)retainedBytes / heapLimit : 0;
+        Volatile.Write(ref retainedStateHeapShare, share);
+
+        if (retainedStateHeapShareLimit <= 0 || heapLimit <= 0)
+            return;
+
+        if (!heapShareBudgetLogged)
+        {
+            heapShareBudgetLogged = true;
+            LogRetainedStateBudget(heapLimit);
+        }
+
+        long nowTicks = Stopwatch.GetTimestamp();
+
+        switch (heapShareLogGate.Observe(share >= retainedStateHeapShareLimit, nowTicks))
+        {
+            case RetentionBudgetLogAction.None:
+                return;
+
+            case RetentionBudgetLogAction.StreakEnded:
+                if (logger.IsEnabled(LogLevel.Information))
+                    logger.LogInformation(
+                        "Retained transaction state is back under {ShareLimit:P0} of the managed heap limit: {RetainedBytes} estimated bytes, {Share:P1} of {HeapLimit} bytes",
+                        retainedStateHeapShareLimit, retainedBytes, share, heapLimit);
+                return;
+        }
+
+        logger.LogWarning(
+            "Retained transaction state is {RetainedBytes} estimated bytes, {Share:P1} of the managed heap limit of {HeapLimit} bytes (warning share {ShareLimit:P0}, passed for {Streak}): {Records} transaction records ({RecordBytes} bytes), {Receipts} completion receipts ({ReceiptBytes} bytes), committed-head ledger with {SettledIdentities} settled identities ({LedgerBytes} bytes). This state grows with the write commit rate: the records and receipts stay for at least the retention floor of {Floor}, and a settled identity for 60 to 75 seconds. The node can run out of heap at this rate. Raise the managed heap limit, or lower DurableRecordRetentionFloor (and the DurableDecisionDeadlineCeilingMs it must cover), or lower the commit rate. Next reminder in {Interval}; watch kahuna.durable_tx.retained_state_heap_share",
+            retainedBytes, share, heapLimit, retainedStateHeapShareLimit, heapShareLogGate.StreakDuration(nowTicks),
+            transactionRecordStore.Count, recordBytes, completionReceiptStore.Count, receiptBytes,
+            preparedIntentStore.SettledIdentityCount, ledgerBytes, retentionFloor, BudgetLogInterval);
+    }
+
+    // Logged once, at the first check: what the share is in bytes on this node, and whether the byte budget of
+    // the records and receipts alone can pass it.
+    private void LogRetainedStateBudget(long heapLimit)
+    {
+        long shareBytes = (long)(heapLimit * retainedStateHeapShareLimit);
+
+        if (logger.IsEnabled(LogLevel.Information))
+            logger.LogInformation(
+                "Managed heap limit {HeapLimit} bytes. The retained transaction state (transaction records, completion receipts, committed-head ledger with settled identities) warns above {ShareLimit:P0} of it, {ShareBytes} bytes. Transaction records and receipts stay for at least the retention floor of {Floor}",
+                heapLimit, retainedStateHeapShareLimit, shareBytes, retentionFloor);
+
+        if (retentionMaxBytes > shareBytes)
+            logger.LogWarning(
+                "DurableRecordRetentionMaxBytes ({MaxBytes} bytes) is above {ShareLimit:P0} of the managed heap limit ({ShareBytes} of {HeapLimit} bytes): the byte budget of the transaction records and completion receipts alone lets the retained state pass the share this node warns at. Lower the budget or raise the managed heap limit",
+                retentionMaxBytes, retainedStateHeapShareLimit, shareBytes, heapLimit);
     }
 
     /// <summary>Post-GC managed heap size over the runtime's available memory (the heap hard limit when one is

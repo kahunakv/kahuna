@@ -1,10 +1,12 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using Google.Protobuf;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.KeyValues.Writes;
 using Kahuna.Server.Replication;
 using Kahuna.Server.Replication.Protos;
 using Kahuna.Shared.KeyValue;
+using Kahuna.Utils;
 using Kommander.Data;
 using Kommander.Time;
 using Microsoft.Extensions.Logging;
@@ -67,15 +69,35 @@ internal sealed partial class PreparedIntentStore
         }
     }
 
-    /// <summary>Per-partition (entries, bytes) of the committed-head ledger, for the tagged gauges. The
-    /// unattributed slice is reported under <see cref="UnattributedPartition"/>.</summary>
-    internal IReadOnlyList<(int PartitionId, long Entries, long Bytes)> SnapshotLedgerSizes()
+    /// <summary>Per-partition sizes of the committed-head ledger, for the tagged gauges: the heads, the
+    /// approximate bytes of the heads and the settled identities together, and the settled identities the slice
+    /// holds. The unattributed slice is reported under <see cref="UnattributedPartition"/>.</summary>
+    internal IReadOnlyList<(int PartitionId, long Entries, long Bytes, long SettledIdentities)> SnapshotLedgerSizes()
     {
-        List<(int, long, long)> sizes = new(ledgers.Count);
+        List<(int, long, long, long)> sizes = new(ledgers.Count);
         foreach (KeyValuePair<int, PartitionLedger> slice in ledgers)
-            sizes.Add((slice.Key, slice.Value.Heads.Count, Volatile.Read(ref slice.Value.Bytes)));
+            sizes.Add((slice.Key, slice.Value.Heads.Count, Volatile.Read(ref slice.Value.Bytes), slice.Value.Settled.Count));
         return sizes;
     }
+
+    /// <summary>Settled identities held across every ledger slice, swept or not. Observability only.</summary>
+    internal long SettledIdentityCount
+    {
+        get
+        {
+            long count = 0;
+            foreach (PartitionLedger ledger in ledgers.Values)
+                count += ledger.Settled.Count;
+            return count;
+        }
+    }
+
+    /// <summary>The longest time the last ledger capture held the apply gate in one step. Test and diagnostic
+    /// seam; the <c>kahuna.durable_tx.ledger_capture_gate_hold</c> histogram records the same value.</summary>
+    internal TimeSpan LastLedgerCaptureLongestGateHold =>
+        Stopwatch.GetElapsedTime(0, Volatile.Read(ref lastLedgerCaptureLongestGateHoldTicks));
+
+    private long lastLedgerCaptureLongestGateHoldTicks;
 
     /// <summary>The committed head a partition's ledger slice holds for <paramref name="key"/>, or false when
     /// the slice holds none. Test/observability seam for the parity assertions: unlike
@@ -119,14 +141,30 @@ internal sealed partial class PreparedIntentStore
         return entries;
     }
 
-    /// <summary>Every settled identity a partition's ledger slice currently retains, sorted by transaction id,
-    /// epoch, then key. Test seam for cross-replica parity assertions.</summary>
+    /// <summary>Every settled identity a partition's ledger slice retains inside its window, sorted by
+    /// transaction id, epoch, then key. An identity outside the window is left out whether or not the sweep
+    /// removed it, so the result is a function of the applied log prefix. Test seam for cross-replica parity
+    /// assertions.</summary>
     internal IReadOnlyList<SettledIdentityEntry> SnapshotSettledIdentities(int partitionId)
     {
-        List<SettledIdentityEntry> entries;
-        lock (applyGate)
+        List<SettledIdentityEntry> entries = [];
+
+        if (ledgers.TryGetValue(partitionId, out PartitionLedger? ledger))
         {
-            entries = ledgers.TryGetValue(partitionId, out PartitionLedger? ledger) ? CopySettledLocked(ledger) : [];
+            lock (applyGate)
+            {
+                List<SettledIdentityEntry> chunk = new(SettledCaptureChunkEntries);
+                long retainedFromL = ledger.Watermark.L - SettledIdentityRetentionMs;
+                long position = 0;
+                bool more = true;
+
+                while (more)
+                {
+                    more = ledger.Settled.CopyNext(ref position, chunk, retainedFromL);
+                    entries.AddRange(chunk);
+                    chunk.Clear();
+                }
+            }
         }
 
         entries.Sort(static (a, b) =>
@@ -434,48 +472,51 @@ internal sealed partial class PreparedIntentStore
 
     /// <summary>The field form of <see cref="RecordSettledIdentity(PreparedIntent, int)"/>, for a settle that
     /// found no intent to take the identity from. <paramref name="settledAt"/> is the time base of the
-    /// identity's retention; with <paramref name="overwrite"/> false an identity already remembered keeps the
-    /// time base it has. Caller holds <see cref="applyGate"/>.</summary>
+    /// identity's retention; with <paramref name="overwrite"/> false an identity remembered inside the window
+    /// keeps the time base it has. An identity remembered outside the window is absent, and the record stores
+    /// the new time base as it does for an identity the sweep already removed. Caller holds
+    /// <see cref="applyGate"/>.</summary>
     private void RecordSettledIdentity(HLCTimestamp transactionId, long epoch, string key, HLCTimestamp settledAt, int partitionId, bool overwrite)
     {
         PartitionLedger ledger = ledgers.GetOrAdd(partitionId, static _ => new PartitionLedger());
 
-        SettledIdentity identity = new(transactionId, epoch, key);
-        if (ledger.Settled.TryAdd(identity, settledAt))
+        long retainedFromL = ledger.Watermark.L - SettledIdentityRetentionMs;
+
+        if (ledger.Settled.Record(new SettledIdentity(transactionId, epoch, key), settledAt, overwrite, retainedFromL))
             ledger.Bytes += SettledIdentityBytes(key);
-        else if (overwrite)
-            ledger.Settled[identity] = settledAt;
 
         StampPartitionDirty(partitionId);
 
-        // Physical prune once per bucket of watermark time. Unobservable to the verdict (logical retention).
+        SweepSettledIdentities(ledger);
+    }
+
+    /// <summary>
+    /// Runs one step of the physical sweep of a slice's settled memory. A sweep starts when the slice's
+    /// watermark enters a new bucket of <see cref="SettledIdentityPruneBucketMs"/>, and each record that follows
+    /// sweeps one shard until every shard was visited. One pass over a million identities is then spread over
+    /// the next thousands of records, where one walk of the whole memory held the gate for all of it. The sweep
+    /// removes only what the window already treats as absent, so its timing is unobservable to any verdict. It
+    /// waits while a capture reads the memory. Caller holds <see cref="applyGate"/>.
+    /// </summary>
+    private static void SweepSettledIdentities(PartitionLedger ledger)
+    {
+        if (ledger.SettledCaptures > 0)
+            return;
+
         long bucket = ledger.Watermark.L / SettledIdentityPruneBucketMs;
         if (bucket != ledger.SettledPrunedBucket)
         {
             ledger.SettledPrunedBucket = bucket;
-            PruneSettledIdentities(ledger);
-        }
-    }
-
-    /// <summary>Physically drops settled identities that fell outside the window measured from the slice's
-    /// watermark — only what the window already treats as absent. Caller holds <see cref="applyGate"/>.</summary>
-    private void PruneSettledIdentities(PartitionLedger ledger)
-    {
-        List<SettledIdentity>? expired = null;
-        foreach (KeyValuePair<SettledIdentity, HLCTimestamp> entry in ledger.Settled)
-        {
-            if (!IsSettledWithinRetention(entry.Value, ledger.Watermark))
-                (expired ??= []).Add(entry.Key);
+            ledger.Settled.BeginSweep();
         }
 
-        if (expired is null)
+        if (!ledger.Settled.SweepInProgress)
             return;
 
-        foreach (SettledIdentity identity in expired)
-        {
-            if (ledger.Settled.Remove(identity))
-                ledger.Bytes -= SettledIdentityBytes(identity.Key);
-        }
+        ledger.Settled.SweepStep(ledger.Watermark.L - SettledIdentityRetentionMs, out int removed, out long removedKeyChars);
+
+        if (removed > 0)
+            ledger.Bytes -= SettledIdentityBytes(removedKeyChars, removed);
     }
 
     /// <summary>Records a committed intent's mutation as its key's committed head in the slice of the
@@ -842,9 +883,16 @@ internal sealed partial class PreparedIntentStore
 
         if (settled is not null)
         {
+            long retainedFromL = watermark.L - SettledIdentityRetentionMs;
+
             foreach (SettledIdentityEntry entry in settled)
             {
-                if (ledger.Settled.TryAdd(new SettledIdentity(entry.TransactionId, entry.Epoch, entry.Key), entry.SettledAt))
+                // An identity outside the window of the installed watermark is absent to every verdict, and
+                // the watermark only advances. It is not installed.
+                if (entry.SettledAt.L < retainedFromL)
+                    continue;
+
+                if (ledger.Settled.Record(new SettledIdentity(entry.TransactionId, entry.Epoch, entry.Key), entry.SettledAt, replace: false, retainedFromL))
                     ledger.Bytes += SettledIdentityBytes(entry.Key);
             }
         }
@@ -962,74 +1010,162 @@ internal sealed partial class PreparedIntentStore
     }
 
     /// <summary>
-    /// Captures one slice consistently for persistence: the watermark is read under the gate, the heads are
-    /// scanned lock-free, and the scan is repeated if a physical prune or a raise of the size floor ran in between — a prune under a newer
-    /// watermark or floor may drop a head the captured watermark still retains, and a snapshot that paired the two would
-    /// judge differently on reload than a replica that never restarted. Heads recorded after the watermark read
-    /// are harmless in the capture: the log entries that recorded them are replayed on top of it. Null when the
-    /// partition has no slice.
+    /// Captures one slice consistently for persistence. Null when the partition has no slice.
+    ///
+    /// <para><b>Settled identities.</b> The watermark is read under the gate, and the settled memory is then
+    /// read one chunk at a time, each chunk under the gate, and handed to <paramref name="settledSink"/> with the
+    /// gate released. The capture holds no copy of the memory: a slice with a million identities costs one
+    /// buffer of <see cref="SettledCaptureChunkEntries"/> entries, and an apply waits for one chunk. The sweep
+    /// of the memory waits while the capture runs (<see cref="PartitionLedger.SettledCaptures"/>), so every
+    /// identity the captured watermark retains reaches the sink. An identity recorded after the watermark read
+    /// reaches it or not: the log entry that recorded it is replayed on top of the capture.</para>
+    ///
+    /// <para><b>Heads.</b> The heads are scanned lock-free after the settled memory, and the scan is repeated if
+    /// a physical prune or a raise of the size floor ran in between: a prune under a newer watermark or floor may
+    /// drop a head the captured watermark still retains, and a snapshot that paired the two would judge
+    /// differently on reload than a replica that never restarted. Heads recorded after the watermark read are
+    /// harmless in the capture: the log entries that recorded them are replayed on top of it. The scan comes
+    /// after the settled memory so that the head of every captured identity is in it.</para>
     /// </summary>
-    private LedgerCapture? CaptureLedger(int partitionId)
+    /// <param name="partitionId">The partition whose slice is captured.</param>
+    /// <param name="settledSink">Receives each chunk of settled identities, outside the gate. The list is
+    /// reused for the next chunk, so the sink must not keep it.</param>
+    private LedgerCapture? CaptureLedger(int partitionId, Action<List<SettledIdentityEntry>> settledSink)
     {
         if (!ledgers.TryGetValue(partitionId, out PartitionLedger? ledger))
             return null;
 
-        for (int attempt = 0; ; attempt++)
+        HLCTimestamp watermark;
+        long generation;
+        long reflectedThroughIndex;
+        long fullyReflectedThroughIndex;
+        long sizeFloor;
+
+        lock (applyGate)
         {
-            HLCTimestamp watermark;
-            long generation;
-            long reflectedThroughIndex;
-            long fullyReflectedThroughIndex;
-            long sizeFloor;
-            List<SettledIdentityEntry> settled;
-            lock (applyGate)
+            watermark = ledger.Watermark;
+            generation = ledger.PruneGeneration;
+            reflectedThroughIndex = ledger.ReflectedThroughIndex;
+            fullyReflectedThroughIndex = ledger.FullyReflectedThroughIndex;
+            sizeFloor = ledger.SizeFloor;
+            ledger.SettledCaptures++;
+        }
+
+        long longestHoldTicks = 0;
+
+        try
+        {
+            CopySettled(ledger, watermark, settledSink, ref longestHoldTicks);
+
+            BetweenCaptureReadsForTesting?.Invoke();
+
+            ChunkedList<KeyValuePair<string, CommittedHead>> heads = new();
+
+            for (int attempt = 0; ; attempt++)
             {
-                watermark = ledger.Watermark;
-                generation = ledger.PruneGeneration;
-                reflectedThroughIndex = ledger.ReflectedThroughIndex;
-                fullyReflectedThroughIndex = ledger.FullyReflectedThroughIndex;
-                sizeFloor = ledger.SizeFloor;
-                // The settled memory is mutated and read under the gate only, so it is copied here: the copy
-                // pairs with the watermark read in the same critical section and cannot tear.
-                settled = CopySettledLocked(ledger);
-            }
+                foreach (KeyValuePair<string, CommittedHead> entry in ledger.Heads)
+                    heads.Add(entry);
 
-            List<KeyValuePair<string, CommittedHead>> heads = new(ledger.Heads.Count);
-            foreach (KeyValuePair<string, CommittedHead> entry in ledger.Heads)
-                heads.Add(entry);
-
-            lock (applyGate)
-            {
-                if (generation == ledger.PruneGeneration)
-                    return new LedgerCapture(watermark, reflectedThroughIndex, fullyReflectedThroughIndex, heads, settled, sizeFloor);
-
-                // A prune tore the capture. Prunes are rare (once per retention bucket), so a rescan almost
-                // always succeeds; past a few attempts take the gate for the scan itself.
-                if (attempt >= 3)
+                lock (applyGate)
                 {
-                    heads.Clear();
-                    foreach (KeyValuePair<string, CommittedHead> entry in ledger.Heads)
-                        heads.Add(entry);
-                    return new LedgerCapture(ledger.Watermark, ledger.ReflectedThroughIndex, ledger.FullyReflectedThroughIndex, heads, CopySettledLocked(ledger), ledger.SizeFloor);
+                    long entered = Stopwatch.GetTimestamp();
+
+                    try
+                    {
+                        if (generation == ledger.PruneGeneration)
+                            return new LedgerCapture(watermark, reflectedThroughIndex, fullyReflectedThroughIndex, heads, sizeFloor);
+
+                        // A prune tore the capture. The values the next scan pairs with are read again here.
+                        // The settled identities already written stay valid: they are the ones an older
+                        // watermark retains, a superset of what the newer one does.
+                        watermark = ledger.Watermark;
+                        generation = ledger.PruneGeneration;
+                        reflectedThroughIndex = ledger.ReflectedThroughIndex;
+                        fullyReflectedThroughIndex = ledger.FullyReflectedThroughIndex;
+                        sizeFloor = ledger.SizeFloor;
+                        heads.Clear();
+
+                        // Prunes are rare (once per retention bucket), so a rescan almost always succeeds; past
+                        // a few attempts take the gate for the scan itself.
+                        if (attempt >= 3)
+                        {
+                            foreach (KeyValuePair<string, CommittedHead> entry in ledger.Heads)
+                                heads.Add(entry);
+
+                            return new LedgerCapture(watermark, reflectedThroughIndex, fullyReflectedThroughIndex, heads, sizeFloor);
+                        }
+                    }
+                    finally
+                    {
+                        longestHoldTicks = Math.Max(longestHoldTicks, Stopwatch.GetTimestamp() - entered);
+                    }
                 }
             }
         }
+        finally
+        {
+            lock (applyGate)
+                ledger.SettledCaptures--;
+
+            Volatile.Write(ref lastLedgerCaptureLongestGateHoldTicks, longestHoldTicks);
+            DurableTransactionMetrics.LedgerCaptureGateHold.Record(Stopwatch.GetElapsedTime(0, longestHoldTicks).TotalMilliseconds);
+        }
     }
 
-    /// <summary>Copies a slice's settled-identity memory. Caller holds <see cref="applyGate"/>.</summary>
-    private static List<SettledIdentityEntry> CopySettledLocked(PartitionLedger ledger)
+    /// <summary>Test seam, invoked after a capture read the settled identities and before it reads the heads.
+    /// Never set in production.</summary>
+    internal Action? BetweenCaptureReadsForTesting { get; set; }
+
+    /// <summary>Hands every settled identity that <paramref name="watermark"/> retains to
+    /// <paramref name="sink"/>, one chunk at a time. Takes the gate for each chunk and releases it for the
+    /// sink. The caller holds the slice's <see cref="PartitionLedger.SettledCaptures"/> count above zero.</summary>
+    private void CopySettled(PartitionLedger ledger, HLCTimestamp watermark, Action<List<SettledIdentityEntry>> sink, ref long longestHoldTicks)
     {
-        List<SettledIdentityEntry> settled = new(ledger.Settled.Count);
-        foreach (KeyValuePair<SettledIdentity, HLCTimestamp> entry in ledger.Settled)
-            settled.Add(new SettledIdentityEntry(entry.Key.TransactionId, entry.Key.Epoch, entry.Key.Key, entry.Value));
-        return settled;
+        List<SettledIdentityEntry> chunk = new(SettledCaptureChunkEntries);
+        long retainedFromL = watermark.L - SettledIdentityRetentionMs;
+        long position = 0;
+        bool more = true;
+
+        while (more)
+        {
+            lock (applyGate)
+            {
+                long entered = Stopwatch.GetTimestamp();
+                more = ledger.Settled.CopyNext(ref position, chunk, retainedFromL);
+                longestHoldTicks = Math.Max(longestHoldTicks, Stopwatch.GetTimestamp() - entered);
+            }
+
+            if (chunk.Count == 0)
+                continue;
+
+            sink(chunk);
+            chunk.Clear();
+        }
     }
 
-    /// <summary>One slice as captured for persistence or transfer: its watermark, its reflected position, its
-    /// heads (consistent with respect to physical pruning, see <see cref="CaptureLedger"/>) and its settled
-    /// identities (copied under the gate with the watermark).</summary>
-    private readonly record struct LedgerCapture(
-        HLCTimestamp Watermark, long ReflectedThroughIndex, long FullyReflectedThroughIndex,
-        List<KeyValuePair<string, CommittedHead>> Heads, List<SettledIdentityEntry> Settled, long SizeFloor);
+    /// <summary>One slice as captured for persistence or transfer: its watermark, its reflected positions, its
+    /// size floor and its heads (consistent with respect to physical pruning, see <see cref="CaptureLedger"/>).
+    /// The settled identities are not held here: the capture hands them to its sink as it reads them.</summary>
+    private sealed class LedgerCapture(
+        HLCTimestamp watermark, long reflectedThroughIndex, long fullyReflectedThroughIndex,
+        ChunkedList<KeyValuePair<string, CommittedHead>> heads, long sizeFloor)
+    {
+        public HLCTimestamp Watermark { get; } = watermark;
+
+        public long ReflectedThroughIndex { get; } = reflectedThroughIndex;
+
+        public long FullyReflectedThroughIndex { get; } = fullyReflectedThroughIndex;
+
+        public long SizeFloor { get; } = sizeFloor;
+
+        /// <summary>The heads the scan read. A key in <see cref="ReplacedHeads"/> is written from there.</summary>
+        public ChunkedList<KeyValuePair<string, CommittedHead>> Heads { get; } = heads;
+
+        /// <summary>Heads that replace the scanned head of their key: the keys whose transaction settled
+        /// between the capture and the intent walk (see <c>AddHeadsSettledDuringCapture</c>). Null when none.</summary>
+        public Dictionary<string, CommittedHead>? ReplacedHeads { get; set; }
+
+        public bool IsReplaced(string key) => ReplacedHeads is not null && ReplacedHeads.ContainsKey(key);
+    }
 
 }

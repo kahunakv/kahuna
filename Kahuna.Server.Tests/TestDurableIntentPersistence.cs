@@ -1,6 +1,7 @@
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kahuna.Server.Replication.Protos;
 using Kahuna.Shared.KeyValue;
 using Kommander.Time;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -243,7 +244,7 @@ public sealed class TestDurableIntentPersistence : IDisposable
     }
 
     [Fact]
-    public void IntentStore_StreamedSnapshot_WithLedger_ByteIdenticalToMessageSerialization()
+    public void IntentStore_StreamedSnapshot_WithLedger_ParsesToTheSerializedMessage()
     {
         PreparedIntentStore store = new(dir, "rev", null);
         store.AttachPartitionResolver(_ => PartitionId);
@@ -255,8 +256,19 @@ public sealed class TestDurableIntentPersistence : IDisposable
         store.Apply(new PrepareIntentCommand(Intent(2000, 1, "row/2")), PartitionId);
         Assert.True(store.PersistSnapshot(PartitionId));
 
+        // The capture writes the settled identities to the file as it reads them, before the intents, and the
+        // message serializer writes them after the heads. A parser reads both orders as the same message, so
+        // the file is compared as a parsed message and by length.
         byte[] expected = store.SerializePartitionIntents(PartitionId, [store.Get("row/2")!]);
-        Assert.Equal(expected, File.ReadAllBytes(Path.Combine(dir, $"preparedintent_rev_p{PartitionId}.snapshot")));
+        byte[] streamed = File.ReadAllBytes(Path.Combine(dir, $"preparedintent_rev_p{PartitionId}.snapshot"));
+
+        PreparedIntentSnapshotMessage expectedMessage = PreparedIntentSnapshotMessage.Parser.ParseFrom(expected);
+        Assert.Single(expectedMessage.Intents);
+        Assert.Single(expectedMessage.CommittedHeads);
+        Assert.Single(expectedMessage.SettledTransactions);
+
+        Assert.Equal(expected.Length, streamed.Length);
+        Assert.Equal(expectedMessage, PreparedIntentSnapshotMessage.Parser.ParseFrom(streamed));
     }
 
     [Fact]

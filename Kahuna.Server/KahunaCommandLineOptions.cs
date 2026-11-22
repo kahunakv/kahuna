@@ -953,6 +953,9 @@ public sealed class KahunaCommandLineOptions
     [Option("durable-record-retention-heap-pressure", Required = false, HelpText = "Managed-heap load (0..1, post-GC heap over the heap hard limit or available memory) above which every terminal record older than the retention floor is reclaimed at once and the receipt backstop runs at the floor — the last-resort valve against running out of heap in the WAL path. 0 disables it. Default 0.85.", Default = 0.85d)]
     public double DurableRecordRetentionHeapPressure { get; set; } = 0.85;
 
+    [Option("durable-retained-state-heap-share", Required = false, HelpText = "Share (0..1) of the managed heap limit above which the node warns that its retained transaction state (resident records, completion receipts, and the committed-head ledger with its settled identities) is too large for its heap. Checked at start and on each maintenance tick; reported on kahuna.durable_tx.retained_state_heap_share. It changes no retention. 0 disables the warning. Default 0.4.", Default = 0.4d)]
+    public double DurableRetainedStateHeapShare { get; set; } = 0.4;
+
     [Option("durable-record-retention-floor", Required = false, HelpText = "Seconds since its decision below which a terminal transaction record is never reclaimed early by a memory budget or the heap-pressure valve. This is the retention horizon prepared-intent recovery reasons with, so it is raised (with a warning) to at least the decision-deadline ceiling plus two maintenance ticks. At a steady commit rate the node retains at least rate × floor records whatever the budget. Default 90.", Default = 90)]
     public int DurableRecordRetentionFloorSeconds { get; set; } = 90;
 

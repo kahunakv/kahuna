@@ -124,7 +124,7 @@ public sealed class TestCommittedHeadLedgerBound : IDisposable
             Assert.True(store.CommittedHeadCountForPartition(Partition) <= 100, $"slice held more than its budget after key {i}");
         }
 
-        (int _, long entries, long bytes) = store.SnapshotLedgerSizes()[0];
+        (int _, long entries, long bytes, long _) = store.SnapshotLedgerSizes()[0];
         Assert.InRange(entries, 75, 100);
         Assert.Equal(entries, store.SnapshotLedger(Partition).Count);
 

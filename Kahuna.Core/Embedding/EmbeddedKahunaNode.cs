@@ -613,6 +613,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             DurableRecordRetentionMax = options.DurableRecordRetentionMax,
             DurableRecordRetentionMaxBytes = options.DurableRecordRetentionMaxBytes,
             DurableRecordRetentionHeapPressure = options.DurableRecordRetentionHeapPressure,
+            DurableRetainedStateHeapShare = options.DurableRetainedStateHeapShare,
             DurableRecordRetentionFloor = options.DurableRecordRetentionFloor,
             DurableMaintenanceInterval = options.DurableMaintenanceInterval,
             OutOfMemoryRestartBreakerThreshold = options.OutOfMemoryRestartBreakerThreshold,

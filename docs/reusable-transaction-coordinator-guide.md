@@ -646,6 +646,7 @@ takes ownership of the lock set, so the transition into finalization does not it
 | `DurableRecordRetentionMax` | 200,000 | Memory budget for the durable-2PC metadata resident on a node, as a count of canonical transaction records. Above it the retention sweep reclaims the oldest terminal records **before** their TTL, down to 90% of the budget, each anchor leader taking its proportional share. A non-positive value disables the count budget. |
 | `DurableRecordRetentionMaxBytes` | 256 MiB | The same budget as an estimated heap byte size of resident records plus completion receipts (reported by the `kahuna.durable_tx.resident_record_bytes` / `resident_receipt_bytes` gauges). A non-positive value disables the byte budget. |
 | `DurableRecordRetentionHeapPressure` | 0.85 | Managed-heap load above which every terminal record older than the floor is reclaimed at once and the receipt backstop runs at the floor: the last-resort valve for budgets sized wrong for the node's heap. A non-positive value disables it. |
+| `DurableRetainedStateHeapShare` | 0.4 | Share of the managed heap limit above which the node warns that its retained transaction state (resident records, completion receipts, and the committed-head ledger with its settled identities) is too large for its heap. The node checks it a few seconds after start and on each maintenance tick, and reports the ratio on `kahuna.durable_tx.retained_state_heap_share`. It changes no retention. A non-positive value disables the warning. |
 | `DurableRecordRetentionFloor` | 90 seconds | Age below which no terminal record is reclaimed early, whatever the budgets say. It is the retention horizon prepared-intent recovery reasons with whenever a budget is enabled, so it is raised (with a warning) to at least `DurableDecisionDeadlineCeilingMs` + 2 × `DurableMaintenanceInterval`. At a steady commit rate a node retains at least rate × floor records, so size the floor for the heap. |
 | `DurableMaintenanceInterval` | 5 seconds | Tick interval of prepared-intent recovery and the record retention sweep. Clamped to `CollectionInterval`; a non-positive value uses it. |
 | `CollectionInterval` | 60 seconds | Tick interval for the transaction reaper and the completion-receipt age backstop; the ceiling of `DurableMaintenanceInterval`. |
@@ -693,6 +694,12 @@ leaves a reachable, "healthy" replica whose WAL queue is pinned and appends noth
 disabled the node reports `ready: false` with a `fatalFault` on `/v1/cluster/health` from the first
 such fault on.
 
+A checkpoint capture is the one exemption. A capture reads a store and writes a temporary file, so a
+capture that runs out of memory is skipped: the partition's WAL retention floor stays where it is,
+`kahuna.persistence.checkpoint_capture_out_of_memory_total` counts the capture, the node logs a
+warning, and the next pass captures again. The exemption covers only the thread that runs the capture.
+An out-of-memory on another thread at the same moment ends the process as before.
+
 **Sizing the heap for the retained metadata.** The budget cannot be honoured below the floor: a node
 retains at least `commit rate × DurableRecordRetentionFloor` terminal records (and their participants'
 completion receipts) whatever `DurableRecordRetentionMax` says, because nothing younger than the floor
@@ -705,6 +712,55 @@ of the same partition decodes a second copy of the records and receipts into the
 the first, so plan the managed heap limit for the baseline plus one install's allocation burst (about
 ten times the snapshot's size in short-lived garbage) with headroom, or lower the floor (and the
 decision-deadline ceiling it must cover) so the baseline fits.
+
+**Retained state for each write commit a second.** Three stores grow with the write commit rate, and
+their retention does not read the heap limit. The table gives Kahuna's own estimate (the
+`resident_record_bytes`, `resident_receipt_bytes` and `committed_head_ledger_bytes` gauges) for a
+workload with two 30-character keys in each transaction and the default floor:
+
+| Store | Kept for | Bytes for each item | MiB for each write commit a second |
+|---|---|---:|---:|
+| Transaction records | `DurableRecordRetentionFloor` at least (90 s) | about 640 for each transaction | 0.055 |
+| Completion receipts | the same time as their record | about 150 for each written key | 0.026 |
+| Settled identities | 60 to 75 s of commit time | 80 + 2 × key length for each written key (140) | 0.020 |
+
+The sum is about 0.10 MiB for each write commit a second. The managed heap limit must be at least that
+state divided by `DurableRetainedStateHeapShare`: with the default of 0.4, about 0.25 MiB of heap limit
+for each write commit a second. On the node these numbers come from, the three gauges summed to 618 MiB
+at 5,945 write commits a second and 680 MiB at 6,519, which needs a heap limit of 1,545 MiB and
+1,700 MiB. That node had a heap limit of 1,229 MiB and ran out of memory. The records and receipts are
+80% of the state, so the setting that lowers it is `DurableRecordRetentionFloor` (and the
+`DurableDecisionDeadlineCeilingMs` it must cover).
+
+**The heap share warning.** The maintenance tick compares the sum of the three estimates with the
+managed heap limit: the runtime's available memory, which is the heap hard limit when one is set. When
+the sum passes `DurableRetainedStateHeapShare` of the limit, the node logs a warning with the size of
+each store, a reminder every ten minutes while the sum stays above the share, and one information line
+when it is back under. The first check runs a few seconds after start, so a node that reloaded a large
+state from its checkpoint warns before it serves load. The first check also logs the byte value of the
+share, and a warning when `DurableRecordRetentionMaxBytes` is above that value.
+`kahuna.durable_tx.retained_state_heap_share` reports the ratio on each tick. The warning changes no
+retention.
+
+**Settled identities.** A ledger slice remembers one settled identity (transaction, epoch and key) for
+each key that a transaction settled on the partition, for 60 s of commit time measured from the slice's
+watermark. A sweep of the expired identities starts once in each 15 s of commit time, so a slice holds
+at most the identities of 75 s: key write rate × 75 s × (80 + 2 × key length) bytes.
+`kahuna.durable_tx.settled_identity_entries` reports the count for each partition, and
+`committed_head_ledger_bytes` includes their bytes. This memory has no size bound. The window is a
+constant because the verdict it gives, the rejection of a replayed prepare of a settled leg, is a
+replicated transition, and every replica must judge an entry by the same window. A size bound would
+shorten the window under load, and a re-driven prepare that arrives after the window installs a pending
+intent for a settled transaction.
+
+A slice stores its identities in shards of at most 768 entries, so no array grows with their number. A
+checkpoint capture and a whole-partition export read the shards in chunks of about 1,000 identities,
+write each chunk to the file, and release the apply gate between chunks. The capture of a slice with one
+million identities makes no allocation above 66 KB and holds the apply gate for less than 0.1 ms at a
+time; `kahuna.durable_tx.ledger_capture_gate_hold` records the longest hold of each capture. The sweep
+removes the expired identities of one shard at each settlement, and it waits while a capture runs. In a
+prepared-intent snapshot and in a whole-partition section the settled identities come before the
+intents. A reader parses the same message for either order.
 
 **The out-of-memory restart breaker.** A node whose heap limit cannot hold its restart baseline dies of
 an out-of-memory fail-fast on every start, inside its restore or its first snapshot install, and under an

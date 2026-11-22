@@ -69,6 +69,9 @@ public static class DashboardHandlers
         "kahuna.persistence.unflushed_budget_fraction",
         "kahuna.persistence.backlog_gate_closed",
 
+        // Retained transaction state (records, receipts, settled identities) over the managed heap limit.
+        "kahuna.durable_tx.retained_state_heap_share",
+
         // Scans and read amplification.
         "kahuna.scan.snapshot_prefix_rows_examined_total",
         "kahuna.scan.snapshot_prefix_entries_returned_total",
