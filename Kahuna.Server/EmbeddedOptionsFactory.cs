@@ -87,6 +87,7 @@ public static class EmbeddedOptionsFactory
         WriteIOThreads = opts.WriteIOThreads,
         RaftMaxWalGroupBatchPartitions = opts.RaftMaxWalGroupBatchPartitions,
         RaftWalGroupCommitLingerMs = opts.RaftWalGroupCommitLingerMs,
+        RaftIdleWorkerMaxSpinBeforeParkMicroseconds = opts.RaftIdleWorkerMaxSpinBeforeParkMicroseconds,
         RaftSnapshotStagingDirectory = opts.RaftSnapshotStagingDirectory,
         RaftWalShardWriteBufferSizeMb = NullIfZero(opts.RaftWalShardWriteBufferSizeMb),
         RaftWalShardMinWriteBufferNumberToMerge = NullIfZero(opts.RaftWalShardMinWriteBufferNumberToMerge),

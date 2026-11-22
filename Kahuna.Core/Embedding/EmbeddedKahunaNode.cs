@@ -751,6 +751,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             SlowRaftWALMachineLog = options.SlowRaftWALMachineLog,
             MaxWalGroupBatchPartitions = options.RaftMaxWalGroupBatchPartitions,
             WalGroupCommitLingerMs = options.RaftWalGroupCommitLingerMs,
+            IdleWorkerMaxSpinBeforePark = TimeSpan.FromMicroseconds(options.RaftIdleWorkerMaxSpinBeforeParkMicroseconds),
             WalSingleFsyncCommit = options.RaftWalSingleFsyncCommit,
             ReadIOThreads = options.ReadIOThreads,
             WriteIOThreads = options.WriteIOThreads,

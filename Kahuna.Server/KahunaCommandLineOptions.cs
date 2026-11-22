@@ -325,6 +325,9 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-wal-group-commit-linger-ms", Required = false, HelpText = "Group-commit linger window in milliseconds (0 = disabled; raise on networks where fsync rate is the bottleneck)", Default = 0)]
     public int RaftWalGroupCommitLingerMs { get; set; }
 
+    [Option("raft-idle-worker-max-spin-before-park-us", Required = false, HelpText = "Longest an idle Raft worker spins, in microseconds, before it parks on a kernel wait (0 = park at once; raise on a host with idle cores to cut hand-off latency)", Default = 20)]
+    public int RaftIdleWorkerMaxSpinBeforeParkMicroseconds { get; set; } = 20;
+
     // Nullable so it takes an explicit value: a bare switch cannot turn a true default off.
     [Option("raft-wal-single-fsync-commit", Required = false, HelpText = "Single-fsync fast path: ack on propose-quorum-durable and demote the commit marker to a lazy write: true or false (default true)")]
     public bool? RaftWalSingleFsyncCommit { get; set; }

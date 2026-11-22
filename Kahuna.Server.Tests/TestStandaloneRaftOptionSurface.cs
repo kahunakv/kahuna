@@ -20,6 +20,7 @@ public sealed class TestStandaloneRaftOptionSurface
             WriteIOThreads = 5,
             RaftMaxWalGroupBatchPartitions = 7,
             RaftWalGroupCommitLingerMs = 2,
+            RaftIdleWorkerMaxSpinBeforeParkMicroseconds = 50,
             RaftWalSingleFsyncCommit = false,
             RaftSnapshotStagingDirectory = "/var/lib/kahuna/staging"
         };
@@ -39,6 +40,7 @@ public sealed class TestStandaloneRaftOptionSurface
         Assert.Equal(5, configuration.WriteIOThreads);
         Assert.Equal(7, configuration.MaxWalGroupBatchPartitions);
         Assert.Equal(2, configuration.WalGroupCommitLingerMs);
+        Assert.Equal(TimeSpan.FromMicroseconds(50), configuration.IdleWorkerMaxSpinBeforePark);
         Assert.False(configuration.WalSingleFsyncCommit);
         Assert.Equal("/var/lib/kahuna/staging", configuration.SnapshotStagingDirectory);
     }
@@ -59,6 +61,7 @@ public sealed class TestStandaloneRaftOptionSurface
         Assert.Equal(commandLine.WriteIOThreads, configuration.WriteIOThreads);
         Assert.Equal(commandLine.RaftMaxWalGroupBatchPartitions, configuration.MaxWalGroupBatchPartitions);
         Assert.Equal(commandLine.RaftWalGroupCommitLingerMs, configuration.WalGroupCommitLingerMs);
+        Assert.Equal(new RaftConfiguration().IdleWorkerMaxSpinBeforePark, configuration.IdleWorkerMaxSpinBeforePark);
         Assert.Null(commandLine.RaftWalSingleFsyncCommit);
         Assert.True(configuration.WalSingleFsyncCommit);
     }

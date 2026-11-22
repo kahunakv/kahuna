@@ -625,6 +625,13 @@ public sealed class EmbeddedKahunaOptions
     public int RaftWalGroupCommitLingerMs { get; set; }
 
     /// <summary>
+    /// Longest an idle Raft worker spins, in microseconds, before it parks on a kernel wait
+    /// (0 = park at once). Mirrors <c>RaftConfiguration.IdleWorkerMaxSpinBeforePark</c>; defaults to
+    /// Kommander's own default of 20 microseconds.
+    /// </summary>
+    public int RaftIdleWorkerMaxSpinBeforeParkMicroseconds { get; set; } = 20;
+
+    /// <summary>
     /// Single-fsync commit fast path. When enabled, an auto-commit single-round proposal releases its
     /// client ticket as soon as the propose quorum is durable and demotes the commit marker to a lazy
     /// write, removing one serial fsync from the caller's critical path without weakening durability.
