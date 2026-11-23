@@ -36,6 +36,9 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
         kahunaLogger = loggerFactory.CreateLogger<IKahuna>();
     }
 
+    /// <summary>Counts the same-id resends of a completed many-key batch that the node refused.</summary>
+    private const string RedriveRefusals = "kahuna.kv.completed_batch_redrive_refusals";
+
     private sealed record Node(RaftManager Raft, KahunaManager Kahuna);
 
     [Fact]
@@ -1212,8 +1215,9 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
     }
 
     /// <summary>
-    /// A batch delete replayed under the same operation id is re-driven (deletes are idempotent) and recovers
-    /// the same anchor without double-recording: the coordinator completion is a no-op the second time.
+    /// A completed batch delete replayed under the same operation id is refused as transient and is not executed a
+    /// second time: every item answers <c>MustRetry</c>, and the anchor and the recorded keys stay as the first
+    /// drive left them.
     /// </summary>
     [Fact]
     public async Task RecordAnchor_BatchDelete_RetrySameOperationId_RecoversSameAnchor()
@@ -1234,14 +1238,18 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
                 await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
 
             TransactionOperationId op = TransactionOperationId.NewRandom();
-            await DeleteManyWithRetry(nodes[2], handle, op, ["dup/m", "dup/a"], KeyValueDurability.Persistent, ct);
+            Assert.All(
+                await DeleteManyWithRetry(nodes[2], handle, op, ["dup/m", "dup/a"], KeyValueDurability.Persistent, ct),
+                r => Assert.Equal(KeyValueResponseType.Deleted, r.Type));
 
             TransactionWorkingSet? afterFirst = await WorkingSetWithRetry(nodes[1], handle, ct);
             Assert.Equal("dup/m", afterFirst!.RecordAnchorKey);
             int modifiedCount = afterFirst.ModifiedKeys.Count;
 
             // Replay the identical batch under the same operation id.
-            await DeleteManyWithRetry(nodes[2], handle, op, ["dup/m", "dup/a"], KeyValueDurability.Persistent, ct);
+            await AssertReplayRefused(async () => (await nodes[2].Kahuna.LocateAndTryDeleteManyKeyValue(
+                DeleteItems(handle, KeyValueDurability.Persistent, "dup/m", "dup/a"), ct, handle.CoordinatorKey, op))
+                .ConvertAll(r => r.Type), ct);
 
             TransactionWorkingSet? afterReplay = await WorkingSetWithRetry(nodes[0], handle, ct);
             Assert.Equal("dup/m", afterReplay!.RecordAnchorKey);
@@ -1291,8 +1299,9 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
     }
 
     /// <summary>
-    /// A batch set replayed under the same operation id is re-driven and recovers the same anchor without
-    /// double-recording: the coordinator completion is a no-op the second time.
+    /// A completed batch set replayed under the same operation id is refused as transient and is not executed a
+    /// second time: every item answers <c>MustRetry</c>, and the anchor and the recorded keys stay as the first
+    /// drive left them.
     /// </summary>
     [Fact]
     public async Task RecordAnchor_BatchSet_RetrySameOperationId_RecoversSameAnchor()
@@ -1305,16 +1314,19 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
                 await nodes[0].Kahuna.LocateAndStartTransaction(new() { Locking = KeyValueTransactionLocking.Pessimistic }, ct);
 
             TransactionOperationId op = TransactionOperationId.NewRandom();
-            await SetManyWithRetry(nodes[2], handle, op,
-                SetItems(handle, KeyValueFlags.None, KeyValueDurability.Persistent, "rset/m", "rset/a"), ct);
+            Assert.All(
+                await SetManyWithRetry(nodes[2], handle, op,
+                    SetItems(handle, KeyValueFlags.None, KeyValueDurability.Persistent, "rset/m", "rset/a"), ct),
+                r => Assert.Equal(KeyValueResponseType.Set, r.Type));
 
             TransactionWorkingSet? afterFirst = await WorkingSetWithRetry(nodes[1], handle, ct);
             Assert.Equal("rset/m", afterFirst!.RecordAnchorKey);
             int modifiedCount = afterFirst.ModifiedKeys.Count;
 
             // Replay the identical batch under the same operation id.
-            await SetManyWithRetry(nodes[2], handle, op,
-                SetItems(handle, KeyValueFlags.None, KeyValueDurability.Persistent, "rset/m", "rset/a"), ct);
+            await AssertReplayRefused(async () => (await nodes[2].Kahuna.LocateAndTrySetManyKeyValue(
+                SetItems(handle, KeyValueFlags.None, KeyValueDurability.Persistent, "rset/m", "rset/a"), ct, handle.CoordinatorKey, op))
+                .ConvertAll(r => r.Type), ct);
 
             TransactionWorkingSet? afterReplay = await WorkingSetWithRetry(nodes[0], handle, ct);
             Assert.Equal("rset/m", afterReplay!.RecordAnchorKey);
@@ -1920,21 +1932,49 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
         })];
     }
 
+    /// <summary>
+    /// Sends a completed two-key batch again and returns when the node refused it as completed; every answer must be
+    /// <c>MustRetry</c> for each item. A resend that finds no coordinator leader gets the same answer, so the refusal
+    /// counter tells the two apart, and only that resend is sent again.
+    /// </summary>
+    private static async Task AssertReplayRefused(Func<Task<List<KeyValueResponseType>>> replay, CancellationToken ct)
+    {
+        using MetricCapture refusals = new("", RedriveRefusals);
+        long deadline = Environment.TickCount64 + 10_000;
+
+        while (true)
+        {
+            List<KeyValueResponseType> answers = await replay();
+
+            Assert.Equal(2, answers.Count);
+            Assert.All(answers, answer => Assert.Equal(KeyValueResponseType.MustRetry, answer));
+
+            if (refusals.Total(RedriveRefusals) >= 1)
+                return;
+
+            Assert.True(Environment.TickCount64 < deadline, "the replay was never refused as a completed batch");
+            await Task.Delay(50, ct);
+        }
+    }
+
+    private static List<KahunaDeleteKeyValueRequestItem> DeleteItems(TransactionHandle handle, KeyValueDurability durability, params string[] keys)
+    {
+        return [.. keys.Select(k => new KahunaDeleteKeyValueRequestItem
+        {
+            TransactionId = handle.TransactionId,
+            Key = k,
+            Durability = durability
+        })];
+    }
+
     private static async Task<List<KahunaDeleteKeyValueResponseItem>> DeleteManyWithRetry(
         Node node, TransactionHandle handle, TransactionOperationId op, string[] keys, KeyValueDurability durability, CancellationToken ct)
     {
         long deadline = Environment.TickCount64 + 10_000;
         while (true)
         {
-            List<KahunaDeleteKeyValueRequestItem> items = [.. keys.Select(k => new KahunaDeleteKeyValueRequestItem
-            {
-                TransactionId = handle.TransactionId,
-                Key = k,
-                Durability = durability
-            })];
-
             List<KahunaDeleteKeyValueResponseItem> responses =
-                await node.Kahuna.LocateAndTryDeleteManyKeyValue(items, ct, handle.CoordinatorKey, op);
+                await node.Kahuna.LocateAndTryDeleteManyKeyValue(DeleteItems(handle, durability, keys), ct, handle.CoordinatorKey, op);
 
             if (!responses.Any(r => r.Type == KeyValueResponseType.MustRetry) || Environment.TickCount64 >= deadline)
                 return responses;

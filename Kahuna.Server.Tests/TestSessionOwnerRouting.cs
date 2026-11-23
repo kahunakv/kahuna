@@ -1,4 +1,8 @@
 
+using Grpc.Core;
+using Kahuna.Communication.External.Grpc;
+using Kahuna.Server.Communication;
+using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
@@ -7,6 +11,7 @@ using Kommander;
 using Kommander.Data;
 using Kommander.Time;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Kahuna.Server.Tests;
 
@@ -67,7 +72,19 @@ public sealed class TestSessionOwnerRouting : BaseCluster
         await WaitUntilAsync(async () => !await rafts[from].AmILeaderIfHosted(partition, ct), timeoutMs: 30_000);
     }
 
-    private static async Task<TransactionHandle> StartTransaction(KahunaManager session, string coordinatorKey, CancellationToken ct, bool pessimistic = false)
+    /// <summary>
+    /// Moves the leadership and waits until <paramref name="observer"/> names the new leader. A node that still
+    /// names the old leader, which owns the session, sends a request straight to the owner, and a test of the route
+    /// through the new leader would then test nothing.
+    /// </summary>
+    private static async Task MoveLeadershipSeenBy(IRaft[] rafts, int partition, int from, int to, int observer, CancellationToken ct)
+    {
+        await MoveLeadership(rafts, partition, from, to, ct);
+        await WaitUntilAsync(async () => await rafts[observer].WaitForLeader(partition, ct) == EndpointOf(to), timeoutMs: 30_000);
+    }
+
+    private static async Task<TransactionHandle> StartTransaction(
+        KahunaManager session, string coordinatorKey, CancellationToken ct, bool pessimistic = false, int timeoutMs = 60_000)
     {
         KeyValueTransactionOptions options = pessimistic
             ? new()
@@ -75,7 +92,7 @@ public sealed class TestSessionOwnerRouting : BaseCluster
                 CoordinatorKey = coordinatorKey,
                 Locking = KeyValueTransactionLocking.Pessimistic,
                 AsyncRelease = false,
-                Timeout = 60_000
+                Timeout = timeoutMs
             }
             : new()
             {
@@ -83,7 +100,7 @@ public sealed class TestSessionOwnerRouting : BaseCluster
                 Locking = KeyValueTransactionLocking.Optimistic,
                 ReadValidation = ReadValidation.TrackAndValidate,
                 AsyncRelease = true,
-                Timeout = 60_000
+                Timeout = timeoutMs
             };
 
         (KeyValueResponseType startType, TransactionHandle handle) = await session.LocateAndStartTransaction(options, ct);
@@ -93,6 +110,26 @@ public sealed class TestSessionOwnerRouting : BaseCluster
     }
 
     private static string BucketOf(string key) => key[..key.LastIndexOf('/')];
+
+    /// <summary>
+    /// The partition whose leader begins a session for <paramref name="coordinatorKey"/>: Kahuna's own router, which
+    /// hashes the placement group of the key's key space. Kommander's partition of the whole key is another number.
+    /// </summary>
+    private static int CoordinatorPartitionOf(KahunaManager manager, string coordinatorKey) => manager.LocateRange(coordinatorKey).PartitionId;
+
+    /// <summary>The node whose coordinator holds the session of <paramref name="handle"/>.</summary>
+    private static int OwnerOf(KahunaManager[] managers, TransactionHandle handle)
+    {
+        int owner = -1;
+        for (int i = 0; i < managers.Length; i++)
+        {
+            if (managers[i].TransactionCoordinator.HasSession(handle.TransactionId))
+                owner = i;
+        }
+
+        Assert.True(owner >= 0, "some node must hold the session");
+        return owner;
+    }
 
     /// <summary>Acquires a Shared range lock over the single key, registered with the session's coordinator.</summary>
     private static async Task<KeyValueResponseType> TryPointRangeLock(KahunaManager session, TransactionHandle handle, string key, CancellationToken ct)
@@ -120,20 +157,11 @@ public sealed class TestSessionOwnerRouting : BaseCluster
     private static async Task<(TransactionHandle Handle, int Partition, int Owner, string DataKey, int DataLeader, int Third)> BeginLockedSession(
         IRaft[] rafts, KahunaManager[] managers, string key, string dataPrefix, int successorOffset, CancellationToken ct)
     {
-        // Begin routes to the leader of the hash-routed coordinator partition (the same router a hash-space key
-        // takes); the owner is the node whose coordinator holds the session.
-        int partition = managers[0].LocateRange(key).PartitionId;
+        int partition = CoordinatorPartitionOf(managers[0], key);
 
         TransactionHandle handle = await StartTransaction(managers[0], key, ct, pessimistic: true);
 
-        int owner = -1;
-        for (int i = 0; i < managers.Length; i++)
-        {
-            if (managers[i].TransactionCoordinator.HasSession(handle.TransactionId))
-                owner = i;
-        }
-
-        Assert.True(owner >= 0, "some node must hold the session");
+        int owner = OwnerOf(managers, handle);
         Assert.Equal(await LeaderIndexOf(partition, rafts, ct), owner);
 
         // A range lock on a bucket lives on the leader of the partition the bucket routes to; keep that partition
@@ -176,25 +204,18 @@ public sealed class TestSessionOwnerRouting : BaseCluster
 
     /// <summary>
     /// Begins a session coordinated on <paramref name="key"/> and returns it with the coordinator partition and the
-    /// node that owns the session: begin routes to the leader of the hash-routed coordinator partition, so the
-    /// owner is found by asking each node's coordinator rather than assumed from the starting node.
+    /// node that owns the session: begin routes to the leader of the coordinator partition, so the owner is found by
+    /// asking each node's coordinator rather than assumed from the starting node.
     /// </summary>
     private static async Task<(TransactionHandle Handle, int Partition, int Owner)> BeginOnItsCoordinator(
-        IRaft[] rafts, KahunaManager[] managers, string key, CancellationToken ct)
+        IRaft[] rafts, KahunaManager[] managers, string key, CancellationToken ct, bool pessimistic = false, int timeoutMs = 60_000)
     {
-        int partition = rafts[0].GetPartitionKey(key);
+        int partition = CoordinatorPartitionOf(managers[0], key);
         int leader = await LeaderIndexOf(partition, rafts, ct);
 
-        TransactionHandle handle = await StartTransaction(managers[leader], key, ct);
+        TransactionHandle handle = await StartTransaction(managers[leader], key, ct, pessimistic, timeoutMs);
 
-        int owner = -1;
-        for (int i = 0; i < managers.Length; i++)
-        {
-            if (managers[i].TransactionCoordinator.HasSession(handle.TransactionId))
-                owner = i;
-        }
-
-        Assert.True(owner >= 0, "some node must hold the session");
+        int owner = OwnerOf(managers, handle);
         Assert.Equal(leader, owner);
 
         return (handle, partition, owner);
@@ -550,5 +571,591 @@ public sealed class TestSessionOwnerRouting : BaseCluster
         {
             await LeaveCluster(rafts[0], rafts[1], rafts[2]);
         }
+    }
+
+    /// <summary>
+    /// A working-set query from a node that neither owns the session nor leads the coordinator partition: the node
+    /// forwards it to the new leader, which has no such session and must offer it to the owner. Before this, the
+    /// forwarded query was answered from the leader's own table, so the third node read no working set at all for a
+    /// session that the owner still held.
+    /// </summary>
+    [Fact]
+    public async Task AWorkingSetQueryForwardedToTheNewLeader_ReachesTheSessionOwner()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft[] rafts, IKahuna[] kahunas, _, MemoryInterNodeCommmunication interNode) =
+            await AssembleClusterWithTransports(Nodes, "memory", Partitions, raftLogger, kahunaLogger);
+        KahunaManager[] managers = [.. kahunas.Cast<KahunaManager>()];
+
+        try
+        {
+            string key = "owner-fwd-ws/" + Guid.NewGuid().ToString("N")[..8];
+            (TransactionHandle handle, int partition, int owner, string dataKey, _, int third) =
+                await BeginLockedSession(rafts, managers, key, "owner-fwd-ws-data", successorOffset: 1, ct);
+
+            await MoveLeadershipSeenBy(rafts, partition, owner, (owner + 1) % Nodes, third, ct);
+
+            int callsBefore = interNode.WorkingSetCallCount;
+
+            TransactionWorkingSet? workingSet = null;
+            await WaitUntilAsync(async () =>
+            {
+                workingSet = await managers[third].LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+                return workingSet is not null;
+            });
+
+            Assert.Equal(dataKey, Assert.Single(workingSet!.AcquiredRangeLocks).StartKey);
+
+            // One forward to the leader and at least the probe that the owner served.
+            Assert.True(interNode.WorkingSetCallCount - callsBefore >= 2);
+
+            // A query does not close the session: the owner still takes a registration.
+            (OperationRegistrationOutcome outcome, _, _, _, _, _) = await managers[owner].LocateAndBeginOperation(
+                handle.CoordinatorKey, handle.TransactionId, TransactionOperationId.NewRandom(), OperationKind.Set, [1], ct);
+            Assert.Equal(OperationRegistrationOutcome.New, outcome);
+        }
+        finally
+        {
+            await LeaveCluster(rafts[0], rafts[1], rafts[2]);
+        }
+    }
+
+    /// <summary>
+    /// The same route for a close: the owner freezes the session and the third node gets the frozen set. The commit
+    /// that follows, from the same node, finalizes that set. Before this, the third node got Errored, so a caller that
+    /// closes to learn the written keys had to fall back to what it remembered itself.
+    /// </summary>
+    [Fact]
+    public async Task ACloseForwardedToTheNewLeader_ReachesTheSessionOwner()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft[] rafts, IKahuna[] kahunas, _, MemoryInterNodeCommmunication interNode) =
+            await AssembleClusterWithTransports(Nodes, "memory", Partitions, raftLogger, kahunaLogger);
+        KahunaManager[] managers = [.. kahunas.Cast<KahunaManager>()];
+
+        try
+        {
+            string key = "owner-fwd-close3/" + Guid.NewGuid().ToString("N")[..8];
+            (TransactionHandle handle, int partition, int owner, string dataKey, int dataLeader, int third) =
+                await BeginLockedSession(rafts, managers, key, "owner-fwd-close3-data", successorOffset: 1, ct);
+
+            await MoveLeadershipSeenBy(rafts, partition, owner, (owner + 1) % Nodes, third, ct);
+
+            int callsBefore = interNode.CloseTransactionCallCount;
+
+            (KeyValueResponseType closeType, TransactionWorkingSet? snapshot) = await RetryOnMustRetryAsync(
+                () => managers[third].LocateAndCloseTransaction(handle.CoordinatorKey, handle.TransactionId, ct), r => r.Item1);
+
+            Assert.Equal(KeyValueResponseType.Set, closeType);
+            Assert.Equal(dataKey, Assert.Single(snapshot!.AcquiredRangeLocks).StartKey);
+
+            // One forward to the leader and at least the probe that the owner served.
+            Assert.True(interNode.CloseTransactionCallCount - callsBefore >= 2);
+
+            // The owner's session is the one that closed: it refuses a new registration and keeps the session.
+            (OperationRegistrationOutcome outcome, _, _, _, _, _) = await managers[owner].LocateAndBeginOperation(
+                handle.CoordinatorKey, handle.TransactionId, TransactionOperationId.NewRandom(), OperationKind.Set, [1], ct);
+            Assert.Equal(OperationRegistrationOutcome.RejectedSessionClosed, outcome);
+
+            (KeyValueResponseType commitType, string? _) = await RetryOnMustRetryAsync(
+                () => managers[third].LocateAndCommitTransaction(handle, ct), r => r.Type);
+
+            Assert.Equal(KeyValueResponseType.Committed, commitType);
+            Assert.False(await HoldsRangeLock(managers[dataLeader], dataKey, handle.TransactionId), "the committed session's range lock must be gone from the data leader");
+        }
+        finally
+        {
+            await LeaveCluster(rafts[0], rafts[1], rafts[2]);
+        }
+    }
+
+    /// <summary>
+    /// A close that the owner cannot finish yet, because an operation is still pending at its drain deadline: the
+    /// owner answers MustRetry, and that is the answer the third node gets. Answered from the new leader's own table
+    /// it read Errored, which tells the caller to stop, in the one case where a write of the transaction is about to
+    /// join the set. The same call after the completion answers the frozen set with that write in it.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task AClosePastItsDrainDeadline_AnswersTheOwnersMustRetry_ThroughTheNewLeader(bool throughThirdNode)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft[] rafts, IKahuna[] kahunas) = await AssembleCluster(Nodes, "memory", Partitions, raftLogger, kahunaLogger);
+        KahunaManager[] managers = [.. kahunas.Cast<KahunaManager>()];
+
+        try
+        {
+            string key = "owner-fwd-drain/" + Guid.NewGuid().ToString("N")[..8];
+            (TransactionHandle handle, int partition, int owner) =
+                await BeginOnItsCoordinator(rafts, managers, key, ct, pessimistic: true, timeoutMs: 1_000);
+
+            int successor = (owner + 1) % Nodes;
+            int third = (owner + 2) % Nodes;
+
+            TransactionOperationId pending = TransactionOperationId.NewRandom();
+            (OperationRegistrationOutcome outcome, _, _, _, _, _) = await managers[owner].LocateAndBeginOperation(
+                handle.CoordinatorKey, handle.TransactionId, pending, OperationKind.Set, [1, 2, 3], ct);
+            Assert.Equal(OperationRegistrationOutcome.New, outcome);
+
+            await MoveLeadershipSeenBy(rafts, partition, owner, successor, third, ct);
+
+            KahunaManager caller = managers[throughThirdNode ? third : successor];
+
+            (KeyValueResponseType drainingType, TransactionWorkingSet? draining) =
+                await caller.LocateAndCloseTransaction(handle.CoordinatorKey, handle.TransactionId, ct);
+
+            Assert.Equal(KeyValueResponseType.MustRetry, drainingType);
+            Assert.Null(draining);
+
+            // MustRetry came from the owner, not from a node that found no leader: the owner's session is closed.
+            (OperationRegistrationOutcome late, _, _, _, _, _) = await managers[owner].LocateAndBeginOperation(
+                handle.CoordinatorKey, handle.TransactionId, TransactionOperationId.NewRandom(), OperationKind.Set, [4], ct);
+            Assert.Equal(OperationRegistrationOutcome.RejectedSessionClosed, late);
+
+            (KeyValueResponseType completed, _) = await managers[owner].LocateAndCompleteOperation(
+                handle.CoordinatorKey, handle.TransactionId, pending,
+                new OperationCompletionPayload
+                {
+                    ModifiedKey = "owner-fwd-drain-data/k",
+                    Durability = KeyValueDurability.Persistent,
+                    CachedType = KeyValueResponseType.Set
+                },
+                ct);
+            Assert.Equal(KeyValueResponseType.Set, completed);
+
+            (KeyValueResponseType closeType, TransactionWorkingSet? snapshot) = await RetryOnMustRetryAsync(
+                () => caller.LocateAndCloseTransaction(handle.CoordinatorKey, handle.TransactionId, ct), r => r.Item1);
+
+            Assert.Equal(KeyValueResponseType.Set, closeType);
+            Assert.Equal("owner-fwd-drain-data/k", Assert.Single(snapshot!.ModifiedKeys).Key);
+        }
+        finally
+        {
+            await LeaveCluster(rafts[0], rafts[1], rafts[2]);
+        }
+    }
+
+    /// <summary>
+    /// A close that reaches the new leader while the owner cannot be reached: no node can say that the session is gone,
+    /// so the answer is MustRetry, and the same call is served when the owner is back. Errored here would end the
+    /// caller's retries for a session that is alive.
+    /// </summary>
+    [Fact]
+    public async Task AClose_WhileTheOwnerIsNotReachable_AnswersMustRetry()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft[] rafts, IKahuna[] kahunas, _, MemoryInterNodeCommmunication interNode) =
+            await AssembleClusterWithTransports(Nodes, "memory", Partitions, raftLogger, kahunaLogger);
+        KahunaManager[] managers = [.. kahunas.Cast<KahunaManager>()];
+
+        try
+        {
+            string key = "owner-fwd-away/" + Guid.NewGuid().ToString("N")[..8];
+            (TransactionHandle handle, int partition, int owner) = await BeginOnItsCoordinator(rafts, managers, key, ct);
+
+            int successor = (owner + 1) % Nodes;
+            int third = (owner + 2) % Nodes;
+            await MoveLeadershipSeenBy(rafts, partition, owner, successor, third, ct);
+
+            Dictionary<string, IKahuna> reachable = Enumerable.Range(0, Nodes).ToDictionary(EndpointOf, i => kahunas[i]);
+
+            Dictionary<string, IKahuna> withoutOwner = new(reachable);
+            withoutOwner.Remove(EndpointOf(owner));
+            interNode.SetNodes(withoutOwner);
+
+            foreach (int caller in new[] { successor, third })
+            {
+                (KeyValueResponseType awayType, TransactionWorkingSet? away) =
+                    await managers[caller].LocateAndCloseTransaction(handle.CoordinatorKey, handle.TransactionId, ct);
+
+                Assert.Equal(KeyValueResponseType.MustRetry, awayType);
+                Assert.Null(away);
+            }
+
+            interNode.SetNodes(reachable);
+
+            (KeyValueResponseType closeType, TransactionWorkingSet? snapshot) = await RetryOnMustRetryAsync(
+                () => managers[third].LocateAndCloseTransaction(handle.CoordinatorKey, handle.TransactionId, ct), r => r.Item1);
+
+            Assert.Equal(KeyValueResponseType.Set, closeType);
+            Assert.NotNull(snapshot);
+        }
+        finally
+        {
+            await LeaveCluster(rafts[0], rafts[1], rafts[2]);
+        }
+    }
+
+    /// <summary>
+    /// A request that reaches the new leader after two forwards: a caller that does not know the leader sends it to
+    /// another replica, and the replica sends it on. The leader must still offer it to the owner. The scope stands for
+    /// the first forward, so the third node's own forward is the second one.
+    /// </summary>
+    [Fact]
+    public async Task ARequestForwardedTwice_ReachesTheSessionOwner()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft[] rafts, IKahuna[] kahunas) = await AssembleCluster(Nodes, "memory", Partitions, raftLogger, kahunaLogger);
+        KahunaManager[] managers = [.. kahunas.Cast<KahunaManager>()];
+
+        try
+        {
+            string key = "owner-fwd-twice/" + Guid.NewGuid().ToString("N")[..8];
+            (TransactionHandle handle, int partition, int owner, string dataKey, int dataLeader, int third) =
+                await BeginLockedSession(rafts, managers, key, "owner-fwd-twice-data", successorOffset: 1, ct);
+
+            await MoveLeadershipSeenBy(rafts, partition, owner, (owner + 1) % Nodes, third, ct);
+
+            using ForwardedRequestScope.Scope arrivedForwarded = ForwardedRequestScope.Enter();
+
+            TransactionWorkingSet? workingSet = null;
+            await WaitUntilAsync(async () =>
+            {
+                workingSet = await managers[third].LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct);
+                return workingSet is not null;
+            });
+
+            Assert.Equal(dataKey, Assert.Single(workingSet!.AcquiredRangeLocks).StartKey);
+
+            (KeyValueResponseType closeType, TransactionWorkingSet? snapshot) = await RetryOnMustRetryAsync(
+                () => managers[third].LocateAndCloseTransaction(handle.CoordinatorKey, handle.TransactionId, ct), r => r.Item1);
+
+            Assert.Equal(KeyValueResponseType.Set, closeType);
+            Assert.Single(snapshot!.AcquiredRangeLocks);
+
+            (KeyValueResponseType commitType, string? _) = await RetryOnMustRetryAsync(
+                () => managers[third].LocateAndCommitTransaction(handle, ct), r => r.Type);
+
+            Assert.Equal(KeyValueResponseType.Committed, commitType);
+            Assert.False(await HoldsRangeLock(managers[dataLeader], dataKey, handle.TransactionId), "the committed session's range lock must be gone from the data leader");
+        }
+        finally
+        {
+            await LeaveCluster(rafts[0], rafts[1], rafts[2]);
+        }
+    }
+
+    /// <summary>
+    /// The inter-node landing points of the gRPC transport, driven through the batch stream a peer opens: the new
+    /// leader gets the query and the close with the hop count that a third node stamps on them, and answers with the
+    /// owner's working set. A probe of the same stream, which carries a hop count above the forward budget, is
+    /// answered from the receiver's own table on a node that does not own the session and on the owner.
+    /// </summary>
+    [Fact]
+    public async Task TheGrpcLandingPoints_ReachTheSessionOwner()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft[] rafts, IKahuna[] kahunas) = await AssembleCluster(Nodes, "memory", Partitions, raftLogger, kahunaLogger);
+        KahunaManager[] managers = [.. kahunas.Cast<KahunaManager>()];
+
+        try
+        {
+            string key = "owner-fwd-grpc/" + Guid.NewGuid().ToString("N")[..8];
+            (TransactionHandle handle, int partition, int owner, string dataKey, _, int third) =
+                await BeginLockedSession(rafts, managers, key, "owner-fwd-grpc-data", successorOffset: 1, ct);
+
+            int successor = (owner + 1) % Nodes;
+            await MoveLeadershipSeenBy(rafts, partition, owner, successor, third, ct);
+
+            const int probeHops = ForwardedRequestScope.MaxForwardHops + 1;
+
+            (GrpcGetTransactionWorkingSetResponse probedQuery, GrpcCloseTransactionResponse probedClose) =
+                await SendQueryAndClose(kahunas[third], handle, probeHops);
+
+            Assert.False(probedQuery.Found);
+            Assert.Equal(KeyValueResponseType.Errored, (KeyValueResponseType)probedClose.Type);
+            Assert.False(probedClose.HasWorkingSet);
+
+            (GrpcGetTransactionWorkingSetResponse query, GrpcCloseTransactionResponse close) =
+                await SendQueryAndClose(kahunas[successor], handle, forwardHops: 1);
+
+            Assert.True(query.Found);
+            Assert.Equal(dataKey, Assert.Single(query.WorkingSet.AcquiredRangeLocks).StartKey);
+
+            Assert.Equal(KeyValueResponseType.Set, (KeyValueResponseType)close.Type);
+            Assert.True(close.HasWorkingSet);
+            Assert.Equal(dataKey, Assert.Single(close.WorkingSet.AcquiredRangeLocks).StartKey);
+
+            (GrpcGetTransactionWorkingSetResponse ownerQuery, GrpcCloseTransactionResponse ownerClose) =
+                await SendQueryAndClose(kahunas[owner], handle, probeHops);
+
+            Assert.True(ownerQuery.Found);
+            Assert.Equal(KeyValueResponseType.Set, (KeyValueResponseType)ownerClose.Type);
+            Assert.True(ownerClose.HasWorkingSet);
+        }
+        finally
+        {
+            await LeaveCluster(rafts[0], rafts[1], rafts[2]);
+        }
+    }
+
+    /// <summary>
+    /// A probe asks a peer for its own session table. A peer that does not hold the session answers at once, with no
+    /// call of its own, whether it leads the coordinator partition or not.
+    /// </summary>
+    [Fact]
+    public async Task AProbe_IsAnsweredFromThePeersOwnTable_WithNoFurtherCall()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft[] rafts, IKahuna[] kahunas, _, MemoryInterNodeCommmunication interNode) =
+            await AssembleClusterWithTransports(Nodes, "memory", Partitions, raftLogger, kahunaLogger);
+        KahunaManager[] managers = [.. kahunas.Cast<KahunaManager>()];
+
+        try
+        {
+            string key = "owner-probe/" + Guid.NewGuid().ToString("N")[..8];
+            (TransactionHandle handle, int partition, int owner) = await BeginOnItsCoordinator(rafts, managers, key, ct);
+
+            int successor = (owner + 1) % Nodes;
+            int third = (owner + 2) % Nodes;
+            await MoveLeadershipSeenBy(rafts, partition, owner, successor, third, ct);
+
+            int queriesBefore = interNode.WorkingSetCallCount;
+            int closesBefore = interNode.CloseTransactionCallCount;
+
+            using (ForwardedRequestScope.EnterAt(ForwardedRequestScope.MaxForwardHops + 1))
+            {
+                foreach (int node in new[] { successor, third })
+                {
+                    Assert.Null(await managers[node].LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct));
+
+                    (KeyValueResponseType closeType, TransactionWorkingSet? snapshot) =
+                        await managers[node].LocateAndCloseTransaction(handle.CoordinatorKey, handle.TransactionId, ct);
+                    Assert.Equal(KeyValueResponseType.Errored, closeType);
+                    Assert.Null(snapshot);
+                }
+
+                Assert.NotNull(await managers[owner].LocateAndGetTransactionWorkingSet(handle.CoordinatorKey, handle.TransactionId, ct));
+
+                (KeyValueResponseType ownerType, TransactionWorkingSet? ownerSnapshot) =
+                    await managers[owner].LocateAndCloseTransaction(handle.CoordinatorKey, handle.TransactionId, ct);
+                Assert.Equal(KeyValueResponseType.Set, ownerType);
+                Assert.NotNull(ownerSnapshot);
+            }
+
+            Assert.Equal(queriesBefore, interNode.WorkingSetCallCount);
+            Assert.Equal(closesBefore, interNode.CloseTransactionCallCount);
+        }
+        finally
+        {
+            await LeaveCluster(rafts[0], rafts[1], rafts[2]);
+        }
+    }
+
+    /// <summary>
+    /// Two nodes can take themselves for the leader at once, so a probe can reach a peer that leads by its own view.
+    /// That peer answers a registration, a completion, a rollback and a commit from its own table and asks no other
+    /// node, because two such nodes would probe each other.
+    /// </summary>
+    [Fact]
+    public async Task AProbeThatReachesALeader_StartsNoProbesOfItsOwn()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft[] rafts, IKahuna[] kahunas, _, MemoryInterNodeCommmunication interNode) =
+            await AssembleClusterWithTransports(Nodes, "memory", Partitions, raftLogger, kahunaLogger);
+        KahunaManager[] managers = [.. kahunas.Cast<KahunaManager>()];
+
+        try
+        {
+            string key = "owner-probe-leader/" + Guid.NewGuid().ToString("N")[..8];
+            (TransactionHandle handle, int partition, int owner) = await BeginOnItsCoordinator(rafts, managers, key, ct);
+
+            int successor = (owner + 1) % Nodes;
+            int third = (owner + 2) % Nodes;
+            await MoveLeadershipSeenBy(rafts, partition, owner, successor, third, ct);
+
+            TransactionOperationId pending = TransactionOperationId.NewRandom();
+            (OperationRegistrationOutcome registered, _, _, _, _, _) = await managers[owner].LocateAndBeginOperation(
+                handle.CoordinatorKey, handle.TransactionId, pending, OperationKind.Set, null, ct);
+            Assert.Equal(OperationRegistrationOutcome.New, registered);
+
+            int beginsBefore = interNode.BeginOperationCallCount;
+            int completionsBefore = interNode.CompleteOperationCallCount;
+
+            using (ForwardedRequestScope.EnterAt(ForwardedRequestScope.MaxForwardHops + 1))
+            {
+                (OperationRegistrationOutcome outcome, _, _, _, _, _) = await managers[successor].LocateAndBeginOperation(
+                    handle.CoordinatorKey, handle.TransactionId, TransactionOperationId.NewRandom(), OperationKind.Set, null, ct);
+                Assert.Equal(OperationRegistrationOutcome.RejectedSessionClosed, outcome);
+
+                await Assert.ThrowsAsync<KahunaServerException>(async () => await managers[successor].LocateAndCompleteOperation(
+                    handle.CoordinatorKey, handle.TransactionId, pending, new OperationCompletionPayload { CachedType = KeyValueResponseType.Set }, ct));
+
+                Assert.Equal(KeyValueResponseType.Errored, await managers[successor].LocateAndRollbackTransaction(handle, ct));
+                Assert.Equal(KeyValueResponseType.Errored, (await managers[successor].LocateAndCommitTransaction(handle, ct)).Type);
+            }
+
+            Assert.Equal(beginsBefore, interNode.BeginOperationCallCount);
+            Assert.Equal(completionsBefore, interNode.CompleteOperationCallCount);
+
+            // The leader decided nothing for the session: its owner holds it, open to operations.
+            (registered, _, _, _, _, _) = await managers[owner].LocateAndBeginOperation(
+                handle.CoordinatorKey, handle.TransactionId, TransactionOperationId.NewRandom(), OperationKind.Set, null, ct);
+            Assert.Equal(OperationRegistrationOutcome.New, registered);
+        }
+        finally
+        {
+            await LeaveCluster(rafts[0], rafts[1], rafts[2]);
+        }
+    }
+
+    /// <summary>
+    /// A query and a close for a transaction that no node holds cost the forwards of the route and one probe of each
+    /// peer, from every node. A probed peer that sent the request on, or that probed the peers itself, would show here.
+    /// </summary>
+    [Fact]
+    public async Task ATransactionNoNodeHolds_CostsOneProbeOfEachPeer()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft[] rafts, IKahuna[] kahunas, _, MemoryInterNodeCommmunication interNode) =
+            await AssembleClusterWithTransports(Nodes, "memory", Partitions, raftLogger, kahunaLogger);
+        KahunaManager[] managers = [.. kahunas.Cast<KahunaManager>()];
+
+        try
+        {
+            string key = "owner-none/" + Guid.NewGuid().ToString("N")[..8];
+            HLCTimestamp unknown = new(1, 42, 0);
+            int partition = CoordinatorPartitionOf(managers[0], key);
+
+            await RunUnderStableLeadership(rafts[0], Partitions, async () =>
+            {
+                int leader = await LeaderIndexOf(partition, rafts, ct);
+
+                for (int node = 0; node < Nodes; node++)
+                {
+                    IRaft raft = rafts[node];
+                    await WaitUntilAsync(async () => await raft.WaitForLeader(partition, ct) == EndpointOf(leader));
+
+                    int forwards = node == leader ? 0 : 1;
+
+                    int queriesBefore = interNode.WorkingSetCallCount;
+                    long unroutedBefore = managers.Sum(m => m.KeyValues.SessionRegistrationCounts.Unrouted);
+                    Assert.Null(await managers[node].LocateAndGetTransactionWorkingSet(key, unknown, ct));
+                    Assert.Equal(forwards + Nodes - 1, interNode.WorkingSetCallCount - queriesBefore);
+
+                    // A probed peer did not look for a leader to send the query to.
+                    Assert.Equal(unroutedBefore, managers.Sum(m => m.KeyValues.SessionRegistrationCounts.Unrouted));
+
+                    int closesBefore = interNode.CloseTransactionCallCount;
+                    (KeyValueResponseType closeType, TransactionWorkingSet? snapshot) = await managers[node].LocateAndCloseTransaction(key, unknown, ct);
+                    Assert.Equal(KeyValueResponseType.Errored, closeType);
+                    Assert.Null(snapshot);
+                    Assert.Equal(forwards + Nodes - 1, interNode.CloseTransactionCallCount - closesBefore);
+                }
+            });
+        }
+        finally
+        {
+            await LeaveCluster(rafts[0], rafts[1], rafts[2]);
+        }
+    }
+
+    /// <summary>
+    /// Sends a working-set query and then a close for <paramref name="handle"/> to <paramref name="receiver"/> through
+    /// the inter-node gRPC batch stream, stamped with <paramref name="forwardHops"/>, and returns the two answers.
+    /// </summary>
+    private static async Task<(GrpcGetTransactionWorkingSetResponse Query, GrpcCloseTransactionResponse Close)> SendQueryAndClose(
+        IKahuna receiver, TransactionHandle handle, int forwardHops)
+    {
+        GrpcBatchServerKeyValueResponse query = await SendOne(receiver, new GrpcBatchServerKeyValueRequest
+        {
+            Type = GrpcServerBatchType.ServerGetTransactionWorkingSet,
+            RequestId = 1,
+            ForwardHops = forwardHops,
+            GetTransactionWorkingSet = new GrpcGetTransactionWorkingSetRequest
+            {
+                CoordinatorKey = handle.CoordinatorKey,
+                TransactionIdNode = handle.TransactionId.N,
+                TransactionIdPhysical = handle.TransactionId.L,
+                TransactionIdCounter = handle.TransactionId.C
+            }
+        });
+
+        GrpcBatchServerKeyValueResponse close = await SendOne(receiver, new GrpcBatchServerKeyValueRequest
+        {
+            Type = GrpcServerBatchType.ServerCloseTransaction,
+            RequestId = 2,
+            ForwardHops = forwardHops,
+            CloseTransaction = new GrpcCloseTransactionRequest
+            {
+                CoordinatorKey = handle.CoordinatorKey,
+                TransactionIdNode = handle.TransactionId.N,
+                TransactionIdPhysical = handle.TransactionId.L,
+                TransactionIdCounter = handle.TransactionId.C
+            }
+        });
+
+        return (query.GetTransactionWorkingSet, close.CloseTransaction);
+    }
+
+    /// <summary>Sends one request over an inter-node batch stream of its own, so its answer is not bundled with another.</summary>
+    private static async Task<GrpcBatchServerKeyValueResponse> SendOne(IKahuna receiver, GrpcBatchServerKeyValueRequest request)
+    {
+        KeyValuesService service = new(receiver, NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
+        CapturingStreamWriter<GrpcBatchServerKeyValueResponse> responses = new();
+
+        await service.BatchServerKeyValueRequests(
+            new ListStreamReader<GrpcBatchServerKeyValueRequest>([request]), responses, new StubServerCallContext());
+
+        GrpcBatchServerKeyValueResponse response = Assert.Single(responses.Written);
+        Assert.Equal(request.Type, response.Type);
+        Assert.Equal(request.RequestId, response.RequestId);
+
+        return response;
+    }
+
+    /// <summary>Feeds a fixed list of requests to the batch handler, then closes the stream.</summary>
+    private sealed class ListStreamReader<T>(IReadOnlyList<T> items) : IAsyncStreamReader<T>
+    {
+        private int index = -1;
+
+        public T Current => items[index];
+
+        public Task<bool> MoveNext(CancellationToken cancellationToken) => Task.FromResult(++index < items.Count);
+    }
+
+    /// <summary>Captures everything the batch handler writes back onto the response stream.</summary>
+    private sealed class CapturingStreamWriter<T> : IServerStreamWriter<T>
+    {
+        private readonly Lock mutex = new();
+
+        public List<T> Written { get; } = [];
+
+        public WriteOptions? WriteOptions { get; set; }
+
+        public Task WriteAsync(T message)
+        {
+            lock (mutex)
+                Written.Add(message);
+
+            return Task.CompletedTask;
+        }
+    }
+
+    /// <summary>Minimal context: the handlers read only the cancellation token.</summary>
+    private sealed class StubServerCallContext : ServerCallContext
+    {
+        protected override CancellationToken CancellationTokenCore => TestContext.Current.CancellationToken;
+        protected override string MethodCore => "test";
+        protected override string HostCore => "test";
+        protected override string PeerCore => "test";
+        protected override DateTime DeadlineCore => DateTime.MaxValue;
+        protected override Metadata RequestHeadersCore => new();
+        protected override Metadata ResponseTrailersCore => new();
+        protected override Status StatusCore { get; set; }
+        protected override WriteOptions? WriteOptionsCore { get; set; }
+        protected override AuthContext AuthContextCore => throw new NotSupportedException();
+        protected override ContextPropagationToken CreatePropagationTokenCore(ContextPropagationOptions? options) => throw new NotSupportedException();
+        protected override Task WriteResponseHeadersAsyncCore(Metadata responseHeaders) => Task.CompletedTask;
     }
 }

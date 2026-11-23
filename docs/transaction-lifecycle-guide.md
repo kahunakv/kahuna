@@ -471,25 +471,33 @@ An interactive session lives on the node that began it — the leader of its coo
 `BEGIN` — and stays there when that partition's leadership moves: the session's finalizer forwards its durable
 work (the anchor bundle, the decision, materialization) to whichever node leads the partition now. The routed
 entry points (`LocateAndCommitTransaction`, `LocateAndRollbackTransaction`, operation registration and
-completion, the working-set query) therefore serve a session **this node owns** locally whatever the current
-leader is. Before this rule, a leader that stepped down routed every commit for its own sessions to its
-successor, which had no such session, and each spun as `MustRetry` until the client's deadline (~100
-indeterminate commits per leader pause under a paused disk).
+completion, `LocateAndGetTransactionWorkingSet`, `LocateAndCloseTransaction`) therefore serve a session **this
+node owns** locally whatever the current leader is. Before this rule, a leader that stepped down routed every
+commit for its own sessions to its successor, which had no such session, and each spun as `MustRetry` until the
+client's deadline (~100 indeterminate commits per leader pause under a paused disk).
 
 A leader that receives a commit, rollback, close, working-set query, operation registration or completion for
 a session it does not hold (the session began on the previous leader) offers it to its peers once, in turn;
-the owner serves it and every other peer answers unknown. The probe runs for a request that reached the leader
-directly from a caller and for one that a non-leader forwarded to it once, which is how a client's commit
-arrives when the client talks to the data leader rather than to the coordinator leader. The forwarding node
-never probes, so a request costs one round of probes whichever node the caller reached; a request at a deeper
-hop is itself a probe, or a forward of a forward, and is answered locally, which bounds the probing. Before the
-forwarded hop was admitted, a commit the data leader forwarded to the new coordinator leader was answered as an
-unknown transaction, and the session's range locks stayed on the data leaders until their lease ran out. The
-membership roster does not carry peers' node ids, so the transaction id cannot name the owner directly.
+the owner serves it and every other peer answers unknown. The probe runs whether the request reached the leader
+directly or was forwarded to it, which is how a client's commit arrives when the client talks to the data leader
+rather than to the coordinator leader. The forwarding node never probes. A probe is terminal
+(`ForwardedRequestScope.EnterTerminal`): the peer answers for itself, sends the request to no other node and
+starts no probes of its own. A request therefore costs at most two forwards and one probe of each peer, whichever
+node the caller reached and whether or not any node holds the session. Before the forwarded request was admitted,
+a commit the data leader forwarded to the new coordinator leader was answered as an unknown transaction, and the
+session's range locks stayed on the data leaders until their lease ran out. The membership roster does not carry
+peers' node ids, so the transaction id cannot name the owner directly.
 
-The inbound completion landing point follows the same ownership rule: a node that holds the session folds the
-completion whatever the current leader is, so the owner a leader found among its peers does not redirect the
-completion back to that leader.
+All of these calls land on the receiver's routed entry point, on both inter-node transports, so the rule above
+holds for a forwarded request as it does for the caller's own. The inbound completion landing point follows the
+same ownership rule: a node that holds the session folds the completion whatever the current leader is, so the
+owner a leader found among its peers does not redirect the completion back to that leader. The working-set query
+and the close landed on the receiver's node-local session table before, so a third node that forwarded one of
+them to the new leader read no working set, or `Errored`, for a session its owner still held.
+
+A close answers `MustRetry` when the owner answered it (an operation is still pending at the drain deadline, or
+another finalize holds the session) and when a peer could not be reached. It answers `Errored` only when every
+peer answered that it does not hold the session.
 
 ### 6.7 Record-less intents past the retention horizon
 

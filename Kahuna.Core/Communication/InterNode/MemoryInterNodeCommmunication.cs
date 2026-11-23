@@ -72,6 +72,8 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     private int getByRangeCallCount;
     private int beginOperationCallCount;
     private int completeOperationCallCount;
+    private int workingSetCallCount;
+    private int closeTransactionCallCount;
     private int checkWriteIntentCallCount;
     private int checkManyWriteIntentsCallCount;
     private int existsManyCallCount;
@@ -100,6 +102,12 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
 
     /// <summary>Number of register-remote <c>CompleteOperation</c> RPCs dispatched to a remote coordinator node.</summary>
     public int CompleteOperationCallCount => Volatile.Read(ref completeOperationCallCount);
+
+    /// <summary>Number of <c>GetTransactionWorkingSet</c> RPCs dispatched to a remote node, the owner probes included.</summary>
+    public int WorkingSetCallCount => Volatile.Read(ref workingSetCallCount);
+
+    /// <summary>Number of <c>CloseTransaction</c> RPCs dispatched to a remote node, the owner probes included.</summary>
+    public int CloseTransactionCallCount => Volatile.Read(ref closeTransactionCallCount);
 
     /// <summary>
     /// Sets the nodes for inter-node communication. The map is copied so the published table is never
@@ -1813,7 +1821,15 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     public async Task<TransactionWorkingSet?> GetTransactionWorkingSet(string node, string coordinatorKey, HLCTimestamp transactionId, CancellationToken cancellationToken)
     {
         if (TryGetNode(node, out IKahuna? kahunaNode))
-            return await Task.FromResult(kahunaNode.GetTransactionWorkingSet(transactionId));
+        {
+            Interlocked.Increment(ref workingSetCallCount);
+
+            // Route through the locator, as BeginOperation does: the receiver can be a leader that did not begin
+            // the session, or a replica that does not lead, and its own session table answers for neither.
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.LocateAndGetTransactionWorkingSet(coordinatorKey, transactionId, cancellationToken);
+        }
 
         throw Unreachable(node);
     }
@@ -1821,7 +1837,14 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     public async Task<(KeyValueResponseType, TransactionWorkingSet?)> CloseTransaction(string node, string coordinatorKey, HLCTimestamp transactionId, CancellationToken cancellationToken)
     {
         if (TryGetNode(node, out IKahuna? kahunaNode))
-            return await kahunaNode.CloseTransaction(transactionId, cancellationToken);
+        {
+            Interlocked.Increment(ref closeTransactionCallCount);
+
+            // Route through the locator, for the reason GetTransactionWorkingSet gives.
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.LocateAndCloseTransaction(coordinatorKey, transactionId, cancellationToken);
+        }
 
         throw Unreachable(node);
     }

@@ -374,7 +374,9 @@ public interface IKahuna
 
     /// <summary>
     /// Closes the transaction to new operations, waits for in-flight ones to drain, and returns the
-    /// frozen working set idempotently. A drain-deadline timeout returns <c>MustRetry</c> with no set.
+    /// frozen working set idempotently. A drain-deadline timeout returns <c>MustRetry</c> with no set,
+    /// and so does a session that cannot be found while a node that can hold it is not reachable;
+    /// <c>Errored</c> means that no node holds the session.
     /// Routed by <paramref name="coordinatorKey"/>.
     /// </summary>
     public Task<(KeyValueResponseType, TransactionWorkingSet?)> LocateAndCloseTransaction(string coordinatorKey, HLCTimestamp transactionId, CancellationToken cancellationToken);

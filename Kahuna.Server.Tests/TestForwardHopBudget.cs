@@ -60,6 +60,63 @@ public sealed class TestForwardHopBudget
         Assert.Equal(0, ForwardedRequestScope.ChainedHops);
     }
 
+    /// <summary>
+    /// Whatever the sender had already spent, a request it sends inside the terminal scope arrives above the budget,
+    /// on the in-memory transport (which counts this flow's hops up) and on the wire (which carries the next count).
+    /// </summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(ForwardedRequestScope.MaxForwardHops)]
+    public async Task EnterTerminal_LeavesTheReceiverNoForward(int arrivedAtHops)
+    {
+        using ForwardedRequestScope.Scope arrived = ForwardedRequestScope.EnterAtIf(arrivedAtHops > 0, arrivedAtHops);
+
+        // A request within the budget is an ordinary one, on the node a client reached and after each forward.
+        Assert.False(ForwardedRequestScope.IsTerminal);
+
+        int onTheWire;
+
+        using (ForwardedRequestScope.EnterTerminal())
+        {
+            onTheWire = ForwardedRequestScope.ChainedHops + 1;
+
+            using (ForwardedRequestScope.Enter())
+            {
+                Assert.True(ForwardedRequestScope.IsTerminal);
+                Assert.False(ForwardedRequestScope.CanForward);
+            }
+        }
+
+        Assert.Equal(arrivedAtHops, ForwardedRequestScope.ChainedHops);
+
+        // The receiver of a wire request starts with no marker of its own.
+        Task receiver;
+
+        using (ExecutionContext.SuppressFlow())
+        {
+            receiver = Task.Run(() =>
+            {
+                Assert.Equal(0, ForwardedRequestScope.ChainedHops);
+
+                using (ForwardedRequestScope.EnterAt(onTheWire))
+                {
+                    Assert.True(ForwardedRequestScope.IsTerminal);
+                    Assert.False(ForwardedRequestScope.CanForward);
+
+                    // Work the receiver starts on its own behalf routes as usual.
+                    using (ForwardedRequestScope.Suppress())
+                    {
+                        Assert.False(ForwardedRequestScope.IsTerminal);
+                        Assert.True(ForwardedRequestScope.CanForward);
+                    }
+                }
+            }, TestContext.Current.CancellationToken);
+        }
+
+        await receiver;
+    }
+
     [Fact]
     public void Suppress_StartsAFreshChainAndRestoresIt()
     {

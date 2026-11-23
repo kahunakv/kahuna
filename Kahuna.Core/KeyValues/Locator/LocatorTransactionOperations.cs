@@ -179,16 +179,16 @@ internal sealed class LocatorTransactionOperations
 
 
     /// <summary>
-    /// Whether this leader may look for a session it does not hold on its peers: for a request that arrived
-    /// directly from a caller, and for one that a non-leader forwarded here once. The forwarding node does not
-    /// lead the partition and never probes, so a request still costs one round of probes, whichever node the
-    /// caller reached. Before the forwarded hop was admitted, a session begun on the previous leader could only
-    /// be finished by a caller that reached the new leader itself: a commit, rollback or lock registration that
-    /// another node routed to the leader was answered from its own empty table, and the session's locks stayed
-    /// on the data leaders until their lease ran out. A request at a deeper hop is itself a probe, or a forward
-    /// of a forward, and is answered locally, so a transaction no node holds gets a bounded number of answers.
+    /// Whether this leader may look for a session it does not hold on its peers: for every request that is not
+    /// itself such a probe. A node that does not lead the partition forwards the request and never probes, and a
+    /// probed peer answers for itself only (<see cref="ForwardedRequestScope.IsTerminal"/>). A request therefore
+    /// costs at most <see cref="ForwardedRequestScope.MaxForwardHops"/> forwards and one probe of each peer,
+    /// whichever node the caller reached. The leader probes for a request that arrives after a second forward
+    /// too: a caller that does not know the leader can send it to another replica, which sends it on. Answered
+    /// from the leader's own table, such a commit, rollback or lock registration missed the session, and the
+    /// session's locks stayed on the data leaders until their lease ran out.
     /// </summary>
-    private static bool MayProbePeersForOwner => ForwardedRequestScope.ChainedHops <= 1;
+    private static bool MayProbePeersForOwner => !ForwardedRequestScope.IsTerminal;
 
     /// <summary>
     /// Offers a commit or rollback for a session this leader does not hold to each peer in turn and returns the
@@ -201,6 +201,10 @@ internal sealed class LocatorTransactionOperations
     /// </summary>
     private async Task<T?> ProbePeersForSessionAsync<T>(Func<string, Task<T>> ask, Func<T, KeyValueResponseType> status, CancellationToken cancellationToken) where T : struct
     {
+        // Each peer answers for itself: one that does not hold the session must not send the probe back to this
+        // leader, and one that also believes it leads must not start a round of its own.
+        using ForwardedRequestScope.Scope terminal = ForwardedRequestScope.EnterTerminal();
+
         string local = raft.GetLocalEndpoint();
 
         foreach (RaftNode peer in raft.GetNodes())
@@ -484,15 +488,22 @@ internal sealed class LocatorTransactionOperations
         }
     }
 
-    /// <summary>Routes a working-set query to the coordinator-partition leader for <paramref name="coordinatorKey"/>.</summary>
+    /// <summary>
+    /// Routes a working-set query to the node that owns the session, which is the leader of the coordinator
+    /// partition for <paramref name="coordinatorKey"/> unless the partition changed leader after the session
+    /// began. Serves the caller's request and the same request forwarded by another node.
+    /// </summary>
     public async Task<TransactionWorkingSet?> LocateAndGetTransactionWorkingSet(string coordinatorKey, HLCTimestamp transactionId, CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(coordinatorKey))
             return null;
 
-        int partitionId = LocateCoordinator(coordinatorKey);
-
         bool owner = OwnsSession(transactionId);
+
+        if (!owner && ForwardedRequestScope.IsTerminal)
+            return null;
+
+        int partitionId = LocateCoordinator(coordinatorKey);
 
         if (owner || !raft.Joined || await routing.AmILeaderIfHosted(partitionId, cancellationToken))
         {
@@ -545,16 +556,23 @@ internal sealed class LocatorTransactionOperations
         }
     }
 
-    /// <summary>Routes a close-and-snapshot to the coordinator-partition leader for <paramref name="coordinatorKey"/>.</summary>
+    /// <summary>
+    /// Routes a close-and-snapshot to the node that owns the session, which is the leader of the coordinator
+    /// partition for <paramref name="coordinatorKey"/> unless the partition changed leader after the session
+    /// began. Serves the caller's request and the same request forwarded by another node.
+    /// </summary>
     public async Task<(KeyValueResponseType, TransactionWorkingSet?)> LocateAndCloseTransaction(string coordinatorKey, HLCTimestamp transactionId, CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(coordinatorKey))
             return (KeyValueResponseType.Errored, null);
 
-        int partitionId = LocateCoordinator(coordinatorKey);
-
         // The session's owner closes it, whoever leads the coordinator partition now (see OwnsSession).
         bool owner = OwnsSession(transactionId);
+
+        if (!owner && ForwardedRequestScope.IsTerminal)
+            return (KeyValueResponseType.Errored, null);
+
+        int partitionId = LocateCoordinator(coordinatorKey);
 
         if (owner || !raft.Joined || await routing.AmILeaderIfHosted(partitionId, cancellationToken))
         {
@@ -562,13 +580,35 @@ internal sealed class LocatorTransactionOperations
             // LocateAndBeginOperation); the local close answers Errored for a session that is not here.
             if (!owner && raft.Joined && MayProbePeersForOwner)
             {
-                (KeyValueResponseType, TransactionWorkingSet?)? served = await ProbePeersForSessionAsync(
-                    peer => interNodeCommunication.CloseTransaction(peer, coordinatorKey, transactionId, cancellationToken),
-                    r => r.Item1,
-                    cancellationToken);
+                bool undecided = false;
+
+                async Task<(KeyValueResponseType Type, TransactionWorkingSet? WorkingSet)> AskPeer(string peer)
+                {
+                    (KeyValueResponseType Type, TransactionWorkingSet? WorkingSet) reply = (KeyValueResponseType.MustRetry, null);
+
+                    try
+                    {
+                        reply = await interNodeCommunication.CloseTransaction(peer, coordinatorKey, transactionId, cancellationToken);
+                        return reply;
+                    }
+                    finally
+                    {
+                        // A call that throws leaves the initial value: the peer was not reached.
+                        undecided |= reply.Type == KeyValueResponseType.MustRetry;
+                    }
+                }
+
+                (KeyValueResponseType Type, TransactionWorkingSet? WorkingSet)? served =
+                    await ProbePeersForSessionAsync(AskPeer, r => r.Type, cancellationToken);
 
                 if (served is { } answer)
                     return answer;
+
+                // A peer that does not hold the session answers Errored, so a MustRetry is the owner's (the session
+                // still drains, or another finalize holds it), or the peer was not reached. Neither shows that the
+                // session is gone, which is what the local answer would say.
+                if (undecided)
+                    return (KeyValueResponseType.MustRetry, null);
             }
 
             return await manager.CloseTransaction(transactionId, cancellationToken);

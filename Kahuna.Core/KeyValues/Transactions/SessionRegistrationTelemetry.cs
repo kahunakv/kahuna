@@ -267,9 +267,9 @@ internal readonly record struct SessionRegistrationForwardDurations(
 /// <param name="CompleteLocal">Completions folded into this node's own session table.</param>
 /// <param name="CompleteForwarded">Completions sent to the session owner, including the ones a receiver
 /// redirected after finding it had lost the coordinator partition.</param>
-/// <param name="WorkingSetLocal">Working-set queries this node routed and then answered from its own session
-/// table. A query another node forwarded here lands on the unrouted local entry point and is not counted, so
-/// this field is the queries this node started, not every query it answered.</param>
+/// <param name="WorkingSetLocal">Working-set queries answered from this node's own session table, the ones
+/// another node forwarded here included. A probe for the session's owner that finds no session here is not
+/// counted.</param>
 /// <param name="WorkingSetForwarded">Working-set queries sent to the session owner.</param>
 /// <param name="Refused">Calls, local or forwarded, whose answer was a rejection or a not-delivered reply.</param>
 /// <param name="Threw">Forwarded calls whose transport threw; a subset of the forwarded counts.</param>

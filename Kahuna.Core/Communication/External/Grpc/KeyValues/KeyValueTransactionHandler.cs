@@ -321,12 +321,16 @@ internal sealed class KeyValueTransactionHandler
         return payload;
     }
 
-    /// <summary>Inter-node landing point for a working-set query against the node-local session.</summary>
-    internal Task<GrpcGetTransactionWorkingSetResponse> GetTransactionWorkingSetInternal(GrpcGetTransactionWorkingSetRequest request, ServerCallContext context)
+    /// <summary>
+    /// Inter-node landing point for a working-set query. Routed through the locator, as
+    /// <see cref="BeginOperationInternal"/> is: the receiver can be a leader that did not begin the session, or a
+    /// replica that does not lead, and its own session table answers for neither.
+    /// </summary>
+    internal async Task<GrpcGetTransactionWorkingSetResponse> GetTransactionWorkingSetInternal(GrpcGetTransactionWorkingSetRequest request, ServerCallContext context)
     {
         HLCTimestamp transactionId = new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter);
 
-        TransactionWorkingSet? workingSet = keyValues.GetTransactionWorkingSet(transactionId);
+        TransactionWorkingSet? workingSet = await keyValues.LocateAndGetTransactionWorkingSet(request.CoordinatorKey, transactionId, context.CancellationToken);
 
         GrpcGetTransactionWorkingSetResponse response = new()
         {
@@ -334,15 +338,18 @@ internal sealed class KeyValueTransactionHandler
             WorkingSet = workingSet is null ? new GrpcTransactionWorkingSet() : ToGrpcWorkingSet(workingSet)
         };
 
-        return Task.FromResult(response);
+        return response;
     }
 
-    /// <summary>Inter-node landing point for a close-and-snapshot against the node-local session.</summary>
+    /// <summary>
+    /// Inter-node landing point for a close-and-snapshot, routed through the locator for the reason
+    /// <see cref="GetTransactionWorkingSetInternal"/> gives.
+    /// </summary>
     internal async Task<GrpcCloseTransactionResponse> CloseTransactionCore(GrpcCloseTransactionRequest request, ServerCallContext context)
     {
         HLCTimestamp transactionId = new(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter);
 
-        (KeyValueResponseType type, TransactionWorkingSet? workingSet) = await keyValues.CloseTransaction(transactionId, context.CancellationToken);
+        (KeyValueResponseType type, TransactionWorkingSet? workingSet) = await keyValues.LocateAndCloseTransaction(request.CoordinatorKey, transactionId, context.CancellationToken);
 
         GrpcCloseTransactionResponse response = new()
         {

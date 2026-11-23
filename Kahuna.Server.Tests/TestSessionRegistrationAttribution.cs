@@ -146,6 +146,8 @@ public sealed class TestSessionRegistrationAttribution : BaseCluster
             Assert.Equal(0, afterWrite.Threw - beforeWrite.Threw);
             Assert.Equal(0, afterWrite.Unrouted - beforeWrite.Unrouted);
 
+            SessionRegistrationCounts sessionBefore = managers[sessionIndex].KeyValues.SessionRegistrationCounts;
+
             // A working-set query made away from the session node is one further hop.
             TransactionWorkingSet? workingSet = await driver.LocateAndGetTransactionWorkingSet(coordinatorKey, handle.TransactionId, ct);
             Assert.NotNull(workingSet);
@@ -153,6 +155,11 @@ public sealed class TestSessionRegistrationAttribution : BaseCluster
             SessionRegistrationCounts afterWorkingSet = driver.KeyValues.SessionRegistrationCounts;
             Assert.Equal(1, afterWorkingSet.WorkingSetForwarded - afterWrite.WorkingSetForwarded);
             Assert.Equal(0, afterWorkingSet.WorkingSetLocal - afterWrite.WorkingSetLocal);
+
+            // The session node answered it from its own table, and counts it as it counts a forwarded registration.
+            SessionRegistrationCounts sessionAfter = managers[sessionIndex].KeyValues.SessionRegistrationCounts;
+            Assert.Equal(1, sessionAfter.WorkingSetLocal - sessionBefore.WorkingSetLocal);
+            Assert.Equal(0, sessionAfter.WorkingSetForwarded - sessionBefore.WorkingSetForwarded);
 
             // The commit is forwarded whole to the session node, so it costs this node no registration hop at
             // all: the working-set read behind the finalize happens on the session node's own session table.

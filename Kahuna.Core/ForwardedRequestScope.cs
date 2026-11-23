@@ -69,6 +69,13 @@ internal static class ForwardedRequestScope
     public static bool CanForward => state.Value.ChainedHops < MaxForwardHops;
 
     /// <summary>
+    /// Whether the request being served was sent inside <see cref="EnterTerminal"/>: the sender asks
+    /// this node for what this node holds, and asks the other nodes itself. A routed forward arrives
+    /// within <see cref="MaxForwardHops"/>, so a higher count marks a request sent inside that scope.
+    /// </summary>
+    public static bool IsTerminal => state.Value.ChainedHops > MaxForwardHops;
+
+    /// <summary>
     /// Marks the current async flow (and everything it awaits) as serving a forwarded request.
     /// </summary>
     /// <exception cref="ForwardLoopException">
@@ -111,6 +118,18 @@ internal static class ForwardedRequestScope
 
         return new Scope(previous);
     }
+
+    /// <summary>
+    /// Spends what is left of the forward budget for every request this flow sends while the scope is
+    /// open, so each receiver serves it under <see cref="IsTerminal"/>: it may not forward the request,
+    /// and it may not ask other nodes on its behalf. Used by a node that asks its peers one by one for
+    /// something one of them holds. Without it a peer that holds nothing sends the request back to the
+    /// asking node, and a peer that takes itself for the leader starts a round of its own.
+    /// </summary>
+    /// <exception cref="ForwardLoopException">
+    /// The flow already nests <see cref="MaxNestedForwards"/> forwards. See that constant.
+    /// </exception>
+    public static Scope EnterTerminal() => EnterAt(MaxForwardHops);
 
     /// <summary>
     /// <see cref="EnterAt"/> when <paramref name="forwarded"/> is set; otherwise a scope that leaves
