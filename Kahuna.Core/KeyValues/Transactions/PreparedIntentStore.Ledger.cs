@@ -482,8 +482,12 @@ internal sealed partial class PreparedIntentStore
 
         long retainedFromL = ledger.Watermark.L - SettledIdentityRetentionMs;
 
-        if (ledger.Settled.Record(new SettledIdentity(transactionId, epoch, key), settledAt, overwrite, retainedFromL))
-            ledger.Bytes += SettledIdentityBytes(key);
+        // The key is the string of the removed intent or of a settle command, decoded for that entry alone. The
+        // identity keeps the shared instance, which the transaction record and the receipts of the key hold.
+        key = keyStrings.Share(key, out bool keyCounted);
+
+        if (ledger.Settled.Record(new SettledIdentity(transactionId, epoch, key, keyCounted), settledAt, overwrite, retainedFromL))
+            ledger.Bytes += SettledIdentityBytes(1, keyCounted ? 1 : 0, keyCounted ? key.Length : 0);
 
         StampPartitionDirty(partitionId);
 
@@ -513,10 +517,11 @@ internal sealed partial class PreparedIntentStore
         if (!ledger.Settled.SweepInProgress)
             return;
 
-        ledger.Settled.SweepStep(ledger.Watermark.L - SettledIdentityRetentionMs, out int removed, out long removedKeyChars);
+        ledger.Settled.SweepStep(
+            ledger.Watermark.L - SettledIdentityRetentionMs, out int removed, out int removedCountedKeys, out long removedCountedKeyChars);
 
         if (removed > 0)
-            ledger.Bytes -= SettledIdentityBytes(removedKeyChars, removed);
+            ledger.Bytes -= SettledIdentityBytes(removed, removedCountedKeys, removedCountedKeyChars);
     }
 
     /// <summary>Records a committed intent's mutation as its key's committed head in the slice of the
@@ -592,6 +597,10 @@ internal sealed partial class PreparedIntentStore
         // live commit that lands here must still reach its watches.
         if (!existed && committedAt.L < Math.Max(ledger.Watermark.L - stagedBaseFenceRetentionMs, ledger.SizeFloor))
             return true;
+
+        // A new head keeps the shared instance of its key. The map keeps the key string of a head it holds.
+        if (!existed)
+            key = keyStrings.Share(key);
 
         ledger.Heads[key] = new(revision, state, committedAt);
         if (existed)
@@ -900,8 +909,10 @@ internal sealed partial class PreparedIntentStore
     }
 
     /// <summary>Adds one head to a slice that is not installed yet. The first head of a key stays.</summary>
-    private static void AddInstalledHead(PartitionLedger ledger, string key, CommittedHead head)
+    private void AddInstalledHead(PartitionLedger ledger, string key, CommittedHead head)
     {
+        key = keyStrings.Share(key);
+
         if (!ledger.Heads.TryAdd(key, head))
             return;
 
@@ -912,15 +923,17 @@ internal sealed partial class PreparedIntentStore
 
     /// <summary>Adds one settled identity to a slice that is not installed yet. An identity outside the window of
     /// the slice's watermark is absent to every verdict, and the watermark only advances, so it is left out.</summary>
-    private static void AddInstalledSettled(PartitionLedger ledger, in SettledIdentityEntry entry)
+    private void AddInstalledSettled(PartitionLedger ledger, in SettledIdentityEntry entry)
     {
         long retainedFromL = ledger.Watermark.L - SettledIdentityRetentionMs;
 
         if (entry.SettledAt.L < retainedFromL)
             return;
 
-        if (ledger.Settled.Record(new SettledIdentity(entry.TransactionId, entry.Epoch, entry.Key), entry.SettledAt, replace: false, retainedFromL))
-            ledger.Bytes += SettledIdentityBytes(entry.Key);
+        string key = keyStrings.Share(entry.Key, out bool keyCounted);
+
+        if (ledger.Settled.Record(new SettledIdentity(entry.TransactionId, entry.Epoch, key, keyCounted), entry.SettledAt, replace: false, retainedFromL))
+            ledger.Bytes += SettledIdentityBytes(1, keyCounted ? 1 : 0, keyCounted ? key.Length : 0);
     }
 
     /// <summary>Swaps a built slice in. The reflected position never regresses across the swap: a re-delivered

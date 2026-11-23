@@ -492,13 +492,22 @@ internal sealed partial class PreparedIntentStore
     // this many milliseconds: one pass over the memory per quarter window per partition.
     private const int SettledIdentityPruneBucketMs = SettledIdentityRetentionMs / 4;
 
-    /// <summary>Approximate bytes one settled-identity entry retains: the key's characters (the string is the
-    /// removed intent's, kept alive by the entry) plus the identity, the timestamp and the dictionary slot.</summary>
-    private static long SettledIdentityBytes(string key) => SettledIdentityBytes(key.Length, 1);
+    // Bytes of one settled-identity entry: the 64-byte entry of the map and its 4-byte bucket, in a shard that
+    // is between half full and full (see SettledIdentityMemory.MaxShardEntries), 94 bytes on average.
+    private const int SettledIdentityEntryBytes = 94;
 
-    /// <summary>The same estimate for <paramref name="entries"/> entries whose keys total
-    /// <paramref name="keyChars"/> characters.</summary>
-    private static long SettledIdentityBytes(long keyChars, int entries) => 2L * keyChars + 80L * entries;
+    // A string is 2 bytes for each character plus its header and terminator, rounded to 8.
+    private const int SettledIdentityStringOverheadBytes = 26;
+
+    /// <summary>
+    /// Approximate bytes that <paramref name="entries"/> settled-identity entries retain, of which
+    /// <paramref name="countedKeys"/> count their key string, with <paramref name="countedKeyChars"/> characters
+    /// in those keys. An entry counts its key string only when the entry brought the string to the node (see
+    /// <see cref="SharedKeyStrings"/>): in most cases the transaction record or a completion receipt holds the
+    /// same string and counts it.
+    /// </summary>
+    private static long SettledIdentityBytes(int entries, int countedKeys, long countedKeyChars) =>
+        (long)SettledIdentityEntryBytes * entries + (long)SettledIdentityStringOverheadBytes * countedKeys + 2L * countedKeyChars;
 
     // Entries one step of a settled-memory capture copies under the gate. The buffer of a step stays below
     // the large object threshold.
@@ -551,15 +560,23 @@ internal sealed partial class PreparedIntentStore
     // the intents this partition owns. Null in the pure/in-memory configuration used by unit tests.
     private Func<string, int>? resolvePartition;
 
+    // Gives the key of a settled identity and of a committed head the string instance that the other stores
+    // of the node hold for the same key.
+    private readonly SharedKeyStrings keyStrings;
+
     /// <summary>In-memory configuration (unit tests): no persistence.</summary>
-    public PreparedIntentStore() { }
+    public PreparedIntentStore() => keyStrings = new SharedKeyStrings();
 
     /// <summary>Durable configuration: a per-partition on-disk snapshot under <paramref name="storagePath"/> is
     /// loaded on construction and rewritten by <see cref="PersistSnapshot"/> before the WAL checkpoint discards
     /// the log tail; a parse failure fails closed.</summary>
-    public PreparedIntentStore(string? storagePath, string? storageRevision, ILogger<IKahuna>? logger)
+    /// <param name="keyStrings">The shared key strings of the node, so a settled identity and a committed head
+    /// hold the same string for a key as the transaction record and the completion receipts. Null gives the
+    /// store a cache of its own.</param>
+    public PreparedIntentStore(string? storagePath, string? storageRevision, ILogger<IKahuna>? logger, SharedKeyStrings? keyStrings = null)
     {
         this.logger = logger;
+        this.keyStrings = keyStrings ?? new SharedKeyStrings();
 
         if (!string.IsNullOrEmpty(storagePath))
         {

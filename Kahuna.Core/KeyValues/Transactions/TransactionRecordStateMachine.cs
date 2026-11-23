@@ -56,6 +56,9 @@ internal readonly record struct TransactionRecordApplyResult(
 /// absent|Commit|Abort--ExtendDeadline------------> rejected
 /// any               --* with mismatched (TxnId,Epoch,ManifestHash)-> rejected (invariant violation)
 /// </code>
+///
+/// <para>The transition to Commit or Abort also clears <see cref="TransactionRecord.CoordinatorKey"/>. The key
+/// is not a part of the identity of a record, and no transition reads it.</para>
 /// </summary>
 internal static class TransactionRecordStateMachine
 {
@@ -145,8 +148,11 @@ internal static class TransactionRecordStateMachine
                 if (commit.AttemptHlc > existing.DecisionDeadline)
                     return Rejected(existing, "commit past decision deadline");
 
+                // A decided record does not keep the coordinator key: nothing reads it after the decision, and
+                // a node holds every decided record for the retention window.
                 TransactionRecord committed = existing with
                 {
+                    CoordinatorKey = string.Empty,
                     Decision = TransactionDecision.Commit,
                     AbortClass = TransactionAbortClass.None,
                     WinningOpId = commit.OpId,
@@ -198,6 +204,7 @@ internal static class TransactionRecordStateMachine
             default:
                 TransactionRecord aborted = existing with
                 {
+                    CoordinatorKey = string.Empty,
                     Decision = TransactionDecision.Abort,
                     AbortClass = abort.AbortClass,
                     WinningOpId = abort.OpId,

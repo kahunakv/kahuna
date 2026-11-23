@@ -18,6 +18,7 @@ using Kahuna.Server.Persistence;
 using Kahuna.Server.ScriptParser;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Shared.KeyValue;
+using Kahuna.Utils;
 
 namespace Kahuna.Server.KeyValues;
 
@@ -178,13 +179,16 @@ internal sealed class KeyValuesManagerBuilder
         // Completion-receipt store: shared with the BackgroundWriterActor when provided (so the writer
         // snapshots the receipts this manager records), otherwise owned locally. The durable overload
         // reloads any persisted receipts so a re-commit after a cold restart still answers Committed.
-        completionReceiptStore = externalReceiptStore ?? new CompletionReceiptStore(configuration.StoragePath, configuration.StorageRevision, logger);
+        //
+        // The stores this manager creates share one cache of key strings, as the stores of a composed node do.
+        SharedKeyStrings keyStrings = externalRecordStore?.KeyStrings ?? new SharedKeyStrings();
+        completionReceiptStore = externalReceiptStore ?? new CompletionReceiptStore(configuration.StoragePath, configuration.StorageRevision, logger, keyStrings);
 
         // Durable-intent 2PC stores share the same per-partition snapshot lifecycle; their key/anchor → partition
         // resolvers are attached below once the locator exists. Shared with the BackgroundWriterActor when provided
         // (so the writer gates each partition's WAL checkpoint on their durable snapshots), otherwise owned locally.
-        transactionRecordStore = externalRecordStore ?? new TransactionRecordStore(configuration.StoragePath, configuration.StorageRevision, logger);
-        preparedIntentStore = externalIntentStore ?? new PreparedIntentStore(configuration.StoragePath, configuration.StorageRevision, logger);
+        transactionRecordStore = externalRecordStore ?? new TransactionRecordStore(configuration.StoragePath, configuration.StorageRevision, logger, keyStrings);
+        preparedIntentStore = externalIntentStore ?? new PreparedIntentStore(configuration.StoragePath, configuration.StorageRevision, logger, keyStrings);
 
         // The staged-base fence's memory horizon comes from configuration; idempotent, so re-applying it to a
         // shared external store is harmless.

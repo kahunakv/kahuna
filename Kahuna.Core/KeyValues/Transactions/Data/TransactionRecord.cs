@@ -1,4 +1,5 @@
 using Kahuna.Shared.KeyValue;
+using Kahuna.Utils;
 using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues.Transactions.Data;
@@ -55,6 +56,12 @@ internal readonly record struct TransactionParticipantRef(string Key, KeyValueDu
 /// mechanism. Instances are produced only by <see cref="TransactionRecordStateMachine.Apply"/>; the immutable
 /// fields are frozen at initialization (or, for a manifestless abort tombstone, at absence→abort) and never
 /// change, and the decision transitions exactly once.
+///
+/// <para>A node keeps one record for each transaction of the last 90 seconds or more, so the size of the object
+/// is a part of the heap of a loaded node. Each timestamp is stored as a <see cref="PackedTimestamp"/>, 16 bytes
+/// where <see cref="HLCTimestamp"/> takes 24, and the properties convert. <see cref="CoordinatorKey"/> is kept
+/// only while the record is undecided: the state machine clears it at the terminal transition, because no
+/// decision, recovery or replay reads it from a decided record.</para>
 /// </summary>
 internal sealed record TransactionRecord(
     HLCTimestamp TransactionId,
@@ -77,6 +84,54 @@ internal sealed record TransactionRecord(
     HLCTimestamp CreatedAt,
     HLCTimestamp DecidedAt)
 {
+    private readonly PackedTimestamp transactionId = new(TransactionId);
+
+    private readonly PackedTimestamp commitTimestamp = new(CommitTimestamp);
+
+    private readonly PackedTimestamp decisionDeadline = new(DecisionDeadline);
+
+    private readonly PackedTimestamp winningOpId = new(WinningOpId);
+
+    private readonly PackedTimestamp createdAt = new(CreatedAt);
+
+    private readonly PackedTimestamp decidedAt = new(DecidedAt);
+
+    public HLCTimestamp TransactionId
+    {
+        get => transactionId.Value;
+        init => transactionId = new(value);
+    }
+
+    public HLCTimestamp CommitTimestamp
+    {
+        get => commitTimestamp.Value;
+        init => commitTimestamp = new(value);
+    }
+
+    public HLCTimestamp DecisionDeadline
+    {
+        get => decisionDeadline.Value;
+        init => decisionDeadline = new(value);
+    }
+
+    public HLCTimestamp WinningOpId
+    {
+        get => winningOpId.Value;
+        init => winningOpId = new(value);
+    }
+
+    public HLCTimestamp CreatedAt
+    {
+        get => createdAt.Value;
+        init => createdAt = new(value);
+    }
+
+    public HLCTimestamp DecidedAt
+    {
+        get => decidedAt.Value;
+        init => decidedAt = new(value);
+    }
+
     public bool IsTerminal => Decision is TransactionDecision.Commit or TransactionDecision.Abort;
 
     /// <summary>
@@ -101,33 +156,51 @@ internal sealed record TransactionRecord(
         return false;
     }
 
-    // Approximate managed-heap cost of one resident record, for the retention memory budget. Object header +
-    // the scalar fields (five HLCs at 16 bytes, two longs, three small enums/bools, four references), the
-    // dictionary entry that holds it (entry + 24-byte key), the two owned strings, and the participant list
-    // with one string per participant. Strings are 2 bytes per char plus the object overhead. Deliberately an
-    // estimate: it needs to track heap growth proportionally, not match a profiler byte for byte.
-    private const int RecordFixedBytes = 16 + 5 * 16 + 2 * 8 + 12 + 4 * 8;
-    private const int DictionaryEntryBytes = 24 + 24 + 8;
+    // Managed-heap cost of one resident record, for the retention memory budget. The record object: header
+    // and method table (16), four references (32), six timestamps of 16 bytes (96), two longs (16), and two
+    // enums and a flag (9, padded to 16). The node of the map that holds it: header (16), a key of 24 bytes,
+    // the value reference, the next reference and the hash (60, padded to 64), with one bucket reference (8).
+    // The participants are one array of a 16-byte entry for each key. A string is 2 bytes for each character
+    // plus its header and terminator, rounded to 8.
+    private const int RecordFixedBytes = 16 + 32 + 96 + 16 + 16;
+    private const int MapEntryBytes = 64 + 8;
     private const int StringOverheadBytes = 26;
+    private const int ArrayOverheadBytes = 24;
     private const int ListOverheadBytes = 32;
     private const int ParticipantStructBytes = 16;
+    private const int TimestampBytes = 24;
 
-    /// <summary>Estimated heap bytes this record and its dictionary entry retain, for the retention budget.</summary>
+    /// <summary>
+    /// Estimated heap bytes this record and its map entry retain, for the retention budget. The record counts
+    /// the string of each participant key. It counts the anchor only when the anchor is a string of its own:
+    /// the anchor is the key of one participant, and a record that the node decoded or built holds one string
+    /// for the two.
+    /// </summary>
     public long EstimateBytes()
     {
-        long bytes = RecordFixedBytes + DictionaryEntryBytes
-            + StringOverheadBytes + 2L * CoordinatorKey.Length
-            + StringOverheadBytes + 2L * RecordAnchorKey.Length
-            + ListOverheadBytes;
+        long bytes = RecordFixedBytes + MapEntryBytes + ArrayOverheadBytes;
+
+        if (CoordinatorKey.Length > 0)
+            bytes += StringOverheadBytes + 2L * CoordinatorKey.Length;
+
+        string anchor = RecordAnchorKey;
+        bool anchorIsParticipantKey = false;
 
         // By index: this runs for every apply of a record, and a foreach over the list's interface allocates an
         // enumerator each time.
         IReadOnlyList<TransactionParticipantRef> participants = Participants;
         for (int i = 0; i < participants.Count; i++)
-            bytes += ParticipantStructBytes + StringOverheadBytes + 2L * participants[i].Key.Length;
+        {
+            string key = participants[i].Key;
+            bytes += ParticipantStructBytes + StringOverheadBytes + 2L * key.Length;
+            anchorIsParticipantKey |= ReferenceEquals(key, anchor);
+        }
+
+        if (!anchorIsParticipantKey && anchor.Length > 0)
+            bytes += StringOverheadBytes + 2L * anchor.Length;
 
         if (RejectedBundledCommitOpIds is { Count: > 0 } rejected)
-            bytes += ListOverheadBytes + 16L * rejected.Count;
+            bytes += ListOverheadBytes + ArrayOverheadBytes + (long)TimestampBytes * rejected.Count;
 
         return bytes;
     }

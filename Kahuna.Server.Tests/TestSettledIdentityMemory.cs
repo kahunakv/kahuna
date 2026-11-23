@@ -76,6 +76,49 @@ public sealed class TestSettledIdentityMemory
     }
 
     [Fact]
+    public void AShardAtItsLimit_FillsEverySlotOfItsMap()
+    {
+        // A shard splits at one entry above the limit, and the new half is a map sized for that count. The
+        // runtime rounds the size of a map up to a prime of its table: when the count is that prime, the shard
+        // uses all of its arrays before it splits. A runtime with another table leaves slots unused, and the
+        // limit then needs a new value.
+        Dictionary<Identity, Kahuna.Utils.PackedTimestamp> map = new(Memory.MaxShardEntries + 1);
+
+        Assert.Equal(Memory.MaxShardEntries + 1, map.EnsureCapacity(0));
+
+        // An entry of the map is 64 bytes: the identity (40), the time base (16), and the hash and the link
+        // of the map (8).
+        Assert.Equal(40, System.Runtime.CompilerServices.Unsafe.SizeOf<Identity>());
+        Assert.Equal(16, System.Runtime.CompilerServices.Unsafe.SizeOf<Kahuna.Utils.PackedTimestamp>());
+    }
+
+    [Fact]
+    public void AnIdentity_IsTheSameIdentity_WhetherItCountsItsKeyOrNot()
+    {
+        Identity counted = new(new HLCTimestamp(2, 1_000, 7), 3, "ranged1/k", keyCounted: true);
+        Identity notCounted = new(new HLCTimestamp(2, 1_000, 7), 3, "ranged1/k", keyCounted: false);
+
+        Assert.True(counted.KeyCounted);
+        Assert.False(notCounted.KeyCounted);
+        Assert.Equal(counted, notCounted);
+        Assert.Equal(counted.GetHashCode(), notCounted.GetHashCode());
+
+        // The memory keeps the identity it stored first, with its flag.
+        Memory memory = new();
+        Assert.True(memory.Record(counted, Ts(5_000), replace: false, NoBound));
+        Assert.False(memory.Record(notCounted, Ts(6_000), replace: true, NoBound));
+        Assert.Equal(1, memory.Count);
+        Assert.True(memory.TryGetValue(notCounted, out HLCTimestamp settledAt));
+        Assert.Equal(Ts(6_000), settledAt);
+
+        memory.BeginSweep();
+        memory.SweepStep(retainedFromL: 10_000, out int removed, out int countedKeys, out long countedKeyChars);
+        Assert.Equal(1, removed);
+        Assert.Equal(1, countedKeys);
+        Assert.Equal("ranged1/k".Length, countedKeyChars);
+    }
+
+    [Fact]
     public void EveryIdentityIsFound_AfterTheShardsSplit()
     {
         const int count = 100_000;
@@ -149,7 +192,7 @@ public sealed class TestSettledIdentityMemory
         Memory swept = new();
         swept.Record(identity, Ts(5_000), replace: false, NoBound);
         swept.BeginSweep();
-        swept.SweepStep(retainedFromL: 30_000, out int removed, out _);
+        swept.SweepStep(retainedFromL: 30_000, out int removed, out _, out _);
         Assert.Equal(1, removed);
         Assert.True(swept.Record(identity, Ts(90_000), replace: false, retainedFromL: 30_000));
 
@@ -241,36 +284,45 @@ public sealed class TestSettledIdentityMemory
         const int recent = 10_000;
 
         Memory memory = new();
-        long oldKeyChars = 0;
+        int oldCountedKeys = 0;
+        long oldCountedKeyChars = 0;
 
+        // Every third identity counts its key string: the sweep reports the keys of those alone, because the
+        // byte estimate of the slice holds the string of no other identity.
         for (int i = 0; i < old + recent; i++)
         {
-            Identity identity = Id(i);
+            bool counted = i % 3 == 0;
+            Identity identity = new(Ts(1_000 + i), 1, $"ranged1/accounts/k{i:D12}", counted);
             bool isOld = i < old;
             memory.Record(identity, Ts(isOld ? 10_000 : 80_000), replace: false, NoBound);
 
-            if (isOld)
-                oldKeyChars += identity.Key.Length;
+            if (isOld && counted)
+            {
+                oldCountedKeys++;
+                oldCountedKeyChars += identity.Key.Length;
+            }
         }
 
         int shards = memory.ShardCount;
         Assert.False(memory.SweepInProgress);
 
         // No sweep was started: a step does nothing.
-        memory.SweepStep(retainedFromL: 20_000, out int idle, out _);
+        memory.SweepStep(retainedFromL: 20_000, out int idle, out _, out _);
         Assert.Equal(0, idle);
 
         memory.BeginSweep();
 
         int steps = 0;
         int removedTotal = 0;
+        int removedCountedKeys = 0;
         long removedChars = 0;
         int largestStep = 0;
 
         while (memory.SweepInProgress)
         {
-            memory.SweepStep(retainedFromL: 20_000, out int removed, out long chars);
+            memory.SweepStep(retainedFromL: 20_000, out int removed, out int countedKeys, out long chars);
             removedTotal += removed;
+            removedCountedKeys += countedKeys;
             removedChars += chars;
             largestStep = Math.Max(largestStep, removed);
             steps++;
@@ -281,7 +333,8 @@ public sealed class TestSettledIdentityMemory
         Assert.True(largestStep <= Memory.MaxShardEntries + 1, $"one step removed {largestStep} entries");
 
         Assert.Equal(old, removedTotal);
-        Assert.Equal(oldKeyChars, removedChars);
+        Assert.Equal(oldCountedKeys, removedCountedKeys);
+        Assert.Equal(oldCountedKeyChars, removedChars);
         Assert.Equal(recent, memory.Count);
 
         for (int i = 0; i < old; i++)
@@ -302,7 +355,7 @@ public sealed class TestSettledIdentityMemory
 
         memory.BeginSweep();
         while (memory.SweepInProgress)
-            memory.SweepStep(retainedFromL: 20_000, out _, out _);
+            memory.SweepStep(retainedFromL: 20_000, out _, out _, out _);
 
         Assert.Equal(0, memory.Count);
         Assert.Equal(1, memory.ShardCount);
@@ -321,7 +374,7 @@ public sealed class TestSettledIdentityMemory
         int shards = memory.ShardCount;
 
         memory.BeginSweep();
-        memory.SweepStep(retainedFromL: 20_000, out _, out _);
+        memory.SweepStep(retainedFromL: 20_000, out _, out _, out _);
 
         // A second start must not send the sweep back to the first shard: at a low record rate the sweep
         // would then visit the first shards again and again and never reach the last ones.
@@ -330,7 +383,7 @@ public sealed class TestSettledIdentityMemory
         int steps = 1;
         while (memory.SweepInProgress)
         {
-            memory.SweepStep(retainedFromL: 20_000, out _, out _);
+            memory.SweepStep(retainedFromL: 20_000, out _, out _, out _);
             steps++;
         }
 

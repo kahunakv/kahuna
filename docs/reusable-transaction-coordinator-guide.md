@@ -704,10 +704,10 @@ An out-of-memory on another thread at the same moment ends the process as before
 retains at least `commit rate × DurableRecordRetentionFloor` terminal records (and their participants'
 completion receipts) whatever `DurableRecordRetentionMax` says, because nothing younger than the floor
 may be reclaimed early. At 4,300 committed transactions per second and the default 90-second floor that
-is about 390,000 resident records against a 200,000 budget, roughly 250 MiB of records, receipts and
-strings, plus the live prepared intents of the moment (about 170,000 with 256-byte values after a
-restart under that load, 60 MiB more) and the ledger's settled identities of the last minute. A node
-restarts into that baseline before it applies a single entry, and a whole-partition snapshot install
+is about 390,000 resident records against a 200,000 budget, about 240 MiB of records and receipts with
+two 30-character keys in each transaction, plus the live prepared intents of the moment (about 170,000
+with 256-byte values after a restart under that load, 60 MiB more) and the ledger's settled identities
+of the last minute. A node restarts into that baseline before it applies a single entry, and a whole-partition snapshot install
 of the same partition decodes a second copy of the records and receipts into the stores after purging
 the first, so plan the managed heap limit for the baseline plus one install's allocation burst (about
 ten times the snapshot's size in short-lived garbage) with headroom, or lower the floor (and the
@@ -720,17 +720,43 @@ workload with two 30-character keys in each transaction and the default floor:
 
 | Store | Kept for | Bytes for each item | MiB for each write commit a second |
 |---|---|---:|---:|
-| Transaction records | `DurableRecordRetentionFloor` at least (90 s) | about 640 for each transaction | 0.055 |
-| Completion receipts | the same time as their record | about 150 for each written key | 0.026 |
-| Settled identities | 60 to 75 s of commit time | 80 + 2 × key length for each written key (140) | 0.020 |
+| Transaction records | `DurableRecordRetentionFloor` at least (90 s) | 296 + 88 for each key string (472) for each transaction | 0.041 |
+| Completion receipts | the same time as their record | 88 for each written key | 0.015 |
+| Settled identities | 60 to 75 s of commit time | 94 for each written key | 0.013 |
 
-The sum is about 0.10 MiB for each write commit a second. The managed heap limit must be at least that
-state divided by `DurableRetainedStateHeapShare`: with the default of 0.4, about 0.25 MiB of heap limit
-for each write commit a second. On the node these numbers come from, the three gauges summed to 618 MiB
-at 5,945 write commits a second and 680 MiB at 6,519, which needs a heap limit of 1,545 MiB and
-1,700 MiB. That node had a heap limit of 1,229 MiB and ran out of memory. The records and receipts are
-80% of the state, so the setting that lowers it is `DurableRecordRetentionFloor` (and the
-`DurableDecisionDeadlineCeilingMs` it must cover).
+The sum is about 0.07 MiB for each write commit a second. The managed heap limit must be at least that
+state divided by `DurableRetainedStateHeapShare`: with the default of 0.4, about 0.17 MiB of heap limit
+for each write commit a second, so 6,000 write commits a second need a heap limit of about 1,040 MiB.
+The records are 60% of the state, so the setting that lowers it is `DurableRecordRetentionFloor` (and
+the `DurableDecisionDeadlineCeilingMs` it must cover).
+
+**Size of the retained items.** The sizes in the table follow from how each store holds an item:
+
+- A transaction record is an object of 176 bytes, a map entry of 72 bytes and an array of 16 bytes for
+  each participant. The record stores each of its six timestamps in 16 bytes; the timestamp type of the
+  clock is 24 bytes. A decided record keeps no coordinator key: the commit or abort transition clears
+  it, because nothing reads the key after the decision. An undecided record keeps it.
+- A completion receipt is a map entry of 88 bytes.
+- A settled identity is a map entry of 64 bytes in a shard that is between half full and full, 94
+  bytes on average.
+- The stores of one node hold one string for a key. Each store reads the key from a log entry of its
+  own, so each decodes a string of its own; before it keeps the string, it asks a cache that the three
+  stores share (`SharedKeyStrings`) for the instance the node already holds. The record, the receipts,
+  the settled identities and the committed heads of one transaction then hold the same string for each
+  key, on a follower as on the leader. The anchor of a record is the key of one of its participants,
+  and it is the same string. The cache is a table of 65,536 slots (512 KB) for each node. It can forget
+  a string; a store then keeps the string it decoded, and no result changes.
+
+The estimate counts each key string once, in the record. A receipt or a settled identity counts a key
+string only when it brought the string to the node, which is the case on a node that holds the
+receipts of a transaction and not its record. The heap is below the estimate when a key is written
+again inside the retention window: the records of the two transactions hold one string, and the
+estimate counts it for each.
+
+`TestRetainedBytesPerTransaction` commits transactions on a running node, empties one store at a time
+and reads the live heap. With keys that are written again inside the window, a node keeps 660 bytes
+for each transaction with two 30-character keys (296 for the record, 164 for the receipts, 200 for the
+ledger) and 1,054 bytes with four 10-character keys.
 
 **The heap share warning.** The maintenance tick compares the sum of the three estimates with the
 managed heap limit: the runtime's available memory, which is the heap hard limit when one is set. When
@@ -745,7 +771,7 @@ retention.
 **Settled identities.** A ledger slice remembers one settled identity (transaction, epoch and key) for
 each key that a transaction settled on the partition, for 60 s of commit time measured from the slice's
 watermark. A sweep of the expired identities starts once in each 15 s of commit time, so a slice holds
-at most the identities of 75 s: key write rate × 75 s × (80 + 2 × key length) bytes.
+at most the identities of 75 s: key write rate × 75 s × 94 bytes.
 `kahuna.durable_tx.settled_identity_entries` reports the count for each partition, and
 `committed_head_ledger_bytes` includes their bytes. This memory has no size bound. The window is a
 constant because the verdict it gives, the rejection of a replayed prepare of a settled leg, is a
@@ -753,7 +779,7 @@ replicated transition, and every replica must judge an entry by the same window.
 shorten the window under load, and a re-driven prepare that arrives after the window installs a pending
 intent for a settled transaction.
 
-A slice stores its identities in shards of at most 768 entries, so no array grows with their number. A
+A slice stores its identities in shards of at most 918 entries, so no array grows with their number. A
 checkpoint capture and a whole-partition export read the shards in chunks of about 1,000 identities,
 write each chunk to the file, and release the apply gate between chunks. The capture of a slice with one
 million identities makes no allocation above 66 KB and holds the apply gate for less than 0.1 ms at a

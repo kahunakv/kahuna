@@ -253,7 +253,8 @@ internal sealed partial class TransactionCoordinator
         if (!DurableFinalizeInputBuilder.TryBuild(
                 txId, epoch, context.CoordinatorKey ?? context.RecordAnchorKey, context.RecordAnchorKey,
                 commitTimestamp, decisionDeadline, persistentKeys, staged,
-                manager.LocateDurablePartition, out input, context.WrittenBaseObservations, context.Origin))
+                manager.LocateDurablePartition, out input, context.WrittenBaseObservations, context.Origin,
+                manager.DurableTransactionRecordStore.KeyStrings))
             return false;
 
         opId = commitTimestamp;

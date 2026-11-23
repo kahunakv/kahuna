@@ -2,6 +2,7 @@
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.KeyValues.Writes;
 using Kahuna.Shared.KeyValue;
+using Kahuna.Utils;
 using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues.Transactions;
@@ -48,7 +49,8 @@ internal static class DurableFinalizeInputBuilder
         Func<string, DurableKeyRoute> locate,
         out DurableFinalizeInput? input,
         IReadOnlyDictionary<(string Key, KeyValueDurability Durability), KeyValueTransactionReadKey>? writtenBases = null,
-        string? origin = null)
+        string? origin = null,
+        SharedKeyStrings? keyStrings = null)
     {
         input = null;
 
@@ -60,10 +62,18 @@ internal static class DurableFinalizeInputBuilder
             if (durability != KeyValueDurability.Persistent)
                 return false;
 
-        List<TransactionParticipantRef> manifest = new(modifiedKeys.Count);
+        // The manifest is an array of the exact size: the transaction record keeps it for the retention window.
+        // Each key goes through the shared key strings of the node, so the record, the intents and what the
+        // node keeps after them (receipts, settled identities) hold one string for a key, and a key in constant
+        // use holds one string across transactions. The anchor is the key of one participant.
+        TransactionParticipantRef[] manifest = new TransactionParticipantRef[modifiedKeys.Count];
+        int participant = 0;
 
         foreach ((string key, KeyValueDurability durability) in modifiedKeys)
-            manifest.Add(new TransactionParticipantRef(key, durability));
+            manifest[participant++] = new TransactionParticipantRef(keyStrings is null ? key : keyStrings.Share(key), durability);
+
+        if (keyStrings is not null)
+            anchorKey = keyStrings.Share(anchorKey);
 
         long manifestHash = TransactionManifest.ComputeHash(transactionId, epoch, anchorKey, commitTimestamp, manifest);
 
@@ -74,8 +84,11 @@ internal static class DurableFinalizeInputBuilder
         // descriptor and dedupes on its space name, so it is fenced once at generation zero.
         HashSet<FenceIdentity> fenced = [];
 
-        foreach ((string key, KeyValueDurability _) in modifiedKeys)
+        // The manifest holds the keys in the order of modifiedKeys, each as its shared string.
+        for (int i = 0; i < manifest.Length; i++)
         {
+            string key = manifest[i].Key;
+
             if (!stagedByKey.TryGetValue(key, out StagedValue staged))
                 return false; // a modified key with no staged value cannot be prepared losslessly — fall back.
 

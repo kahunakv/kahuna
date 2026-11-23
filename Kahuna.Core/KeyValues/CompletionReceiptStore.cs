@@ -50,15 +50,23 @@ internal sealed class CompletionReceiptStore
     // retention memory budget reads a counter instead of scanning two million entries.
     private long estimatedBytes;
 
-    // Approximate heap cost of one receipt: the dictionary entry (entry + 24-byte key struct + 16-byte value
-    // struct) plus the key string and the anchor string, which the replicated apply decodes as fresh strings.
-    private const int ReceiptEntryBytes = 24 + 24 + 16;
+    // Heap cost of one receipt. The node of the map: header (16), the key of 32 bytes, the value of 16 bytes,
+    // the next reference and the hash (76, padded to 80), with one bucket reference (8). A string is 2 bytes
+    // for each character plus its header and terminator, rounded to 8.
+    private const int ReceiptEntryBytes = 80 + 8;
     private const int StringOverheadBytes = 26;
 
-    private static long EstimateBytes(string key, string? recordAnchorKey) =>
+    // A receipt counts a string only when the receipt brought it to the node (see SharedKeyStrings): the key
+    // and the anchor of a receipt are in most cases strings that the transaction record, another receipt of
+    // the transaction or a settled identity already holds, and that holder counts them.
+    private static long EstimateBytes(string key, in CompletionReceipt receipt) =>
         ReceiptEntryBytes
-        + StringOverheadBytes + 2L * key.Length
-        + (recordAnchorKey is null ? 0 : StringOverheadBytes + 2L * recordAnchorKey.Length);
+        + (receipt.KeyCounted ? StringOverheadBytes + 2L * key.Length : 0)
+        + (receipt.AnchorCounted && receipt.RecordAnchorKey is not null ? StringOverheadBytes + 2L * receipt.RecordAnchorKey.Length : 0);
+
+    // Gives the key and the anchor of a receipt the string instances that the other stores of the node hold
+    // for the same keys.
+    private readonly SharedKeyStrings keyStrings;
 
     // Monotonic tick source for the dirty stamps below: each mutation mints one tick, so stamps taken
     // from it order mutations against the pre-scan capture in <see cref="PersistSnapshot"/>.
@@ -111,17 +119,18 @@ internal sealed class CompletionReceiptStore
     internal Func<int, bool>? PersistSnapshotFault { get; set; }
 
     /// <summary>Memory-only store: no durable snapshot. Used by the no-persistence fallback and tests.</summary>
-    public CompletionReceiptStore()
-    {
-    }
+    public CompletionReceiptStore() => keyStrings = new SharedKeyStrings();
 
     /// <summary>
     /// Durable store: reloads any persisted receipts from disk immediately, and writes the per-partition sets
     /// back on <see cref="PersistSnapshot"/> (driven at checkpoint time, before the WAL retention floor advances).
     /// </summary>
-    public CompletionReceiptStore(string? storagePath, string storageRevision, ILogger<IKahuna> logger)
+    /// <param name="keyStrings">The shared key strings of the node, so a receipt holds the same string for a
+    /// key as the transaction record and the settled identities. Null gives the store a cache of its own.</param>
+    public CompletionReceiptStore(string? storagePath, string storageRevision, ILogger<IKahuna> logger, SharedKeyStrings? keyStrings = null)
     {
         this.logger = logger;
+        this.keyStrings = keyStrings ?? new SharedKeyStrings();
         if (string.IsNullOrEmpty(storagePath))
         {
             snapshotDirectory = null;
@@ -226,10 +235,21 @@ internal sealed class CompletionReceiptStore
         if (transactionId == HLCTimestamp.Zero || string.IsNullOrEmpty(key))
             return;
 
-        if (receipts.TryAdd(new ReceiptKey(transactionId, key), new CompletionReceipt(recordAnchorKey, durability)))
+        // The caller decoded the key and the anchor from a log entry of its own. The receipt keeps the shared
+        // instances, so the receipts of one transaction hold one anchor string between them, and a receipt
+        // holds the key string of the transaction record and of the settled identity.
+        key = keyStrings.Share(key, out bool keyCounted);
+
+        bool anchorCounted = false;
+        if (recordAnchorKey is not null)
+            recordAnchorKey = keyStrings.Share(recordAnchorKey, out anchorCounted);
+
+        CompletionReceipt receipt = new(recordAnchorKey, durability, keyCounted, anchorCounted);
+
+        if (receipts.TryAdd(new ReceiptKey(transactionId, key), receipt))
         {
             Interlocked.Increment(ref receiptCount);
-            Interlocked.Add(ref estimatedBytes, EstimateBytes(key, recordAnchorKey));
+            Interlocked.Add(ref estimatedBytes, EstimateBytes(key, receipt));
             StampDirty(key);
         }
     }
@@ -266,7 +286,7 @@ internal sealed class CompletionReceiptStore
             return false;
 
         Interlocked.Decrement(ref receiptCount);
-        Interlocked.Add(ref estimatedBytes, -EstimateBytes(key, removed.RecordAnchorKey));
+        Interlocked.Add(ref estimatedBytes, -EstimateBytes(key, removed));
         StampDirty(key);
         return true;
     }
@@ -329,7 +349,7 @@ internal sealed class CompletionReceiptStore
             if (receipts.TryRemove(receipt))
             {
                 Interlocked.Decrement(ref receiptCount);
-                Interlocked.Add(ref estimatedBytes, -EstimateBytes(receipt.Key.Key, receipt.Value.RecordAnchorKey));
+                Interlocked.Add(ref estimatedBytes, -EstimateBytes(receipt.Key.Key, receipt.Value));
                 removed++;
             }
         }
@@ -790,7 +810,13 @@ internal sealed class CompletionReceiptStore
     // routing stamp it routed with. A checkpoint skips the rewrite only when both still match.
     private readonly record struct PersistedStamp(long Version, long RoutingVersion);
 
-    private readonly record struct CompletionReceipt(string? RecordAnchorKey, KeyValueDurability Durability);
+    // KeyCounted and AnchorCounted say whether the estimate of this receipt includes the string of its key
+    // and of its anchor. They fill the padding of the struct, so they add no bytes to an entry.
+    private readonly record struct CompletionReceipt(
+        string? RecordAnchorKey,
+        KeyValueDurability Durability,
+        bool KeyCounted = false,
+        bool AnchorCounted = false);
 
     // A receipt decoded from a replicated batch, buffered until the batch's Forget flag is known so the
     // record-vs-remove action can be applied regardless of the flag's wire position.

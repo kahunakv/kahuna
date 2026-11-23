@@ -15,6 +15,7 @@ using Kahuna.Server.Diagnostics;
 using Kahuna.Server.Persistence;
 using Kahuna.Server.Persistence.Backend;
 using Kahuna.Server.Sequencer;
+using Kahuna.Utils;
 using Writes = Kahuna.Server.KeyValues.Writes;
 
 namespace Kahuna.Server.Composition;
@@ -152,14 +153,18 @@ internal static class KahunaNodeComposer
         // checkpoint time) and the key-value layer (which records and consults receipts), mirroring how the
         // snapshot-floor store is shared. The writer is spawned before the KeyValuesManager exists, so the
         // single instance is created here and injected into both.
-        CompletionReceiptStore completionReceiptStore = new(configuration.StoragePath, configuration.StorageRevision, logger);
+        //
+        // The three stores of the retained transaction state share one cache of key strings, so a key that a
+        // transaction leaves in its record, its receipts and its settled identities is one string on the node.
+        SharedKeyStrings keyStrings = new();
+        CompletionReceiptStore completionReceiptStore = new(configuration.StoragePath, configuration.StorageRevision, logger, keyStrings);
 
         // Durable-intent 2PC stores are likewise shared between the background writer (which snapshots them durably
         // at checkpoint time, before the WAL retention floor advances past their delta log entries) and the
         // key-value layer (which applies and reads them). Created here for the same reason as the receipt store:
         // the writer is spawned before the KeyValuesManager exists.
-        TransactionRecordStore transactionRecordStore = new(configuration.StoragePath, configuration.StorageRevision, logger);
-        PreparedIntentStore preparedIntentStore = new(configuration.StoragePath, configuration.StorageRevision, logger);
+        TransactionRecordStore transactionRecordStore = new(configuration.StoragePath, configuration.StorageRevision, logger, keyStrings);
+        PreparedIntentStore preparedIntentStore = new(configuration.StoragePath, configuration.StorageRevision, logger, keyStrings);
 
         // Late-bound bridge so the background writer can acknowledge flushes back to the key-value
         // layer; the writer is spawned before the KeyValuesManager exists, so it is wired below.

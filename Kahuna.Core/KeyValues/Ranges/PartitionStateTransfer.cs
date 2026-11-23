@@ -825,7 +825,7 @@ internal sealed class PartitionStateTransfer : IRaftPartitionStateTransfer
 
             // Each entry is decoded off the staged snapshot and folded into its store before the next is read.
             completionReceiptStore.ImportRange(CompletionReceiptStore.ReadReceipts(new PayloadStream(input, layout.Receipts)));
-            transactionRecordStore.ImportRecords(TransactionRecordStore.ReadRecords(new PayloadStream(input, layout.Records)));
+            transactionRecordStore.ImportRecords(TransactionRecordStore.ReadRecords(new PayloadStream(input, layout.Records), transactionRecordStore.KeyStrings));
             preparedIntentStore.ReplacePartitionIntents(
                 partitionId, new PayloadStream(input, layout.Intents), intentHeader, requireLedgerOnInstall, isOwned);
 

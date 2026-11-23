@@ -14,7 +14,11 @@ internal sealed partial class PreparedIntentStore
     /// <para>The identity computes its hash once, when it is built, and keeps it. The memory reads the hash to
     /// select a shard, the map of the shard reads it again, and a shard split reads it for every entry it
     /// moves; hashing the key each time was most of the cost of a record. The fields are laid out so that the
-    /// stored hash adds no bytes to an entry.</para></summary>
+    /// stored hash adds no bytes to an entry.</para>
+    ///
+    /// <para><see cref="KeyCounted"/> says whether the byte estimate of the slice includes the string of the
+    /// key. It is not a part of the identity: two identities that differ only in it are equal. It shares the
+    /// padding of the hash, so it adds no bytes to an entry.</para></summary>
     internal readonly struct SettledIdentity : IEquatable<SettledIdentity>
     {
         private readonly long transactionL;
@@ -27,15 +31,21 @@ internal sealed partial class PreparedIntentStore
         // large transaction differ only in the key.
         private readonly int hash;
 
-        public SettledIdentity(HLCTimestamp transactionId, long epoch, string key)
+        public SettledIdentity(HLCTimestamp transactionId, long epoch, string key, bool keyCounted = false)
         {
             transactionL = transactionId.L;
             transactionC = transactionId.C;
             transactionN = transactionId.N;
             Epoch = epoch;
             Key = key;
+            KeyCounted = keyCounted;
             hash = TransactionKeyHash.Combine(key, transactionId, epoch);
         }
+
+        /// <summary>Whether the slice counts the bytes of <see cref="Key"/> for this identity: true when the
+        /// identity brought the string to the node (see <see cref="SharedKeyStrings"/>), false when another
+        /// holder of the same string counts it.</summary>
+        public bool KeyCounted { get; }
 
         public HLCTimestamp TransactionId => new(transactionN, transactionL, transactionC);
 
@@ -77,9 +87,11 @@ internal sealed partial class PreparedIntentStore
     /// </summary>
     internal sealed class SettledIdentityMemory
     {
-        /// <summary>Entries one shard holds before it splits. With the 72-byte entry of the map, a shard at this
-        /// size keeps its arrays below the large object threshold.</summary>
-        internal const int MaxShardEntries = 768;
+        /// <summary>Entries one shard holds before it splits. A map sized for one more entry has 919 slots, the
+        /// size the runtime gives a map that grew to hold them, so a shard uses every slot of its arrays before
+        /// it splits and is between half full and full. With the 64-byte entry of the map, the arrays of a
+        /// shard stay below the large object threshold.</summary>
+        internal const int MaxShardEntries = 918;
 
         // A shard at this depth does not split and grows as one map. 2^20 shards hold 800 million identities.
         private const int MaxDepth = 20;
@@ -90,12 +102,13 @@ internal sealed partial class PreparedIntentStore
         // Shards one CopyNext call reads at most, so a run of empty shards does not extend the gate hold.
         private const int MaxShardsPerCopy = 256;
 
-        private sealed class Shard(int depth, Dictionary<SettledIdentity, HLCTimestamp> map)
+        // The time base of an identity is stored in 16 bytes, so an entry of the map is 64 bytes.
+        private sealed class Shard(int depth, Dictionary<SettledIdentity, PackedTimestamp> map)
         {
             // Number of high hash bits every identity of the shard shares.
             public readonly int Depth = depth;
 
-            public Dictionary<SettledIdentity, HLCTimestamp> Map = map;
+            public Dictionary<SettledIdentity, PackedTimestamp> Map = map;
         }
 
         // 2^directoryDepth slots. A shard of depth d fills 2^(directoryDepth - d) adjacent slots.
@@ -119,8 +132,12 @@ internal sealed partial class PreparedIntentStore
         /// <summary>Whether a sweep started by <see cref="BeginSweep"/> has shards left to visit.</summary>
         public bool SweepInProgress => sweepPosition < HashSpaceEnd;
 
-        public bool TryGetValue(in SettledIdentity identity, out HLCTimestamp settledAt) =>
-            directory[SlotOf((uint)identity.GetHashCode())].Map.TryGetValue(identity, out settledAt);
+        public bool TryGetValue(in SettledIdentity identity, out HLCTimestamp settledAt)
+        {
+            bool held = directory[SlotOf((uint)identity.GetHashCode())].Map.TryGetValue(identity, out PackedTimestamp packed);
+            settledAt = packed.Value;
+            return held;
+        }
 
         /// <summary>
         /// Stores <paramref name="settledAt"/> for <paramref name="identity"/> and returns whether the memory
@@ -134,7 +151,7 @@ internal sealed partial class PreparedIntentStore
             uint hash = (uint)identity.GetHashCode();
             Shard shard = directory[SlotOf(hash)];
 
-            if (shard.Map.TryAdd(identity, settledAt))
+            if (shard.Map.TryAdd(identity, new PackedTimestamp(settledAt)))
             {
                 count++;
 
@@ -144,8 +161,8 @@ internal sealed partial class PreparedIntentStore
                 return true;
             }
 
-            if (replace || (shard.Map.TryGetValue(identity, out HLCTimestamp held) && held.L < retainedFromL))
-                shard.Map[identity] = settledAt;
+            if (replace || (shard.Map.TryGetValue(identity, out PackedTimestamp held) && held.L < retainedFromL))
+                shard.Map[identity] = new PackedTimestamp(settledAt);
 
             return false;
         }
@@ -174,10 +191,10 @@ internal sealed partial class PreparedIntentStore
                 if (visited > 0 && (visited >= MaxShardsPerCopy || destination.Count + shard.Map.Count > destination.Capacity))
                     return true;
 
-                foreach (KeyValuePair<SettledIdentity, HLCTimestamp> entry in shard.Map)
+                foreach (KeyValuePair<SettledIdentity, PackedTimestamp> entry in shard.Map)
                 {
                     if (entry.Value.L >= retainedFromL)
-                        destination.Add(new SettledIdentityEntry(entry.Key.TransactionId, entry.Key.Epoch, entry.Key.Key, entry.Value));
+                        destination.Add(new SettledIdentityEntry(entry.Key.TransactionId, entry.Key.Epoch, entry.Key.Key, entry.Value.Value));
                 }
 
                 position = end;
@@ -196,30 +213,37 @@ internal sealed partial class PreparedIntentStore
 
         /// <summary>
         /// Removes from the next shard of the sweep the identities whose time base is before
-        /// <paramref name="retainedFromL"/>, and reports how many it removed and the total length of their keys.
+        /// <paramref name="retainedFromL"/>, and reports how many it removed, how many of them counted their
+        /// key string (<see cref="SettledIdentity.KeyCounted"/>), and the total length of those counted keys.
         /// One call visits one shard, so the time under the gate is that of a few hundred entries. A no-op when
         /// no sweep is in progress.
         /// </summary>
-        public void SweepStep(long retainedFromL, out int removed, out long removedKeyChars)
+        public void SweepStep(long retainedFromL, out int removed, out int removedCountedKeys, out long removedCountedKeyChars)
         {
             removed = 0;
-            removedKeyChars = 0;
+            removedCountedKeys = 0;
+            removedCountedKeyChars = 0;
 
             if (sweepPosition >= HashSpaceEnd)
                 return;
 
             Shard shard = ShardAt(sweepPosition, out long end);
-            Dictionary<SettledIdentity, HLCTimestamp> map = shard.Map;
+            Dictionary<SettledIdentity, PackedTimestamp> map = shard.Map;
 
             // A removal does not invalidate the enumerator of a Dictionary.
-            foreach (KeyValuePair<SettledIdentity, HLCTimestamp> entry in map)
+            foreach (KeyValuePair<SettledIdentity, PackedTimestamp> entry in map)
             {
                 if (entry.Value.L >= retainedFromL)
                     continue;
 
                 map.Remove(entry.Key);
                 removed++;
-                removedKeyChars += entry.Key.Key.Length;
+
+                if (entry.Key.KeyCounted)
+                {
+                    removedCountedKeys++;
+                    removedCountedKeyChars += entry.Key.Key.Length;
+                }
             }
 
             if (removed > 0)
@@ -230,7 +254,7 @@ internal sealed partial class PreparedIntentStore
                 if (map.Count == 0)
                     shard.Map = [];
                 else if (map.Count * 8 <= map.EnsureCapacity(0))
-                    shard.Map = new Dictionary<SettledIdentity, HLCTimestamp>(map);
+                    shard.Map = new Dictionary<SettledIdentity, PackedTimestamp>(map);
             }
 
             sweepPosition = end;
@@ -280,10 +304,10 @@ internal sealed partial class PreparedIntentStore
             // The new map is sized for a full shard and the entry that triggers its split, so it does not
             // resize before then.
             Shard low = new(depth, shard.Map);
-            Shard high = new(depth, new Dictionary<SettledIdentity, HLCTimestamp>(MaxShardEntries + 1));
+            Shard high = new(depth, new Dictionary<SettledIdentity, PackedTimestamp>(MaxShardEntries + 1));
 
             // A removal does not invalidate the enumerator of a Dictionary.
-            foreach (KeyValuePair<SettledIdentity, HLCTimestamp> entry in shard.Map)
+            foreach (KeyValuePair<SettledIdentity, PackedTimestamp> entry in shard.Map)
             {
                 if ((((uint)entry.Key.GetHashCode() >> bit) & 1) == 0)
                     continue;

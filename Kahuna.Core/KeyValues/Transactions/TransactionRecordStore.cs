@@ -24,8 +24,31 @@ internal sealed class TransactionRecordStore
     // A sharded map: at the record count of a loaded node, one concurrent dictionary replaces a bucket array
     // of megabytes, and makes a new node for every record, at each doubling on the apply path. Every writer
     // holds applyGate, so one lock for each shard is enough.
-    private readonly ShardedConcurrentMap<(HLCTimestamp TransactionId, long Epoch), TransactionRecord, KeyHashShardHasher<(HLCTimestamp TransactionId, long Epoch)>> records =
+    private readonly ShardedConcurrentMap<RecordKey, TransactionRecord, KeyHashShardHasher<RecordKey>> records =
         new(RecordMapShards, concurrencyLevel: 1);
+
+    /// <summary>
+    /// The key of the record map: a transaction id and an epoch in 24 bytes. A tuple of
+    /// <see cref="HLCTimestamp"/> and a long is 32 bytes, and the map holds one key for each record.
+    /// </summary>
+    private readonly struct RecordKey : IEquatable<RecordKey>
+    {
+        private readonly PackedTimestamp transactionId;
+
+        private readonly long epoch;
+
+        public RecordKey(HLCTimestamp transactionId, long epoch)
+        {
+            this.transactionId = new(transactionId);
+            this.epoch = epoch;
+        }
+
+        public bool Equals(RecordKey other) => epoch == other.epoch && transactionId.Equals(other.transactionId);
+
+        public override bool Equals(object? obj) => obj is RecordKey other && Equals(other);
+
+        public override int GetHashCode() => TransactionKeyHash.Combine(transactionId.Value, epoch);
+    }
 
     // At 560,000 records a shard holds about 4,400 of them, and its bucket array is 67 KB.
     private const int RecordMapShards = 128;
@@ -79,15 +102,25 @@ internal sealed class TransactionRecordStore
     // covers the records this partition owns. Null in the pure/in-memory configuration used by unit tests.
     private Func<string, (int PartitionId, long Generation)>? resolveAnchorPartition;
 
+    // Gives the anchor and the participant keys of a decoded record the string instances that the other
+    // stores of the node hold for the same keys.
+    private readonly SharedKeyStrings keyStrings;
+
+    /// <summary>The shared key strings this store decodes its records with.</summary>
+    internal SharedKeyStrings KeyStrings => keyStrings;
+
     /// <summary>In-memory configuration (unit tests): no persistence.</summary>
-    public TransactionRecordStore() { }
+    public TransactionRecordStore() => keyStrings = new SharedKeyStrings();
 
     /// <summary>Durable configuration: a per-partition on-disk snapshot under <paramref name="storagePath"/> is
     /// loaded on construction and rewritten by <see cref="PersistSnapshot"/> before the WAL checkpoint discards
     /// the log tail. A parse failure fails closed rather than silently starting without a committed decision.</summary>
-    public TransactionRecordStore(string? storagePath, string? storageRevision, ILogger<IKahuna>? logger)
+    /// <param name="keyStrings">The shared key strings of the node, so the records hold the same string for a
+    /// key as the completion receipts and the settled identities. Null gives the store a cache of its own.</param>
+    public TransactionRecordStore(string? storagePath, string? storageRevision, ILogger<IKahuna>? logger, SharedKeyStrings? keyStrings = null)
     {
         this.logger = logger;
+        this.keyStrings = keyStrings ?? new SharedKeyStrings();
         if (!string.IsNullOrEmpty(storagePath))
         {
             snapshotDirectory = storagePath;
@@ -217,7 +250,7 @@ internal sealed class TransactionRecordStore
     /// </summary>
     public TransactionRecordApplyResult Apply(TransactionRecordCommand command, int partitionId, long logTerm)
     {
-        (HLCTimestamp, long) key = KeyOf(command);
+        RecordKey key = KeyOf(command);
 
         lock (applyGate)
         {
@@ -312,7 +345,7 @@ internal sealed class TransactionRecordStore
     }
 
     public TransactionRecord? Get(HLCTimestamp transactionId, long epoch) =>
-        records.TryGetValue((transactionId, epoch), out TransactionRecord? record) ? record : null;
+        records.TryGetValue(new RecordKey(transactionId, epoch), out TransactionRecord? record) ? record : null;
 
     /// <summary>Every record, as one copy that is atomic across records: the copy is taken under the apply
     /// gate, which every writer holds. A caller that runs on a timer uses <see cref="EnumerateRecords"/>.</summary>
@@ -322,7 +355,7 @@ internal sealed class TransactionRecordStore
         {
             List<TransactionRecord> snapshot = new(Count);
 
-            foreach (KeyValuePair<(HLCTimestamp TransactionId, long Epoch), TransactionRecord> kv in records)
+            foreach (KeyValuePair<RecordKey, TransactionRecord> kv in records)
                 snapshot.Add(kv.Value);
 
             return snapshot;
@@ -338,7 +371,7 @@ internal sealed class TransactionRecordStore
     /// </summary>
     public IEnumerable<TransactionRecord> EnumerateRecords()
     {
-        foreach (KeyValuePair<(HLCTimestamp TransactionId, long Epoch), TransactionRecord> kv in records)
+        foreach (KeyValuePair<RecordKey, TransactionRecord> kv in records)
             yield return kv.Value;
     }
 
@@ -389,7 +422,7 @@ internal sealed class TransactionRecordStore
         TransactionRecordDeltaMessage delta = ReplicationSerializer.UnserializeTransactionRecordDeltaMessage(log.LogData);
 
         foreach (TransactionRecordCommandMessage message in delta.Commands)
-            Apply(ToCommand(message), partitionId, log.Term);
+            Apply(ToCommand(message, keyStrings), partitionId, log.Term);
 
         return true;
     }
@@ -447,13 +480,13 @@ internal sealed class TransactionRecordStore
         return SerializeDelta(commands);
     }
 
-    private static (HLCTimestamp, long) KeyOf(TransactionRecordCommand command) => command switch
+    private static RecordKey KeyOf(TransactionRecordCommand command) => command switch
     {
-        InitializeTransactionCommand i => (i.TransactionId, i.Epoch),
-        CommitTransactionCommand c => (c.TransactionId, c.Epoch),
-        AbortTransactionCommand a => (a.TransactionId, a.Epoch),
-        ExtendDecisionDeadlineCommand e => (e.TransactionId, e.Epoch),
-        PurgeTransactionCommand p => (p.TransactionId, p.Epoch),
+        InitializeTransactionCommand i => new(i.TransactionId, i.Epoch),
+        CommitTransactionCommand c => new(c.TransactionId, c.Epoch),
+        AbortTransactionCommand a => new(a.TransactionId, a.Epoch),
+        ExtendDecisionDeadlineCommand e => new(e.TransactionId, e.Epoch),
+        PurgeTransactionCommand p => new(p.TransactionId, p.Epoch),
         _ => throw new ArgumentOutOfRangeException(nameof(command), command.GetType().Name, "unknown transaction-record command")
     };
 
@@ -551,7 +584,7 @@ internal sealed class TransactionRecordStore
         }
     }
 
-    private static TransactionRecordCommand ToCommand(TransactionRecordCommandMessage m)
+    private static TransactionRecordCommand ToCommand(TransactionRecordCommandMessage m, SharedKeyStrings? keyStrings)
     {
         HLCTimestamp txId = new(m.TransactionIdNode, m.TransactionIdPhysical, m.TransactionIdCounter);
         HLCTimestamp opId = new(m.OpIdNode, m.OpIdPhysical, m.OpIdCounter);
@@ -560,15 +593,11 @@ internal sealed class TransactionRecordStore
         {
             case TransactionRecordCommandKindMessage.TransactionRecordInitialize:
             {
-                List<TransactionParticipantRef> participants = new(m.Participants.Count);
-                foreach (TransactionParticipantRefMessage p in m.Participants)
-                    participants.Add(new TransactionParticipantRef(p.Key, (KeyValueDurability)p.Durability));
-
                 return new InitializeTransactionCommand(
-                    txId, m.Epoch, m.CoordinatorKey, m.RecordAnchorKey,
+                    txId, m.Epoch, m.CoordinatorKey, Shared(keyStrings, m.RecordAnchorKey),
                     new HLCTimestamp(m.CommitTimestampNode, m.CommitTimestampPhysical, m.CommitTimestampCounter),
                     new HLCTimestamp(m.DecisionDeadlineNode, m.DecisionDeadlinePhysical, m.DecisionDeadlineCounter),
-                    m.ManifestHash, participants, opId,
+                    m.ManifestHash, DecodeParticipants(m.Participants, keyStrings), opId,
                     new HLCTimestamp(m.CreatedAtNode, m.CreatedAtPhysical, m.CreatedAtCounter));
             }
 
@@ -596,7 +625,7 @@ internal sealed class TransactionRecordStore
             case TransactionRecordCommandKindMessage.TransactionRecordAbort:
                 return new AbortTransactionCommand(txId, m.Epoch, m.ManifestHash, (TransactionAbortClass)m.AbortClass, opId,
                     new HLCTimestamp(m.AttemptNode, m.AttemptPhysical, m.AttemptCounter),
-                    m.RecordAnchorKey,
+                    Shared(keyStrings, m.RecordAnchorKey),
                     new HLCTimestamp(m.CommitTimestampNode, m.CommitTimestampPhysical, m.CommitTimestampCounter),
                     new HLCTimestamp(m.DecisionDeadlineNode, m.DecisionDeadlinePhysical, m.DecisionDeadlineCounter),
                     new HLCTimestamp(m.CreatedAtNode, m.CreatedAtPhysical, m.CreatedAtCounter));
@@ -613,6 +642,30 @@ internal sealed class TransactionRecordStore
             default:
                 throw new ArgumentOutOfRangeException(nameof(m), m.Kind, "unknown transaction-record command kind");
         }
+    }
+
+    private static string Shared(SharedKeyStrings? keyStrings, string key) =>
+        keyStrings is null ? key : keyStrings.Share(key);
+
+    // The participants of a decoded record, as an array of the exact size: the record keeps them for the
+    // retention window, and a list adds an object and spare capacity to each record. Each key goes through the
+    // shared key strings, so the anchor, which is the key of one participant, and the receipts and settled
+    // identities of the same keys hold the same string.
+    private static TransactionParticipantRef[] DecodeParticipants(
+        Google.Protobuf.Collections.RepeatedField<TransactionParticipantRefMessage> messages, SharedKeyStrings? keyStrings)
+    {
+        if (messages.Count == 0)
+            return [];
+
+        TransactionParticipantRef[] participants = new TransactionParticipantRef[messages.Count];
+
+        for (int i = 0; i < participants.Length; i++)
+        {
+            TransactionParticipantRefMessage p = messages[i];
+            participants[i] = new TransactionParticipantRef(Shared(keyStrings, p.Key), (KeyValueDurability)p.Durability);
+        }
+
+        return participants;
     }
 
     // ── durable snapshot ──────────────────────────────────────────────────────────
@@ -666,7 +719,7 @@ internal sealed class TransactionRecordStore
                     TransactionRecordSnapshotEntry entry = new();
                     List<TransactionParticipantRefMessage> participantPool = [];
 
-                    foreach (KeyValuePair<(HLCTimestamp TransactionId, long Epoch), TransactionRecord> kv in records)
+                    foreach (KeyValuePair<RecordKey, TransactionRecord> kv in records)
                     {
                         TransactionRecord record = kv.Value;
 
@@ -714,7 +767,7 @@ internal sealed class TransactionRecordStore
                 {
                     using FileStream file = new(path, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024);
 
-                    foreach (TransactionRecord record in ReadRecords(file))
+                    foreach (TransactionRecord record in ReadRecords(file, keyStrings))
                         MergeLoad(record);
                 }
             }
@@ -734,7 +787,7 @@ internal sealed class TransactionRecordStore
     // wins and a conflict is logged rather than silently overwriting.
     private void MergeLoad(TransactionRecord incoming)
     {
-        (HLCTimestamp, long) key = (incoming.TransactionId, incoming.Epoch);
+        RecordKey key = new(incoming.TransactionId, incoming.Epoch);
         if (!records.TryGetValue(key, out TransactionRecord? existing))
         {
             records[key] = incoming;
@@ -788,7 +841,7 @@ internal sealed class TransactionRecordStore
 
         lock (applyGate)
         {
-            foreach (KeyValuePair<(HLCTimestamp TransactionId, long Epoch), TransactionRecord> kv in records)
+            foreach (KeyValuePair<RecordKey, TransactionRecord> kv in records)
             {
                 TransactionRecord record = kv.Value;
                 string anchor = record.RecordAnchorKey;
@@ -824,7 +877,7 @@ internal sealed class TransactionRecordStore
         TransactionRecordSnapshotEntry entry = new();
         List<TransactionParticipantRefMessage> participantPool = [];
 
-        foreach (KeyValuePair<(HLCTimestamp TransactionId, long Epoch), TransactionRecord> kv in records)
+        foreach (KeyValuePair<RecordKey, TransactionRecord> kv in records)
         {
             TransactionRecord record = kv.Value;
 
@@ -851,9 +904,9 @@ internal sealed class TransactionRecordStore
     {
         lock (applyGate)
         {
-            List<(HLCTimestamp TransactionId, long Epoch)>? toRemove = null;
+            List<RecordKey>? toRemove = null;
 
-            foreach (KeyValuePair<(HLCTimestamp TransactionId, long Epoch), TransactionRecord> kv in records)
+            foreach (KeyValuePair<RecordKey, TransactionRecord> kv in records)
             {
                 if (shouldRemoveAnchor(kv.Value.RecordAnchorKey))
                     (toRemove ??= []).Add(kv.Key);
@@ -862,7 +915,7 @@ internal sealed class TransactionRecordStore
             if (toRemove is null)
                 return 0;
 
-            foreach ((HLCTimestamp TransactionId, long Epoch) key in toRemove)
+            foreach (RecordKey key in toRemove)
             {
                 if (records.TryRemove(key, out TransactionRecord? removed))
                     AccountReplaced(removed, null);
@@ -902,7 +955,7 @@ internal sealed class TransactionRecordStore
         TransactionRecordSnapshotMessage message = ReplicationSerializer.UnserializeTransactionRecordSnapshotMessage(data);
         List<TransactionRecord> result = new(message.Records.Count);
         foreach (TransactionRecordSnapshotEntry entry in message.Records)
-            result.Add(FromSnapshotEntry(entry));
+            result.Add(FromSnapshotEntry(entry, keyStrings: null));
 
         return result;
     }
@@ -917,7 +970,10 @@ internal sealed class TransactionRecordStore
     /// megabytes under a busy durable workload.
     /// A malformed payload throws <see cref="InvalidProtocolBufferException"/> at the entry that fails to parse.
     /// </summary>
-    public static IEnumerable<TransactionRecord> ReadRecords(Stream payload)
+    /// <param name="keyStrings">The shared key strings of the store that keeps the records (its
+    /// <see cref="KeyStrings"/>), so each record holds the strings the node already holds for its keys. Null
+    /// for a caller that does not keep the records.</param>
+    public static IEnumerable<TransactionRecord> ReadRecords(Stream payload, SharedKeyStrings? keyStrings = null)
     {
         CodedInputStream input = new(payload, leaveOpen: true);
 
@@ -933,7 +989,7 @@ internal sealed class TransactionRecordStore
 
             TransactionRecordSnapshotEntry entry = new();
             input.ReadMessage(entry);
-            yield return FromSnapshotEntry(entry);
+            yield return FromSnapshotEntry(entry, keyStrings);
         }
     }
 
@@ -999,11 +1055,16 @@ internal sealed class TransactionRecordStore
         }
     }
 
-    private static TransactionRecord FromSnapshotEntry(TransactionRecordSnapshotEntry e)
+    private static TransactionRecord FromSnapshotEntry(TransactionRecordSnapshotEntry e, SharedKeyStrings? keyStrings)
     {
-        List<TransactionParticipantRef> participants = new(e.Participants.Count);
-        foreach (TransactionParticipantRefMessage p in e.Participants)
-            participants.Add(new TransactionParticipantRef(p.Key, (KeyValueDurability)p.Durability));
+        TransactionParticipantRef[] participants = DecodeParticipants(e.Participants, keyStrings);
+
+        TransactionDecision decision = e.Decision switch
+        {
+            TransactionDecisionMessage.TransactionDecisionCommit => TransactionDecision.Commit,
+            TransactionDecisionMessage.TransactionDecisionAbort => TransactionDecision.Abort,
+            _ => TransactionDecision.Undecided
+        };
 
         List<HLCTimestamp>? rejected = null;
         if (e.RejectedBundledCommits.Count > 0)
@@ -1015,16 +1076,15 @@ internal sealed class TransactionRecordStore
 
         return new TransactionRecord(
             new HLCTimestamp(e.TransactionIdNode, e.TransactionIdPhysical, e.TransactionIdCounter),
-            e.Epoch, e.CoordinatorKey, e.RecordAnchorKey,
+            e.Epoch,
+            // A decided record keeps no coordinator key (see TransactionRecordStateMachine). A snapshot that a
+            // version before that rule wrote still carries one.
+            decision == TransactionDecision.Undecided ? e.CoordinatorKey : string.Empty,
+            Shared(keyStrings, e.RecordAnchorKey),
             new HLCTimestamp(e.CommitTimestampNode, e.CommitTimestampPhysical, e.CommitTimestampCounter),
             new HLCTimestamp(e.DecisionDeadlineNode, e.DecisionDeadlinePhysical, e.DecisionDeadlineCounter),
             e.ManifestHash, participants, e.ManifestPresent,
-            e.Decision switch
-            {
-                TransactionDecisionMessage.TransactionDecisionCommit => TransactionDecision.Commit,
-                TransactionDecisionMessage.TransactionDecisionAbort => TransactionDecision.Abort,
-                _ => TransactionDecision.Undecided
-            },
+            decision,
             (TransactionAbortClass)e.AbortClass,
             new HLCTimestamp(e.WinningOpIdNode, e.WinningOpIdPhysical, e.WinningOpIdCounter),
             new HLCTimestamp(e.CreatedAtNode, e.CreatedAtPhysical, e.CreatedAtCounter),

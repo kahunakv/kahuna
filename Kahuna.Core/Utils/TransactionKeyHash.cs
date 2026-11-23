@@ -16,10 +16,15 @@ internal static class TransactionKeyHash
     /// part of the string hash. The combine methods of <see cref="HashCode"/> give the same quality for
     /// several times the cost of this fold.
     /// </summary>
-    public static int Combine(string key, HLCTimestamp transactionId, long epoch = 0)
-    {
-        uint hash = (uint)key.GetHashCode();
+    public static int Combine(string key, HLCTimestamp transactionId, long epoch = 0) =>
+        Fold((uint)key.GetHashCode(), transactionId, epoch);
 
+    /// <summary>The hash of the identity of a transaction alone, for a key with no string: the key of a
+    /// transaction record.</summary>
+    public static int Combine(HLCTimestamp transactionId, long epoch) => Fold(0x9747B28Cu, transactionId, epoch);
+
+    private static int Fold(uint hash, HLCTimestamp transactionId, long epoch)
+    {
         hash = (hash ^ (uint)transactionId.L) * 0x9E3779B1u;
         hash = (hash ^ (uint)(transactionId.L >> 32) ^ transactionId.C) * 0x85EBCA6Bu;
         hash = (hash ^ (uint)transactionId.N ^ (uint)epoch ^ (uint)(epoch >> 32)) * 0xC2B2AE35u;
