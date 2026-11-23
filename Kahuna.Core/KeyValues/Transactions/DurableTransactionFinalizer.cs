@@ -531,6 +531,8 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     /// ran on the one-phase path. A floor at or above the frozen commit timestamp refuses the attempt before the
     /// bundle is proposed, with <see cref="DurableFinalizeOutcome.CommitFloor"/> set, so the coordinator freezes
     /// the commit again above it.</param>
+    /// <param name="timeline">The stage clock of the commit call this attempt runs for, or null when the call is
+    /// not timed or the attempt is not a commit call's.</param>
     public async Task<DurableFinalizeOutcome> FinalizeAsync(
         DurableFinalizeInput input,
         Func<CancellationToken, Task<TransactionAbortClass>> validateReadSet,
@@ -540,9 +542,12 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         bool applyTimeValidation = false,
         IReadOnlyList<BundledReadDependency>? bundledReadDependencies = null,
         Func<long>? bundledExclusionTerm = null,
-        Func<HLCTimestamp>? claimedCommitFloor = null)
+        Func<HLCTimestamp>? claimedCommitFloor = null,
+        CommitCallTimeline? timeline = null)
     {
         long startTicks = Stopwatch.GetTimestamp();
+
+        timeline?.Enter(CommitCallStage.Preflight, startTicks);
 
         // Test-only interleaving point; see TestAfterPreValidationHook. Read once so a concurrent
         // clear cannot fault the invocation below.
@@ -577,9 +582,11 @@ internal sealed class DurableTransactionFinalizer : IDisposable
                     // The abort is driven through the record CAS (a tombstone from absence when nothing durable
                     // exists yet), never fabricated: a prior attempt of this same frozen input may have left a
                     // decision proposal in flight, and only a record-backed abort fences it out.
+                    timeline?.Enter(CommitCallStage.Decision);
                     DurableFinalizeOutcome conflictOutcome = await DecideAsync(
                         input, commit: false, TransactionAbortClass.Conflict, opId, cancellationToken,
                         CommitRefusalClass.StagedBaseMoved, "A validated base moved before the prepare was durable").ConfigureAwait(false);
+                    timeline?.Enter(CommitCallStage.Resolution);
                     await FinishResolutionAsync(input, conflictOutcome, cancellationToken).ConfigureAwait(false);
                     return conflictOutcome;
                 }
@@ -594,6 +601,8 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         // staged-base fence exists to catch, which no external caller can time deterministically.
         if (afterPreValidationHook is not null)
             await afterPreValidationHook(cancellationToken).ConfigureAwait(false);
+
+        timeline?.Enter(CommitCallStage.Encode);
 
         // ── Initialize the canonical record (Undecided) on the anchor partition ──
         byte[] initDelta = TransactionRecordStore.SerializeDelta([new InitializeTransactionCommand(
@@ -670,11 +679,16 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
         if (gate == OnePhaseGateOutcome.Entered)
         {
+            if (timeline is not null)
+                timeline.Path = CommitCallPath.OnePhase;
+
             (DurableFinalizeOutcome? onePhase, OnePhaseFallbackReason fallback) = await TryOnePhaseFinalizeAsync(
-                input, initDelta, prepareDeltas[0], validateReadSet, opId, applyTimeValidation, bundledReadDependencies, bundledExclusionTerm, claimedCommitFloor, cancellationToken).ConfigureAwait(false);
+                input, initDelta, prepareDeltas[0], validateReadSet, opId, applyTimeValidation, bundledReadDependencies, bundledExclusionTerm, claimedCommitFloor, timeline, cancellationToken).ConfigureAwait(false);
 
             if (onePhase is { } fastOutcome)
             {
+                timeline?.Enter(CommitCallStage.Resolution);
+
                 recordDecisionLatencyMs?.Invoke(Stopwatch.GetElapsedTime(startTicks).TotalMilliseconds, input.Manifest.Count);
                 await FinishResolutionAsync(input, fastOutcome, cancellationToken).ConfigureAwait(false);
                 return fastOutcome;
@@ -682,6 +696,12 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
             DurableTransactionMetrics.OnePhaseFellBack(fallback);
             prepareStageStart = Stopwatch.GetTimestamp();
+        }
+
+        if (timeline is not null)
+        {
+            timeline.Path = CommitCallPath.TwoPhase;
+            timeline.Enter(CommitCallStage.Prepare);
         }
 
         // ── Claim the staged intents, before the first proposal ──
@@ -1055,6 +1075,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         // same truthful conflict a failed validation is — ordered ahead of the decision, where the detached
         // stale-base veto carrying the same verdict used to race the commit and lose.
         long validateStart = Stopwatch.GetTimestamp();
+        timeline?.Enter(CommitCallStage.Validate, validateStart);
         TransactionAbortClass validation = TransactionAbortClass.None;
         if (allPrepared)
         {
@@ -1082,6 +1103,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             await afterReadSetValidationHook(cancellationToken).ConfigureAwait(false);
 
         long decisionStart = Stopwatch.GetTimestamp();
+        timeline?.Enter(CommitCallStage.Decision, decisionStart);
         DurableFinalizeOutcome outcome;
         if (identitySettled || recordDecided)
         {
@@ -1170,6 +1192,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             outcome = await DecideAsync(input, commit: false, abortClass, opId, cancellationToken, refusal, reason).ConfigureAwait(false);
         }
         DurableTransactionMetrics.FinalizeDecisionMs.Record(Stopwatch.GetElapsedTime(decisionStart).TotalMilliseconds);
+        timeline?.Enter(CommitCallStage.Resolution);
 
         // Record the latency up to the decision only — resolution below is excluded so it never inflates the
         // deadline window that a future finalize's prepare must fit inside.
@@ -1466,12 +1489,14 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         IReadOnlyList<BundledReadDependency>? bundledReadDependencies,
         Func<long>? bundledExclusionTerm,
         Func<HLCTimestamp>? claimedCommitFloor,
+        CommitCallTimeline? timeline,
         CancellationToken cancellationToken)
     {
         // Every admitted attempt records its pre-submission wall time exactly once: at a pre-propose exit
         // (route local — nothing left this node), or after the propose answers (the reply's leader-measured
         // bundle round subtracted, so the forwarded route's wire time lands on the pre-bundle side).
         long attemptStart = Stopwatch.GetTimestamp();
+        timeline?.Enter(CommitCallStage.Attempt, attemptStart);
 
         DurablePartitionPrepare partition = input.Partitions[0];
 
@@ -1556,6 +1581,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
                     // Recorded before the abort's decide round, so that round is never folded into the
                     // pre-submission time of a bundle that was never proposed.
                     DurableTransactionMetrics.OnePhasePreBundle(Stopwatch.GetElapsedTime(attemptStart).TotalMilliseconds, forwarded: false);
+                    timeline?.Enter(CommitCallStage.Decision);
                     return (await DecideAsync(input, commit: false, TransactionAbortClass.Conflict, opId, cancellationToken,
                         CommitRefusalClass.StagedBaseMoved, "A validated base moved before the bundle was proposed").ConfigureAwait(false), OnePhaseFallbackReason.None);
 
@@ -1619,7 +1645,9 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         // wire directions of a forward — is pre-submission time on the route the reply names. A reply without a
         // measured round (never enqueued, or an older remote leader without the field) records no bundle sample:
         // the whole span is honest pre-submission time rather than a fabricated zero-length round.
-        double attemptMs = Stopwatch.GetElapsedTime(attemptStart).TotalMilliseconds;
+        long repliedAt = Stopwatch.GetTimestamp();
+        timeline?.Enter(CommitCallStage.Apply, repliedAt);
+        double attemptMs = Stopwatch.GetElapsedTime(attemptStart, repliedAt).TotalMilliseconds;
         if (proposed is { BundleMs: > 0 } measured)
         {
             DurableTransactionMetrics.OnePhaseBundleMs.Record(measured.BundleMs);
@@ -1660,6 +1688,9 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
         if (reply.Decision == TransactionDecision.Undecided)
         {
+            // The arms below that abort or conclude the transaction run a record transition of their own.
+            timeline?.Enter(CommitCallStage.Decision);
+
             // The bundled commit gate withheld the commit, or the deadline gate did. The leader that applied
             // the batch recorded the gate's verdict for this attempt and the reply carries it. A stale base or
             // read is deterministic and final — heads only advance, and the transaction only grows older

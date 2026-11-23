@@ -102,6 +102,9 @@ internal sealed partial class TransactionCoordinator : IDisposable
     /// <summary>Signaled when the node begins to shut down; ends the detached retry of a commit's lock releases.</summary>
     private readonly CancellationToken shutdown;
 
+    /// <summary>Times this node's commit calls and splits them into stages.</summary>
+    internal CommitCallTelemetry CommitCalls { get; } = new();
+
     /// <summary>First delay of the detached retry of unacknowledged lock releases; doubles each attempt up to
     /// <see cref="LockReleaseRetryMaxDelayMs"/>.</summary>
     internal const int LockReleaseRetryInitialDelayMs = 50;
@@ -273,5 +276,6 @@ internal sealed partial class TransactionCoordinator : IDisposable
         try { deferredResolutionCts.Cancel(); } catch (ObjectDisposedException) { /* already disposed */ }
         deferredResolutionCts.Dispose();
         durableFinalizer?.Dispose();
+        CommitCalls.Dispose();
     }
 }

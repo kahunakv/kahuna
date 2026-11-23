@@ -299,6 +299,8 @@ internal sealed partial class TransactionCoordinator
 
             if (pastDeadline || movedKey is not null)
             {
+                context.CommitTimeline?.Enter(CommitCallStage.Decision);
+
                 (DurableFinalizeOutcome fenced, bool fenceRan) = await FenceUnresolvedDurableFinalize(input, opId, cancellationToken).ConfigureAwait(false);
 
                 if (pastDeadline)
@@ -418,7 +420,8 @@ internal sealed partial class TransactionCoordinator
                         applyTimeValidation: eligibility.ApplyTimeValidation,
                         bundledReadDependencies: eligibility.OnPartitionReadDependencies,
                         bundledExclusionTerm: () => AnchorExclusionTerm(context, input.AnchorPartitionId),
-                        claimedCommitFloor: () => context.ClaimedCommitFloor).ConfigureAwait(false);
+                        claimedCommitFloor: () => context.ClaimedCommitFloor,
+                        timeline: context.CommitTimeline).ConfigureAwait(false);
                 }
                 catch (Exception)
                 {
@@ -427,6 +430,8 @@ internal sealed partial class TransactionCoordinator
                     // post-decision failure from telling the caller to replay a transaction that committed.
                     outcome = ClassifyFromCanonicalRecord(input);
                 }
+
+                context.CommitTimeline?.Enter(CommitCallStage.Answer);
 
                 if (outcome.CommitFloor.IsNull())
                     break;
@@ -445,6 +450,8 @@ internal sealed partial class TransactionCoordinator
                         input.TransactionId, outcome.CommitFloor, input.CommitTimestamp, !frozenHere, refreeze);
                     break;
                 }
+
+                context.CommitTimeline?.Enter(CommitCallStage.Freeze);
 
                 context.RaiseClaimedCommitFloor(outcome.CommitFloor);
                 context.UnresolvedDurableFinalize = null;

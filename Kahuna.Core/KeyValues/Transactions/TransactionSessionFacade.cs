@@ -196,6 +196,15 @@ internal sealed class TransactionSessionFacade
     }
 
     /// <summary>
+    /// As <see cref="CommitTransaction(TransactionHandle)"/>, for a call whose stage clock the routed entry point
+    /// opened. A null clock means the call is not timed.
+    /// </summary>
+    internal Task<TransactionCommitAnswer> CommitTransaction(TransactionHandle handle, CommitCallTimeline? timeline)
+    {
+        return txCoordinator.CommitTransaction(handle, timeline);
+    }
+
+    /// <summary>
     /// Rolls back the transaction identified by <paramref name="handle"/>.
     /// </summary>
     /// <param name="handle">The handle returned by <see cref="StartTransaction"/>.</param>

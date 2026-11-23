@@ -233,14 +233,16 @@ internal sealed class LocatorTransactionOperations
         if (handle.IsEmpty)
             return new TransactionCommitAnswer(KeyValueResponseType.Errored, null, CommitRefusalClass.UnknownTransaction, "The transaction handle is empty");
 
+        CommitCallTimeline? timeline = BeginCommitCall();
+
         // The session's owner serves it, whoever leads the coordinator partition now.
         if (OwnsSession(handle.TransactionId))
-            return await manager.CommitTransaction(handle);
+            return await manager.CommitTransaction(handle, timeline);
 
         // A commit of a session this node does not own is not taken on while the node stops: the sender
         // resolves the owner, or the record, through a node whose leadership view is live.
         if (routing.RefusesWhileStopping())
-            return new TransactionCommitAnswer(KeyValueResponseType.MustRetry, null, CommitRefusalClass.Unresolved, "The node is shutting down");
+            return Answered(timeline, CommitCallPath.None, new TransactionCommitAnswer(KeyValueResponseType.MustRetry, null, CommitRefusalClass.Unresolved, "The node is shutting down"));
 
         int partitionId = LocateCoordinator(handle.CoordinatorKey);
 
@@ -255,19 +257,35 @@ internal sealed class LocatorTransactionOperations
                     peer => interNodeCommunication.CommitTransaction(peer, handle, cancellationToken), r => r.Type, cancellationToken);
 
                 if (served is { } answer)
-                    return answer;
+                    return Answered(timeline, CommitCallPath.Forwarded, answer);
             }
 
-            return await manager.CommitTransaction(handle);
+            return await manager.CommitTransaction(handle, timeline);
         }
 
         string? leader = await routing.TryWaitForLeader(partitionId, cancellationToken);
         if (leader is null || leader == raft.GetLocalEndpoint())
-            return new TransactionCommitAnswer(KeyValueResponseType.MustRetry, null, CommitRefusalClass.Unresolved, "No leader is known for the coordinator partition");
+            return Answered(timeline, CommitCallPath.None, new TransactionCommitAnswer(KeyValueResponseType.MustRetry, null, CommitRefusalClass.Unresolved, "No leader is known for the coordinator partition"));
 
         logger.LogCommitTransactionRedirected(handle.CoordinatorKey, partitionId, leader);
 
-        return await interNodeCommunication.CommitTransaction(leader, handle, cancellationToken);
+        return Answered(timeline, CommitCallPath.Forwarded, await interNodeCommunication.CommitTransaction(leader, handle, cancellationToken));
+    }
+
+    /// <summary>Opens the stage clock of a commit call that enters this node, or returns null when it is not timed.</summary>
+    private CommitCallTimeline? BeginCommitCall() => manager?.Coordinator?.CommitCalls.Begin();
+
+    /// <summary>Ends the stage clock of a commit call that this node's coordinator did not serve, and returns its
+    /// answer. The whole call is in its route stage.</summary>
+    private static TransactionCommitAnswer Answered(CommitCallTimeline? timeline, CommitCallPath path, TransactionCommitAnswer answer)
+    {
+        if (timeline is not null)
+        {
+            timeline.Path = path;
+            timeline.Complete(answer.Type);
+        }
+
+        return answer;
     }
 
     /// <summary>

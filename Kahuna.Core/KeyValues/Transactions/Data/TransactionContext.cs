@@ -189,6 +189,13 @@ internal class TransactionContext
     internal HLCTimestamp DurableCommitTimestamp { get; set; }
 
     /// <summary>
+    /// The stage clock of the commit call that owns the session's finalize slot. Null when no listener reads the
+    /// commit call metrics, and for every finalize that is not a commit call: a rollback, the reaper, a script.
+    /// Accessed only while holding the finalize slot.
+    /// </summary>
+    internal CommitCallTimeline? CommitTimeline { get; set; }
+
+    /// <summary>
     /// The highest commit floor the commit-time probe reported over this transaction's staged intents: the
     /// highest snapshot timestamp a read was served the committed head at over one of them while the commit could
     /// still be moved (<see cref="KeyValueWriteIntent.CommitFloor"/>). The durable commit timestamp must be

@@ -450,6 +450,10 @@ internal sealed partial class KeyValuesManager
     public Task<TransactionCommitAnswer> CommitTransaction(TransactionHandle handle) =>
         transactionSessions.CommitTransaction(handle);
 
+    /// <summary>The local commit of a call whose stage clock the routed entry point opened.</summary>
+    internal Task<TransactionCommitAnswer> CommitTransaction(TransactionHandle handle, CommitCallTimeline? timeline) =>
+        transactionSessions.CommitTransaction(handle, timeline);
+
     public Task<KeyValueResponseType> RollbackTransaction(TransactionHandle handle) =>
         transactionSessions.RollbackTransaction(handle);
 

@@ -25,8 +25,16 @@ internal sealed partial class TransactionCoordinator
     /// </summary>
     internal async Task TwoPhaseCommit(TransactionContext context, CancellationToken cancellationToken)
     {
+        CommitCallTimeline? timeline = context.CommitTimeline;
+
         if (context.ModifiedKeys is null || context.ModifiedKeys.Count == 0)
         {
+            if (timeline is not null)
+            {
+                timeline.Path = CommitCallPath.ReadOnly;
+                timeline.Enter(CommitCallStage.Validate);
+            }
+
             // A read-only transaction must still prove its reads form one consistent cut. Each read saw the latest
             // commit at a different moment, so a commit between two reads gives a view no serial order explains.
             // The concurrent-writer probe runs first: it sees an undecided foreign intent, which the revision
@@ -117,6 +125,8 @@ internal sealed partial class TransactionCoordinator
                 return;
             }
 
+            timeline?.Enter(CommitCallStage.Ephemeral);
+
             // Mixed transaction. Prepare the ephemeral keys first, so their failure aborts everything before a
             // persistent decision exists. Then the durable decision drives the ephemeral commit.
             (bool ephemeralOk, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)>? ephemeralMutations) =
@@ -134,7 +144,11 @@ internal sealed partial class TransactionCoordinator
                 return; // context.Result already set to Aborted by PrepareMutations
             }
 
+            timeline?.Enter(CommitCallStage.Freeze);
+
             DurableFinalizeResult durableResult = await DurableFinalize(context, persistentKeys, durableInput!, durableOpId, cancellationToken).ConfigureAwait(false);
+
+            timeline?.Enter(CommitCallStage.Ephemeral);
 
             // The durable decision is the outcome. On commit, apply the ephemeral writes (the persistent commit
             // stands either way); otherwise discard them.
@@ -157,8 +171,16 @@ internal sealed partial class TransactionCoordinator
         }
 
         {
+            if (timeline is not null)
+            {
+                timeline.Path = CommitCallPath.Ephemeral;
+                timeline.Enter(CommitCallStage.Validate);
+            }
+
             if (!await ValidateReadSet(context, cancellationToken))
                 return;
+
+            timeline?.Enter(CommitCallStage.Ephemeral);
 
             // One ephemeral key led by this node: prepare, range-lock probe and commit go to one actor, so run
             // them as one turn. Otherwise send the three messages.

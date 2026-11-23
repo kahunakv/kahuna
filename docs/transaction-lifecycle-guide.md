@@ -521,6 +521,65 @@ replica that settled the intent, keys served from there. Containment then has th
 (a requested whole-partition install from the leader), which replaces its intent slice with the peers'
 settled state: the holds drop to zero when the gate lifts.
 
+### 6.8 Commit call timing
+
+A node times each commit call of an interactive transaction, from its entry into
+`LocateAndCommitTransaction` (or the local `CommitTransaction`) to its answer. A script commits inside its own
+execution and is not recorded here.
+
+| Instrument | Kind | Tags | Content |
+|---|---|---|---|
+| `kahuna.transactions.commit_call_ms` | histogram | `path`, `outcome` | Wall time of the call. One sample for each call that answers. |
+| `kahuna.transactions.commit_stage_ms` | observable counter | `stage`, `path` | Total time the calls spent in each stage since the node started. A pair that no call has used is not reported. |
+
+A call is in exactly one stage at any moment, so its stages add up to it. For one path, over one interval:
+
+- The increase of `commit_stage_ms`, summed over `stage`, equals the increase of the sum of `commit_call_ms`,
+  summed over `outcome`.
+- The increase of `commit_stage_ms` for one stage, divided by the increase of the count of `commit_call_ms`, is
+  the mean of that stage. The stage series has no distribution.
+
+| Stage | Content |
+|---|---|
+| `route` | From the entry of the call to the coordinator: the check for the session's owner and, for a session this node does not hold, the leadership check, the probe of the peers and the forward |
+| `session` | The session lookup and the finalize slot. A call that does not own the finalize spends its time here |
+| `drain` | The wait for the operations of the session that are still in flight |
+| `freeze` | The checks before the commit, the pin of a yielding transaction's intents, the commit timestamp, the build of the finalize input, the admission gates and the one-phase eligibility |
+| `preflight` | The staged-base validation before the first proposal (`finalize_preflight_ms`) |
+| `encode` | The serialization of the record init and of the prepares, and the one-phase gate |
+| `attempt` | The one-phase attempt: `one_phase_pre_bundle_ms` plus `one_phase_bundle_ms` |
+| `apply` | After the reply of the bundle: the verdict, and the apply of the committed values on the leader |
+| `prepare` | Two-phase: the claim of the staged intents, the prepare barrier and its retries |
+| `validate` | The commit-time checks of the two-phase, read-only and ephemeral paths. The one-phase path runs its checks inside `attempt` |
+| `decision` | A terminal transition of the record on its own round: the two-phase decision, an abort driven through the record, or the fence of an earlier attempt |
+| `resolution` | The hand-off of the resolution to the background, or the whole resolution when deferred settlement is off |
+| `ephemeral` | The in-memory prepare, probe, commit and rollback of ephemeral keys |
+| `release` | The release of the transaction's locks and read snapshots. With `AsyncRelease` the part after its first wait is outside the call |
+| `answer` | The outcome on the session, the retained outcome, the end of the session and the publication to the callers that wait for it |
+
+| Path | Content |
+|---|---|
+| `one_phase` | The one-phase attempt gave the outcome |
+| `two_phase` | The two-phase flow gave the outcome. Its `attempt` stage has time when a one-phase attempt fell back |
+| `ephemeral` | Every written key is ephemeral |
+| `read_only` | The transaction wrote nothing |
+| `mirrored` | Another call owned the finalize and this one answered its outcome |
+| `replayed` | The session was gone, and the answer came from the retained outcome or the durable record |
+| `forwarded` | Another node served the call. That node records it too, so exclude this path to count commits across a cluster. The time of a forwarded call contains the hop and the time of the serving node |
+| `none` | The call ended before a path was chosen: a drain that timed out, a refusal by a check or an admission gate, a fence of an earlier attempt, or a session that is being reaped |
+
+`outcome` is `committed`, `aborted`, `rolled_back`, `must_retry` or `errored`. A finalize that throws keeps its
+time in the stage it threw in.
+
+The existing histograms split some stages further: `finalize_validate_ms`, `finalize_first_prepare_ms`,
+`finalize_decision_replicate_ms` and, for the wait of the bundle in the write aggregator,
+`kahuna.kv.write.submission_queue_delay`. `finalize_prepare_ms` starts at the entry of the finalize, so without a
+one-phase attempt it also contains `preflight` and `encode`.
+
+A call reads the clock once at each stage boundary and records one histogram sample. The stages add to totals
+that a listener reads when it collects, so they cost no listener callback for each commit. With no listener on
+either instrument the call opens no clock.
+
 ---
 
 ## 7. The partition write aggregator
@@ -754,6 +813,7 @@ Observability: `kahuna.durable_tx.resident_prepared_intents`, `…resident_prepa
 `…late_commit_conclusions{outcome}`, `…retries_past_deadline{outcome}`, `…deadline_extensions{outcome}`,
 `…prepare_retry_loops{outcome}`,
 `…replica_fence_lagging_replicas`, `…replica_fence_lag_transitions{state,reason}`, `…replica_fence_lagging_asks{kind}`.
+The time of a commit call and its stages are in §6.8.
 
 ---
 
@@ -767,6 +827,7 @@ Observability: `kahuna.durable_tx.resident_prepared_intents`, `…resident_prepa
 | Per-key state | `KeyValues/KeyValueActor.cs`, `KeyValues/Handlers/` |
 | Script execution | `KeyValues/Transactions/ScriptTransactionExecutor.cs`, `ScriptParser/` |
 | Coordination / 2PC | `KeyValues/Transactions/TransactionCoordinator.cs`, `DurableTransactionFinalizer.cs`, `DurableFinalizeInputBuilder.cs` |
+| Commit call timing | `KeyValues/Transactions/CommitCallTelemetry.cs`, `CommitCallTimeline.cs`, `CommitCallStage.cs` |
 | Durable stores | `Transactions/TransactionRecordStore.cs`, `PreparedIntentStore.cs` (+ their state machines) |
 | Deferred-window visibility | `Handlers/DurableReadVisibility.cs`, `PreparedIntentVisibility.cs`, `ForeignIntentWriteResolver.cs` |
 | Recovery | `Transactions/DurableTransactionRecovery.cs` |

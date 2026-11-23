@@ -1245,6 +1245,228 @@ public sealed class TestDurableTransactionFinalizer
         Assert.Contains(capture.Samples("kahuna.durable_tx.one_phase_pre_bundle_ms", "forwarded"), s => s >= 50);
     }
 
+    // ── commit call stages ───────────────────────────────────────────────────────
+
+    /// <summary>A delay long enough to be the largest part of any finalize of these tests.</summary>
+    private const int StageHoldMs = 250;
+
+    /// <summary>The least time a stage that contains the delay must show.</summary>
+    private const double StageHeldMs = StageHoldMs * 0.8;
+
+    private static CommitCallStage LargestStage(CommitCallTelemetry calls, CommitCallPath path) =>
+        Enum.GetValues<CommitCallStage>().MaxBy(stage => calls.StageMilliseconds(path, stage));
+
+    private static void AssertHeldIn(CommitCallTelemetry calls, CommitCallPath path, CommitCallStage stage)
+    {
+        Assert.Equal(1, calls.Calls(path));
+        Assert.True(calls.StageMilliseconds(path, stage) >= StageHeldMs, $"stage {stage} took {calls.StageMilliseconds(path, stage)} ms");
+        Assert.Equal(stage, LargestStage(calls, path));
+    }
+
+    /// <summary>
+    /// Each step of a one-phase finalize is charged to its own stage: the staged-base validation to the preflight,
+    /// the commit-time checks and the bundle to the attempt, the first leader-local apply to the apply, and the
+    /// resolution, when it runs inline, to the resolution.
+    /// </summary>
+    [Theory]
+    [InlineData("staged_bases", "preflight")]
+    [InlineData("checks", "attempt")]
+    [InlineData("bundle", "attempt")]
+    [InlineData("apply", "apply")]
+    [InlineData("resolve", "resolution")]
+    public async Task OnePhaseStages_ChargeEachStepToItsStage(string heldStep, string expectedStage)
+    {
+        (TransactionRecordStore records, PreparedIntentStore intents) = StoresWithProbe();
+        Seam seam = new() { Records = records, Intents = intents };
+        DurableTransactionFinalizer.ReplicateOnePhaseBundleDelegate apply = OnePhase(records, intents);
+
+        Task Hold(string step) => step == heldStep ? Task.Delay(StageHoldMs) : Task.CompletedTask;
+
+        int stagedBaseCalls = 0, applies = 0;
+        using DurableTransactionFinalizer finalizer = new(
+            records, intents, seam.Replicate,
+            applyCommitLocally: async (_, _) =>
+            {
+                // The first apply is the attempt's own, before the finalize returns; the resolution applies again.
+                await Hold(Interlocked.Increment(ref applies) == 1 ? "apply" : "resolve");
+                return true;
+            },
+            replicateOnePhaseBundle: async (partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, ct) =>
+            {
+                await Hold("bundle");
+                return await apply(partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, ct);
+            },
+            validateStagedBases: async (_, _) =>
+            {
+                // The second call is the attempt's late re-validation.
+                if (Interlocked.Increment(ref stagedBaseCalls) == 1)
+                    await Hold("staged_bases");
+
+                return StagedBaseValidation.Valid;
+            });
+
+        using CommitCallTelemetry calls = new();
+        CommitCallTimeline timeline = new(calls, Stopwatch.GetTimestamp());
+
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(Ts(1000), 1, (5, "acct/1")),
+            async _ => { await Hold("checks"); return TransactionAbortClass.None; },
+            opId: Ts(2000), CancellationToken.None, timeline: timeline);
+        timeline.Complete(KeyValueResponseType.Committed);
+
+        Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+        AssertHeldIn(calls, CommitCallPath.OnePhase, Enum.GetValues<CommitCallStage>().Single(s => CommitCallTelemetry.StageName(s) == expectedStage));
+    }
+
+    /// <summary>
+    /// Each step of a two-phase finalize is charged to its own stage: the claim and the prepares to the prepare, the
+    /// commit-time checks to the validate, the terminal transition to the decision, and the inline resolution to the
+    /// resolution.
+    /// </summary>
+    [Theory]
+    [InlineData("claim", "prepare")]
+    [InlineData("prepare", "prepare")]
+    [InlineData("checks", "validate")]
+    [InlineData("decision", "decision")]
+    [InlineData("resolve", "resolution")]
+    public async Task TwoPhaseStages_ChargeEachStepToItsStage(string heldStep, string expectedStage)
+    {
+        TransactionRecordStore records = new();
+        PreparedIntentStore intents = new();
+        Seam seam = new() { Records = records, Intents = intents };
+
+        Task Hold(string step) => step == heldStep ? Task.Delay(StageHoldMs) : Task.CompletedTask;
+
+        using DurableTransactionFinalizer finalizer = new(
+            records, intents,
+            async (partitionId, logType, data, admissionClass, stage, ct) =>
+            {
+                await Hold(stage switch
+                {
+                    WriteSubmissionStage.Prepare => "prepare",
+                    WriteSubmissionStage.Decision => "decision",
+                    _ => ""
+                });
+                return await seam.Replicate(partitionId, logType, data, admissionClass, stage, ct);
+            },
+            applyCommitLocally: async (_, _) => { await Hold("resolve"); return true; },
+            claimStagedIntents: async (_, _) =>
+            {
+                await Hold("claim");
+                return new StagedIntentClaim(StagedIntentClaimOutcome.Held, HLCTimestamp.Zero, null);
+            });
+
+        using CommitCallTelemetry calls = new();
+        CommitCallTimeline timeline = new(calls, Stopwatch.GetTimestamp());
+
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(Ts(1000), 1, (5, "acct/1")),
+            async _ => { await Hold("checks"); return TransactionAbortClass.None; },
+            opId: Ts(2000), CancellationToken.None, timeline: timeline);
+        timeline.Complete(KeyValueResponseType.Committed);
+
+        Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+        AssertHeldIn(calls, CommitCallPath.TwoPhase, Enum.GetValues<CommitCallStage>().Single(s => CommitCallTelemetry.StageName(s) == expectedStage));
+    }
+
+    /// <summary>A one-phase attempt that falls back keeps its time in the attempt, and the call is a two-phase call.</summary>
+    [Fact]
+    public async Task AFallback_KeepsTheAttemptAsAStageOfTheTwoPhaseCall()
+    {
+        (TransactionRecordStore records, PreparedIntentStore intents) = StoresWithProbe();
+        Seam seam = new() { Records = records, Intents = intents };
+
+        using DurableTransactionFinalizer finalizer = new(
+            records, intents, seam.Replicate,
+            replicateOnePhaseBundle: (_, _, _, _, _, _, _, _, _, _) => Task.FromResult<DurableOnePhaseReply?>(null));
+
+        int checks = 0;
+        using CommitCallTelemetry calls = new();
+        CommitCallTimeline timeline = new(calls, Stopwatch.GetTimestamp());
+
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(Ts(1000), 1, (5, "acct/1")),
+            async _ =>
+            {
+                if (Interlocked.Increment(ref checks) == 1)
+                    await Task.Delay(StageHoldMs);
+
+                return TransactionAbortClass.None;
+            },
+            opId: Ts(2000), CancellationToken.None, timeline: timeline);
+        timeline.Complete(KeyValueResponseType.Committed);
+
+        Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+        Assert.Equal(0, calls.Calls(CommitCallPath.OnePhase));
+        AssertHeldIn(calls, CommitCallPath.TwoPhase, CommitCallStage.Attempt);
+        Assert.True(calls.StageMilliseconds(CommitCallPath.TwoPhase, CommitCallStage.Prepare) > 0);
+        Assert.True(calls.StageMilliseconds(CommitCallPath.TwoPhase, CommitCallStage.Decision) > 0);
+    }
+
+    /// <summary>An abort driven through the record is charged to the decision, also when it follows a refusal of the
+    /// preflight, of the validation before the bundle or of the bundled commit, and not a prepare.</summary>
+    [Theory]
+    [InlineData("preflight")]
+    [InlineData("before_bundle")]
+    [InlineData("bundled_commit")]
+    public async Task AnAbortThroughTheRecord_IsChargedToTheDecision(string refusedAt)
+    {
+        int stagedBaseCalls = 0;
+        (TransactionRecordStore records, PreparedIntentStore intents) = StoresWithProbe();
+        Seam seam = new()
+        {
+            Records = records,
+            Intents = intents,
+            DelayMs = static (_, logType) => logType == ReplicationTypes.TransactionRecord ? StageHoldMs : 0
+        };
+
+        using DurableTransactionFinalizer finalizer = new(
+            records, intents, seam.Replicate,
+            replicateOnePhaseBundle: (_, _, _, _, _, _, _, _, _, _) => Task.FromResult<DurableOnePhaseReply?>(new(
+                true, true, PrepareRejectionKind.None, true, TransactionDecision.Undecided, TransactionAbortClass.None, BundledCommitVerdict.StaleBase)),
+            validateStagedBases: (_, _) => Task.FromResult(
+                (Interlocked.Increment(ref stagedBaseCalls), refusedAt) is (1, "preflight") or (2, "before_bundle")
+                    ? StagedBaseValidation.Conflict
+                    : StagedBaseValidation.Valid));
+
+        using CommitCallTelemetry calls = new();
+        CommitCallTimeline timeline = new(calls, Stopwatch.GetTimestamp());
+
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(Ts(1000), 1, (5, "acct/1")), Validate(true), opId: Ts(2000), CancellationToken.None, timeline: timeline);
+        timeline.Complete(KeyValueResponseType.Aborted);
+
+        Assert.Equal(DurableFinalizeResult.Aborted, outcome.Result);
+        AssertHeldIn(calls, refusedAt == "preflight" ? CommitCallPath.None : CommitCallPath.OnePhase, CommitCallStage.Decision);
+    }
+
+    /// <summary>A bundle that throws leaves its time in the attempt of a one-phase call.</summary>
+    [Fact]
+    public async Task ABundleThatThrows_LeavesItsTimeInTheAttempt()
+    {
+        (TransactionRecordStore records, PreparedIntentStore intents) = StoresWithProbe();
+        Seam seam = new() { Records = records, Intents = intents };
+
+        using DurableTransactionFinalizer finalizer = new(
+            records, intents, seam.Replicate,
+            replicateOnePhaseBundle: async (_, _, _, _, _, _, _, _, _, _) =>
+            {
+                await Task.Delay(StageHoldMs);
+                throw new InvalidOperationException("injected");
+            });
+
+        using CommitCallTelemetry calls = new();
+        CommitCallTimeline timeline = new(calls, Stopwatch.GetTimestamp());
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => finalizer.FinalizeAsync(
+            Input(Ts(1000), 1, (5, "acct/1")), Validate(true), opId: Ts(2000), CancellationToken.None, timeline: timeline));
+
+        timeline.Enter(CommitCallStage.Answer);
+        timeline.Complete(KeyValueResponseType.MustRetry);
+
+        AssertHeldIn(calls, CommitCallPath.OnePhase, CommitCallStage.Attempt);
+    }
+
     /// <summary>
     /// The no-double-count contract of a fallback: an attempt that fails its up-front validation records its
     /// pre-bundle time once (route local — nothing left this node), proposes no bundle, and the 2PC prepare

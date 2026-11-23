@@ -1,5 +1,6 @@
 
 using Kahuna.Server.KeyValues;
+using Kahuna.Server.KeyValues.Transactions;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
 using Kommander;
@@ -402,12 +403,21 @@ public sealed class TestSessionOwnerRouting : BaseCluster
             (TransactionHandle handle, int partition, int owner, string dataKey, int dataLeader, int third) =
                 await BeginLockedSession(rafts, managers, key, "owner-fwd-commit-data", successorOffset: 1, ct);
 
-            await MoveLeadership(rafts, partition, owner, (owner + 1) % Nodes, ct);
+            int successor = (owner + 1) % Nodes;
+            await MoveLeadership(rafts, partition, owner, successor, ct);
+
+            using MetricCapture timed = new("path", "kahuna.transactions.commit_call_ms");
 
             (KeyValueResponseType commitType, string? _) = await RetryOnMustRetryAsync(
                 () => managers[third].LocateAndCommitTransaction(handle, ct), r => r.Type);
 
             Assert.Equal(KeyValueResponseType.Committed, commitType);
+
+            // Both nodes the commit passed through record a forwarded call: the third node sent it to the new leader,
+            // and the new leader found the owner among its peers.
+            Assert.True(managers[third].TransactionCoordinator.CommitCalls.Calls(CommitCallPath.Forwarded) >= 1);
+            Assert.True(managers[successor].TransactionCoordinator.CommitCalls.Calls(CommitCallPath.Forwarded) >= 1);
+
             Assert.False(managers[owner].TransactionCoordinator.HasSession(handle.TransactionId));
             Assert.False(await HoldsRangeLock(managers[dataLeader], dataKey, handle.TransactionId), "the committed session's range lock must be gone from the data leader");
         }

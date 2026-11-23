@@ -59,6 +59,10 @@ public static class DashboardHandlers
         "kahuna.kv.write.batch_submissions",
         "kahuna.kv.write.fill_target",
 
+        // The commit calls of interactive transactions by path and outcome, and the time they spent in each stage.
+        "kahuna.transactions.commit_call_ms",
+        "kahuna.transactions.commit_stage_ms",
+
         // The point-read path per step, and the coordinator registration hops a transaction-scoped read takes.
         "kahuna.kv.read.stage",
         "kahuna.kv.read.fallback",

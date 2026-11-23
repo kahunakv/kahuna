@@ -77,8 +77,16 @@ internal sealed partial class TransactionCoordinator
     /// The handle carries both the transaction ID (used to locate the session) and the
     /// coordinator key (used by the caller to route this request to the right node).
     /// </summary>
-    public async Task<TransactionCommitAnswer> CommitTransaction(TransactionHandle handle)
+    public Task<TransactionCommitAnswer> CommitTransaction(TransactionHandle handle) => CommitTransaction(handle, CommitCalls.Begin());
+
+    /// <summary>
+    /// As <see cref="CommitTransaction(TransactionHandle)"/>, for a call whose stage clock the routed entry point
+    /// opened. The coordinator completes the clock when it answers.
+    /// </summary>
+    internal async Task<TransactionCommitAnswer> CommitTransaction(TransactionHandle handle, CommitCallTimeline? timeline)
     {
+        timeline?.Enter(CommitCallStage.Session);
+
         // The commit may arrive by placement forwarding, but its work (staged-base validation reads, durable
         // prepare legs, the decision proposal, settlement) is new fan-out this node starts against other
         // partitions' leaders. Lift the forwarded-request loop guard so it routes; otherwise a forwarded commit
@@ -89,10 +97,13 @@ internal sealed partial class TransactionCoordinator
 
         if (!sessions.TryGetValue(transactionId, out TransactionContext? context))
         {
+            if (timeline is not null)
+                timeline.Path = CommitCallPath.Replayed;
+
             // The session is gone. Within the idempotency window, a duplicate commit replays the retained
             // terminal answer.
             if (terminalOutcomes.TryGet(transactionId, out TerminalOutcomeWindow.RetainedOutcome retained))
-                return retained.Outcome.ToAnswer();
+                return Answered(timeline, retained.Outcome.ToAnswer());
 
             // The session was evicted, restarted, or lived on a failed node, but an all-persistent transaction's
             // outcome survives as its canonical durable record on the data partition. Consult it via the anchor
@@ -101,13 +112,13 @@ internal sealed partial class TransactionCoordinator
             (bool found, KeyValueResponseType durableRecord, CommitRefusalClass durableRefusal, HLCTimestamp durableCommitTimestamp) =
                 await TryConsultDurableTransactionRecord(handle);
             if (found)
-                return new TransactionCommitAnswer(durableRecord, handle.RecordAnchorKey, durableRefusal,
+                return Answered(timeline, new TransactionCommitAnswer(durableRecord, handle.RecordAnchorKey, durableRefusal,
                     durableRefusal == CommitRefusalClass.None ? null : "Outcome consulted from the canonical record after the session was lost",
-                    durableCommitTimestamp);
+                    durableCommitTimestamp));
 
             logger.LogWarning("Trying to commit unknown transaction {TransactionId}", transactionId);
 
-            return new TransactionCommitAnswer(KeyValueResponseType.Errored, null, CommitRefusalClass.UnknownTransaction, "Unknown transaction: no session and no routable record anchor");
+            return Answered(timeline, new TransactionCommitAnswer(KeyValueResponseType.Errored, null, CommitRefusalClass.UnknownTransaction, "Unknown transaction: no session and no routable record anchor"));
         }
 
         // Serialize against a concurrent commit, rollback, or reaper on the session. The owner runs the finalize
@@ -117,13 +128,18 @@ internal sealed partial class TransactionCoordinator
         // retry mirrors the reap once it re-arms, or replays the retained outcome once the reap is terminal.
         FinalizeAdmission admission = context.EnterFinalize(out FinalizeAttempt? attempt);
         if (admission == FinalizeAdmission.Rejected)
-            return new TransactionCommitAnswer(KeyValueResponseType.MustRetry, null, CommitRefusalClass.Unresolved, "The session is being reaped between attempts");
+            return Answered(timeline, new TransactionCommitAnswer(KeyValueResponseType.MustRetry, null, CommitRefusalClass.Unresolved, "The session is being reaped between attempts"));
 
         if (admission == FinalizeAdmission.Mirror)
         {
+            if (timeline is not null)
+                timeline.Path = CommitCallPath.Mirrored;
+
             FinalizeOutcome mirrored = await attempt!.Completion;
-            return mirrored.ToAnswer();
+            return Answered(timeline, mirrored.ToAnswer());
         }
+
+        context.CommitTimeline = timeline;
 
         FinalizeOutcome outcome = new(KeyValueResponseType.Aborted, null, CommitRefusalClass.Faulted, "The finalize did not publish an outcome");
         try
@@ -143,10 +159,23 @@ internal sealed partial class TransactionCoordinator
         }
         finally
         {
+            // Cleared while this call still holds the slot: the next finalize of the session must not charge its
+            // time to this call.
+            context.CommitTimeline = null;
+
             // Always publish, even on an unexpected throw, so no mirroring waiter can hang. A terminal
             // outcome is retained for later duplicate finalizes; a MustRetry releases the slot for a retry.
             context.CompleteFinalize(attempt!, outcome);
+
+            timeline?.Complete(outcome.Type);
         }
+    }
+
+    /// <summary>Ends the stage clock of a commit call that does not own the finalize, and returns its answer.</summary>
+    private static TransactionCommitAnswer Answered(CommitCallTimeline? timeline, TransactionCommitAnswer answer)
+    {
+        timeline?.Complete(answer.Type);
+        return answer;
     }
 
     /// <summary>
@@ -156,11 +185,15 @@ internal sealed partial class TransactionCoordinator
     /// </summary>
     private async Task<FinalizeOutcome> ExecuteCommit(TransactionContext context, HLCTimestamp transactionId)
     {
+        context.CommitTimeline?.Enter(CommitCallStage.Drain);
+
         // Drain in-flight operations so the working set is frozen before 2PC reads it. Operations registered
         // before finalization are part of the commit; later ones are rejected. A drain timeout is a non-terminal
         // MustRetry.
         if (!await FreezeForFinalize(context))
             return new(KeyValueResponseType.MustRetry, null, CommitRefusalClass.Unresolved, "In-flight operations did not drain before the finalize");
+
+        context.CommitTimeline?.Enter(CommitCallStage.Freeze);
 
         // The working set is frozen: capture the record anchor under the finalize fence and return it from the
         // commit. No concurrent operation can now assign the anchor between a pre-commit read and the fence.
@@ -244,11 +277,15 @@ internal sealed partial class TransactionCoordinator
 
             if (!heldForRetry)
             {
+                context.CommitTimeline?.Enter(CommitCallStage.Release);
+
                 if (context.AsyncRelease)
                     _ = ReleaseWorkingSetAfterCommit(context);
                 else
                     await ReleaseWorkingSetAfterCommit(context);
             }
+
+            context.CommitTimeline?.Enter(CommitCallStage.Answer);
         }
     }
 
