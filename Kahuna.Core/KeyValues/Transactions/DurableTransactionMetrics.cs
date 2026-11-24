@@ -1251,8 +1251,8 @@ internal static class DurableTransactionMetrics
     /// <summary>
     /// Transactions committed through the one-phase fast path: a single durable batch carrying
     /// [record init + anchor prepare + commit decision], taken when the participant set collapses to the
-    /// locally-led anchor partition, no foreign durable intent holds any written key, and read-set
-    /// validation passes up front. Compare with <see cref="OnePhaseFallbacks"/> for the hit rate.
+    /// locally-led anchor partition, no foreign durable intent that the bundle cannot settle holds any written
+    /// key, and read-set validation passes up front. Compare with <see cref="OnePhaseFallbacks"/> for the hit rate.
     /// </summary>
     internal static readonly Counter<long> OnePhaseCommits =
         Meter.CreateCounter<long>(
@@ -1274,7 +1274,8 @@ internal static class DurableTransactionMetrics
 
     /// <summary>
     /// One-phase-eligible transactions that fell back to the standard 2PC flow, tagged by <c>reason</c>: a
-    /// foreign durable intent on a written key, failed up-front validation, or a remote anchor leader. Counts
+    /// foreign durable intent on a written key that the bundle could not settle itself (see
+    /// <see cref="OnePhaseCarriedSettles"/>), failed up-front validation, or a remote anchor leader. Counts
     /// only attempts the gate admitted (see <see cref="OnePhaseGateDecisions"/> for the ones it excluded). A
     /// high rate relative to <see cref="OnePhaseCommits"/> means the fast path rarely completes and the
     /// workload still pays both barriers.
@@ -1283,6 +1284,18 @@ internal static class DurableTransactionMetrics
         Meter.CreateCounter<long>(
             "kahuna.durable_tx.one_phase_fallbacks",
             description: "One-phase-eligible finalizes that fell back to the standard 2PC flow, tagged by reason.");
+
+    /// <summary>
+    /// Intents of committed predecessors whose settlement a one-phase bundle carried ahead of its own prepare,
+    /// counted when the bundle's batch committed. The predecessor's own settlement usually applies first, and the
+    /// carried one is then a no-op; the resolution of the predecessor counts the intent in
+    /// <see cref="SettledIntents"/> either way. A high rate relative to <see cref="OnePhaseCommits"/> names a
+    /// workload that commits the same keys again before their settlement applies.
+    /// </summary>
+    internal static readonly Counter<long> OnePhaseCarriedSettles =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.one_phase_carried_settles",
+            description: "Intents of committed predecessors whose settlement a committed one-phase bundle carried.");
 
     /// <summary>
     /// Every finalize's one-phase eligibility verdict, tagged by <c>outcome</c>: <c>entered</c>, or the reason

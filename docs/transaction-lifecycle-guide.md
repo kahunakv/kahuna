@@ -314,6 +314,33 @@ writes a row keeps the bundle open by naming the index key space in the row key 
 whether apply-time validation is enabled once at startup, so the setting can be confirmed without a
 metrics scrape.
 
+**A written key that another transaction's intent still holds.** The bundled prepare is refused over a held
+key, and the decision in the same batch cannot be withheld, so the attempt reads the intent store before it
+validates. With deferred settlement (§8) the usual holder is a transaction that committed a moment before and
+whose settlement has not applied yet: a counter, the head of a queue, one hot row. Such a holder does not end the
+attempt. The bundle carries its settlement as the first entry of the batch, `[settlement of the holder, record
+init, prepare, commit decision]`. The settlement installs the holder's value and records its revision as the
+committed head of the key before the prepare applies, and the base and the staged revision of the bundle are
+judged against that head. The settlement is the one the holder's own resolution proposes; whichever of the two
+applies second changes nothing. The attempt waits for nothing: it reads the holder's record on this node, and
+right before the propose it leaves out each holder that settled in the meantime.
+
+The bundle settles a holder when all of these are true:
+
+- `OnePhaseApplyTimeValidation` is on. Without it the batch commits whatever the staged-base fence says about its
+  prepare, and a holder that moved the base would be overwritten.
+- `DurableMaterializeOnResolve` is on. The other settlement needs a materialization record and a confirmed apply
+  before it (see the [durable settlement guide](durable-settlement-guide.md)).
+- The holder's record is a commit, and this node leads the partition of that record.
+- This node leads the anchor partition. A node that does not lead it sees the holder on a replica at most.
+
+Any other holder (undecided, aborted, or decided on a record that another node leads) falls back to the two-phase
+flow with the reason `foreign_intent`, and the helping pass of step 2 deals with it.
+`kahuna.durable_tx.one_phase_carried_settles` counts the intents whose settlement a committed bundle carried.
+
+A leader change between the validation and the propose refuses the bundle, as it does without a holder: the bundle
+is fenced to the term the validation was made under. The attempt answers a retry and nothing is durable.
+
 On the receiving leader, a forwarded durable request (an operation, a bundle, a one-phase bundle, a
 decision or a record lookup) starts as soon as the inter-node stream delivers it. It does not wait for
 the earlier durable requests on its stream, so concurrent forwards reach the partition's write
@@ -699,7 +726,7 @@ intent with resolution `Pending`**. Anything touching that key in the window mus
 | Any read after a later write moved the head past the intent | A non-transactional write does not wait for settlement: it materializes the committed intent and writes the next revision, and the intent lingers until settled. A head **strictly newer** than the intent wins everywhere — point reads (latest and snapshot; a persistent cache miss loads the head first), transactional pins, and scans (a newer row stands, and a newer delete stays deleted) — so a client never reads back the value its own write replaced. An equal revision is not proof (an extend reuses it), so there the intent is served. |
 | Point lock acquire | Resolved exactly like a write before the lock is granted: a committed intent is materialized into the entry, so the new holder never holds a key whose committed head it cannot see; undecided → `WaitingForReplication`, which the acquire loop waits out (routing the holder's decision when it is not local). A wait budget that runs out answers `WaitingForReplication` too, never `MustRetry`. |
 | Transactional read that already holds its own MVCC entry on the key | Skips the overlay (its own view is authoritative), but if a committed intent is newer than the resident entry, the pin is behind the committed head and the read answers `Aborted` — the same answer it gives once the entry has advanced. It never returns the pinned pre-commit value. |
-| A new transaction's prepare | Blocked (one live intent per key) until the predecessor settles — absorbed by the prepare retry in §6.3, which a decided predecessor bounds by the decision deadline (renewed while the wait lasts, §6.4) and a live one by eight rounds. |
+| A new transaction's prepare | A one-phase bundle carries the settlement of a committed predecessor and applies behind it (§6.3.1). Any other prepare is blocked (one live intent per key) until the predecessor settles — absorbed by the prepare retry in §6.3, which a decided predecessor bounds by the decision deadline (renewed while the wait lasts, §6.4) and a live one by eight rounds. |
 
 **Settlement never erases another transaction's lock state.** A commit that settles after it released its own
 intent can land on a key that another transaction has since locked and read. The apply advances the entry,

@@ -390,11 +390,15 @@ internal sealed partial class KeyValuesManager : IDisposable
     /// <summary>One-phase bundled commit, run locally or forwarded whole to a remote anchor leader. Null when
     /// the remote leader does not implement the typed operation (an older node).</summary>
     internal Task<Writes.DurableOnePhaseReply?> ReplicateDurableOnePhaseBundleThroughSchedulerFenced(
-        int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
+        int partitionId, byte[]? predecessorSettleDelta, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
         HLCTimestamp transactionId, long epoch, HLCTimestamp opId,
         IReadOnlyList<Writes.RangeFence> fences, long expectedTerm, CancellationToken cancellationToken) =>
         durableReplication.ReplicateDurableOnePhaseBundleThroughSchedulerFenced(
-            partitionId, recordInitDelta, anchorPrepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, cancellationToken);
+            partitionId, predecessorSettleDelta, recordInitDelta, anchorPrepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, cancellationToken);
+
+    /// <summary>Whether this node knows the holder of a durable intent to be committed and may settle it.</summary>
+    internal ValueTask<bool> IsCommittedHolderHere(int partitionId, PreparedIntent holder) =>
+        durableReplication.IsCommittedHolderHere(partitionId, holder);
 
     /// <summary>Executes a durable operation on this node (the inbound leg of a routed durable call).</summary>
     internal Task<bool> DurableOperationLocal(int partitionId, int kind, string logType, byte[] payload, CancellationToken cancellationToken) =>

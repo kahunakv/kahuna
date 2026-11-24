@@ -462,6 +462,36 @@ public sealed class TestMaterializeOnResolve : BaseCluster, IDisposable
         Assert.Equal("committed:acct/1", ValueOf(restored, "acct/1"));
     }
 
+    /// <summary>
+    /// The settlement of a transaction is in the log twice: ahead of the prepare of the transaction that wrote the
+    /// key next, in that transaction's bundle, and after it, from its own resolution. The prepare of the first one
+    /// is before the cut of the full backup. Each target restores the value that was committed there.
+    /// </summary>
+    [Theory]
+    [InlineData(350, "committed:acct/1")]
+    [InlineData(450, "second:acct/1")]
+    public async Task Pitr_SettlementCarriedByTheNextWritersBundle_RestoresEachCommit(long target, string expected)
+    {
+        PreparedIntent first = CommittedAt300("acct/1");
+        PreparedIntent second = first with
+        {
+            TransactionId = Ts(1_300), CommitTimestamp = Ts(400), Revision = 10, BaseRevision = 9,
+            Value = Encoding.UTF8.GetBytes("second:acct/1")
+        };
+
+        InMemoryWAL wal = SeededWal();
+        wal.Write([(1, [IntentLog(2, 200, new PrepareIntentCommand(first))])]);
+
+        MemoryPersistenceBackend restored = await RestoreChainAsync("carried-" + target, wal, [
+            IntentLog(3, 410, Settle(materialize: true, first)),
+            IntentLog(4, 411, new PrepareIntentCommand(second)),
+            IntentLog(5, 412, Settle(materialize: true, first)),
+            IntentLog(6, 413, Settle(materialize: true, second))
+        ], Ts(target));
+
+        Assert.Equal(expected, ValueOf(restored, "acct/1"));
+    }
+
     [Fact]
     public async Task Pitr_MaterializingSettleWithNoPrepare_FailsTheRestore()
     {

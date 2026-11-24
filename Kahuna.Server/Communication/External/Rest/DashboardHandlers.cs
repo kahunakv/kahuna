@@ -66,6 +66,11 @@ public static class DashboardHandlers
         // The per-key releases that end a transaction: sent, or left to the apply of a one-phase commit.
         "kahuna.transactions.working_set_release_keys",
 
+        // The one-phase commits, the attempts that fell back, and the settlements that a bundle carried.
+        "kahuna.durable_tx.one_phase_commits",
+        "kahuna.durable_tx.one_phase_fallbacks",
+        "kahuna.durable_tx.one_phase_carried_settles",
+
         // The point-read path per step, and the coordinator registration hops a transaction-scoped read takes.
         "kahuna.kv.read.stage",
         "kahuna.kv.read.fallback",

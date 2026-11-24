@@ -259,11 +259,21 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     /// Raft term the anchor partition must still be led under when the bundle is appended — the term the commit
     /// probe confirmed the transaction's staged intents (and locks) under; the anchor leader refuses the bundle
     /// before anything is appended when its term differs, and 0 disables that fence. <paramref name="fences"/> are
-    /// the anchor group's dispatch fences: the anchor descriptor and every descriptor its keys resolved through.</summary>
+    /// the anchor group's dispatch fences: the anchor descriptor and every descriptor its keys resolved through.
+    /// <paramref name="predecessorSettleDelta"/>, when present, settles the committed transactions that still hold
+    /// keys of the bundle and is the first entry of the batch, so the prepare applies to free keys. It is proposed
+    /// on this node only: when another node leads the anchor partition, the bundle is answered as not committed.</summary>
     public delegate Task<Writes.DurableOnePhaseReply?> ReplicateOnePhaseBundleDelegate(
-        int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
+        int partitionId, byte[]? predecessorSettleDelta, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
         HLCTimestamp transactionId, long epoch, HLCTimestamp opId,
         IReadOnlyList<RangeFence> fences, long expectedTerm, CancellationToken cancellationToken);
+
+    /// <summary>Whether the transaction that holds a key of <paramref name="partitionId"/> with
+    /// <paramref name="holder"/> is committed and this node may settle it: this node leads the partition, and it
+    /// leads the partition of the holder's canonical record and reads a commit there. Calls no other node, so a
+    /// record that another node leads answers false. Null keeps every foreign holder a reason to leave the
+    /// one-phase path (protocol tests).</summary>
+    public delegate ValueTask<bool> IsCommittedHolderDelegate(int partitionId, PreparedIntent holder);
 
     /// <summary>Checks every frozen intent's validated base (<see cref="PreparedIntent.BaseRevision"/> /
     /// <see cref="PreparedIntent.BaseState"/>) against the key's current committed state — the write-side
@@ -318,8 +328,9 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
     private readonly TransactionRecordStore recordStore;
 
-    // Consulted by the one-phase fast path's pre-flight check (foreign durable intent on any written key ⇒
-    // fall back to 2PC, whose prepare/retry/helping machinery owns that conflict).
+    // Consulted by the one-phase fast path's pre-flight check: a foreign durable intent on a written key is
+    // settled by the bundle when its transaction is committed, and otherwise falls back to 2PC, whose
+    // prepare/retry/helping machinery owns that conflict.
     private readonly PreparedIntentStore intentStore;
 
     private readonly ReplicateDelegate replicate;
@@ -344,6 +355,9 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
     // Null disables the one-phase commit fast path; every finalize then runs the standard 2PC flow.
     private readonly ReplicateOnePhaseBundleDelegate? replicateOnePhaseBundle;
+
+    // Tells the one-phase pre-flight which foreign holders the bundle may settle itself; null settles none.
+    private readonly IsCommittedHolderDelegate? isCommittedHolder;
 
     // Null disables the up-front staged-base check (protocol tests that fabricate intents).
     private readonly ValidateStagedBasesDelegate? validateStagedBases;
@@ -454,8 +468,10 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         ClaimStagedIntentsDelegate? claimStagedIntents = null,
         Func<string, DurableKeyRoute>? locateRoute = null,
         Func<bool>? isStopping = null,
-        ApplyCommitReportingRelease? applyCommitReportingRelease = null)
+        ApplyCommitReportingRelease? applyCommitReportingRelease = null,
+        IsCommittedHolderDelegate? isCommittedHolder = null)
     {
+        this.isCommittedHolder = isCommittedHolder;
         this.isStopping = isStopping;
         this.applyCommitReportingRelease = applyCommitReportingRelease;
         this.decide = decide;
@@ -646,9 +662,9 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         // durable barrier: validate the read set up front, then propose [record init + prepare + commit
         // decision] as a single atomic batch — locally when this node leads the anchor, forwarded whole to the
         // anchor leader otherwise (one extra hop, still one durable round). Any ineligibility (an older remote
-        // leader without the typed operation, a foreign durable intent on a written key, failed validation,
-        // scheduler rejection outcome that is retryable-but-ambiguous) falls through to the standard 2PC flow
-        // below, unchanged.
+        // leader without the typed operation, a foreign durable intent that the bundle cannot settle, failed
+        // validation, scheduler rejection outcome that is retryable-but-ambiguous) falls through to the standard
+        // 2PC flow below, unchanged.
         //
         // Ineligible whenever the validated read set reaches beyond the written keys. The bundle's validation
         // runs before anything durable, and its only apply-time re-checks cover written keys (the bundled-prepare
@@ -1496,10 +1512,10 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
     /// <summary>
     /// The one-phase commit fast path body. Returns the finalize outcome, or a <see langword="null"/> outcome with
-    /// the reason when this transaction must fall back to the standard 2PC flow (foreign durable intent on a
-    /// written key, failed up-front validation, or an older remote anchor leader without the typed one-phase
-    /// operation). Callable only when the participant set is exactly the anchor partition and
-    /// <see cref="replicateOnePhaseBundle"/> is wired.
+    /// the reason when this transaction must fall back to the standard 2PC flow (a foreign durable intent on a
+    /// written key that the bundle cannot settle, failed up-front validation, or an older remote anchor leader
+    /// without the typed one-phase operation). Callable only when the participant set is exactly the anchor
+    /// partition and <see cref="replicateOnePhaseBundle"/> is wired.
     /// </summary>
     private async Task<(DurableFinalizeOutcome? Outcome, OnePhaseFallbackReason Fallback)> TryOnePhaseFinalizeAsync(
         DurableFinalizeInput input,
@@ -1522,10 +1538,9 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
         DurablePartitionPrepare partition = input.Partitions[0];
 
-        // Pre-flight: a foreign durable intent on any written key would reject the bundled prepare — and the
-        // bundled decision, sharing the atomic batch, could not be withheld once proposed. Fall back to 2PC,
-        // whose prepare/retry/helping machinery owns that conflict. The check is race-free when this node
-        // leads the anchor: a NEW conflicting durable prepare cannot land behind it, because its producer
+        // Pre-flight: a foreign durable intent on any written key rejects the bundled prepare, and the bundled
+        // decision, sharing the atomic batch, cannot be withheld once proposed. The check is race-free when this
+        // node leads the anchor: a NEW conflicting durable prepare cannot land behind it, because its producer
         // would first need an in-memory write intent on this key on that leader, and this transaction's own
         // in-memory intents already exclude it — the point locks it holds, and, for the read-then-write path,
         // the staged intents PrepareMutations installs. (An all-persistent transaction skips PrepareMutations
@@ -1535,14 +1550,36 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         // visible to this check. With a remote anchor leader the local store sees at most a replica's view
         // and the check is advisory only — the record store's bundled-prepare gate re-checks at apply, on
         // the leader, and a rejected prepare rejects the bundled commit with it.
+        //
+        // A committed predecessor does not end the attempt: the bundle carries its settlement as the first entry
+        // of the batch. Its record is the same canonical commit that the predecessor's own resolution settles
+        // from, and whichever of the two settlements applies second changes nothing. The batch applies in log
+        // order, so the settlement records the predecessor's value as the committed head of the key and frees the
+        // key before the prepare applies, and the base and the revision of this transaction are judged against
+        // that head. This needs three things:
+        //  - a materializing settle, whose apply installs the value itself. The other form needs a
+        //    materialization record and a confirmed apply before it;
+        //  - apply-time validation. Without it the batch commits whatever the staged-base fence says about its
+        //    prepare, and a predecessor that moved the base or took the revision would be overwritten;
+        //  - this node as the leader of the anchor partition and of the predecessor's record.
+        // Any other holder (undecided, aborted, or decided on a record that another node leads) falls back to the
+        // two-phase flow, whose prepare, retry and helping machinery owns that conflict.
+        List<PreparedIntent>? committedHolders = null;
+
         foreach (PreparedIntent intent in partition.Intents)
         {
             PreparedIntent? holder = intentStore.Get(intent.Key);
-            if (holder is not null && (holder.TransactionId != input.TransactionId || holder.Epoch != input.Epoch))
+            if (holder is null || (holder.TransactionId == input.TransactionId && holder.Epoch == input.Epoch))
+                continue;
+
+            if (!applyTimeValidation || !materializeOnResolve || isCommittedHolder is null
+                || !await IsCommittedHolderAsync(partition.PartitionId, holder, committedHolders).ConfigureAwait(false))
             {
                 DurableTransactionMetrics.OnePhasePreBundle(Stopwatch.GetElapsedTime(attemptStart).TotalMilliseconds, forwarded: false);
                 return (null, OnePhaseFallbackReason.ForeignIntent);
             }
+
+            (committedHolders ??= new(partition.Intents.Count)).Add(holder);
         }
 
         // Validation runs BEFORE anything durable — unlike 2PC's post-prepare validation. Safe for the same
@@ -1657,8 +1694,10 @@ internal sealed class DurableTransactionFinalizer : IDisposable
                 BundledReadDependencies: applyTimeValidation && bundledReadDependencies is { Count: > 0 } ? bundledReadDependencies : null,
                 LockGrantTerm: applyTimeValidation ? exclusionTerm : 0)]);
 
+        byte[]? predecessorSettleDelta = BuildPredecessorSettle(committedHolders, out int carriedSettles);
+
         Writes.DurableOnePhaseReply? proposed = await replicateOnePhaseBundle!(
-            partition.PartitionId, initDelta, anchorPrepareDelta, decisionDelta,
+            partition.PartitionId, predecessorSettleDelta, initDelta, anchorPrepareDelta, decisionDelta,
             input.TransactionId, input.Epoch, opId,
             partition.Fences, exclusionTerm, cancellationToken).ConfigureAwait(false);
 
@@ -1691,6 +1730,9 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         // Nothing durable — a clean retry, exactly as a failed 2PC record init.
         if (!reply.BatchCommitted)
             return (Retry(), OnePhaseFallbackReason.None);
+
+        if (carriedSettles > 0)
+            DurableTransactionMetrics.OnePhaseCarriedSettles.Add(carriedSettles);
 
         // A rejected bundled prepare (another transaction took a key while this proposal was in flight) also
         // rejects the bundled commit through the record store's bundled-prepare gate, so the canonical outcome
@@ -1745,10 +1787,10 @@ internal sealed class DurableTransactionFinalizer : IDisposable
                 {
                     // Another transaction took a bundled key before the batch applied. When this node's own
                     // intent store can see that holder (it applied the batch, or replicates the anchor
-                    // partition), a clean retry suffices: the retry's pre-flight sees the holder and falls back
-                    // to 2PC. A holder on a remote anchor leader is invisible to that pre-flight — a retry
-                    // would re-propose the same doomed bundle — so continue into the standard 2PC flow now,
-                    // whose prepare/retry/helping machinery consults the leader that can see it.
+                    // partition), a clean retry suffices: the retry's pre-flight sees the holder and settles it in
+                    // the bundle or falls back to 2PC. A holder on a remote anchor leader is invisible to that
+                    // pre-flight — a retry would re-propose the same doomed bundle — so continue into the standard
+                    // 2PC flow now, whose prepare/retry/helping machinery consults the leader that can see it.
                     foreach (PreparedIntent intent in partition.Intents)
                     {
                         PreparedIntent? holder = intentStore.Get(intent.Key);
@@ -1825,6 +1867,45 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             TransactionDecision.Abort => new DurableFinalizeOutcome(DurableFinalizeResult.Aborted, reply.AbortClass, CanonicalDecisionRead: true),
             _ => Retry()
         }, OnePhaseFallbackReason.None);
+    }
+
+    /// <summary>
+    /// Asks <see cref="isCommittedHolder"/> about <paramref name="holder"/>, once for each transaction: a
+    /// transaction that holds several keys of the bundle holds them in a row in the common case, so the holder
+    /// accepted last answers for the next key of the same transaction.
+    /// </summary>
+    private ValueTask<bool> IsCommittedHolderAsync(int partitionId, PreparedIntent holder, List<PreparedIntent>? accepted)
+    {
+        if (accepted is { Count: > 0 } && accepted[^1].TransactionId == holder.TransactionId && accepted[^1].Epoch == holder.Epoch)
+            return ValueTask.FromResult(true);
+
+        return isCommittedHolder!(partitionId, holder);
+    }
+
+    /// <summary>
+    /// The settlement of the committed predecessors that still hold keys of a one-phase bundle, or null when none
+    /// does. Built at the propose and not at the pre-flight: the predecessor's own settlement is usually in flight,
+    /// and one that applied during the validation needs no second copy in the log. A copy that applies second is a
+    /// no-op.
+    /// </summary>
+    private byte[]? BuildPredecessorSettle(List<PreparedIntent>? committedHolders, out int carried)
+    {
+        carried = 0;
+        if (committedHolders is null)
+            return null;
+
+        List<PreparedIntent>? unsettled = null;
+        foreach (PreparedIntent holder in committedHolders)
+        {
+            if (intentStore.GetByIdentity(holder.TransactionId, holder.Epoch, holder.Key) is not null)
+                (unsettled ??= new(committedHolders.Count)).Add(holder);
+        }
+
+        if (unsettled is null)
+            return null;
+
+        carried = unsettled.Count;
+        return PreparedIntentStore.SerializeDelta(BuildSettleCommands(unsettled, commit: true, materializeOnResolve: true));
     }
 
     /// <summary>

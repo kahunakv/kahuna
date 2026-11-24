@@ -59,7 +59,10 @@ the required store snapshots, including receipts, are durable. Applying the inte
 alone is insufficient to release WAL retention. A settled intent whose row is still awaiting flush is
 retained for restart replay; it is also included in the durable intent snapshot.
 
-Duplicate settlement is idempotent. Live apply does not install an already removed intent again;
+Duplicate settlement is idempotent, and it is routine with materialization at settlement apply: a
+one-phase bundle that writes a key of a committed and unsettled transaction carries that transaction's
+settlement (see the [transaction lifecycle guide](transaction-lifecycle-guide.md), section 6.3.1), and the
+transaction's own resolution proposes it too. Live apply does not install an already removed intent again;
 restart replay can reconstruct from the retained settled intent while its row is not yet durable.
 A crash after the decision but before settlement leaves committed prepared intents for the recovery
 sweep to settle and install. Whole-partition snapshot seeding also carries the intent state needed for

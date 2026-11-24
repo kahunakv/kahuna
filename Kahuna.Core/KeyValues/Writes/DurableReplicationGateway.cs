@@ -610,20 +610,26 @@ internal sealed class DurableReplicationGateway
     /// the caller falls back to the standard 2PC flow.
     /// The safety argument for deciding in the same batch as the prepare lives at the call site
     /// (<see cref="Transactions.DurableTransactionFinalizer"/>): the caller pre-checks that no foreign durable
-    /// intent holds any of the transaction's keys, and the transaction's own in-memory intents on the anchor
-    /// leader — its point locks, plus the staged intents PrepareMutations installs on a read-then-write path,
-    /// but not necessarily any staged intent for an all-persistent transaction, which skips PrepareMutations —
-    /// exclude new conflicting prepares from being proposed behind it; the record store's apply-time gates
-    /// re-check both on every replica.
+    /// intent holds any of the transaction's keys, other than those of committed transactions that
+    /// <paramref name="predecessorSettleDelta"/> settles ahead of the prepare in the same batch, and the
+    /// transaction's own in-memory intents on the anchor leader — its point locks, plus the staged intents
+    /// PrepareMutations installs on a read-then-write path, but not necessarily any staged intent for an
+    /// all-persistent transaction, which skips PrepareMutations — exclude new conflicting prepares from being
+    /// proposed behind it; the record store's apply-time gates re-check both on every replica.
     /// </summary>
     internal async Task<DurableOnePhaseReply?> ReplicateDurableOnePhaseBundleThroughSchedulerFenced(
-        int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
+        int partitionId, byte[]? predecessorSettleDelta, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
         HLCTimestamp transactionId, long epoch, HLCTimestamp opId,
         IReadOnlyList<RangeFence> fences, long expectedTerm, CancellationToken cancellationToken)
     {
         string? leader = await ResolveDurableLeader(partitionId, cancellationToken).ConfigureAwait(false);
         if (leader is not null)
         {
+            // The partition left this node after the settlement was judged here. The bundle is fenced to the term
+            // this node led under, so the new leader would refuse it: answer the same clean retry without the hop.
+            if (predecessorSettleDelta is not null)
+                return NotCommittedOnePhaseReply;
+
             DurableOnePhaseReply? typed = await ForwardDurableOnePhaseAsync(
                 leader, partitionId, recordInitDelta, anchorPrepareDelta, decisionDelta,
                 transactionId, epoch, opId, fences, expectedTerm, cancellationToken).ConfigureAwait(false);
@@ -639,7 +645,7 @@ internal sealed class DurableReplicationGateway
         }
 
         return await ReplicateDurableOnePhaseLocal(
-            partitionId, recordInitDelta, anchorPrepareDelta, decisionDelta,
+            partitionId, predecessorSettleDelta, recordInitDelta, anchorPrepareDelta, decisionDelta,
             transactionId, epoch, opId, fences, expectedTerm, cancellationToken).ConfigureAwait(false);
     }
 
@@ -716,7 +722,7 @@ internal sealed class DurableReplicationGateway
         }
 
         DurableOnePhaseReply reply = await ReplicateDurableOnePhaseLocal(
-            partitionId, recordInitDelta, anchorPrepareDelta, decisionDelta,
+            partitionId, predecessorSettleDelta: null, recordInitDelta, anchorPrepareDelta, decisionDelta,
             transactionId, epoch, opId, fences, expectedTerm, cancellationToken).ConfigureAwait(false);
         return reply.ToWire();
     }
@@ -726,7 +732,7 @@ internal sealed class DurableReplicationGateway
         false, false, PrepareRejectionKind.None, false, TransactionDecision.Undecided, TransactionAbortClass.None, BundledCommitVerdict.Admit);
 
     private async Task<DurableOnePhaseReply> ReplicateDurableOnePhaseLocal(
-        int partitionId, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
+        int partitionId, byte[]? predecessorSettleDelta, byte[] recordInitDelta, byte[] anchorPrepareDelta, byte[] decisionDelta,
         HLCTimestamp transactionId, long epoch, HLCTimestamp opId,
         IReadOnlyList<RangeFence> fences, long exclusionTerm, CancellationToken cancellationToken)
     {
@@ -756,20 +762,25 @@ internal sealed class DurableReplicationGateway
 
         TaskCompletionSource<bool> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        RaftProposalEntry init = new(ReplicationTypes.TransactionRecord, recordInitDelta, AutoCommit: true, ExpectedGeneration: 0, ExpectedTerm: expectedTerm);
+        RaftProposalEntry prepare = new(ReplicationTypes.PreparedIntent, anchorPrepareDelta, AutoCommit: true, ExpectedGeneration: 0, ExpectedTerm: expectedTerm);
+        RaftProposalEntry decision = new(ReplicationTypes.TransactionRecord, decisionDelta, AutoCommit: true, ExpectedGeneration: 0, ExpectedTerm: expectedTerm);
+
+        // The settlement of the committed predecessors goes first: the prepare applies after it, to free keys.
+        RaftProposalEntry[] entries = predecessorSettleDelta is null
+            ? [init, prepare, decision]
+            : [new(ReplicationTypes.PreparedIntent, predecessorSettleDelta, AutoCommit: true, ExpectedGeneration: 0, ExpectedTerm: expectedTerm), init, prepare, decision];
+
         Writes.DurableProposalSubmission submission = new(
             partitionId,
-            [
-                new RaftProposalEntry(ReplicationTypes.TransactionRecord, recordInitDelta, AutoCommit: true, ExpectedGeneration: 0, ExpectedTerm: expectedTerm),
-                new RaftProposalEntry(ReplicationTypes.PreparedIntent, anchorPrepareDelta, AutoCommit: true, ExpectedGeneration: 0, ExpectedTerm: expectedTerm),
-                new RaftProposalEntry(ReplicationTypes.TransactionRecord, decisionDelta, AutoCommit: true, ExpectedGeneration: 0, ExpectedTerm: expectedTerm)
-            ],
+            entries,
             completion,
             // Ordinary admission, matching the 2PC record-init/prepare stage: nothing is prepared yet, so a
             // capacity rejection here is a clean retry — the Terminal reserve stays dedicated to finishing
             // transactions that already hold durable intents.
             Writes.WriteAdmissionClass.Ordinary,
             WriteSubmissionStage.OnePhase,
-            (batchPartitionId, entries, entryLogIndices) => AwaitDurableEntriesAppliedAsync(batchPartitionId, entries, entryLogIndices, cancellationToken),
+            (batchPartitionId, batchEntries, entryLogIndices) => AwaitDurableEntriesAppliedAsync(batchPartitionId, batchEntries, entryLogIndices, cancellationToken),
             fences);
 
         if (!writeAggregator.TryEnqueue(submission))
@@ -1008,6 +1019,28 @@ internal sealed class DurableReplicationGateway
             durableRecordLookupCache[(transactionId, epoch)] = record;
 
         return record;
+    }
+
+    /// <summary>
+    /// Whether the transaction that holds a key of <paramref name="partitionId"/> with <paramref name="holder"/>
+    /// is committed by its canonical record, and this node may settle it: this node leads the partition, whose
+    /// intent store names the holder, and the partition of the record, whose record store is canonical. Calls no
+    /// other node and waits for no election: a record that another node leads, one whose partition has no leader
+    /// and one that is not a commit answer false.
+    /// </summary>
+    internal async ValueTask<bool> IsCommittedHolderHere(int partitionId, Transactions.Data.PreparedIntent holder)
+    {
+        if (transactionRecordStore.Get(holder.TransactionId, holder.Epoch) is not { Decision: TransactionDecision.Commit })
+            return false;
+
+        if (!raft.Joined)
+            return true;
+
+        if (!await raft.AmILeaderQuickIfHosted(partitionId).ConfigureAwait(false)
+            || !locator.TryLocateRange(holder.RecordAnchorKey, out int recordPartitionId))
+            return false;
+
+        return recordPartitionId == partitionId || await raft.AmILeaderQuickIfHosted(recordPartitionId).ConfigureAwait(false);
     }
 
     /// <summary>

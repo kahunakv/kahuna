@@ -1304,15 +1304,18 @@ public sealed class TestDurableTransactionFinalizer
     // ── one-phase bundled-commit gate ────────────────────────────────────────────
 
     // Mirrors the production one-phase bundle apply (ReplicateDurableOnePhaseBundleThroughSchedulerFenced +
-    // the ordered scheduler completion): [record init, prepare, commit decision] apply in order as one committed
-    // batch. BeforeApply models the in-flight window between the finalizer's pre-flight/validation and the
+    // the ordered scheduler completion): [settlement of committed predecessors, record init, prepare, commit
+    // decision] apply in order as one committed batch. BeforeApply models the in-flight window between the finalizer's pre-flight/validation and the
     // batch's ordered apply — where a competing transaction's entries can land first once the in-memory write
     // intents that excluded them are gone (killed node, expired lease, a stall outliving the locks).
     private static DurableTransactionFinalizer.ReplicateOnePhaseBundleDelegate OnePhase(
         TransactionRecordStore records, PreparedIntentStore intents, Action? beforeApply = null) =>
-        (partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, ct) =>
+        (partitionId, settleDelta, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, ct) =>
         {
             beforeApply?.Invoke();
+
+            if (settleDelta is not null)
+                intents.ApplyDeltaAckPrepares(partitionId, new RaftLog { LogType = ReplicationTypes.PreparedIntent, LogData = settleDelta });
 
             records.Replicate(partitionId, new RaftLog { LogType = ReplicationTypes.TransactionRecord, LogData = initDelta });
             bool prepareAck = intents.ApplyDeltaAckPrepares(partitionId, new RaftLog { LogType = ReplicationTypes.PreparedIntent, LogData = prepareDelta });
@@ -1363,12 +1366,12 @@ public sealed class TestDurableTransactionFinalizer
         DurableTransactionFinalizer.ReplicateOnePhaseBundleDelegate apply = OnePhase(records, intents);
         DurableTransactionFinalizer finalizer = new(
             records, intents, seam.Replicate,
-            replicateOnePhaseBundle: async (partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, ct) =>
+            replicateOnePhaseBundle: async (partitionId, settleDelta, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, ct) =>
             {
                 // Models in-flight time ahead of the aggregator hand-off, so the attempt's pre-bundle share has
                 // a floor this test can assert on.
                 await Task.Delay(20, ct);
-                DurableOnePhaseReply? reply = await apply(partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, ct);
+                DurableOnePhaseReply? reply = await apply(partitionId, settleDelta, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, ct);
                 return reply!.Value with { BundleMs = bundleSentinelMs };
             });
 
@@ -1553,11 +1556,11 @@ public sealed class TestDurableTransactionFinalizer
         DurableTransactionFinalizer.ReplicateOnePhaseBundleDelegate apply = OnePhase(records, intents);
         DurableTransactionFinalizer finalizer = new(
             records, intents, seam.Replicate,
-            replicateOnePhaseBundle: async (partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, ct) =>
+            replicateOnePhaseBundle: async (partitionId, settleDelta, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, ct) =>
             {
                 // Models both wire directions of the forward to a remote anchor leader.
                 await Task.Delay(60, ct);
-                DurableOnePhaseReply? reply = await apply(partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, ct);
+                DurableOnePhaseReply? reply = await apply(partitionId, settleDelta, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, ct);
                 return reply!.Value with { BundleMs = bundleSentinelMs, Forwarded = true };
             });
 
@@ -1618,10 +1621,10 @@ public sealed class TestDurableTransactionFinalizer
                 await Hold(Interlocked.Increment(ref applies) == 1 ? "apply" : "resolve");
                 return true;
             },
-            replicateOnePhaseBundle: async (partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, ct) =>
+            replicateOnePhaseBundle: async (partitionId, settleDelta, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, ct) =>
             {
                 await Hold("bundle");
-                return await apply(partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, ct);
+                return await apply(partitionId, settleDelta, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, ct);
             },
             validateStagedBases: async (_, _) =>
             {
@@ -1705,7 +1708,7 @@ public sealed class TestDurableTransactionFinalizer
 
         using DurableTransactionFinalizer finalizer = new(
             records, intents, seam.Replicate,
-            replicateOnePhaseBundle: (_, _, _, _, _, _, _, _, _, _) => Task.FromResult<DurableOnePhaseReply?>(null));
+            replicateOnePhaseBundle: (_, _, _, _, _, _, _, _, _, _, _) => Task.FromResult<DurableOnePhaseReply?>(null));
 
         int checks = 0;
         using CommitCallTelemetry calls = new();
@@ -1749,7 +1752,7 @@ public sealed class TestDurableTransactionFinalizer
 
         using DurableTransactionFinalizer finalizer = new(
             records, intents, seam.Replicate,
-            replicateOnePhaseBundle: (_, _, _, _, _, _, _, _, _, _) => Task.FromResult<DurableOnePhaseReply?>(new(
+            replicateOnePhaseBundle: (_, _, _, _, _, _, _, _, _, _, _) => Task.FromResult<DurableOnePhaseReply?>(new(
                 true, true, PrepareRejectionKind.None, true, TransactionDecision.Undecided, TransactionAbortClass.None, BundledCommitVerdict.StaleBase)),
             validateStagedBases: (_, _) => Task.FromResult(
                 (Interlocked.Increment(ref stagedBaseCalls), refusedAt) is (1, "preflight") or (2, "before_bundle")
@@ -1776,7 +1779,7 @@ public sealed class TestDurableTransactionFinalizer
 
         using DurableTransactionFinalizer finalizer = new(
             records, intents, seam.Replicate,
-            replicateOnePhaseBundle: async (_, _, _, _, _, _, _, _, _, _) =>
+            replicateOnePhaseBundle: async (_, _, _, _, _, _, _, _, _, _, _) =>
             {
                 await Task.Delay(StageHoldMs);
                 throw new InvalidOperationException("injected");
@@ -1812,7 +1815,7 @@ public sealed class TestDurableTransactionFinalizer
         bool proposed = false;
         DurableTransactionFinalizer finalizer = new(
             records, intents, seam.Replicate,
-            replicateOnePhaseBundle: (_, _, _, _, _, _, _, _, _, _) =>
+            replicateOnePhaseBundle: (_, _, _, _, _, _, _, _, _, _, _) =>
             {
                 proposed = true;
                 return Task.FromResult<DurableOnePhaseReply?>(null);
@@ -1904,7 +1907,7 @@ public sealed class TestDurableTransactionFinalizer
 
         DurableTransactionFinalizer finalizer = new(
             records, intents, seam.Replicate,
-            replicateOnePhaseBundle: (_, _, _, _, _, _, _, _, _, _) => Task.FromResult<DurableOnePhaseReply?>(null));
+            replicateOnePhaseBundle: (_, _, _, _, _, _, _, _, _, _, _) => Task.FromResult<DurableOnePhaseReply?>(null));
 
         using MetricCapture gate = new("outcome", "kahuna.durable_tx.one_phase_gate");
         using MetricCapture fallback = new("reason", "kahuna.durable_tx.one_phase_fallbacks");
@@ -1979,9 +1982,9 @@ public sealed class TestDurableTransactionFinalizer
         DurableTransactionFinalizer.ReplicateOnePhaseBundleDelegate once = OnePhase(records, intents);
         DurableTransactionFinalizer finalizer = new(
             records, intents, seam.Replicate,
-            replicateOnePhaseBundle: async (partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, ct) =>
+            replicateOnePhaseBundle: async (partitionId, settleDelta, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, ct) =>
             {
-                DurableOnePhaseReply? first = await once(partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, ct);
+                DurableOnePhaseReply? first = await once(partitionId, settleDelta, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, ct);
                 // The duplicate: the same three entries replayed in order against the already-applied stores.
                 records.Replicate(partitionId, new RaftLog { LogType = ReplicationTypes.TransactionRecord, LogData = initDelta });
                 intents.ApplyDeltaAckPrepares(partitionId, new RaftLog { LogType = ReplicationTypes.PreparedIntent, LogData = prepareDelta });
@@ -2109,10 +2112,10 @@ public sealed class TestDurableTransactionFinalizer
         DurableTransactionFinalizer.ReplicateOnePhaseBundleDelegate onePhaseSeam = OnePhase(records, intents);
         DurableTransactionFinalizer finalizer = new(
             records, intents, seam.Replicate,
-            replicateOnePhaseBundle: (partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, ct) =>
+            replicateOnePhaseBundle: (partitionId, settleDelta, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, ct) =>
             {
                 onePhaseInvoked = true;
-                return onePhaseSeam(partitionId, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, ct);
+                return onePhaseSeam(partitionId, settleDelta, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, ct);
             });
 
         DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
@@ -2130,6 +2133,422 @@ public sealed class TestDurableTransactionFinalizer
         Assert.True(intentVisibleDuringValidation);
         Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
         Assert.Equal(TransactionDecision.Commit, records.Get(txId, 1)!.Decision);
+    }
+
+    // ── one-phase bundle over a committed predecessor ────────────────────────────
+
+    private sealed class RecordingInstaller : IResolvedIntentInstaller
+    {
+        public readonly List<(HLCTimestamp TransactionId, string Key)> Installed = [];
+
+        public void Install(int partitionId, long logIndex, PreparedIntent intent, bool replay) => Installed.Add((intent.TransactionId, intent.Key));
+
+        public void CompleteEntry(int partitionId, long logIndex, bool replay) { }
+
+        public void NoteUnresolvedOnReplay(int partitionId, long logIndex, HLCTimestamp transactionId, long epoch, string key, HLCTimestamp commitTimestamp) { }
+    }
+
+    /// <summary>
+    /// A finalizer over stores that can hold committed transactions whose intents are not settled, with a bundle
+    /// seam that records the settlement each bundle carried and a resolution that never runs.
+    /// </summary>
+    private sealed class PredecessorRig : IDisposable
+    {
+        public readonly TransactionRecordStore Records;
+
+        public readonly PreparedIntentStore Intents;
+
+        public readonly Seam Seam;
+
+        public readonly RecordingInstaller Installer = new();
+
+        // The settlement each bundle carried, in the order of the bundles; null for a bundle that carried none.
+        public readonly List<PreparedIntentCommand[]?> Carried = [];
+
+        // The holders the finalizer asked about.
+        public readonly List<(int PartitionId, HLCTimestamp TransactionId, string Key)> Asked = [];
+
+        public readonly DurableTransactionFinalizer Finalizer;
+
+        public PredecessorRig(bool materializeOnResolve = true, bool asks = true, bool batchCommits = true)
+        {
+            (Records, Intents) = StoresWithProbe();
+            Intents.AttachResolvedIntentInstaller(Installer);
+            Seam = new() { Records = Records, Intents = Intents };
+
+            DurableTransactionFinalizer.ReplicateOnePhaseBundleDelegate apply = OnePhase(Records, Intents);
+
+            Finalizer = new(
+                Records, Intents, Seam.Replicate,
+                resolutionScheduler: _ => { },
+                replicateAnchorBundle: Seam.ReplicateBundle,
+                replicateOnePhaseBundle: (partitionId, settleDelta, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, ct) =>
+                {
+                    Carried.Add(settleDelta is null ? null : PreparedIntentStore.DecodeDelta(settleDelta));
+
+                    return batchCommits
+                        ? apply(partitionId, settleDelta, initDelta, prepareDelta, decisionDelta, transactionId, epoch, opId, fences, expectedTerm, ct)
+                        : Task.FromResult<DurableOnePhaseReply?>(new(
+                            false, false, PrepareRejectionKind.None, false, TransactionDecision.Undecided, TransactionAbortClass.None, BundledCommitVerdict.Admit));
+                },
+                materializeOnResolve: materializeOnResolve,
+                isCommittedHolder: !asks
+                    ? null
+                    : (partitionId, holder) =>
+                    {
+                        Asked.Add((partitionId, holder.TransactionId, holder.Key));
+                        return ValueTask.FromResult(Records.Get(holder.TransactionId, holder.Epoch) is { Decision: TransactionDecision.Commit });
+                    });
+        }
+
+        /// <summary>A transaction with a pending intent on each key, and its record in the given state.</summary>
+        public IReadOnlyList<PreparedIntent> Hold(HLCTimestamp txId, TransactionDecision decision, params string[] keys) =>
+            Hold(txId, epoch: 1, decision, keys);
+
+        public IReadOnlyList<PreparedIntent> Hold(HLCTimestamp txId, long epoch, TransactionDecision decision, params string[] keys)
+        {
+            DurableFinalizeInput input = Input(txId, epoch, [.. keys.Select(static key => (5, key))]);
+
+            Records.Apply(new InitializeTransactionCommand(
+                txId, epoch, input.CoordinatorKey, input.RecordAnchorKey, input.CommitTimestamp, input.DecisionDeadline,
+                input.ManifestHash, input.Manifest, Ts(1500), input.CreatedAt));
+
+            foreach (PreparedIntent intent in input.Partitions[0].Intents)
+                Assert.Equal(TransactionApplyOutcome.Applied, Intents.Apply(new PrepareIntentCommand(intent), 5).Outcome);
+
+            if (decision == TransactionDecision.Commit)
+                Assert.Equal(TransactionApplyOutcome.Applied, Records.Apply(new CommitTransactionCommand(txId, epoch, input.ManifestHash, Ts(1500), AttemptHlc: Ts(1600))).Outcome);
+            else if (decision == TransactionDecision.Abort)
+                Records.Apply(new AbortTransactionCommand(
+                    txId, epoch, input.ManifestHash, TransactionAbortClass.Conflict, Ts(1500), Ts(1600),
+                    input.RecordAnchorKey, input.CommitTimestamp, input.DecisionDeadline, input.CreatedAt));
+
+            return input.Partitions[0].Intents;
+        }
+
+        /// <summary>The settlement of the given intents, applied the way the holder's own resolution applies it.</summary>
+        public void Settle(IReadOnlyList<PreparedIntent> intents) =>
+            Intents.ApplyDeltaAckPrepares(5, new RaftLog
+            {
+                LogType = ReplicationTypes.PreparedIntent,
+                LogData = PreparedIntentStore.SerializeDelta(DurableTransactionFinalizer.BuildSettleCommands(intents, commit: true, materializeOnResolve: true))
+            });
+
+        /// <summary>Finalizes a successor that read revision 1 of each key and writes revision 2.</summary>
+        public Task<DurableFinalizeOutcome> Successor(HLCTimestamp txId, bool applyTimeValidation, params string[] keys) =>
+            Finalizer.FinalizeAsync(
+                Input(txId, 1, revision: 2, baseRevision: 1, [.. keys.Select(static key => (5, key))]),
+                Validate(true), opId: Ts(4000), CancellationToken.None, applyTimeValidation: applyTimeValidation);
+
+        public bool TwoPhaseRan => Seam.Calls.Any(static call => call.Type == Seam.BundleType);
+
+        public void Dispose() => Finalizer.Dispose();
+    }
+
+    private static IEnumerable<(HLCTimestamp, long, string)> ResolvesOf(PreparedIntentCommand[] delta) =>
+        delta.OfType<ResolveIntentCommand>().Select(static resolve => (resolve.TransactionId, resolve.Epoch, resolve.Key));
+
+    /// <summary>
+    /// A transaction writes the keys of a committed predecessor whose intents are not settled. The bundle carries
+    /// their settlement, so the attempt stays on the one-phase path: the settlement installs the predecessor's
+    /// values and records its revision as the committed head before the prepare takes the keys, and the commit is
+    /// judged against that head. Nothing of the two-phase flow runs.
+    /// </summary>
+    [Fact]
+    public async Task OnePhase_OverACommittedPredecessor_CarriesItsSettlement_AndCommits()
+    {
+        using PredecessorRig rig = new();
+        IReadOnlyList<PreparedIntent> held = rig.Hold(Ts(1000), TransactionDecision.Commit, "acct/1", "acct/2");
+
+        DurableFinalizeOutcome outcome = await rig.Successor(Ts(3000), applyTimeValidation: true, "acct/1", "acct/2");
+
+        Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+        Assert.False(rig.TwoPhaseRan);
+
+        PreparedIntentCommand[]? carried = Assert.Single(rig.Carried);
+        Assert.Equal(
+            DurableTransactionFinalizer.BuildSettleCommands(held, commit: true, materializeOnResolve: true),
+            carried!);
+
+        Assert.Equal([(Ts(1000), "acct/1"), (Ts(1000), "acct/2")], rig.Installer.Installed);
+
+        foreach (string key in (string[])["acct/1", "acct/2"])
+        {
+            Assert.Equal(Ts(3000), rig.Intents.Get(key)!.TransactionId);
+            Assert.True(rig.Intents.TryGetCommittedHead(key, out long head, out _));
+            Assert.Equal(1, head);
+        }
+    }
+
+    /// <summary>A transaction with no foreign holder on its keys asks about none and its bundle carries nothing.</summary>
+    [Fact]
+    public async Task OnePhase_WithNoHolder_AsksNothing_AndCarriesNothing()
+    {
+        using PredecessorRig rig = new();
+
+        DurableFinalizeOutcome outcome = await rig.Successor(Ts(3000), applyTimeValidation: true, "acct/1", "acct/2");
+
+        Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+        Assert.Null(Assert.Single(rig.Carried));
+        Assert.Empty(rig.Asked);
+    }
+
+    /// <summary>
+    /// A second attempt of the same transaction finds the intent that its first attempt installed. Its own intent
+    /// is no holder: it asks about nothing, carries nothing and commits in one bundle.
+    /// </summary>
+    [Fact]
+    public async Task OnePhase_OverItsOwnIntent_AsksNothing_AndCommits()
+    {
+        using PredecessorRig rig = new();
+        DurableFinalizeInput input = Input(Ts(3000), 1, revision: 2, baseRevision: 1, (5, "acct/1"));
+        Assert.Equal(TransactionApplyOutcome.Applied, rig.Intents.Apply(new PrepareIntentCommand(input.Partitions[0].Intents[0]), 5).Outcome);
+
+        DurableFinalizeOutcome outcome = await rig.Finalizer.FinalizeAsync(
+            input, Validate(true), opId: Ts(4000), CancellationToken.None, applyTimeValidation: true);
+
+        Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+        Assert.Null(Assert.Single(rig.Carried));
+        Assert.Empty(rig.Asked);
+        Assert.False(rig.TwoPhaseRan);
+    }
+
+    /// <summary>
+    /// A holder that is not committed ends the one-phase attempt: an undecided one is a live conflict, and an
+    /// aborted one needs its staged state cleared on the key's actor before its intent is removed. The two-phase
+    /// flow owns both, and the holder keeps its intent here.
+    /// </summary>
+    [Theory]
+    [InlineData(nameof(TransactionDecision.Undecided))]
+    [InlineData(nameof(TransactionDecision.Abort))]
+    public async Task OnePhase_OverAHolderThatIsNotCommitted_FallsBack(string decision)
+    {
+        using PredecessorRig rig = new();
+        rig.Hold(Ts(1000), Enum.Parse<TransactionDecision>(decision), "acct/1");
+
+        DurableFinalizeOutcome outcome = await rig.Successor(Ts(3000), applyTimeValidation: true, "acct/1");
+
+        Assert.Empty(rig.Carried);
+        Assert.True(rig.TwoPhaseRan);
+        Assert.Equal(DurableFinalizeResult.Aborted, outcome.Result);
+        Assert.Equal(Ts(1000), rig.Intents.Get("acct/1")!.TransactionId);
+        Assert.Empty(rig.Installer.Installed);
+    }
+
+    /// <summary>
+    /// One committed holder and one undecided holder: the bundle could not free the second key, so nothing of it
+    /// is proposed and the two-phase flow runs.
+    /// </summary>
+    [Fact]
+    public async Task OnePhase_OverACommittedAndAnUndecidedHolder_FallsBack()
+    {
+        using PredecessorRig rig = new();
+        rig.Hold(Ts(1000), TransactionDecision.Commit, "acct/1");
+        rig.Hold(Ts(1001), TransactionDecision.Undecided, "acct/2");
+
+        await rig.Successor(Ts(3000), applyTimeValidation: true, "acct/1", "acct/2");
+
+        Assert.Empty(rig.Carried);
+        Assert.True(rig.TwoPhaseRan);
+        Assert.Equal(Ts(1000), rig.Intents.Get("acct/1")!.TransactionId);
+        Assert.Equal(Ts(1001), rig.Intents.Get("acct/2")!.TransactionId);
+    }
+
+    /// <summary>
+    /// The bundle settles a predecessor only with a settle that installs the value itself, only when its commit is
+    /// validated at its apply, and only when the node can say that the holder is committed. Without one of them
+    /// the holder is not asked about and the two-phase flow runs, as it does for any other holder.
+    /// </summary>
+    [Theory]
+    [InlineData(false, true, true)]
+    [InlineData(true, false, true)]
+    [InlineData(true, true, false)]
+    public async Task OnePhase_OverACommittedPredecessor_WithoutARequirement_FallsBack(bool materializeOnResolve, bool applyTimeValidation, bool asks)
+    {
+        using PredecessorRig rig = new(materializeOnResolve, asks);
+        rig.Hold(Ts(1000), TransactionDecision.Commit, "acct/1");
+
+        await rig.Successor(Ts(3000), applyTimeValidation, "acct/1");
+
+        Assert.Empty(rig.Carried);
+        Assert.Empty(rig.Asked);
+        Assert.True(rig.TwoPhaseRan);
+        Assert.Equal(Ts(1000), rig.Intents.Get("acct/1")!.TransactionId);
+    }
+
+    /// <summary>
+    /// The keys are held by two committed transactions. Each is asked about once, however many of the keys it
+    /// holds, and the settlement names each intent under its own transaction.
+    /// </summary>
+    [Fact]
+    public async Task OnePhase_OverTwoCommittedPredecessors_AsksAboutEachOnce_AndSettlesBoth()
+    {
+        using PredecessorRig rig = new();
+        rig.Hold(Ts(1000), TransactionDecision.Commit, "acct/1", "acct/2");
+        rig.Hold(Ts(1001), TransactionDecision.Commit, "acct/3", "acct/4");
+
+        DurableFinalizeOutcome outcome = await rig.Successor(Ts(3000), applyTimeValidation: true, "acct/1", "acct/2", "acct/3", "acct/4", "acct/5");
+
+        Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+        Assert.Equal([(5, Ts(1000), "acct/1"), (5, Ts(1001), "acct/3")], rig.Asked);
+        Assert.Equal(
+            [(Ts(1000), 1L, "acct/1"), (Ts(1000), 1L, "acct/2"), (Ts(1001), 1L, "acct/3"), (Ts(1001), 1L, "acct/4")],
+            ResolvesOf(Assert.Single(rig.Carried)!));
+    }
+
+    /// <summary>
+    /// Two attempts of one transaction, told apart by their epoch, are two holders: a commit of the one says
+    /// nothing about the other, so the bundle is not proposed over the undecided attempt.
+    /// </summary>
+    [Fact]
+    public async Task OnePhase_OverTwoEpochsOfOneTransaction_AsksAboutEach()
+    {
+        using PredecessorRig rig = new();
+        rig.Hold(Ts(1000), epoch: 1, TransactionDecision.Commit, "acct/1");
+        rig.Hold(Ts(1000), epoch: 2, TransactionDecision.Undecided, "acct/2");
+
+        await rig.Successor(Ts(3000), applyTimeValidation: true, "acct/1", "acct/2");
+
+        Assert.Equal([(5, Ts(1000), "acct/1"), (5, Ts(1000), "acct/2")], rig.Asked);
+        Assert.Empty(rig.Carried);
+        Assert.True(rig.TwoPhaseRan);
+    }
+
+    /// <summary>
+    /// The predecessor holds more keys than the successor writes. The bundle settles only the keys it needs; the
+    /// others stay for the predecessor's own resolution.
+    /// </summary>
+    [Fact]
+    public async Task OnePhase_OverACommittedPredecessor_SettlesOnlyTheKeysOfTheBundle()
+    {
+        using PredecessorRig rig = new();
+        rig.Hold(Ts(1000), TransactionDecision.Commit, "acct/1", "acct/2");
+
+        DurableFinalizeOutcome outcome = await rig.Successor(Ts(3000), applyTimeValidation: true, "acct/2");
+
+        Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+        Assert.Equal([(Ts(1000), 1L, "acct/2")], ResolvesOf(Assert.Single(rig.Carried)!));
+        Assert.Equal(Ts(1000), rig.Intents.Get("acct/1")!.TransactionId);
+    }
+
+    /// <summary>
+    /// The predecessor's own settlement applies while the successor validates. The bundle carries no second copy
+    /// for a key that is free by then, and still carries the one that is not.
+    /// </summary>
+    [Fact]
+    public async Task OnePhase_PredecessorThatSettlesDuringTheValidation_IsNotSettledAgain()
+    {
+        using PredecessorRig rig = new();
+        IReadOnlyList<PreparedIntent> held = rig.Hold(Ts(1000), TransactionDecision.Commit, "acct/1", "acct/2");
+
+        rig.Finalizer.TestAfterReadSetValidationHook = _ =>
+        {
+            rig.Settle([held[0]]);
+            return Task.CompletedTask;
+        };
+
+        DurableFinalizeOutcome outcome = await rig.Successor(Ts(3000), applyTimeValidation: true, "acct/1", "acct/2");
+
+        Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+        Assert.Equal([(Ts(1000), 1L, "acct/2")], ResolvesOf(Assert.Single(rig.Carried)!));
+        Assert.Equal([(Ts(1000), "acct/1"), (Ts(1000), "acct/2")], rig.Installer.Installed);
+    }
+
+    /// <summary>A predecessor that settles in full during the validation leaves a bundle with no settlement.</summary>
+    [Fact]
+    public async Task OnePhase_PredecessorThatSettlesInFullDuringTheValidation_LeavesThePlainBundle()
+    {
+        using PredecessorRig rig = new();
+        IReadOnlyList<PreparedIntent> held = rig.Hold(Ts(1000), TransactionDecision.Commit, "acct/1", "acct/2");
+
+        rig.Finalizer.TestAfterReadSetValidationHook = _ =>
+        {
+            rig.Settle(held);
+            return Task.CompletedTask;
+        };
+
+        DurableFinalizeOutcome outcome = await rig.Successor(Ts(3000), applyTimeValidation: true, "acct/1", "acct/2");
+
+        Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+        Assert.Null(Assert.Single(rig.Carried));
+    }
+
+    /// <summary>
+    /// The predecessor's own settlement applies after the bundle that carried a copy of it. It changes nothing: the
+    /// successor keeps its intents, no value is installed twice and the head stays.
+    /// </summary>
+    [Fact]
+    public async Task OnePhase_PredecessorSettlementAfterTheBundle_ChangesNothing()
+    {
+        using PredecessorRig rig = new();
+        IReadOnlyList<PreparedIntent> held = rig.Hold(Ts(1000), TransactionDecision.Commit, "acct/1");
+
+        await rig.Successor(Ts(3000), applyTimeValidation: true, "acct/1");
+        Assert.NotNull(Assert.Single(rig.Carried));
+
+        rig.Settle(held);
+
+        PreparedIntent live = rig.Intents.Get("acct/1")!;
+        Assert.Equal(Ts(3000), live.TransactionId);
+        Assert.True(live.IsPending);
+        Assert.Equal([(Ts(1000), "acct/1")], rig.Installer.Installed);
+        Assert.True(rig.Intents.TryGetCommittedHead("acct/1", out long head, out _));
+        Assert.Equal(1, head);
+    }
+
+    /// <summary>
+    /// The predecessor committed the revision that the successor staged, which only a lost exclusion allows. The
+    /// settlement in the bundle makes that revision the committed head, so the commit is refused at its apply as a
+    /// conflict and the predecessor's value stands.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task OnePhase_OverAPredecessorThatTookTheStagedRevision_IsRefusedAtItsApply(bool validatedBase)
+    {
+        using PredecessorRig rig = new();
+        rig.Hold(Ts(1000), TransactionDecision.Commit, "acct/1");
+
+        DurableFinalizeInput input = Input(Ts(3000), 1, revision: 1, baseRevision: validatedBase ? 0 : PreparedIntent.UnknownBaseRevision, (5, "acct/1"));
+
+        DurableFinalizeOutcome outcome = await rig.Finalizer.FinalizeAsync(
+            input, Validate(true), opId: Ts(4000), CancellationToken.None, applyTimeValidation: true);
+
+        Assert.NotNull(Assert.Single(rig.Carried));
+        Assert.Equal(DurableFinalizeResult.Aborted, outcome.Result);
+        Assert.Equal(TransactionAbortClass.Conflict, outcome.AbortClass);
+        Assert.Equal(CommitRefusalClass.StagedBaseMoved, outcome.Refusal);
+        Assert.Equal(TransactionDecision.Abort, rig.Records.Get(Ts(3000), 1)!.Decision);
+        Assert.Equal([(Ts(1000), "acct/1")], rig.Installer.Installed);
+        Assert.True(rig.Intents.TryGetCommittedHead("acct/1", out long head, out _));
+        Assert.Equal(1, head);
+    }
+
+    /// <summary>
+    /// The counter reports the intents whose settlement a committed bundle carried, and nothing for a bundle whose
+    /// batch did not commit: that attempt leaves nothing durable and answers a clean retry.
+    /// </summary>
+    [Theory]
+    [InlineData(true, 7)]
+    [InlineData(false, 9)]
+    public async Task OnePhase_CarriedSettlements_AreCountedWhenTheBatchCommits(bool batchCommits, int held)
+    {
+        using PredecessorRig rig = new(batchCommits: batchCommits);
+        string[] keys = [.. Enumerable.Range(1, held).Select(static i => $"acct/{i}")];
+        rig.Hold(Ts(1000), TransactionDecision.Commit, keys);
+
+        using MetricCapture capture = new("unused", "kahuna.durable_tx.one_phase_carried_settles");
+
+        DurableFinalizeOutcome outcome = await rig.Successor(Ts(3000), applyTimeValidation: true, keys);
+
+        Assert.Equal(batchCommits ? DurableFinalizeResult.Committed : DurableFinalizeResult.MustRetry, outcome.Result);
+        Assert.NotNull(Assert.Single(rig.Carried));
+
+        // Other tests of the process count too; no other bundle carries this many keys.
+        if (batchCommits)
+            Assert.Contains(held, capture.Samples("kahuna.durable_tx.one_phase_carried_settles"));
+        else
+            Assert.DoesNotContain(held, capture.Samples("kahuna.durable_tx.one_phase_carried_settles"));
     }
 
     /// <summary>

@@ -129,7 +129,10 @@ internal sealed partial class TransactionCoordinator
         isStopping: () => manager.Stopping,
         // The one-phase path's apply in line before the answer also reports the keys it left with nothing of the
         // transaction on them, so the working-set release sends nothing for those.
-        applyCommitReportingRelease: ApplyDurableCommitReportingRelease);
+        applyCommitReportingRelease: ApplyDurableCommitReportingRelease,
+        // A committed predecessor that still holds a written key does not end the one-phase attempt: the bundle
+        // carries its settlement, when this node leads both the partition and the predecessor's record.
+        isCommittedHolder: manager.IsCommittedHolderHere);
 
     /// <summary>Runs a durable transaction's post-decision resolution off the commit critical path. Exceptions are
     /// logged and swallowed: the decision is durable and recovery finishes a lost run. The task is tracked so
