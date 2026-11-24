@@ -143,6 +143,18 @@ public sealed class KeyValueResponse
     internal static KeyValueResponse NothingHeldHere() => new(KeyValueResponseType.MustRetry) { NothingHeld = true };
 
     /// <summary>
+    /// True on the <see cref="KeyValueResponseType.Committed"/> answer of a durable commit apply that found the
+    /// write intent of the committing transaction on the key and removed it, with the MVCC entry of the
+    /// transaction, in the same actor turn. The transaction holds nothing on the key after that turn, so a release
+    /// of the key for it would find nothing. False on every other answer, which includes a commit apply that
+    /// found the head already in place or the intent gone.
+    /// </summary>
+    internal bool OwnIntentReleased { get; private init; }
+
+    /// <summary>The answer of a commit apply that also removed the transaction's own intent; see <see cref="OwnIntentReleased"/>.</summary>
+    internal static KeyValueResponse CommittedOwnIntentReleased() => new(KeyValueResponseType.Committed) { OwnIntentReleased = true };
+
+    /// <summary>
     /// On the clean answer of a commit-time probe that asked <see cref="KeyValueConflictChecks.CommitFloor"/>: the
     /// highest snapshot timestamp a read was served the committed head at over the caller's own staged intent on
     /// the key (<see cref="KeyValueWriteIntent.CommitFloor"/>). The caller mints its commit timestamp strictly

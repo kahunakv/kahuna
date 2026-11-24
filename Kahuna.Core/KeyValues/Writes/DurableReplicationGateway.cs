@@ -920,7 +920,8 @@ internal sealed class DurableReplicationGateway
                 return await ReplicateDurableLocal(partitionId, logType, payload, Writes.WriteAdmissionClass.Terminal, WriteSubmissionStage.Other, fences: [], cancellationToken).ConfigureAwait(false);
 
             case DurableOpCommit:
-                return await replicator.ApplyDurableCommit(partitionId, PreparedIntentStore.DeserializeIntents(payload)[0]).ConfigureAwait(false);
+                return await replicator.ApplyDurableCommit(partitionId, PreparedIntentStore.DeserializeIntents(payload)[0]).ConfigureAwait(false)
+                    != Transactions.Data.DurableCommitApply.NotApplied;
 
             case DurableOpRollback:
                 return await replicator.ApplyDurableRollback(partitionId, PreparedIntentStore.DeserializeIntents(payload)[0]).ConfigureAwait(false);
@@ -1021,7 +1022,24 @@ internal sealed class DurableReplicationGateway
         if (leader is not null)
             return await ForwardDurableOperationAsync(leader, partitionId, DurableOpCommit, "", PreparedIntentStore.SerializeIntents([intent]), cancellationToken).ConfigureAwait(false);
 
-        return await replicator.ApplyDurableCommit(partitionId, intent).ConfigureAwait(false);
+        return await replicator.ApplyDurableCommit(partitionId, intent).ConfigureAwait(false) != Transactions.Data.DurableCommitApply.NotApplied;
+    }
+
+    /// <summary>
+    /// <see cref="ApplyDurableCommit"/> for a committer that wants to know whether the apply also removed the
+    /// transaction's own write intent and MVCC entry. That answer comes only from an apply on this node: the
+    /// forwarded operation answers a bool, so an apply on another node is at most
+    /// <see cref="Transactions.Data.DurableCommitApply.Applied"/>.
+    /// </summary>
+    internal async Task<Transactions.Data.DurableCommitApply> ApplyDurableCommitReportingRelease(int partitionId, Transactions.Data.PreparedIntent intent, CancellationToken cancellationToken)
+    {
+        string? leader = await ResolveDurableLeader(partitionId, cancellationToken).ConfigureAwait(false);
+        if (leader is null)
+            return await replicator.ApplyDurableCommit(partitionId, intent).ConfigureAwait(false);
+
+        return await ForwardDurableOperationAsync(leader, partitionId, DurableOpCommit, "", PreparedIntentStore.SerializeIntents([intent]), cancellationToken).ConfigureAwait(false)
+            ? Transactions.Data.DurableCommitApply.Applied
+            : Transactions.Data.DurableCommitApply.NotApplied;
     }
 
     /// <summary>

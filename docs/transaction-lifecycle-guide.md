@@ -569,7 +569,7 @@ A call is in exactly one stage at any moment, so its stages add up to it. For on
 | `decision` | A terminal transition of the record on its own round: the two-phase decision, an abort driven through the record, or the fence of an earlier attempt |
 | `resolution` | The hand-off of the resolution to the background, or the whole resolution when deferred settlement is off |
 | `ephemeral` | The in-memory prepare, probe, commit and rollback of ephemeral keys |
-| `release` | The release of the transaction's locks and read snapshots. With `AsyncRelease` the part after its first wait is outside the call |
+| `release` | The release of the transaction's locks and read snapshots (§6.9). With `AsyncRelease` the part after its first wait is outside the call |
 | `answer` | The outcome on the session, the retained outcome, the end of the session and the publication to the callers that wait for it |
 
 | Path | Content |
@@ -594,6 +594,49 @@ one-phase attempt it also contains `preflight` and `encode`.
 A call reads the clock once at each stage boundary and records one histogram sample. The stages add to totals
 that a listener reads when it collects, so they cost no listener callback for each commit. With no listener on
 either instrument the call opens no clock.
+
+### 6.9 Working-set release
+
+When a transaction ends, its coordinator releases what the transaction still holds: each point lock, each
+staged write, each read snapshot, each prefix lock and each range lock. The per-key items go to the leader of
+each key in one batched request. A release of a key removes the transaction's write intent and its MVCC
+entry. For a yielding transaction that lost its intent on the key to a takeover, the release removes the
+record of that loss. It removes nothing else.
+
+A one-phase commit applies each committed value on the leader before it answers (the `apply` stage). That
+apply removes the same write intent and the same MVCC entry, in the turn of the actor that owns the key. The
+actor says so in its answer, and the coordinator then sends no release for the key. A read-modify-write
+commit on the leader of its keys sends no per-key release at all.
+
+A key is left out only when all of these are true:
+
+- The commit took the one-phase path and its decision is `Commit`.
+- The apply of the key ran on the node that holds the session. An apply that is forwarded to another leader
+  answers only whether it succeeded, so its key keeps the release.
+- The apply found the write intent of the transaction on the key and removed it. An apply that found the head
+  already in place, or found no intent of the transaction, reports nothing.
+
+Everything else is released as before:
+
+| Item | Release |
+|---|---|
+| A key the transaction only read | Sent. The commit applies nothing on it |
+| A point lock on a key the transaction did not write | Sent |
+| A prefix lock, a range lock | Sent, each with its own request |
+| Every key of an abort, a rollback or a reaped session | Sent |
+| Every key of a two-phase commit | Sent. With deferred settlement its apply runs after the answer, so the release is what clears the intent |
+| A written key whose apply failed, ran on another node, or found no intent | Sent |
+
+A key that is left out is not a pending release: it does not enter the list that the detached retry sends
+again (`kahuna.transactions.lock_release_retries`).
+
+The leader of a key can change after the apply. The node that stops leading a partition drops its write
+intents and MVCC entries for that partition, and a release goes only to the current leader, so the new
+leader holds nothing of the transaction with or without the release.
+
+`kahuna.transactions.working_set_release_keys{result}` counts the per-key items: `sent` for a release that
+was sent, and `commit_applied` for a written key that needed none. A one-phase workload whose written keys
+stay under `sent` commits on nodes that do not lead those keys.
 
 ---
 
@@ -868,6 +911,7 @@ The time of a commit call and its stages are in §6.8.
 | Script execution | `KeyValues/Transactions/ScriptTransactionExecutor.cs`, `ScriptParser/` |
 | Coordination / 2PC | `KeyValues/Transactions/TransactionCoordinator.cs`, `DurableTransactionFinalizer.cs`, `DurableFinalizeInputBuilder.cs` |
 | Commit call timing | `KeyValues/Transactions/CommitCallTelemetry.cs`, `CommitCallTimeline.cs`, `CommitCallStage.cs` |
+| Working-set release | `KeyValues/Transactions/TransactionCoordinator.WorkingSetRelease.cs`, `Handlers/TryReleaseExclusiveLockHandler.cs`, `Handlers/InvalidateOrApplyHandler.cs` |
 | Durable stores | `Transactions/TransactionRecordStore.cs`, `PreparedIntentStore.cs` (+ their state machines) |
 | Deferred-window visibility | `Handlers/DurableReadVisibility.cs`, `PreparedIntentVisibility.cs`, `ForeignIntentWriteResolver.cs` |
 | Recovery | `Transactions/DurableTransactionRecovery.cs` |

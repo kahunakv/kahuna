@@ -42,6 +42,10 @@ internal static class KeyValueStaticResponses
     /// transaction; see <see cref="KeyValueResponse.NothingHeld"/>.</summary>
     internal static readonly KeyValueResponse NothingHeldResponse = KeyValueResponse.NothingHeldHere();
 
+    /// <summary>Committed from a commit apply that also removed the transaction's own write intent and MVCC
+    /// entry; see <see cref="KeyValueResponse.OwnIntentReleased"/>.</summary>
+    internal static readonly KeyValueResponse CommittedOwnIntentReleasedResponse = KeyValueResponse.CommittedOwnIntentReleased();
+
     internal static readonly KeyValueResponse NotSetResponse = new(KeyValueResponseType.NotSet);
 
     internal static readonly KeyValueResponse InvalidInputResponse = new(KeyValueResponseType.InvalidInput);

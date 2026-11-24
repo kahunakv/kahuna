@@ -145,7 +145,11 @@ internal readonly record struct DurableFinalizeOutcome(
     // committed head over one of the transaction's staged writes at a timestamp at or above the frozen commit
     // timestamp. The coordinator freezes the commit again strictly above this floor and drives the attempt
     // again; nothing carries the refused identity.
-    HLCTimestamp CommitFloor = default);
+    HLCTimestamp CommitFloor = default,
+    // Set on a one-phase commit: the written keys whose apply on this node, in line before the answer, removed
+    // the transaction's own write intent and MVCC entry. The transaction holds nothing on them, so the
+    // coordinator sends no release for them. Null when no key qualified.
+    IReadOnlySet<string>? ReleasedByApply = null);
 
 /// <summary>
 /// Drives one transaction's finalize under the durable-intent 2PC model: initialize the canonical
@@ -222,6 +226,13 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     /// key/value record makes followers converge, but the leader does not apply it through the replication callback,
     /// so this is how the committed value becomes visible on the leader. Null in bare protocol tests (no actor).</summary>
     public delegate Task<bool> ApplyCommitLocally(int partitionId, PreparedIntent intent);
+
+    /// <summary><see cref="ApplyCommitLocally"/> for the one-phase path's apply in line before the commit answers.
+    /// Its answer also says whether the apply ran on this node and removed the transaction's own write intent and
+    /// MVCC entry in the same actor turn (<see cref="DurableCommitApply.AppliedAndReleased"/>); the finalize
+    /// reports those keys in <see cref="DurableFinalizeOutcome.ReleasedByApply"/>. Null uses
+    /// <see cref="ApplyCommitLocally"/> and reports no key.</summary>
+    public delegate Task<DurableCommitApply> ApplyCommitReportingRelease(int partitionId, PreparedIntent intent);
 
     /// <summary>Clears an aborted transaction's staged write intent + MVCC snapshot on the owning actor (the durable
     /// analog of ApplyConfirmedRollback), so the key is not blocked until the intent lease expires. Null in bare
@@ -323,6 +334,8 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     private readonly ResolutionScheduler? scheduleResolution;
 
     private readonly ApplyCommitLocally? applyCommitLocally;
+
+    private readonly ApplyCommitReportingRelease? applyCommitReportingRelease;
 
     private readonly ApplyRollbackLocally? applyRollbackLocally;
 
@@ -440,9 +453,11 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         long commitAdmissionLagMs = 0,
         ClaimStagedIntentsDelegate? claimStagedIntents = null,
         Func<string, DurableKeyRoute>? locateRoute = null,
-        Func<bool>? isStopping = null)
+        Func<bool>? isStopping = null,
+        ApplyCommitReportingRelease? applyCommitReportingRelease = null)
     {
         this.isStopping = isStopping;
+        this.applyCommitReportingRelease = applyCommitReportingRelease;
         this.decide = decide;
         this.locateRoute = locateRoute;
         this.claimStagedIntents = claimStagedIntents;
@@ -1754,6 +1769,8 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             return (Retry(), OnePhaseFallbackReason.None);
         }
 
+        HashSet<string>? releasedByApply = null;
+
         if (reply.Decision == TransactionDecision.Commit)
         {
             DurableTransactionMetrics.OnePhaseCommits.Add(1);
@@ -1764,7 +1781,27 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             // barrier gives the deferred resolution task time to win this race; with a single barrier the
             // race would be routinely lost. Only the in-memory apply runs inline — the durable materialize
             // + settle still ride the deferred resolution (idempotent re-apply) or the recovery sweep.
-            if (applyCommitLocally is not null)
+            //
+            // An apply that ran on this node and removed the transaction's own write intent and MVCC entry left
+            // nothing for a release of that key to remove. Those keys are reported, and the coordinator leaves
+            // them out of the working-set release. A key whose apply threw, ran on another node, or found no
+            // intent of the transaction is not reported and keeps its release.
+            if (applyCommitReportingRelease is not null)
+            {
+                foreach (PreparedIntent intent in partition.Intents)
+                {
+                    try
+                    {
+                        if (await applyCommitReportingRelease(partition.PartitionId, intent).ConfigureAwait(false) == DurableCommitApply.AppliedAndReleased)
+                            (releasedByApply ??= new HashSet<string>(partition.Intents.Count, StringComparer.Ordinal)).Add(intent.Key);
+                    }
+                    catch
+                    {
+                        // Best-effort: the decision is durable; deferred resolution/recovery re-applies.
+                    }
+                }
+            }
+            else if (applyCommitLocally is not null)
             {
                 foreach (PreparedIntent intent in partition.Intents)
                 {
@@ -1784,7 +1821,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         // resolution may take its direction from the outcome without reading the record again.
         return (reply.Decision switch
         {
-            TransactionDecision.Commit => new DurableFinalizeOutcome(DurableFinalizeResult.Committed, TransactionAbortClass.None, CanonicalDecisionRead: true),
+            TransactionDecision.Commit => new DurableFinalizeOutcome(DurableFinalizeResult.Committed, TransactionAbortClass.None, CanonicalDecisionRead: true, ReleasedByApply: releasedByApply),
             TransactionDecision.Abort => new DurableFinalizeOutcome(DurableFinalizeResult.Aborted, reply.AbortClass, CanonicalDecisionRead: true),
             _ => Retry()
         }, OnePhaseFallbackReason.None);

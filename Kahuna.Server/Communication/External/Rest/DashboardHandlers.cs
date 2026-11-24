@@ -63,6 +63,9 @@ public static class DashboardHandlers
         "kahuna.transactions.commit_call_ms",
         "kahuna.transactions.commit_stage_ms",
 
+        // The per-key releases that end a transaction: sent, or left to the apply of a one-phase commit.
+        "kahuna.transactions.working_set_release_keys",
+
         // The point-read path per step, and the coordinator registration hops a transaction-scoped read takes.
         "kahuna.kv.read.stage",
         "kahuna.kv.read.fallback",

@@ -253,7 +253,11 @@ internal sealed class KeyValueReplicator
     /// base entry. The returned acknowledgement means the actor has
     /// completed that work; routing/enqueueing alone is not sufficient to settle the durable intent.
     ///
-    /// <para>A true return attests the RESIDENT entry only, never local durability: the actor answers
+    /// <para>The answer also says whether the apply found the transaction's own write intent on the key and
+    /// removed it with the transaction's MVCC entry (<see cref="DurableCommitApply.AppliedAndReleased"/>). A
+    /// committer that gets that answer on this node sends no release for the key.</para>
+    ///
+    /// <para>An applied answer attests the RESIDENT entry only, never local durability: the actor answers
     /// Committed for a head it already applied even when nothing was persisted for it (the leader's own
     /// one-phase materialization advances the resident head and deliberately persists nothing, trusting the
     /// replicator's durable apply — which may have been skipped). A caller that needs the mutation durable
@@ -266,7 +270,7 @@ internal sealed class KeyValueReplicator
     /// (after a snapshot install or un-host purge evicted the entry), and installing over a fabricated empty
     /// base would shadow newer persisted rows.</para>
     /// </summary>
-    public async Task<bool> ApplyDurableCommit(int partitionId, PreparedIntent intent)
+    public async Task<DurableCommitApply> ApplyDurableCommit(int partitionId, PreparedIntent intent)
     {
         // Abort fence: every durable-commit apply — the finalizer's resolution, a recovery settle, the
         // helping pass, and the commit-repair ladder, local or forwarded — crosses this method. A locally
@@ -281,16 +285,16 @@ internal sealed class KeyValueReplicator
             logger.LogError(
                 "Refusing durable commit apply for key {Key} at revision {Revision}: transaction {TransactionId} epoch {Epoch} is aborted",
                 intent.Key, intent.Revision, intent.TransactionId, intent.Epoch);
-            return false;
+            return DurableCommitApply.NotApplied;
         }
 
-        KeyValueResponseType first = await AskDurableCommit(partitionId, intent, hydratedEntry: null, backendHydrated: false).ConfigureAwait(false);
+        KeyValueResponse? first = await AskDurableCommit(partitionId, intent, hydratedEntry: null, backendHydrated: false).ConfigureAwait(false);
 
-        if (first == KeyValueResponseType.Committed)
-            return true;
+        if (first is { Type: KeyValueResponseType.Committed })
+            return AppliedAs(first);
 
-        if (first != KeyValueResponseType.MustRetry || hydrateFromBackend is null)
-            return false;
+        if (first is not { Type: KeyValueResponseType.MustRetry } || hydrateFromBackend is null)
+            return DurableCommitApply.NotApplied;
 
         ReadOnlyKeyValueEntry? persisted;
         try
@@ -302,14 +306,23 @@ internal sealed class KeyValueReplicator
         }
         catch
         {
-            return false;
+            return DurableCommitApply.NotApplied;
         }
 
-        return await AskDurableCommit(partitionId, intent, persisted, backendHydrated: true).ConfigureAwait(false)
-            == KeyValueResponseType.Committed;
+        return AppliedAs(await AskDurableCommit(partitionId, intent, persisted, backendHydrated: true).ConfigureAwait(false));
     }
 
-    private async Task<KeyValueResponseType> AskDurableCommit(
+    /// <summary>
+    /// Maps the actor's answer to a commit apply. Only <c>Committed</c> confirms the head; the answer also says
+    /// whether the same turn removed the transaction's own write intent and MVCC entry.
+    /// </summary>
+    private static DurableCommitApply AppliedAs(KeyValueResponse? response) =>
+        response is not { Type: KeyValueResponseType.Committed } ? DurableCommitApply.NotApplied
+        : response.OwnIntentReleased ? DurableCommitApply.AppliedAndReleased
+        : DurableCommitApply.Applied;
+
+    /// <summary>Asks the owning actor to apply the commit. Null when the actor gave no answer or the ask failed.</summary>
+    private async Task<KeyValueResponse?> AskDurableCommit(
         int partitionId, PreparedIntent intent, ReadOnlyKeyValueEntry? hydratedEntry, bool backendHydrated)
     {
         persistentRouter.NotePendingApply(intent.Key, intent.Revision, intent.CommitTimestamp);
@@ -334,12 +347,11 @@ internal sealed class KeyValueReplicator
 
         try
         {
-            KeyValueResponse? response = await persistentRouter.Ask(request).ConfigureAwait(false);
-            return response?.Type ?? KeyValueResponseType.Errored;
+            return await persistentRouter.Ask(request).ConfigureAwait(false);
         }
         catch
         {
-            return KeyValueResponseType.Errored;
+            return null;
         }
         finally
         {
@@ -645,7 +657,7 @@ internal sealed class KeyValueReplicator
                     bool actorCommitted;
                     try
                     {
-                        actorCommitted = await ApplyDurableCommit(partitionId, intent).ConfigureAwait(false);
+                        actorCommitted = await ApplyDurableCommit(partitionId, intent).ConfigureAwait(false) != DurableCommitApply.NotApplied;
                     }
                     catch
                     {

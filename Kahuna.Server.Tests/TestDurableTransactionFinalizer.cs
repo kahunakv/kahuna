@@ -1390,6 +1390,153 @@ public sealed class TestDurableTransactionFinalizer
     }
 
     /// <summary>
+    /// A one-phase commit reports the keys whose apply, in line before the answer, said that it removed the
+    /// transaction's own intent, and no other key: not one whose apply found no intent of the transaction, not
+    /// one whose apply did not confirm the head, and not one whose apply threw. The apply of a later key still
+    /// runs after one throws.
+    /// </summary>
+    [Fact]
+    public async Task OnePhase_Commit_ReportsOnlyTheKeysWhoseApplyReleasedTheIntent()
+    {
+        HLCTimestamp txId = Ts(1000);
+        (TransactionRecordStore records, PreparedIntentStore intents) = StoresWithProbe();
+        Seam seam = new() { Records = records, Intents = intents };
+        ConcurrentQueue<string> asked = new();
+
+        DurableTransactionFinalizer finalizer = new(
+            records, intents, seam.Replicate,
+            applyCommitLocally: (_, _) => Task.FromResult(true),
+            replicateOnePhaseBundle: OnePhase(records, intents),
+            applyCommitReportingRelease: (_, intent) =>
+            {
+                asked.Enqueue(intent.Key);
+
+                return intent.Key switch
+                {
+                    "acct/1" => Task.FromResult(DurableCommitApply.AppliedAndReleased),
+                    "acct/2" => Task.FromResult(DurableCommitApply.Applied),
+                    "acct/3" => throw new InvalidOperationException("apply boom"),
+                    "acct/4" => Task.FromResult(DurableCommitApply.NotApplied),
+                    _ => Task.FromResult(DurableCommitApply.AppliedAndReleased)
+                };
+            });
+
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(txId, 1, (5, "acct/1"), (5, "acct/2"), (5, "acct/3"), (5, "acct/4"), (5, "acct/5")),
+            Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+        Assert.Equal(["acct/1", "acct/2", "acct/3", "acct/4", "acct/5"], asked);
+        Assert.NotNull(outcome.ReleasedByApply);
+        Assert.Equal(["acct/1", "acct/5"], outcome.ReleasedByApply.Order(StringComparer.Ordinal));
+    }
+
+    /// <summary>A one-phase commit with no key released by its apply reports none.</summary>
+    [Fact]
+    public async Task OnePhase_Commit_WhoseApplyReleasedNothing_ReportsNoKey()
+    {
+        (TransactionRecordStore records, PreparedIntentStore intents) = StoresWithProbe();
+        Seam seam = new() { Records = records, Intents = intents };
+
+        DurableTransactionFinalizer finalizer = new(
+            records, intents, seam.Replicate,
+            replicateOnePhaseBundle: OnePhase(records, intents),
+            applyCommitReportingRelease: (_, _) => Task.FromResult(DurableCommitApply.Applied));
+
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(Ts(1000), 1, (5, "acct/1"), (5, "acct/2")), Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+        Assert.Null(outcome.ReleasedByApply);
+    }
+
+    /// <summary>
+    /// Without the reporting apply the one-phase path applies each key through the plain apply, as before, and
+    /// reports no key.
+    /// </summary>
+    [Fact]
+    public async Task OnePhase_Commit_WithoutTheReportingApply_AppliesInLine_AndReportsNoKey()
+    {
+        (TransactionRecordStore records, PreparedIntentStore intents) = StoresWithProbe();
+        Seam seam = new() { Records = records, Intents = intents };
+        ConcurrentQueue<string> applied = new();
+
+        // A scheduler that never runs the resolution, so only the apply in line reaches the queue.
+        DurableTransactionFinalizer finalizer = new(
+            records, intents, seam.Replicate,
+            resolutionScheduler: _ => { },
+            applyCommitLocally: (_, intent) => { applied.Enqueue(intent.Key); return Task.FromResult(true); },
+            replicateOnePhaseBundle: OnePhase(records, intents));
+
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(Ts(1000), 1, (5, "acct/1"), (5, "acct/2")), Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+        Assert.Equal(["acct/1", "acct/2"], applied);
+        Assert.Null(outcome.ReleasedByApply);
+    }
+
+    /// <summary>
+    /// A commit over two partitions has no one-phase attempt. Its apply runs in the resolution, which with
+    /// deferred settlement is after the answer, so it never asks the reporting apply and reports no key: the
+    /// release is what clears its intents.
+    /// </summary>
+    [Fact]
+    public async Task TwoPhase_Commit_NeverAsksTheReportingApply_AndReportsNoKey()
+    {
+        (TransactionRecordStore records, PreparedIntentStore intents) = StoresWithProbe();
+        Seam seam = new() { Records = records, Intents = intents };
+        int reportingAsks = 0;
+        ConcurrentQueue<string> applied = new();
+
+        DurableTransactionFinalizer finalizer = new(
+            records, intents, seam.Replicate,
+            applyCommitLocally: (_, intent) => { applied.Enqueue(intent.Key); return Task.FromResult(true); },
+            replicateOnePhaseBundle: OnePhase(records, intents),
+            applyCommitReportingRelease: (_, _) =>
+            {
+                Interlocked.Increment(ref reportingAsks);
+                return Task.FromResult(DurableCommitApply.AppliedAndReleased);
+            });
+
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(Ts(1000), 1, (5, "acct/1"), (6, "acct/2")), Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+        Assert.Equal(0, reportingAsks);
+        Assert.Equal(["acct/1", "acct/2"], applied.Order(StringComparer.Ordinal));
+        Assert.Null(outcome.ReleasedByApply);
+    }
+
+    /// <summary>
+    /// A one-phase attempt whose validation fails falls back to the standard flow and aborts. Nothing was
+    /// applied, so the outcome reports no key and every key keeps its release.
+    /// </summary>
+    [Fact]
+    public async Task OnePhase_AttemptThatAborts_ReportsNoKey()
+    {
+        (TransactionRecordStore records, PreparedIntentStore intents) = StoresWithProbe();
+        Seam seam = new() { Records = records, Intents = intents };
+        int reportingAsks = 0;
+
+        DurableTransactionFinalizer finalizer = new(
+            records, intents, seam.Replicate,
+            replicateOnePhaseBundle: OnePhase(records, intents),
+            applyCommitReportingRelease: (_, _) =>
+            {
+                Interlocked.Increment(ref reportingAsks);
+                return Task.FromResult(DurableCommitApply.AppliedAndReleased);
+            });
+
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(Ts(1000), 1, (5, "acct/1"), (5, "acct/2")), Validate(false), opId: Ts(2000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.Aborted, outcome.Result);
+        Assert.Equal(0, reportingAsks);
+        Assert.Null(outcome.ReleasedByApply);
+    }
+
+    /// <summary>
     /// A one-phase commit whose bundle crossed to a remote anchor leader records its pre-bundle time on the
     /// <c>route=forwarded</c> series, and that sample carries the wire time (the injected round trip here) —
     /// measurably larger than a co-located attempt's — while the bundle sample still carries the remote

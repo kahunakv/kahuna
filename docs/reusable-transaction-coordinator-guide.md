@@ -346,6 +346,10 @@ After a successful best-effort commit, modified-key locks were already settled b
 then releases any remaining point/prefix/range locks and read MVCC entries. Eligible post-commit
 cleanup may be detached when `AsyncRelease` is enabled.
 
+A one-phase commit of persistent keys applies each written key on its leader before it answers, and that
+apply removes the transaction's write intent and MVCC entry. The coordinator sends no release for such a
+key when the apply ran on its own node. The transaction lifecycle guide, §6.9, lists what is still released.
+
 ### Rollback
 
 Rollback does not prepare. It releases staged writes, point locks, prefix locks, range locks, and read

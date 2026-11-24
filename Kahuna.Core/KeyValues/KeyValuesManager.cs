@@ -459,6 +459,11 @@ internal sealed partial class KeyValuesManager : IDisposable
     internal Task<bool> ApplyDurableCommit(int partitionId, Transactions.Data.PreparedIntent intent, CancellationToken cancellationToken) =>
         durableReplication.ApplyDurableCommit(partitionId, intent, cancellationToken);
 
+    /// <summary>Applies a prepared intent's commit on its partition and reports whether the apply, on this node,
+    /// also removed the transaction's own write intent and MVCC entry.</summary>
+    internal Task<Transactions.Data.DurableCommitApply> ApplyDurableCommitReportingRelease(int partitionId, Transactions.Data.PreparedIntent intent, CancellationToken cancellationToken) =>
+        durableReplication.ApplyDurableCommitReportingRelease(partitionId, intent, cancellationToken);
+
     /// <summary>Applies a prepared intent's rollback on its partition.</summary>
     internal Task<bool> ApplyDurableRollback(int partitionId, Transactions.Data.PreparedIntent intent, CancellationToken cancellationToken) =>
         durableReplication.ApplyDurableRollback(partitionId, intent, cancellationToken);

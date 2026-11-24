@@ -223,7 +223,16 @@ internal sealed class InvalidateOrApplyHandler : BaseHandler
         HLCTimestamp now = context.Raft.HybridLogicalClock.TrySendOrLocalEvent(context.Raft.GetLocalNodeId());
         ApplyConfirmedCommit(entry, proposal, data.TransactionId, now, data.PartitionId, recordAnchorKey: null);
 
-        return new(KeyValueResponseType.Committed);
+        if (!ownsIntent)
+            return new(KeyValueResponseType.Committed);
+
+        // The apply removed the transaction's write intent and its MVCC entry, which is all a release of the key
+        // removes. A takeover record names a transaction that lost its intent, so none exists for an intent the
+        // transaction still owned; forgetting it here makes the answer hold without that argument. The answer
+        // lets the committer leave the key out of its working-set release.
+        context.ForgetYieldedIntent(key, data.TransactionId);
+
+        return KeyValueStaticResponses.CommittedOwnIntentReleasedResponse;
     }
 
     /// <summary>

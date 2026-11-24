@@ -257,6 +257,15 @@ internal class TransactionContext
     internal bool PerKeyWorkingSetReleased { get; set; }
 
     /// <summary>
+    /// The persistent written keys the one-phase commit already cleaned: the apply of each committed value, on
+    /// this node and before the commit answered, removed the transaction's write intent and MVCC entry in the turn
+    /// of the key's actor. The working-set release sends nothing for them. Null when the commit reported no key,
+    /// which is every commit that is not one-phase and every outcome that is not a commit. Written once by the
+    /// finalize that committed and read by the release that follows it.
+    /// </summary>
+    internal IReadOnlySet<string>? KeysReleasedByCommitApply { get; set; }
+
+    /// <summary>
     /// Prefix locks acquired during execution.
     /// </summary>
     public HashSet<(string, KeyValueDurability)>? PrefixLocksAcquired { get; set; }

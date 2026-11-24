@@ -1078,6 +1078,26 @@ internal static class DurableTransactionMetrics
             "kahuna.transactions.lock_releases_left_to_lease",
             description: "Mandatory lock releases never acknowledged, left to lapse with the lock lease.");
 
+    /// <summary>
+    /// Keys of the working-set release that ends a transaction, tagged by <c>result</c>: <c>sent</c> for a per-key
+    /// release that was sent (a point lock, a staged write or a read snapshot), and <c>commit_applied</c> for a
+    /// written key that needed none, because the apply of a one-phase commit on this node had already removed
+    /// the transaction's write intent and MVCC entry. A one-phase workload that still shows its written keys
+    /// under <c>sent</c> commits on a node that does not lead the keys: only an apply on the committing node
+    /// reports the removal.
+    /// </summary>
+    internal static readonly Counter<long> WorkingSetReleaseKeys =
+        Meter.CreateCounter<long>(
+            "kahuna.transactions.working_set_release_keys",
+            description: "Keys of the working-set release of a transaction, tagged by result: sent, or commit_applied when the one-phase commit apply had already released the key.");
+
+    private static readonly KeyValuePair<string, object?> ReleaseKeysSent = new("result", "sent");
+    private static readonly KeyValuePair<string, object?> ReleaseKeysCommitApplied = new("result", "commit_applied");
+
+    internal static void WorkingSetReleaseKeysSent(int count) => WorkingSetReleaseKeys.Add(count, ReleaseKeysSent);
+
+    internal static void WorkingSetReleaseKeysLeftToCommitApply(int count) => WorkingSetReleaseKeys.Add(count, ReleaseKeysCommitApplied);
+
     private static long lockReleaseRetries;
     private static long lockReleasesLate;
     private static long lockReleasesLeftToLease;

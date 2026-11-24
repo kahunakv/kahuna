@@ -126,7 +126,10 @@ internal sealed partial class TransactionCoordinator
         // Every prepare carries the commit admission lag bound, so each replica refuses a commit timestamp that
         // reaches its log too late (or too far ahead) and a watch can promise a watermark.
         commitAdmissionLagMs: configuration.CommitAdmissionLagMs,
-        isStopping: () => manager.Stopping);
+        isStopping: () => manager.Stopping,
+        // The one-phase path's apply in line before the answer also reports the keys it left with nothing of the
+        // transaction on them, so the working-set release sends nothing for those.
+        applyCommitReportingRelease: ApplyDurableCommitReportingRelease);
 
     /// <summary>Runs a durable transaction's post-decision resolution off the commit critical path. Exceptions are
     /// logged and swallowed: the decision is durable and recovery finishes a lost run. The task is tracked so
@@ -173,6 +176,11 @@ internal sealed partial class TransactionCoordinator
     // participant partition's leader (routed there on a cluster). Called by the finalizer's resolution.
     private Task<bool> ApplyDurableCommitLocally(int partitionId, PreparedIntent intent) =>
         manager.ApplyDurableCommit(partitionId, intent, CancellationToken.None);
+
+    // The same apply for the one-phase path's own keys. The answer says whether the apply ran on this node and
+    // removed the transaction's write intent and MVCC entry.
+    private Task<DurableCommitApply> ApplyDurableCommitReportingRelease(int partitionId, PreparedIntent intent) =>
+        manager.ApplyDurableCommitReportingRelease(partitionId, intent, CancellationToken.None);
 
     // Clears an aborted transaction's staged write intent/MVCC on the leader (the durable analog of
     // ApplyConfirmedRollback), invoked by the finalizer's resolution when the decision is abort.
@@ -512,6 +520,10 @@ internal sealed partial class TransactionCoordinator
             context.UnresolvedDurableFinalize = null;
         else if (context.UnresolvedDurableFinalize is { } unresolved && outcome.DecisionDeadline > unresolved.DecisionDeadline)
             context.UnresolvedDurableFinalize = unresolved with { DecisionDeadline = outcome.DecisionDeadline };
+
+        // The keys a one-phase commit already cleaned on their leader. Only a commit reports them, and a commit is
+        // the last outcome of the session, so the release that follows reads what this attempt wrote.
+        context.KeysReleasedByCommitApply = outcome.Result == DurableFinalizeResult.Committed ? outcome.ReleasedByApply : null;
 
         // Per-transaction view of the deadline gate. The finalizer counts each rejected attempt, and each client
         // retry is an attempt. Count the transaction once, on first rejection, to show how many transactions the

@@ -29,7 +29,9 @@ internal sealed partial class TransactionCoordinator
     /// intent, so one per-key call cleans a point lock, a staged (un-prepared) write, or a read snapshot. Point
     /// locks and staged writes are <b>mandatory</b>: their write intent blocks other writers until cleared.
     /// Read-only MVCC snapshots are <b>best-effort</b> (no intent; trimmed lazily). On a committed transaction
-    /// 2PC already finalized the modified keys, so their locks are not released again. Every item is attempted
+    /// 2PC already finalized the modified keys, so their locks are not released again. A one-phase commit applies
+    /// each committed value on the leader before it answers, and that apply removes the same two things, so a key
+    /// it reports (<see cref="TransactionContext.KeysReleasedByCommitApply"/>) is left out. Every item is attempted
     /// even after a failure. Returns true when every mandatory release acknowledged; the caller uses it to
     /// decide whether a rollback may report <c>RolledBack</c> or must retry.
     /// </remarks>
@@ -57,13 +59,22 @@ internal sealed partial class TransactionCoordinator
         int pendingModifiedCount = context.State == KeyValueTransactionState.Pending ? (context.ModifiedKeys?.Count ?? 0) : 0;
         int readCount = context.ReadKeys?.Count ?? 0;
 
+        // The written keys a one-phase commit already cleaned on their leader: the apply of each committed value
+        // removed the transaction's write intent and MVCC entry in the turn of the key's actor, which is all a
+        // release of the key removes. Nothing is sent for them, as a lock, as a staged write or as a read
+        // snapshot. Only an apply that answered so on this node counts (see DurableCommitApply); every other key
+        // keeps its release.
+        IReadOnlySet<string>? releasedByApply = context.KeysReleasedByCommitApply;
+        int leftToCommitApply = 0;
+
         // No per-key footprint, or one already released inside its actor turn: skip to the prefix/range releases.
         if (!context.PerKeyWorkingSetReleased && (lockCount > 0 || pendingModifiedCount > 0 || readCount > 0))
         {
             // Intent-bearing per-key cleanup: point locks and, while Pending, staged writes. The set is
             // authoritative for the acknowledgement checks below; read keys append straight to the batch list
-            // (their source dictionary already guarantees uniqueness).
-            HashSet<(string, KeyValueDurability)> mandatoryKeys = new(lockCount + pendingModifiedCount);
+            // (their source dictionary already guarantees uniqueness). Both collections are created at the first
+            // key that needs a release, so a commit whose apply cleaned every key allocates neither.
+            HashSet<(string, KeyValueDurability)>? mandatoryKeys = null;
 
             if (context.LocksAcquired is not null)
             {
@@ -73,21 +84,38 @@ internal sealed partial class TransactionCoordinator
                     if (committed && context.ModifiedKeys is not null && context.ModifiedKeys.Contains(lockKey))
                         continue;
 
-                    mandatoryKeys.Add(lockKey);
+                    if (WasReleasedByCommitApply(releasedByApply, lockKey))
+                        continue;
+
+                    (mandatoryKeys ??= new(lockCount + pendingModifiedCount)).Add(lockKey);
                 }
             }
 
             if (pendingModifiedCount > 0 && context.ModifiedKeys is not null)
             {
                 foreach ((string, KeyValueDurability) modified in context.ModifiedKeys)
-                    mandatoryKeys.Add(modified);
+                {
+                    if (WasReleasedByCommitApply(releasedByApply, modified))
+                    {
+                        leftToCommitApply++;
+                        continue;
+                    }
+
+                    (mandatoryKeys ??= new(lockCount + pendingModifiedCount)).Add(modified);
+                }
             }
 
             // One batched round-trip cleans every per-key entry; the release handler is idempotent, so a key
             // already cleaned is a harmless no-op.
-            List<(string, KeyValueDurability)> perKey = new(mandatoryKeys.Count + readCount);
-            foreach ((string, KeyValueDurability) mandatory in mandatoryKeys)
-                perKey.Add(mandatory);
+            List<(string, KeyValueDurability)>? perKey = null;
+
+            if (mandatoryKeys is not null)
+            {
+                perKey = new(mandatoryKeys.Count + readCount);
+
+                foreach ((string, KeyValueDurability) mandatory in mandatoryKeys)
+                    perKey.Add(mandatory);
+            }
 
             // Best-effort read MVCC cleanup for keys not already covered by a mandatory release or a committed
             // mutation (which the commit phase already cleaned).
@@ -95,47 +123,55 @@ internal sealed partial class TransactionCoordinator
             {
                 foreach ((string, KeyValueDurability) readKey in context.ReadKeys.Keys)
                 {
-                    if (mandatoryKeys.Contains(readKey))
+                    if (mandatoryKeys is not null && mandatoryKeys.Contains(readKey))
                         continue;
 
                     if (committed && context.ModifiedKeys is not null && context.ModifiedKeys.Contains(readKey))
                         continue;
 
-                    perKey.Add(readKey);
+                    if (WasReleasedByCommitApply(releasedByApply, readKey))
+                        continue;
+
+                    (perKey ??= new(readCount)).Add(readKey);
                 }
             }
 
+            CountPointReleases(sent: perKey?.Count ?? 0, leftToCommitApply);
+
             try
             {
-                if (perKey.Count == 1)
+                if (perKey is { Count: 1 })
                 {
                     (string key, KeyValueDurability durability) = perKey[0];
 
                     (KeyValueResponseType type, string _) = await manager.LocateAndTryReleaseExclusiveLock(context.TransactionId, key, durability, CancellationToken.None);
 
-                    if (mandatoryKeys.Contains((key, durability)) && !IsReleaseAcked(type))
+                    if (mandatoryKeys is not null && mandatoryKeys.Contains((key, durability)) && !IsReleaseAcked(type))
                     {
                         allMandatoryAcked = false;
                         context.RecordUnacknowledgedRelease(PendingLockRelease.OfPoint(key, durability));
                     }
                 }
-                else if (perKey.Count > 1)
+                else if (perKey is { Count: > 1 })
                 {
                     List<(KeyValueResponseType, string, KeyValueDurability)> results =
                         await manager.LocateAndTryReleaseManyExclusiveLocks(context.TransactionId, perKey, CancellationToken.None);
 
-                    // Index responses by key to verify every mandatory key. A mandatory key missing from the
-                    // results, or with a non-proof response, is not acknowledged.
-                    Dictionary<(string, KeyValueDurability), KeyValueResponseType> releasedByKey = new(results.Count);
-                    foreach ((KeyValueResponseType type, string key, KeyValueDurability durability) in results)
-                        releasedByKey[(key, durability)] = type;
-
-                    foreach ((string, KeyValueDurability) mandatory in mandatoryKeys)
+                    if (mandatoryKeys is not null)
                     {
-                        if (!releasedByKey.TryGetValue(mandatory, out KeyValueResponseType type) || !IsReleaseAcked(type))
+                        // Index responses by key to verify every mandatory key. A mandatory key missing from the
+                        // results, or with a non-proof response, is not acknowledged.
+                        Dictionary<(string, KeyValueDurability), KeyValueResponseType> releasedByKey = new(results.Count);
+                        foreach ((KeyValueResponseType type, string key, KeyValueDurability durability) in results)
+                            releasedByKey[(key, durability)] = type;
+
+                        foreach ((string, KeyValueDurability) mandatory in mandatoryKeys)
                         {
-                            allMandatoryAcked = false;
-                            context.RecordUnacknowledgedRelease(PendingLockRelease.OfPoint(mandatory.Item1, mandatory.Item2));
+                            if (!releasedByKey.TryGetValue(mandatory, out KeyValueResponseType type) || !IsReleaseAcked(type))
+                            {
+                                allMandatoryAcked = false;
+                                context.RecordUnacknowledgedRelease(PendingLockRelease.OfPoint(mandatory.Item1, mandatory.Item2));
+                            }
                         }
                     }
                 }
@@ -145,8 +181,11 @@ internal sealed partial class TransactionCoordinator
                 logger.LogError("ReleaseWorkingSet keys: {Type} {Message}\n{StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
                 allMandatoryAcked = false;
 
-                foreach ((string key, KeyValueDurability durability) in mandatoryKeys)
-                    context.RecordUnacknowledgedRelease(PendingLockRelease.OfPoint(key, durability));
+                if (mandatoryKeys is not null)
+                {
+                    foreach ((string key, KeyValueDurability durability) in mandatoryKeys)
+                        context.RecordUnacknowledgedRelease(PendingLockRelease.OfPoint(key, durability));
+                }
             }
         }
 
@@ -219,4 +258,37 @@ internal sealed partial class TransactionCoordinator
         type is KeyValueResponseType.Unlocked
              or KeyValueResponseType.DoesNotExist
              or KeyValueResponseType.AlreadyLocked;
+
+    /// <summary>
+    /// Whether the one-phase commit's apply already removed everything the transaction held on the key. Only a
+    /// persistent key can be in the set: a one-phase commit writes persistent keys alone.
+    /// </summary>
+    private static bool WasReleasedByCommitApply(IReadOnlySet<string>? releasedByApply, (string Key, KeyValueDurability Durability) key) =>
+        releasedByApply is not null && key.Durability == KeyValueDurability.Persistent && releasedByApply.Contains(key.Key);
+
+    private long pointReleasesSent;
+    private long pointReleasesLeftToCommitApply;
+
+    /// <summary>The per-key releases the working-set releases of this node sent: point locks, staged writes and
+    /// read snapshots. A retry of an unacknowledged release is not counted.</summary>
+    internal long PointReleasesSent => Interlocked.Read(ref pointReleasesSent);
+
+    /// <summary>The written keys the working-set releases of this node sent nothing for, because the apply of a
+    /// one-phase commit had already removed what the transaction held on them.</summary>
+    internal long PointReleasesLeftToCommitApply => Interlocked.Read(ref pointReleasesLeftToCommitApply);
+
+    private void CountPointReleases(int sent, int leftToCommitApply)
+    {
+        if (sent > 0)
+        {
+            Interlocked.Add(ref pointReleasesSent, sent);
+            DurableTransactionMetrics.WorkingSetReleaseKeysSent(sent);
+        }
+
+        if (leftToCommitApply > 0)
+        {
+            Interlocked.Add(ref pointReleasesLeftToCommitApply, leftToCommitApply);
+            DurableTransactionMetrics.WorkingSetReleaseKeysLeftToCommitApply(leftToCommitApply);
+        }
+    }
 }
