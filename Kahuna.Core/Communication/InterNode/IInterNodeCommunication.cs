@@ -294,4 +294,14 @@ public interface IInterNodeCommunication
     /// </summary>
     public Task<KeyValueResponseType> ConfirmRangeQuiesce(
         string node, int partitionId, string keySpace, string? startKey, string? endKey, HLCTimestamp owner, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Asks <paramref name="node"/>, which leads <paramref name="partitionId"/>, to settle the decided intents of
+    /// other transactions on <paramref name="keys"/> (see <see cref="IKahuna.SettleDecidedBlockers"/>).
+    /// <see cref="KeyValueResponseType.MustRetry"/> when that node could not look and on a transport failure;
+    /// <see cref="KeyValueResponseType.DoesNotExist"/> when the node does not know the call, which is a node of
+    /// an older version.
+    /// </summary>
+    public Task<(KeyValueResponseType Type, int Settled, int Decided, int Undecided)> SettleDecidedBlockers(
+        string node, int partitionId, IReadOnlyList<string> keys, HLCTimestamp transactionId, long epoch, CancellationToken cancellationToken);
 }

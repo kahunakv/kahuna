@@ -267,7 +267,7 @@ internal sealed class DurableReplicationGateway
     /// intent locally, both of which require the local node to be the partition leader, so on a cluster a coordinator
     /// that is not the leader forwards the operation to the leader (where records also coalesce across coordinators).
     /// </summary>
-    private async Task<string?> ResolveDurableLeader(int partitionId, CancellationToken cancellationToken)
+    internal async Task<string?> ResolveDurableLeader(int partitionId, CancellationToken cancellationToken)
     {
         // Durable-path routing is always a sub-operation the serving node initiates on its own
         // behalf (a 2PC leg to a participant leader, an anchor-record lookup for a foreign intent),

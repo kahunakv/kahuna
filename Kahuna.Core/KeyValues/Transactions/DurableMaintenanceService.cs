@@ -262,8 +262,9 @@ internal sealed class DurableMaintenanceService
     /// <summary>
     /// Participant-side recovery for the durable-intent path: on each partition this node leads, resolves due
     /// unresolved prepared intents to their canonical decision, presuming abort only past the decision deadline
-    /// (the abort drive routes to the anchor partition's leader when it is remote). No-op unless the
-    /// durable-intent path is enabled. Runs off the request path; idempotent with a concurrent finalize.
+    /// (the abort drive routes to the anchor partition's leader when it is remote), and settles the intents that
+    /// are not due but whose decision is already recorded (see <see cref="SettleDecidedIntentsAsync"/>). No-op
+    /// unless the durable-intent path is enabled. Runs off the request path; idempotent with a concurrent finalize.
     /// </summary>
     internal async Task RecoverPreparedIntents(CancellationToken cancellationToken)
     {
@@ -272,6 +273,20 @@ internal sealed class DurableMaintenanceService
 
         HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
 
+        try
+        {
+            await SweepDueIntentsAsync(now, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            // A sweep that fails does not hold this pass back; its exception still reaches the caller.
+            await SettleDecidedIntentsAsync(now, inheritedOnly: false, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>The sweep of the intents past their recovery deadline, which owns the presumed-abort protocol.</summary>
+    private async Task SweepDueIntentsAsync(HLCTimestamp now, CancellationToken cancellationToken)
+    {
         IReadOnlyList<PreparedIntent> due = preparedIntentStore.DueForRecovery(now);
         if (due.Count == 0)
             return;
@@ -334,6 +349,248 @@ internal sealed class DurableMaintenanceService
         // an install replaces the projection.
         foreach ((int partitionId, (string fullerPeer, string evidence)) in recovery.StaleRecordlessHolds)
             await runtime.DivergenceContainment.ContainAsync(partitionId, fullerPeer, evidence, "recovery").ConfigureAwait(false);
+    }
+
+    // Partitions whose leadership arrived here and whose inherited intents are not all settled yet, with the time it
+    // arrived: an intent that commits later is not inherited. A partition leaves the map when a pass finds none of
+    // its inherited intents left, when its leadership moves on, or when it is in the map for as long as the minimum
+    // age of the periodic pass, which covers those intents from then on.
+    private readonly ConcurrentDictionary<int, HLCTimestamp> inheritedPartitions = new();
+
+    // The partition after which the next capped pass over decided intents resumes, as the recovery sweep's does.
+    private int decidedSettleResumeAfterPartition = -1;
+
+    // Per partition, the transaction after which the next pass resumes when the last one reached its transaction
+    // cap.
+    private readonly ConcurrentDictionary<int, (HLCTimestamp TransactionId, long Epoch)> decidedSettleResumeAfter = new();
+
+    // Record lookups, and so settlements, one pass makes for one partition.
+    internal const int DecidedSettleMaxTransactionsPerPartition = 1_024;
+
+    // How long one pass may start record lookups and settlements. A lookup is a call to the anchor's leader when
+    // that is another node, and a settlement waits for a Raft round: an anchor that cannot be reached or a stalled
+    // partition must not hold the mailbox of the maintenance actor, which also runs the sweep and the retention GC.
+    private static readonly TimeSpan DecidedSettlePassBudget = TimeSpan.FromSeconds(5);
+
+    /// <summary>Test seam: turns off the settlement of decided intents outside the deadline sweep, so a test can
+    /// observe another path that settles them.</summary>
+    internal bool SettlesDecidedIntents { get; set; } = true;
+
+    /// <summary>
+    /// How old a pending intent must be before the periodic pass looks its record up. Below it the intent is
+    /// ordinary settlement lag: its own settlement is in flight, and a second one would add a proposal per
+    /// transaction exactly when the partition is busy. An intent that outlived a whole tick has no settlement on
+    /// its way. An inherited intent has no minimum: the leader change is what may have lost its settlement.
+    /// </summary>
+    private long DecidedSettleMinAgeMs => Math.Max(1_000, (long)MaintenanceTick(configuration).TotalMilliseconds);
+
+    /// <summary>
+    /// Notes that this node became the leader of <paramref name="partitionId"/>. Returns true when the partition
+    /// may hold inherited intents and the caller must run <see cref="SettleInheritedIntentsAsync"/> off the
+    /// notification path. The applied log of a new leader reaches everything its predecessor committed before the
+    /// notification, so an empty store means nothing was inherited.
+    /// </summary>
+    internal bool NoteLeadershipGained(int partitionId)
+    {
+        if (preparedIntentStore.Count == 0)
+            return false;
+
+        inheritedPartitions[partitionId] = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+        return true;
+    }
+
+    /// <summary>Notes that this node does not lead <paramref name="partitionId"/> any more.</summary>
+    internal void NoteLeadershipLost(int partitionId) => inheritedPartitions.TryRemove(partitionId, out _);
+
+    /// <summary>
+    /// Settles the decided intents of the partitions whose leadership arrived here. Returns whether some partition
+    /// may still hold an inherited intent, in which case the caller runs another pass after a short wait: right
+    /// after a leader change a decision may still be on its way, the anchor of a record may be electing its own
+    /// leader, and a proposal may meet the last of the old term.
+    /// </summary>
+    internal async Task<bool> SettleInheritedIntentsAsync(CancellationToken cancellationToken)
+    {
+        if (inheritedPartitions.IsEmpty)
+            return false;
+
+        HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+
+        await SettleDecidedIntentsAsync(now, inheritedOnly: true, cancellationToken).ConfigureAwait(false);
+
+        return SettlesDecidedIntents && !inheritedPartitions.IsEmpty;
+    }
+
+    /// <summary>
+    /// Settles the pending intents of the partitions this node leads whose canonical record is already terminal,
+    /// without waiting for their decision deadline. The settlement of a decided transaction is sent once by the
+    /// node that finalized it; when it does not land (its partition changed leader under it, the scheduler turned
+    /// it away, its node stopped), the intent holds its key until something else settles it, and the deadline
+    /// sweep would leave it there for as long as the decision deadline was set.
+    ///
+    /// <para>Never decides anything: an intent whose record is undecided, absent or not readable is left alone,
+    /// and stays with its coordinator or, past the deadline, with the sweep. The record is read from its anchor's
+    /// leader. The settlement is the one the sweep uses, so a race with the transaction's own settlement, another
+    /// helper or the sweep applies once.</para>
+    ///
+    /// <para>Bounded per pass in partitions, in transactions per partition and in time, and it resumes where it
+    /// stopped.</para>
+    /// </summary>
+    private async Task SettleDecidedIntentsAsync(HLCTimestamp now, bool inheritedOnly, CancellationToken cancellationToken)
+    {
+        if (!SettlesDecidedIntents)
+            return;
+
+        (SortedDictionary<int, DecidedSettleCandidates> byPartition, HashSet<int> inheritedWithIntents) =
+            await CollectDecidedSettleCandidatesAsync(now, inheritedOnly, cancellationToken).ConfigureAwait(false);
+
+        foreach ((int partitionId, HLCTimestamp since) in inheritedPartitions)
+        {
+            if (now.L - since.L >= DecidedSettleMinAgeMs || !inheritedWithIntents.Contains(partitionId))
+                ForgetInherited(partitionId, since);
+        }
+
+        if (byPartition.Count == 0)
+            return;
+
+        List<int> partitions = [.. byPartition.Keys];
+        if (!inheritedOnly)
+        {
+            partitions = SelectRotated(partitions, decidedSettleResumeAfterPartition, durableRecoveryMaxPartitionsPerPass);
+            decidedSettleResumeAfterPartition = partitions[^1];
+        }
+
+        using CancellationTokenSource budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        budget.CancelAfter(DecidedSettlePassBudget);
+
+        DurableTransactionRecovery recovery = durableBlockerRecovery ??= BuildPreparedIntentRecovery();
+
+        foreach (int partitionId in partitions)
+        {
+            DecidedSettleCandidates candidates = byPartition[partitionId];
+
+            try
+            {
+                DecidedSettleReport report = await recovery.SettleDecidedAsync(
+                    partitionId, candidates.Groups,
+                    async ct => !raft.Joined || await raft.AmILeaderIfHosted(partitionId, ct).ConfigureAwait(false),
+                    budget.Token, cancellationToken).ConfigureAwait(false);
+
+                if (candidates.Truncated)
+                    decidedSettleResumeAfter[partitionId] = candidates.Last;
+                else
+                    decidedSettleResumeAfter.TryRemove(partitionId, out _);
+
+                if (report.Settled > 0 && logger.IsEnabled(LogLevel.Information))
+                    logger.LogInformation(
+                        "Settled {Settled} prepared intent(s) on partition {PartitionId} whose decision was recorded and whose settlement did not land ({Undecided} undecided, {Failed} not settled, e.g. {Key} of transaction {TransactionId})",
+                        report.Settled, partitionId, report.Undecided, report.Failed, report.SampleKey, report.SampleTransactionId);
+            }
+            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+            {
+                logger.LogError(ex, "Settlement of decided prepared intents failed for partition {Partition}", partitionId);
+            }
+        }
+    }
+
+    /// <summary>The transactions one pass looks up on one partition: the lowest identities after the partition's
+    /// resume point, at most <see cref="DecidedSettleMaxTransactionsPerPartition"/>.</summary>
+    internal sealed class DecidedSettleCandidates
+    {
+        private readonly Dictionary<(HLCTimestamp TransactionId, long Epoch), List<PreparedIntent>> groups = [];
+
+        private readonly SortedSet<(HLCTimestamp TransactionId, long Epoch)> identities = [];
+
+        /// <summary>Candidates above the last one were left for the next pass.</summary>
+        public bool Truncated { get; private set; }
+
+        public (HLCTimestamp TransactionId, long Epoch) Last => identities.Max;
+
+        public IReadOnlyCollection<List<PreparedIntent>> Groups => groups.Values;
+
+        public void Add(PreparedIntent intent)
+        {
+            (HLCTimestamp TransactionId, long Epoch) identity = (intent.TransactionId, intent.Epoch);
+
+            if (groups.TryGetValue(identity, out List<PreparedIntent>? group))
+            {
+                group.Add(intent);
+                return;
+            }
+
+            if (groups.Count >= DecidedSettleMaxTransactionsPerPartition)
+            {
+                Truncated = true;
+
+                // A transaction dropped here, or never taken, cannot come back: the highest held only falls.
+                (HLCTimestamp TransactionId, long Epoch) highest = identities.Max;
+                if (Comparer<(HLCTimestamp, long)>.Default.Compare(identity, highest) > 0)
+                    return;
+
+                identities.Remove(highest);
+                groups.Remove(highest);
+            }
+
+            identities.Add(identity);
+            groups[identity] = [intent];
+        }
+    }
+
+    // Removes the partition only when its leadership did not arrive again meanwhile.
+    private void ForgetInherited(int partitionId, HLCTimestamp since) =>
+        inheritedPartitions.TryRemove(new KeyValuePair<int, HLCTimestamp>(partitionId, since));
+
+    private async Task<(SortedDictionary<int, DecidedSettleCandidates> ByPartition, HashSet<int> InheritedWithIntents)> CollectDecidedSettleCandidatesAsync(
+        HLCTimestamp now, bool inheritedOnly, CancellationToken cancellationToken)
+    {
+        SortedDictionary<int, DecidedSettleCandidates> byPartition = [];
+        HashSet<int> inheritedWithIntents = [];
+        Dictionary<int, bool> led = [];
+        long minAgeMs = DecidedSettleMinAgeMs;
+
+        foreach (PreparedIntent intent in preparedIntentStore.EnumerateIntents())
+        {
+            if (cancellationToken.IsCancellationRequested)
+                break;
+
+            if (!intent.IsPending)
+                continue;
+
+            // A due intent belongs to the deadline sweep, which also settles a recorded decision.
+            if (intent.RecoveryDeadline != HLCTimestamp.Zero && intent.RecoveryDeadline <= now)
+                continue;
+
+            bool aged = now.L - intent.CommitTimestamp.L >= minAgeMs;
+            if (!aged && inheritedPartitions.IsEmpty)
+                continue;
+
+            // A key no descriptor covers on this node yet stays for a later pass.
+            if (!locator.TryLocateRange(intent.Key, out int partitionId))
+                continue;
+
+            bool inherited = inheritedPartitions.TryGetValue(partitionId, out HLCTimestamp since) && intent.CommitTimestamp <= since;
+            if (inherited)
+                inheritedWithIntents.Add(partitionId);
+
+            if (inheritedOnly ? !inherited : !inherited && !aged)
+                continue;
+
+            if (!led.TryGetValue(partitionId, out bool leads))
+                led[partitionId] = leads = !raft.Joined || await raft.AmILeaderIfHosted(partitionId, cancellationToken).ConfigureAwait(false);
+
+            if (!leads)
+                continue;
+
+            if (!byPartition.TryGetValue(partitionId, out DecidedSettleCandidates? candidates))
+                byPartition[partitionId] = candidates = new DecidedSettleCandidates();
+
+            if (decidedSettleResumeAfter.TryGetValue(partitionId, out (HLCTimestamp, long) resumeAfter)
+                && Comparer<(HLCTimestamp, long)>.Default.Compare((intent.TransactionId, intent.Epoch), resumeAfter) <= 0)
+                continue;
+
+            candidates.Add(intent);
+        }
+
+        return (byPartition, inheritedWithIntents);
     }
 
     /// <summary>
@@ -982,20 +1239,120 @@ internal sealed class DurableMaintenanceService
     // holds only immutable delegates, so sharing it across concurrent callers is safe.
     private DurableTransactionRecovery? durableBlockerRecovery;
 
+    // The longest a helping pass waits for the leader of a refused partition on another node. The pass runs between
+    // two rounds of a bounded retry loop: a leader that does not answer in this time counts as a pass that could
+    // not look, and the round budget of the loop applies.
+    private const int RemoteHelpTimeoutMs = 2_000;
+
     /// <summary>
     /// Finalizer seam for the prepare-conflict helping pass: settles foreign intents blocking the given keys on
-    /// <paramref name="partitionId"/> when their canonical record is already terminal (settlement lag). Gated on
-    /// partition leadership exactly like the recovery sweep — a non-leader's local intent store is not
-    /// authoritative, and its replicate seam could not apply the settle delta anyway.
+    /// <paramref name="partitionId"/> when their canonical record is already terminal (settlement lag). The pass
+    /// runs on the partition leader, whose intent store names the holders and whose scheduler applies the settle
+    /// delta: here when this node leads the partition, otherwise on the node that does. A session is finalized by
+    /// the node that began it, so a finalizer that does not lead a partition it writes is the normal case after a
+    /// leader change and for a transaction over several partitions.
+    /// <para>Answers <see cref="BlockerHelpResult.NotInspected"/> when no leader could be asked: none is known, it
+    /// did not answer, or it is a node of an older version. Never throws except for the caller's own
+    /// cancellation, so one unreachable partition does not hide what the passes over the others found.</para>
     /// </summary>
     internal async Task<BlockerHelpResult> TryResolveDecidedDurableBlockersAsync(
         int partitionId, IReadOnlyList<PreparedIntent> intents, HLCTimestamp transactionId, long epoch, CancellationToken cancellationToken)
     {
-        if (raft.Joined && !await raft.AmILeaderIfHosted(partitionId, cancellationToken).ConfigureAwait(false))
+        string[] keys = new string[intents.Count];
+        for (int i = 0; i < keys.Length; i++)
+            keys[i] = intents[i].Key;
+
+        bool remote = false;
+
+        try
+        {
+            if (await HelpAsLeaderAsync(partitionId, keys, transactionId, epoch, cancellationToken).ConfigureAwait(false) is { } local)
+                return local;
+
+            remote = true;
+
+            using CancellationTokenSource bounded = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            bounded.CancelAfter(RemoteHelpTimeoutMs);
+
+            string? leader = await durableReplication.ResolveDurableLeader(partitionId, bounded.Token).ConfigureAwait(false);
+
+            // The leadership arrived here between the two questions.
+            if (leader is null)
+                return await HelpAsLeaderAsync(partitionId, keys, transactionId, epoch, cancellationToken).ConfigureAwait(false) ?? BlockerHelpResult.NotInspected;
+
+            // A request of this node's own, with its own target: it starts a fresh forward chain whatever call
+            // brought the commit here.
+            using ForwardedRequestScope.SuppressScope _ = ForwardedRequestScope.Suppress();
+
+            (KeyValueResponseType type, int settled, int decided, int undecided) = await interNodeCommunication
+                .SettleDecidedBlockers(leader, partitionId, keys, transactionId, epoch, bounded.Token).ConfigureAwait(false);
+
+            DurableTransactionMetrics.HelpingForwarded(type);
+
+            return type == KeyValueResponseType.Get
+                ? new BlockerHelpResult(Inspected: true, settled, decided, undecided)
+                : BlockerHelpResult.NotInspected;
+        }
+        catch (Exception ex)
+        {
+            if (cancellationToken.IsCancellationRequested)
+                throw;
+
+            if (remote)
+                DurableTransactionMetrics.HelpingForwardThrew();
+
+            if (logger.IsEnabled(LogLevel.Debug))
+                logger.LogDebug("The helping pass on partition {PartitionId} for transaction {TransactionId} did not complete: {Type} {Message}",
+                    partitionId, transactionId, ex.GetType().Name, ex.Message);
+
             return BlockerHelpResult.NotInspected;
+        }
+    }
+
+    /// <summary>The helping pass on this node, or null when this node does not lead the partition: the intent store
+    /// of a node that does not lead it is not authoritative for who holds a key.</summary>
+    private async Task<BlockerHelpResult?> HelpAsLeaderAsync(
+        int partitionId, IReadOnlyList<string> keys, HLCTimestamp transactionId, long epoch, CancellationToken cancellationToken)
+    {
+        if (raft.Joined && !await raft.AmILeaderIfHosted(partitionId, cancellationToken).ConfigureAwait(false))
+            return null;
 
         DurableTransactionRecovery recovery = durableBlockerRecovery ??= BuildPreparedIntentRecovery();
-        return await recovery.TryResolveDecidedBlockersAsync(partitionId, intents, transactionId, epoch, cancellationToken).ConfigureAwait(false);
+        return await recovery.TryResolveDecidedBlockersAsync(partitionId, keys, transactionId, epoch, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The receiving half of a forwarded helping pass (see <see cref="IKahuna.SettleDecidedBlockers"/>). A sender
+    /// that does not host the partition picks a replica from the placement map, so a receiver that does not lead
+    /// it redirects the request to the leader it knows, inside the forward budget of the request. A node that is
+    /// shutting down answers from no leadership belief.
+    /// </summary>
+    internal async Task<(KeyValueResponseType Type, int Settled, int Decided, int Undecided)> SettleDecidedBlockersLocalAsync(
+        int partitionId, IReadOnlyList<string> keys, HLCTimestamp transactionId, long epoch, CancellationToken cancellationToken)
+    {
+        if (manager.Stopping)
+            return (KeyValueResponseType.MustRetry, 0, 0, 0);
+
+        if (await HelpAsLeaderAsync(partitionId, keys, transactionId, epoch, cancellationToken).ConfigureAwait(false) is { } report)
+            return (KeyValueResponseType.Get, report.Settled, report.Decided, report.Undecided);
+
+        string? leader;
+        try
+        {
+            leader = await raft.TryResolveLeader(partitionId, cancellationToken).ConfigureAwait(false);
+        }
+        catch (RaftException)
+        {
+            // An election is in progress; the sender asks again in its next round.
+            return (KeyValueResponseType.MustRetry, 0, 0, 0);
+        }
+
+        if (leader is null || string.Equals(leader, raft.GetLocalEndpoint(), StringComparison.Ordinal))
+            return (KeyValueResponseType.MustRetry, 0, 0, 0);
+
+        DurableTransactionMetrics.DurableOperationRedirected();
+
+        return await interNodeCommunication.SettleDecidedBlockers(leader, partitionId, keys, transactionId, epoch, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>

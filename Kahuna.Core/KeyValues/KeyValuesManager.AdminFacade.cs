@@ -243,7 +243,12 @@ internal sealed partial class KeyValuesManager
     public void ReleaseParkedDurableCompletionsForShutdown() => replicationDispatcher.ReleaseParkedCompletionsForShutdown();
 
     /// <summary>Invoked when a partition's leader changes.</summary>
-    public Task<bool> OnLeaderChanged(int partitionId, string node) => replicationDispatcher.OnLeaderChanged(partitionId, node);
+    public Task<bool> OnLeaderChanged(int partitionId, string node)
+    {
+        NoteLeaderOfPartition(partitionId, node);
+
+        return replicationDispatcher.OnLeaderChanged(partitionId, node);
+    }
 
     /// <summary>
     /// Invoked when this node stops leading a partition. Drops the belief-only actor state of that partition

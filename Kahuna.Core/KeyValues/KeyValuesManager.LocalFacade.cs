@@ -238,6 +238,35 @@ internal sealed partial class KeyValuesManager
     internal Task RecoverPreparedIntents(CancellationToken cancellationToken) =>
         durableMaintenance.RecoverPreparedIntents(cancellationToken);
 
+    /// <summary>Settles the decided intents of the partitions whose leadership arrived at this node; whether another
+    /// pass may find more.</summary>
+    internal Task<bool> SettleInheritedIntents(CancellationToken cancellationToken)
+    {
+        // Cleared before the pass reads the partitions, so a leadership that arrives during it queues another.
+        Volatile.Write(ref inheritedPassQueued, 0);
+
+        return durableMaintenance.SettleInheritedIntentsAsync(cancellationToken);
+    }
+
+    // Set while a pass over inherited intents waits in the recovery actor's mailbox, so the leadership of many
+    // partitions at once queues one pass.
+    private int inheritedPassQueued;
+
+    private void NoteLeaderOfPartition(int partitionId, string node)
+    {
+        if (node != runtime.Raft.GetLocalEndpoint())
+        {
+            durableMaintenance.NoteLeadershipLost(partitionId);
+            return;
+        }
+
+        if (Stopping || !durableMaintenance.NoteLeadershipGained(partitionId))
+            return;
+
+        if (Interlocked.Exchange(ref inheritedPassQueued, 1) == 0)
+            preparedIntentRecovery.Send(new PreparedIntentRecoveryRequest { InheritedOnly = true });
+    }
+
     internal Task CollectDurableTransactionRecords(CancellationToken cancellationToken) =>
         durableMaintenance.CollectDurableTransactionRecords(cancellationToken);
 
@@ -256,6 +285,11 @@ internal sealed partial class KeyValuesManager
     internal Task<BlockerHelpResult> TryResolveDecidedDurableBlockersAsync(
         int partitionId, IReadOnlyList<PreparedIntent> intents, HLCTimestamp transactionId, long epoch, CancellationToken cancellationToken) =>
         durableMaintenance.TryResolveDecidedDurableBlockersAsync(partitionId, intents, transactionId, epoch, cancellationToken);
+
+    /// <summary>The partition leader's half of a forwarded helping pass; see <see cref="IKahuna.SettleDecidedBlockers"/>.</summary>
+    public Task<(KeyValueResponseType Type, int Settled, int Decided, int Undecided)> SettleDecidedBlockers(
+        int partitionId, IReadOnlyList<string> keys, HLCTimestamp transactionId, long epoch, CancellationToken cancellationToken) =>
+        durableMaintenance.SettleDecidedBlockersLocalAsync(partitionId, keys, transactionId, epoch, cancellationToken);
 
     public Task<(bool Serviced, IReadOnlyList<KeyValueStagedBaseVerdictEntry> Verdicts)> GetStagedBaseVerdictsLocal(
         int partitionId, HLCTimestamp transactionId, long epoch, IReadOnlyList<string> keys, IReadOnlyList<KeyValueStagedBaseProbe>? probes, int waitMs, CancellationToken cancellationToken) =>

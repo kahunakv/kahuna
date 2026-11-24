@@ -824,6 +824,17 @@ public interface IKahuna
     public Task<KeyValueResponseType>
         ConfirmRangeQuiesce(int partitionId, string keySpace, string? startKey, string? endKey, HLCTimestamp owner, CancellationToken ct);
 
+    /// <summary>
+    /// Asked by the finalizer of <paramref name="transactionId"/>, whose prepare of <paramref name="keys"/> was
+    /// refused, of the node that leads <paramref name="partitionId"/>: settles the intents of other transactions
+    /// on those keys whose record is already terminal, and answers what holds the keys. Type is
+    /// <see cref="KeyValueResponseType.Get"/> when this node leads the partition and looked at the holders (or
+    /// redirected the request to the node that does), and <see cref="KeyValueResponseType.MustRetry"/> when it
+    /// did not; the counts are then meaningless. An undecided holder is counted and left alone.
+    /// </summary>
+    public Task<(KeyValueResponseType Type, int Settled, int Decided, int Undecided)>
+        SettleDecidedBlockers(int partitionId, IReadOnlyList<string> keys, HLCTimestamp transactionId, long epoch, CancellationToken ct);
+
     // ── Watch streams ───────────────────────────────────────────────────────────────────────
 
     /// <summary>

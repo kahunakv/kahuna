@@ -7,8 +7,9 @@ namespace Kahuna.Server.KeyValues.Transactions.Data;
 /// loop is bounded by the decision deadline; a blocker that is still undecided is a live coordinator inside
 /// its decision window, and the loop keeps its bounded rounds.
 /// </summary>
-/// <param name="Inspected">True when the pass could read the keys' holders (it ran on the partition leader).
-/// False when it could not (not the leader, or helping disabled): the counts are then meaningless.</param>
+/// <param name="Inspected">True when the pass could read the keys' holders (it ran on the partition leader, here
+/// or on another node). False when it could not (no leader could be asked, or helping disabled): the counts are
+/// then meaningless.</param>
 /// <param name="Settled">How many blocking intents the pass confirmed settled (their settle delta replicated).</param>
 /// <param name="Decided">How many blocked keys were held by a transaction whose record is terminal, whether or
 /// not the pass managed to settle them this round.</param>

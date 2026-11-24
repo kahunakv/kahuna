@@ -728,4 +728,160 @@ public sealed class TestDurableTransactionRecovery
         Assert.Null(store.Get("acct/1"));
         Assert.Equal(0, recovery.HeldRecordlessIntents);
     }
+
+    // ── The pass over decided intents that are not due ───────────────────────────────────────────────
+
+    private static DurableTransactionRecovery DecidedRecovery(
+        PreparedIntentStore store, Seam seam, DurableTransactionRecovery.LookupRecordDelegate lookup)
+    {
+        seam.Store = store;
+        return new DurableTransactionRecovery(store, seam.Replicate, lookup,
+            (_, _, _) => throw new InvalidOperationException("the pass must never drive an abort"));
+    }
+
+    private static List<List<PreparedIntent>> Install(PreparedIntentStore store, params (string Key, HLCTimestamp TransactionId)[] intents)
+    {
+        List<List<PreparedIntent>> groups = [];
+        foreach ((string key, HLCTimestamp transactionId) in intents)
+        {
+            PreparedIntent intent = PendingIntent(key, Ts(9_000_000), transactionId);
+            store.Apply(new PrepareIntentCommand(intent));
+            groups.Add([intent]);
+        }
+
+        return groups;
+    }
+
+    private static ValueTask<bool> Leads(CancellationToken _) => ValueTask.FromResult(true);
+
+    /// <summary>One pass over a committed, an aborted, an undecided, a record-less and an unreadable transaction: the
+    /// first two settle, the next two are left, and the last one counts as failed and stops none of the others.</summary>
+    [Fact]
+    public async Task DecidedPass_SettlesOnlyTerminalRecords_AndOneUnreadableRecordStopsNoOther()
+    {
+        PreparedIntentStore store = new();
+        Seam seam = new();
+        DurableTransactionRecovery recovery = DecidedRecovery(store, seam, (transactionId, _, _, _) => transactionId.L switch
+        {
+            1 => Task.FromResult<TransactionRecord?>(Record(TransactionDecision.Commit, Ts(9000))),
+            2 => Task.FromResult<TransactionRecord?>(Record(TransactionDecision.Abort, Ts(9000))),
+            3 => Task.FromResult<TransactionRecord?>(Record(TransactionDecision.Undecided, Ts(9000))),
+            4 => Task.FromResult<TransactionRecord?>(null),
+            _ => throw new InvalidOperationException("the anchor cannot be reached")
+        });
+
+        List<List<PreparedIntent>> groups = Install(store, ("k/1", Ts(1)), ("k/2", Ts(2)), ("k/3", Ts(3)), ("k/4", Ts(4)), ("k/5", Ts(5)));
+
+        DecidedSettleReport report = await recovery.SettleDecidedAsync(PartitionId, groups, Leads, CancellationToken.None, CancellationToken.None);
+
+        Assert.Equal((2, 2, 1), (report.Settled, report.Undecided, report.Failed));
+        Assert.True(report.SampleKey is "k/1" or "k/2");
+        Assert.Null(store.Get("k/1"));
+        Assert.Null(store.Get("k/2"));
+        Assert.NotNull(store.Get("k/3"));
+        Assert.NotNull(store.Get("k/4"));
+        Assert.NotNull(store.Get("k/5"));
+    }
+
+    /// <summary>A node that lost the partition proposes nothing, whatever the records say.</summary>
+    [Fact]
+    public async Task DecidedPass_ProposesNothingOnceTheLeadershipIsLost()
+    {
+        PreparedIntentStore store = new();
+        Seam seam = new();
+        DurableTransactionRecovery recovery = DecidedRecovery(store, seam,
+            (_, _, _, _) => Task.FromResult<TransactionRecord?>(Record(TransactionDecision.Commit, Ts(9000))));
+
+        List<List<PreparedIntent>> groups = Install(store, ("k/1", Ts(1)), ("k/2", Ts(2)));
+
+        DecidedSettleReport lost = await recovery.SettleDecidedAsync(
+            PartitionId, groups, _ => ValueTask.FromResult(false), CancellationToken.None, CancellationToken.None);
+
+        Assert.Equal((0, 0, 2), (lost.Settled, lost.Undecided, lost.Failed));
+
+        DecidedSettleReport unknown = await recovery.SettleDecidedAsync(
+            PartitionId, groups, _ => throw new InvalidOperationException("no leadership answer"), CancellationToken.None, CancellationToken.None);
+
+        Assert.Equal((0, 0, 2), (unknown.Settled, unknown.Undecided, unknown.Failed));
+        Assert.Empty(seam.Calls);
+        Assert.NotNull(store.Get("k/1"));
+    }
+
+    /// <summary>The spent budget starts no lookup, abandons one in flight, and starts no settlement behind one that
+    /// came back late.</summary>
+    [Fact]
+    public async Task DecidedPass_StopsAtItsBudget()
+    {
+        PreparedIntentStore store = new();
+        Seam seam = new();
+        int lookups = 0;
+        using CancellationTokenSource budget = new();
+
+        DurableTransactionRecovery recovery = DecidedRecovery(store, seam, async (transactionId, _, _, token) =>
+        {
+            Interlocked.Increment(ref lookups);
+
+            if (transactionId.L == 1)
+                await Task.Delay(Timeout.Infinite, token);
+
+            budget.Cancel();
+            return Record(TransactionDecision.Commit, Ts(9000));
+        });
+
+        List<List<PreparedIntent>> groups = Install(store, ("k/1", Ts(1)), ("k/2", Ts(2)));
+
+        DecidedSettleReport report = await recovery.SettleDecidedAsync(PartitionId, groups, Leads, budget.Token, CancellationToken.None);
+        Assert.Equal((0, 0, 2), (report.Settled, report.Undecided, report.Failed));
+
+        DecidedSettleReport spent = await recovery.SettleDecidedAsync(PartitionId, groups, Leads, budget.Token, CancellationToken.None);
+        Assert.Equal((0, 0, 2), (spent.Settled, spent.Undecided, spent.Failed));
+
+        Assert.Equal(2, lookups);
+        Assert.Empty(seam.Calls);
+    }
+
+    /// <summary>A settlement the scheduler turned away counts as failed and leaves the intent.</summary>
+    [Fact]
+    public async Task DecidedPass_ReportsARefusedSettlement()
+    {
+        PreparedIntentStore store = new();
+        Seam seam = new() { Fail = (logType, _) => logType == ReplicationTypes.PreparedIntent };
+        DurableTransactionRecovery recovery = DecidedRecovery(store, seam,
+            (_, _, _, _) => Task.FromResult<TransactionRecord?>(Record(TransactionDecision.Commit, Ts(9000))));
+
+        DecidedSettleReport report = await recovery.SettleDecidedAsync(
+            PartitionId, Install(store, ("k/1", Ts(1))), Leads, CancellationToken.None, CancellationToken.None);
+
+        Assert.Equal((0, 0, 1), (report.Settled, report.Undecided, report.Failed));
+        Assert.Null(report.SampleKey);
+        Assert.NotNull(store.Get("k/1"));
+    }
+
+    /// <summary>One pass takes the lowest identities up to its cap whatever the order it meets them in, keeps every
+    /// intent of a transaction it takes, and names the point where the next pass resumes.</summary>
+    [Fact]
+    public void DecidedPassCandidates_KeepTheLowestIdentitiesUpToTheCap()
+    {
+        const int cap = DurableMaintenanceService.DecidedSettleMaxTransactionsPerPartition;
+
+        DurableMaintenanceService.DecidedSettleCandidates candidates = new();
+        for (int i = 1; i <= cap; i++)
+            candidates.Add(PendingIntent($"k/{i}", Ts(9000), Ts(i * 2)));
+
+        Assert.False(candidates.Truncated);
+
+        candidates.Add(PendingIntent("k/second", Ts(9000), Ts(2)));
+        Assert.False(candidates.Truncated);
+
+        candidates.Add(PendingIntent("k/above", Ts(9000), Ts(cap * 2 + 1)));
+        candidates.Add(PendingIntent("k/below", Ts(9000), Ts(1)));
+        candidates.Add(PendingIntent("k/dropped", Ts(9000), Ts(cap * 2)));
+
+        Assert.True(candidates.Truncated);
+        Assert.Equal(cap, candidates.Groups.Count);
+        Assert.Equal(Ts((cap - 1) * 2), candidates.Last.TransactionId);
+        Assert.Contains(candidates.Groups, g => g.Count == 1 && g[0].Key == "k/below");
+        Assert.Contains(candidates.Groups, g => g.Count == 2 && g[0].TransactionId == Ts(2));
+        Assert.DoesNotContain(candidates.Groups, g => g[0].TransactionId.L >= cap * 2);
+    }
 }

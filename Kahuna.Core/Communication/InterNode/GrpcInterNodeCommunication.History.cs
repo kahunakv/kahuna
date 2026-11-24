@@ -293,4 +293,49 @@ public partial class GrpcInterNodeCommunication
             return KeyValueResponseType.MustRetry;
         }
     }
+
+    /// <summary>
+    /// Asks the leader of a refused partition to settle the decided blockers of a prepare. A plain unary call: it
+    /// is sent only when a prepare was refused, and its handling waits for a Raft round of its own, which must not
+    /// hold a place in the ordered stream that carries the durable operations. A node of an older version answers
+    /// Unimplemented, reported as <see cref="KeyValueResponseType.DoesNotExist"/>.
+    /// </summary>
+    public async Task<(KeyValueResponseType Type, int Settled, int Decided, int Undecided)> SettleDecidedBlockers(
+        string node, int partitionId, IReadOnlyList<string> keys, HLCTimestamp transactionId, long epoch, CancellationToken cancellationToken)
+    {
+        GrpcSettleDecidedBlockersRequest request = new()
+        {
+            PartitionId           = partitionId,
+            TransactionIdNode     = transactionId.N,
+            TransactionIdPhysical = transactionId.L,
+            TransactionIdCounter  = transactionId.C,
+            Epoch                 = epoch,
+            ForwardHops           = NextForwardHop
+        };
+
+        request.Keys.Capacity = keys.Count;
+        for (int i = 0; i < keys.Count; i++)
+            request.Keys.Add(keys[i]);
+
+        try
+        {
+            global::KeyValuer.KeyValuerClient client = new(SharedChannels.GetChannel(ResolveNodeUrl(node), transportSecurity));
+
+            GrpcSettleDecidedBlockersResponse response = await client
+                .SettleDecidedBlockersAsync(request, headers: InterNodeHeaders.ForwardedCall, cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+
+            return ((KeyValueResponseType)response.Type, response.Settled, response.Decided, response.Undecided);
+        }
+        catch (RpcException ex) when (ex.StatusCode == StatusCode.Unimplemented)
+        {
+            return (KeyValueResponseType.DoesNotExist, 0, 0, 0);
+        }
+        catch (RpcException ex) when (IsRetryableTransportFailure(ex))
+        {
+            LogForwardingTransportFailure("SettleDecidedBlockers", node, ex.StatusCode);
+
+            return (KeyValueResponseType.MustRetry, 0, 0, 0);
+        }
+    }
 }

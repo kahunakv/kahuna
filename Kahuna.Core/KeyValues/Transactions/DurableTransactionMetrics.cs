@@ -164,7 +164,8 @@ internal enum ResolutionSource
     Finalize,
     Recovery,
     Helping,
-    RangeMove
+    RangeMove,
+    DecidedSweep
 }
 
 /// <summary>Why a resolution pass over one transaction's intents settled nothing; the tag of
@@ -1239,17 +1240,17 @@ internal static class DurableTransactionMetrics
             description: "Durable transactions committed via the single-batch one-phase fast path.");
 
     /// <summary>
-    /// A committed transaction's resolution failed to materialize or leader-apply an intent's value, leaving
-    /// it committed-but-unsettled until the recovery sweep retries. Each failure extends the window in which
-    /// the committed value exists only as a prepared intent — visible solely through the intent overlay, and
-    /// the state a range move must settle before it may cut over. A sustained rate means settlement is being
-    /// refused somewhere (scheduler backpressure, a quiesced range, a forwarding failure) and the deferred
-    /// path is silently leaning on recovery.
+    /// Intents the resolution of a decided transaction left unsettled after its resends: a value that did not
+    /// materialize or apply, or a settle delta that did not land. Such an intent stays until the settlement pass
+    /// of its partition leader or the recovery sweep takes it, and holds its key against every other writer until
+    /// then; the value of a commit is visible only through the intent overlay. A sustained rate means settlement
+    /// is being refused somewhere (scheduler backpressure, a quiesced range, a forwarding failure) and the
+    /// deferred path is leaning on recovery.
     /// </summary>
     internal static readonly Counter<long> ResolutionSettleFailures =
         Meter.CreateCounter<long>(
             "kahuna.durable_tx.resolution_settle_failures",
-            description: "Intents a commit resolution could not materialize/apply; recovery completes them.");
+            description: "Intents a transaction resolution left unsettled after its resends; the partition leader settles them later.");
 
     /// <summary>
     /// One-phase-eligible transactions that fell back to the standard 2PC flow, tagged by <c>reason</c>: a
@@ -1382,12 +1383,14 @@ internal static class DurableTransactionMetrics
     private static readonly KeyValuePair<string, object?> SourceRecovery = new("source", "recovery");
     private static readonly KeyValuePair<string, object?> SourceHelping = new("source", "helping");
     private static readonly KeyValuePair<string, object?> SourceRangeMove = new("source", "range_move");
+    private static readonly KeyValuePair<string, object?> SourceDecidedSweep = new("source", "decided_sweep");
 
     private static KeyValuePair<string, object?> SourceTag(ResolutionSource source) => source switch
     {
         ResolutionSource.Recovery => SourceRecovery,
         ResolutionSource.Helping => SourceHelping,
         ResolutionSource.RangeMove => SourceRangeMove,
+        ResolutionSource.DecidedSweep => SourceDecidedSweep,
         _ => SourceFinalize
     };
 
@@ -1956,6 +1959,55 @@ internal static class DurableTransactionMetrics
     private static readonly KeyValuePair<string, object?> CauseApplyFailed = new("cause", "apply_failed");
     private static readonly KeyValuePair<string, object?> CauseSettleFailed = new("cause", "settle_failed");
     private static readonly KeyValuePair<string, object?> CauseOther = new("cause", "other");
+
+    /// <summary>
+    /// Intents of a deferred settlement that did not land and was sent again, tagged by result: <c>settled</c>
+    /// counts an intent once, on the send that landed; <c>not_settled</c> counts it on each send that did not. A
+    /// burst belongs to a leader change; a sustained <c>not_settled</c> rate means the resends do not help.
+    /// </summary>
+    internal static readonly Counter<long> SettleResends =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.settle_resends",
+            description: "Intents whose deferred settlement was sent again after it did not land, tagged by result.");
+
+    private static readonly KeyValuePair<string, object?> ResendSettled = new("result", "settled");
+    private static readonly KeyValuePair<string, object?> ResendNotSettled = new("result", "not_settled");
+
+    internal static void SettlementResent(int settled, int notSettled)
+    {
+        if (settled > 0)
+            SettleResends.Add(settled, ResendSettled);
+
+        if (notSettled > 0)
+            SettleResends.Add(notSettled, ResendNotSettled);
+    }
+
+    /// <summary>
+    /// Helping passes sent to the leader of a refused partition on another node, tagged by result:
+    /// <c>inspected</c> (the leader looked at the holders), <c>refused</c> (it could not: not the leader, or
+    /// shutting down), <c>unsupported</c> (a node of an older version) and <c>threw</c> (no leader known, a
+    /// transport failure, or the time bound). Every result but <c>inspected</c> leaves the refused prepare to the
+    /// short round budget of its retry loop.
+    /// </summary>
+    internal static readonly Counter<long> HelpingForwards =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.helping_forwards",
+            description: "Helping passes sent to the leader of a refused partition on another node, tagged by result.");
+
+    private static readonly KeyValuePair<string, object?> HelpInspected = new("result", "inspected");
+    private static readonly KeyValuePair<string, object?> HelpRefused = new("result", "refused");
+    private static readonly KeyValuePair<string, object?> HelpUnsupported = new("result", "unsupported");
+    private static readonly KeyValuePair<string, object?> HelpThrew = new("result", "threw");
+
+    internal static void HelpingForwarded(KeyValueResponseType answer) =>
+        HelpingForwards.Add(1, answer switch
+        {
+            KeyValueResponseType.Get => HelpInspected,
+            KeyValueResponseType.DoesNotExist => HelpUnsupported,
+            _ => HelpRefused
+        });
+
+    internal static void HelpingForwardThrew() => HelpingForwards.Add(1, HelpThrew);
 
     internal static void HelpingSettledNone(ResolveFailureCause cause) =>
         HelpingSettledNothing.Add(1, cause switch

@@ -125,7 +125,8 @@ internal sealed partial class TransactionCoordinator
         logger: logger,
         // Every prepare carries the commit admission lag bound, so each replica refuses a commit timestamp that
         // reaches its log too late (or too far ahead) and a watch can promise a watermark.
-        commitAdmissionLagMs: configuration.CommitAdmissionLagMs);
+        commitAdmissionLagMs: configuration.CommitAdmissionLagMs,
+        isStopping: () => manager.Stopping);
 
     /// <summary>Runs a durable transaction's post-decision resolution off the commit critical path. Exceptions are
     /// logged and swallowed: the decision is durable and recovery finishes a lost run. The task is tracked so

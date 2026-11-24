@@ -46,6 +46,7 @@ service KeyValuer {
   rpc GetPartitionApplyFingerprint (GrpcGetPartitionApplyFingerprintRequest) returns (GrpcGetPartitionApplyFingerprintResponse);
   rpc GetPreparedIntentPresence (GrpcGetPreparedIntentPresenceRequest) returns (GrpcGetPreparedIntentPresenceResponse);
   rpc ConfirmRangeQuiesce (GrpcConfirmRangeQuiesceRequest) returns (GrpcConfirmRangeQuiesceResponse);
+  rpc SettleDecidedBlockers (GrpcSettleDecidedBlockersRequest) returns (GrpcSettleDecidedBlockersResponse);
   rpc Watch (stream GrpcWatchRequest) returns (stream GrpcWatchResponse);
   rpc HistoryHold (GrpcHistoryHoldRequest) returns (GrpcHistoryHoldResponse);
 }
@@ -2195,6 +2196,28 @@ message GrpcConfirmRangeQuiesceResponse {
   // the quiesce, and every write it had dispatched for the partition is applied; TYPE_MUST_RETRY in
   // every other state.
   GrpcKeyValueResponseType Type = 1;
+}
+
+// Asked by the finalizer of a transaction whose prepare was refused, of the leader of the refused
+// partition: settle the intents of other transactions on Keys whose record is already terminal, and say
+// what holds the keys. ForwardHops is how many times the request was forwarded, this hop included.
+message GrpcSettleDecidedBlockersRequest {
+  int32 PartitionId = 1;
+  repeated string Keys = 2;
+  int32 TransactionIdNode = 3;
+  int64 TransactionIdPhysical = 4;
+  uint32 TransactionIdCounter = 5;
+  int64 Epoch = 6;
+  int32 ForwardHops = 7;
+}
+
+message GrpcSettleDecidedBlockersResponse {
+  // TYPE_GOT when the node leads the partition and looked at the holders; TYPE_MUST_RETRY when it did
+  // not, and the counts are then meaningless.
+  GrpcKeyValueResponseType Type = 1;
+  int32 Settled = 2;
+  int32 Decided = 3;
+  int32 Undecided = 4;
 }
 
 // ---------------------------------------------------------------------------------------------

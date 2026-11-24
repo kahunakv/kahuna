@@ -2017,4 +2017,17 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
 
         throw Unreachable(node);
     }
+
+    public async Task<(KeyValueResponseType Type, int Settled, int Decided, int Undecided)> SettleDecidedBlockers(
+        string node, int partitionId, IReadOnlyList<string> keys, HLCTimestamp transactionId, long epoch, CancellationToken cancellationToken)
+    {
+        if (TryGetNode(node, out IKahuna? kahunaNode))
+        {
+            using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+
+            return await kahunaNode.SettleDecidedBlockers(partitionId, keys, transactionId, epoch, cancellationToken);
+        }
+
+        throw Unreachable(node);
+    }
 }

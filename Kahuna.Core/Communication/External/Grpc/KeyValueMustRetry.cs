@@ -81,6 +81,8 @@ internal static class KeyValueMustRetry
 
     public static GrpcConfirmRangeQuiesceResponse ConfirmRangeQuiesce() => new() { Type = Type };
 
+    public static GrpcSettleDecidedBlockersResponse SettleDecidedBlockers() => new() { Type = Type };
+
     public static GrpcTrySetManyKeyValueResponse TrySetManyKeyValue(GrpcTrySetManyKeyValueRequest request)
     {
         GrpcTrySetManyKeyValueResponse response = new();

@@ -261,7 +261,14 @@ still be durably aborted), while `Commit` **cannot** — a commit requires an `U
 2. **Prepare retry.** A prepare rejected only because the key still holds a *predecessor's*
    committed-but-unsettled intent is retryable in place: the set is re-prepared a bounded number of times
    (idempotent for partitions that already prepared) **before any decision is written**, so a healthy
-   commit is not aborted because background settlement had not caught up.
+   commit is not aborted because background settlement had not caught up. Between two rounds a helping pass
+   settles the holders whose record is already terminal and reports what holds the keys. The pass runs on the
+   leader of the refused partition: here when this node leads it, otherwise through `SettleDecidedBlockers`,
+   an inter-node call bounded by 2 s. A session is finalized by the node that began it (§6.6), so after a
+   leader change, or for a transaction over several partitions, that leader is another node.
+   `kahuna.durable_tx.helping_forwards{result}` counts the calls; every result but `inspected` leaves the
+   refused prepare to the eight-round budget. A node of an older version does not know the call
+   (`unsupported`).
 3. **Validate** the read set — revision comparison plus a concurrent-writer probe, read through the
    intent-aware path. Only meaningful once every prepare is durable.
 4. **Decide.** Compare-and-set the canonical record: `Commit` only if every prepare is durable *and*
@@ -627,6 +634,14 @@ The executor issues one `IRaft.ReplicateEntries` per batch (`IPartitionBatchExec
 
 Either way the decision is already durable, so **recovery finishes any settlement a background run loses**.
 
+A deferred settlement that does not land is sent again, up to five times over about two seconds, through the
+current routing of its keys. The usual reason is a leadership that moved between the routing of the settlement
+and its proposal, which the proposal answers with `NodeIsNotLeader` or `TermMismatch`. Every send reads the
+direction from the canonical record again, and a settlement that landed before applies as a no-op. A node that is
+shutting down sends nothing again. `kahuna.durable_tx.settle_resends{result}` counts the intents sent again, and
+`kahuna.durable_tx.resolution_settle_failures` counts the intents that stayed unsettled, which the partition
+leader settles later (§9).
+
 ### 8.1 The settlement window
 
 Between the durable decision and settlement, a committed transaction's value lingers as a **prepared
@@ -686,8 +701,10 @@ materialization: an expiry extension retains the revision, so expiry and state m
 
 ## 9. Recovery
 
-`DurableTransactionRecovery` is the participant-side sweep that makes the protocol survive a lost
-coordinator. Per partition leader, for intents whose recovery deadline has passed:
+`DurableTransactionRecovery` makes the protocol survive a lost coordinator and a lost settlement. It runs on
+each partition leader, in two passes.
+
+The **deadline sweep** takes the intents whose recovery deadline has passed:
 
 - **Committed record** → resolve committed and materialize.
 - **Abort record** → resolve aborted, no materialization.
@@ -698,6 +715,21 @@ coordinator. Per partition leader, for intents whose recovery deadline has passe
 
 Recovery always takes the winner the record became — a concurrent commit is honoured even while
 recovery is trying to abort.
+
+The **decided pass** takes pending intents before their deadline and settles those whose record is already
+terminal. It decides nothing: an intent whose record is undecided, absent or not readable stays with its
+coordinator, or with the deadline sweep. It runs in two cases:
+
+- **At a leadership gain**, over the intents of the gained partition that committed before the gain. A leader
+  change is what can lose the settlement of a decided transaction, and the new leader does not wait for the
+  decision deadline of the transaction to settle it. While an inherited intent is left (its decision is still
+  on its way, or the leader of its anchor is not elected yet), the pass repeats after 100 ms and then after
+  growing waits, until the periodic pass covers the intent.
+- **In each maintenance tick** (`DurableMaintenanceInterval`), over the intents older than one tick (at least
+  1 s). A younger intent is ordinary settlement lag, and its own settlement is on its way.
+
+A pass handles at most 1,024 transactions of a partition, starts nothing after 5 s, and resumes where it stopped.
+The intents it settles are counted under `source=decided_sweep` in `kahuna.durable_tx.settled_intents`.
 
 ---
 

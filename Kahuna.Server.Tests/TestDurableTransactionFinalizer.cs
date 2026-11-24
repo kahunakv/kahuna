@@ -30,6 +30,9 @@ public sealed class TestDurableTransactionFinalizer
         // Wall-clock milliseconds a (partitionId, logType) replicate takes before it answers, so a test can make
         // one step of the finalize outlast a lease measured by a real-time attempt clock. Null or 0: immediate.
         public Func<int, string, int>? DelayMs { get; set; }
+
+        // Observes every delta before it is judged.
+        public Action<byte[]>? OnDelta { get; set; }
         public readonly ConcurrentQueue<(int Partition, string Type)> Calls = new();
 
         // The stores the seam applies to, mirroring the production scheduler-completion apply owner: this single
@@ -48,6 +51,7 @@ public sealed class TestDurableTransactionFinalizer
         public async Task<bool> Replicate(int partitionId, string logType, byte[] data, WriteAdmissionClass admissionClass, WriteSubmissionStage stage, CancellationToken ct)
         {
             Calls.Enqueue((partitionId, logType));
+            OnDelta?.Invoke(data);
 
             if (DelayMs?.Invoke(partitionId, logType) is > 0 and int delayMs)
                 await Task.Delay(delayMs, ct);
@@ -163,6 +167,182 @@ public sealed class TestDurableTransactionFinalizer
         // Running the deferred resolution settles it: the intent is materialized and garbage-collected.
         await captured!(CancellationToken.None);
         Assert.Null(intents.Get("acct/1"));
+    }
+
+    private static DurableTransactionFinalizer ResendFinalizer(
+        Seam seam, TransactionRecordStore records, PreparedIntentStore intents, Action<Func<CancellationToken, Task>> capture,
+        Func<HLCTimestamp, long, TransactionRecord?>? lookup = null, Func<bool>? isStopping = null, bool materializeOnResolve = true)
+    {
+        seam.Records = records;
+        seam.Intents = intents;
+        return new DurableTransactionFinalizer(records, intents, seam.Replicate, resolution => capture(resolution),
+            lookupRecordRouted: (transactionId, epoch, _, _) => Task.FromResult(lookup is null ? records.Get(transactionId, epoch) : lookup(transactionId, epoch)),
+            materializeOnResolve: materializeOnResolve, isStopping: isStopping);
+    }
+
+    /// <summary>A deferred settlement that does not land on one of two partitions is sent again for that partition
+    /// only, and the rest of the transaction is not settled twice.</summary>
+    [Fact]
+    public async Task DeferredSettle_ThatDoesNotLand_IsSentAgainForItsPartitionOnly()
+    {
+        HLCTimestamp txId = Ts(1000);
+        TransactionRecordStore records = new();
+        PreparedIntentStore intents = new();
+        Seam seam = new();
+        Func<CancellationToken, Task>? captured = null;
+        DurableTransactionFinalizer finalizer = ResendFinalizer(seam, records, intents, r => captured = r);
+
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(
+            Input(txId, 1, (5, "acct/1"), (6, "acct/2")), Validate(true), opId: Ts(2000), CancellationToken.None);
+        Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+
+        seam.Calls.Clear();
+        int refused = 0;
+        seam.Fail = (partition, type) => partition == 6 && type == ReplicationTypes.PreparedIntent && Interlocked.Increment(ref refused) <= 2;
+
+        using MetricCapture metrics = new("result", "kahuna.durable_tx.settle_resends", "kahuna.durable_tx.resolution_settle_failures");
+        await captured!(CancellationToken.None);
+
+        Assert.Null(intents.Get("acct/1"));
+        Assert.Null(intents.Get("acct/2"));
+        Assert.Equal(1, seam.Calls.Count(c => c.Partition == 5));
+        Assert.Equal(3, seam.Calls.Count(c => c.Partition == 6));
+        Assert.True(metrics.Total("kahuna.durable_tx.settle_resends", "not_settled") >= 1);
+        Assert.True(metrics.Total("kahuna.durable_tx.settle_resends", "settled") >= 1);
+    }
+
+    /// <summary>A replicate that throws is a settlement that did not land; it neither escapes nor hides the other
+    /// partition's settlement.</summary>
+    [Fact]
+    public async Task DeferredSettle_ThatThrows_IsSentAgain()
+    {
+        HLCTimestamp txId = Ts(1000);
+        TransactionRecordStore records = new();
+        PreparedIntentStore intents = new();
+        Seam seam = new();
+        Func<CancellationToken, Task>? captured = null;
+        DurableTransactionFinalizer finalizer = ResendFinalizer(seam, records, intents, r => captured = r);
+
+        await finalizer.FinalizeAsync(Input(txId, 1, (5, "acct/1"), (6, "acct/2")), Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        int thrown = 0;
+        seam.Fail = (partition, type) => partition == 5 && type == ReplicationTypes.PreparedIntent && Interlocked.Increment(ref thrown) == 1
+            ? throw new InvalidOperationException("no leader")
+            : false;
+
+        await captured!(CancellationToken.None);
+
+        Assert.Null(intents.Get("acct/1"));
+        Assert.Null(intents.Get("acct/2"));
+    }
+
+    /// <summary>Every send reads its direction from the canonical record: a record that cannot be read sends nothing,
+    /// and one that is an abort settles the intents as an abort.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DeferredSettle_ReadsTheCanonicalRecordBeforeItIsSentAgain(bool aborted)
+    {
+        HLCTimestamp txId = Ts(1000);
+        TransactionRecordStore records = new();
+        PreparedIntentStore intents = new();
+        Seam seam = new();
+        Func<CancellationToken, Task>? captured = null;
+        bool resending = false;
+        DurableTransactionFinalizer finalizer = ResendFinalizer(seam, records, intents, r => captured = r,
+            lookup: (transactionId, epoch) => !resending ? records.Get(transactionId, epoch)
+                : aborted ? records.Get(transactionId, epoch)! with { Decision = TransactionDecision.Abort }
+                : null);
+
+        await finalizer.FinalizeAsync(Input(txId, 1, (5, "acct/1")), Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        seam.Calls.Clear();
+        int refused = 0;
+        bool committedResend = false;
+        seam.Fail = (_, _) =>
+        {
+            resending = true;
+            return Interlocked.Increment(ref refused) == 1;
+        };
+        seam.OnDelta = delta => committedResend |= PreparedIntentStore.DecodeDelta(delta).Any(c => c is ResolveIntentCommand { Commit: true }) && refused > 1;
+
+        await captured!(CancellationToken.None);
+
+        Assert.Equal(aborted ? 2 : 1, seam.Calls.Count);
+        Assert.False(committedResend);
+        Assert.Equal(aborted, intents.Get("acct/1") is null);
+    }
+
+    /// <summary>The sends are bounded, and a node that stops sends nothing again. What is left is counted.</summary>
+    [Theory]
+    [InlineData(false, 6)]
+    [InlineData(true, 1)]
+    public async Task DeferredSettle_ThatKeepsFailing_IsBounded(bool stopping, int sends)
+    {
+        HLCTimestamp txId = Ts(1000);
+        TransactionRecordStore records = new();
+        PreparedIntentStore intents = new();
+        Seam seam = new();
+        Func<CancellationToken, Task>? captured = null;
+        DurableTransactionFinalizer finalizer = ResendFinalizer(seam, records, intents, r => captured = r, isStopping: () => stopping);
+
+        await finalizer.FinalizeAsync(Input(txId, 1, (5, "acct/1")), Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        seam.Calls.Clear();
+        seam.Fail = (_, _) => true;
+
+        using MetricCapture metrics = new("result", "kahuna.durable_tx.resolution_settle_failures");
+        await captured!(CancellationToken.None);
+
+        Assert.Equal(sends, seam.Calls.Count);
+        Assert.NotNull(intents.Get("acct/1"));
+        Assert.True(metrics.Total("kahuna.durable_tx.resolution_settle_failures", "") >= 1);
+    }
+
+    /// <summary>The node's shutdown ends the wait between two sends.</summary>
+    [Fact]
+    public async Task DeferredSettle_WaitBetweenSends_EndsWithTheNode()
+    {
+        HLCTimestamp txId = Ts(1000);
+        TransactionRecordStore records = new();
+        PreparedIntentStore intents = new();
+        Seam seam = new();
+        Func<CancellationToken, Task>? captured = null;
+        DurableTransactionFinalizer finalizer = ResendFinalizer(seam, records, intents, r => captured = r);
+
+        await finalizer.FinalizeAsync(Input(txId, 1, (5, "acct/1")), Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        using CancellationTokenSource node = new();
+        seam.Fail = (_, _) =>
+        {
+            node.Cancel();
+            return true;
+        };
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => captured!(node.Token));
+    }
+
+    /// <summary>An inline resolution holds the answer of the commit, so it sends its settlement once.</summary>
+    [Fact]
+    public async Task InlineSettle_ThatDoesNotLand_IsNotSentAgain()
+    {
+        HLCTimestamp txId = Ts(1000);
+        Seam seam = new();
+        (DurableTransactionFinalizer finalizer, _, PreparedIntentStore intents) = Build(seam);
+
+        int settles = 0;
+        bool decided = false;
+        seam.Fail = (_, type) =>
+        {
+            decided |= type == ReplicationTypes.KeyValues;
+            return decided && type == ReplicationTypes.PreparedIntent && Interlocked.Increment(ref settles) > 0;
+        };
+
+        DurableFinalizeOutcome outcome = await finalizer.FinalizeAsync(Input(txId, 1, (5, "acct/1")), Validate(true), opId: Ts(2000), CancellationToken.None);
+
+        Assert.Equal(DurableFinalizeResult.Committed, outcome.Result);
+        Assert.Equal(1, settles);
+        Assert.NotNull(intents.Get("acct/1"));
     }
 
     private static Func<CancellationToken, Task<TransactionAbortClass>> Validate(bool ok) =>

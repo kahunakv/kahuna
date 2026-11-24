@@ -57,6 +57,9 @@ public sealed partial class KeyValuesService
     public override Task<GrpcConfirmRangeQuiesceResponse> ConfirmRangeQuiesce(GrpcConfirmRangeQuiesceRequest request, ServerCallContext context)
         => Guard(request, context, static (s, r, c) => s.snapshots.ConfirmRangeQuiesceCore(r, c), static _ => KeyValueMustRetry.ConfirmRangeQuiesce());
 
+    public override Task<GrpcSettleDecidedBlockersResponse> SettleDecidedBlockers(GrpcSettleDecidedBlockersRequest request, ServerCallContext context)
+        => Guard(request, context, static (s, r, c) => s.snapshots.SettleDecidedBlockersCore(r, c), static _ => KeyValueMustRetry.SettleDecidedBlockers());
+
     internal Task<GrpcAcquireSnapshotHoldResponse> AcquireSnapshotHoldInternal(GrpcAcquireSnapshotHoldRequest request, ServerCallContext context)
         => Guard(request, context, static (s, r, c) => s.snapshots.AcquireSnapshotHoldCore(r, c), static _ => KeyValueMustRetry.AcquireSnapshotHold());
 

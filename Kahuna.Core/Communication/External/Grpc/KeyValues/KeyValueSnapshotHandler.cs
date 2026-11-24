@@ -163,4 +163,26 @@ internal sealed class KeyValueSnapshotHandler
 
         return new() { Type = (GrpcKeyValueResponseType)type };
     }
+
+    internal async Task<GrpcSettleDecidedBlockersResponse> SettleDecidedBlockersCore(
+        GrpcSettleDecidedBlockersRequest request, ServerCallContext context)
+    {
+        // The request may be redirected once to the actual leader, so the hops it made count against the budget.
+        using Kahuna.Server.ForwardedRequestScope.Scope forwardedScope = Kahuna.Server.ForwardedRequestScope.EnterAt(request.ForwardHops);
+
+        (KeyValueResponseType type, int settled, int decided, int undecided) = await keyValues.SettleDecidedBlockers(
+            request.PartitionId,
+            request.Keys,
+            new HLCTimestamp(request.TransactionIdNode, request.TransactionIdPhysical, request.TransactionIdCounter),
+            request.Epoch,
+            context.CancellationToken).ConfigureAwait(false);
+
+        return new()
+        {
+            Type      = (GrpcKeyValueResponseType)type,
+            Settled   = settled,
+            Decided   = decided,
+            Undecided = undecided
+        };
+    }
 }

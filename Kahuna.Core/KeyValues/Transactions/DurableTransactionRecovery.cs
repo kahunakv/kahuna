@@ -118,6 +118,11 @@ internal sealed class DurableTransactionRecovery
     // their materializations coalesce into the same proposals instead of serializing one durable round each.
     private const int MaxConcurrentBlockerGroups = 4;
 
+    // The same bound for the pass over decided intents. Larger, because one pass can cover every transaction a
+    // leader change left behind and nothing waits on a single one of them; still fixed, because each group
+    // proposes through the partition's scheduler.
+    private const int MaxConcurrentDecidedGroups = 16;
+
     public DurableTransactionRecovery(
         PreparedIntentStore intentStore,
         DurableTransactionFinalizer.ReplicateDelegate replicate,
@@ -378,6 +383,81 @@ internal sealed class DurableTransactionRecovery
         }
 
         return unsettled;
+    }
+
+    /// <summary>
+    /// Settles the groups of <paramref name="transactions"/> (each one transaction's pending intents on
+    /// <paramref name="partitionId"/>) whose canonical record is terminal, and nothing else: an undecided
+    /// transaction, one with no record and one whose record cannot be read are left as they are, whatever their
+    /// deadline. Groups run a few at a time and independently, so one unreadable record does not stop the others.
+    ///
+    /// <para><paramref name="stillLeads"/> is asked before each settlement; once it answers no, the pass proposes
+    /// nothing more and counts the rest as failed.</para>
+    /// </summary>
+    /// <param name="budget">Ends the pass: once it fires no lookup and no settlement is started, a lookup in flight
+    /// is abandoned, and what is left is counted as failed. A settlement in flight is carried out.</param>
+    public async Task<DecidedSettleReport> SettleDecidedAsync(
+        int partitionId,
+        IReadOnlyCollection<List<PreparedIntent>> transactions,
+        Func<CancellationToken, ValueTask<bool>> stillLeads,
+        CancellationToken budget,
+        CancellationToken cancellationToken)
+    {
+        int settled = 0;
+        int undecided = 0;
+        int failed = 0;
+        PreparedIntent? sample = null;
+
+        await Parallel.ForEachAsync(
+            transactions,
+            new ParallelOptions { MaxDegreeOfParallelism = MaxConcurrentDecidedGroups, CancellationToken = cancellationToken },
+            async (group, ct) =>
+            {
+                PreparedIntent representative = group[0];
+                TransactionRecord? record;
+                bool leads;
+
+                try
+                {
+                    budget.ThrowIfCancellationRequested();
+
+                    record = await lookupRecord(
+                        representative.TransactionId, representative.Epoch, representative.RecordAnchorKey, budget).ConfigureAwait(false);
+
+                    leads = record is not { IsTerminal: true } || (await stillLeads(ct).ConfigureAwait(false) && !budget.IsCancellationRequested);
+                }
+                catch (Exception) when (!ct.IsCancellationRequested)
+                {
+                    Interlocked.Add(ref failed, group.Count);
+                    return;
+                }
+
+                if (record is not { IsTerminal: true })
+                {
+                    Interlocked.Add(ref undecided, group.Count);
+                    return;
+                }
+
+                if (!leads)
+                {
+                    Interlocked.Add(ref failed, group.Count);
+                    return;
+                }
+
+                ResolveGroupResult result = await ResolveGroupAsync(
+                    partitionId, group, record.Decision == TransactionDecision.Commit, ResolutionSource.DecidedSweep, ct).ConfigureAwait(false);
+
+                if (result.Settled > 0)
+                {
+                    Interlocked.Add(ref settled, result.Settled);
+                    Interlocked.CompareExchange(ref sample, representative, null);
+                }
+
+                if (result.Settled < group.Count)
+                    Interlocked.Add(ref failed, group.Count - result.Settled);
+            }).ConfigureAwait(false);
+
+        return new DecidedSettleReport(settled, undecided, failed, sample?.Key, sample?.TransactionId ?? HLCTimestamp.Zero);
     }
 
     private async Task<bool?> DecideAsync(int partitionId, PreparedIntent intent, HLCTimestamp now, CancellationToken cancellationToken)
@@ -643,6 +723,12 @@ internal sealed class DurableTransactionRecovery
         return new ResolveGroupResult(settleable.Count, ResolveFailureCause.None);
     }
 }
+
+/// <summary>What one pass over decided intents did, in intents: <paramref name="Settled"/> confirmed,
+/// <paramref name="Undecided"/> left because their record is not terminal, <paramref name="Failed"/> left because
+/// the record could not be read, the settlement did not land or the leadership moved. The sample names one settled
+/// intent.</summary>
+internal readonly record struct DecidedSettleReport(int Settled, int Undecided, int Failed, string? SampleKey, HLCTimestamp SampleTransactionId);
 
 /// <summary>What one resolution pass over a transaction's intents confirmed: <paramref name="Settled"/> is the
 /// number of intents whose settle delta replicated; <paramref name="Cause"/> names the step that stopped the pass

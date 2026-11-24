@@ -622,4 +622,9 @@ public sealed partial class KahunaManager
     public Task<KeyValueResponseType>
         ConfirmRangeQuiesce(int partitionId, string keySpace, string? startKey, string? endKey, HLCTimestamp owner, CancellationToken ct) =>
         keyValues.ConfirmRangeQuiesce(partitionId, keySpace, startKey, endKey, owner, ct);
+
+    /// <inheritdoc/>
+    public Task<(KeyValueResponseType Type, int Settled, int Decided, int Undecided)>
+        SettleDecidedBlockers(int partitionId, IReadOnlyList<string> keys, HLCTimestamp transactionId, long epoch, CancellationToken ct) =>
+        keyValues.SettleDecidedBlockers(partitionId, keys, transactionId, epoch, ct);
 }

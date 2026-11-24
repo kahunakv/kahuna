@@ -468,7 +468,8 @@ off the record, so a renewed record waits. `kahuna.durable_tx.deadline_extension
 as `extended`, `record_terminal`, `unavailable`, `lapsed` or `budget_spent`; a resend counts again.
 
 The prepare retry loop uses the same lease. The helping pass reports whether the holders of a refused key
-are decided or still undecided: decided holders are settlement lag, bounded by the (renewed) deadline. A
+are decided or still undecided; it runs on the leader of the refused partition, which need not be the node that
+finalizes the transaction. Decided holders are settlement lag, bounded by the (renewed) deadline. A
 lease that still lapses with renewal on records the abort with class `RetryableFailure` and refusal class
 `SettlementLag`, naming the rounds, renewals and holders (`prepare_retry_loops{outcome=deadline_lapsed}`);
 with renewal off the attempt answers `MustRetry` with refusal class `SettlementLag` and leaves the

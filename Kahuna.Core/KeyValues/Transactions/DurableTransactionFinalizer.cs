@@ -232,7 +232,8 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     /// whose canonical record is already terminal (decided but not yet settled — settlement lag, not a live
     /// conflict), and reports what held the keys: how many were settled, how many holders are decided, how many
     /// are still undecided, and whether the pass could look at all. Wired to
-    /// <see cref="DurableTransactionRecovery.TryResolveDecidedBlockersAsync"/>; null disables the helping pass and
+    /// <see cref="DurableMaintenanceService.TryResolveDecidedDurableBlockersAsync"/>, which runs the pass on the
+    /// partition's leader; null disables the helping pass and
     /// keeps the pure backoff-retry behaviour (bare protocol tests, or a deployment that opts out).</summary>
     public delegate Task<BlockerHelpResult> ResolveDecidedBlockersDelegate(
         int partitionId, IReadOnlyList<PreparedIntent> intents, HLCTimestamp transactionId, long epoch, CancellationToken cancellationToken);
@@ -399,6 +400,10 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     // the window is off. Each replica judges the prepare by the bound it carries (see CommitAdmission).
     private readonly long commitAdmissionLagMs;
 
+    // True once the node signaled its shutdown: a settlement that did not land is not sent again then. Null in
+    // protocol tests.
+    private readonly Func<bool>? isStopping;
+
     // Names the arms that refuse a commit without any other trace: the deadline gate and the exhausted prepare
     // loop. Null in bare protocol tests.
     private readonly ILogger? logger;
@@ -434,8 +439,10 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         ILogger? logger = null,
         long commitAdmissionLagMs = 0,
         ClaimStagedIntentsDelegate? claimStagedIntents = null,
-        Func<string, DurableKeyRoute>? locateRoute = null)
+        Func<string, DurableKeyRoute>? locateRoute = null,
+        Func<bool>? isStopping = null)
     {
+        this.isStopping = isStopping;
         this.decide = decide;
         this.locateRoute = locateRoute;
         this.claimStagedIntents = claimStagedIntents;
@@ -843,7 +850,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         //    was held for as long as it could be), and answers MustRetry with its prepares installed when renewal
         //    is off (see the decision below).
         //  - some holder is still undecided (a live coordinator inside its decision window), the pass could not
-        //    look (helping unavailable, the partition led elsewhere, no attempt clock to measure the deadline), or
+        //    look (helping unavailable, no leader of the partition answered, no attempt clock to measure the deadline), or
         //    no holder was visible for a key that keeps being refused: the loop is bounded by MaxPrepareRetries
         //    rounds of short backoff, after which the truthful abort below records the refusal. A live mutual wait
         //    between two finalizes has to break quickly, not after a whole deadline.
@@ -1925,7 +1932,122 @@ internal sealed class DurableTransactionFinalizer : IDisposable
             commit = record.Decision == TransactionDecision.Commit;
         }
 
-        await Task.WhenAll(input.Partitions.Select(partition => ResolvePartitionAsync(partition, commit, localApplyGate, cancellationToken))).ConfigureAwait(false);
+        IReadOnlyList<PreparedIntent>[] unsettled = await Task.WhenAll(
+            input.Partitions.Select(partition => ResolvePartitionAsync(partition, commit, localApplyGate, cancellationToken))).ConfigureAwait(false);
+
+        // Only a deferred resolution is sent again: an inline one holds the answer of the commit.
+        if (scheduleResolution is not null)
+            unsettled = await ResendUnsettledAsync(input, unsettled, cancellationToken).ConfigureAwait(false);
+
+        int left = 0;
+        for (int i = 0; i < unsettled.Length; i++)
+            left += unsettled[i].Count;
+
+        if (left == 0)
+            return;
+
+        // Every intent left behind stays decided-but-unsettled until the settlement pass of its partition leader
+        // or the recovery sweep. The value of a commit is visible only through the intent overlay until then, and
+        // the key refuses every other writer. Surface the rate: settlement being refused (a leader change, a
+        // quiesced range, backpressure, a forwarding failure) is otherwise silent.
+        DurableTransactionMetrics.ResolutionSettleFailures.Add(left);
+
+        LogUnsettledRateLimited(input.TransactionId, commit, left, unsettled);
+    }
+
+    // One line a second at most: a partition without a leader fails the settlement of every transaction in flight.
+    private const int UnsettledLogIntervalMs = 1_000;
+
+    private long lastUnsettledLogTicks = Environment.TickCount64 - UnsettledLogIntervalMs;
+
+    private int suppressedUnsettledLogs;
+
+    private void LogUnsettledRateLimited(HLCTimestamp transactionId, bool commit, int left, IReadOnlyList<PreparedIntent>[] unsettled)
+    {
+        if (logger is null)
+            return;
+
+        long now = Environment.TickCount64;
+        long last = Interlocked.Read(ref lastUnsettledLogTicks);
+
+        if (now - last < UnsettledLogIntervalMs || Interlocked.CompareExchange(ref lastUnsettledLogTicks, now, last) != last)
+        {
+            Interlocked.Increment(ref suppressedUnsettledLogs);
+            return;
+        }
+
+        string? key = null;
+        for (int i = 0; i < unsettled.Length && key is null; i++)
+        {
+            if (unsettled[i].Count > 0)
+                key = unsettled[i][0].Key;
+        }
+
+        logger.LogWarning(
+            "The settlement of transaction {TransactionId} ({Decision}) did not land for {Left} intent(s), e.g. key {Key}; the leader of the partition settles them later (+{Suppressed} similar suppressed)",
+            transactionId, commit ? "commit" : "abort", left, key, Interlocked.Exchange(ref suppressedUnsettledLogs, 0));
+    }
+
+    // The waits before each time a deferred settlement that did not land is sent again. Together about two seconds:
+    // long enough for a planned leadership transfer and for the routing to name the new leader, short enough that a
+    // partition that stays unavailable does not pile up resolutions in memory. Each send also waits for a leader.
+    private static readonly int[] SettleResendDelaysMs = [25, 75, 200, 500, 1_200];
+
+    /// <summary>
+    /// Sends the settlement of the intents in <paramref name="unsettled"/> again, through the current routing of
+    /// their keys, until it lands or the bounded tries are spent, and returns what is still unsettled.
+    ///
+    /// <para>A settlement is proposed by the leader that the sender believed in. When the leadership moves between
+    /// that belief and the proposal, the proposal is refused (not the leader, or another term) or dropped, and
+    /// nothing else sends it: the intent would hold its key, with its decision recorded, until the new leader's own
+    /// pass finds it. The refusal does not cross the replicate seam, so every settlement that did not land is sent
+    /// again; a settlement of an intent that is already gone applies as a no-op.</para>
+    ///
+    /// <para>The direction is read from the canonical record before every send, as the first one did, and the abort
+    /// fence is checked again behind it.</para>
+    /// </summary>
+    private async Task<IReadOnlyList<PreparedIntent>[]> ResendUnsettledAsync(
+        DurableFinalizeInput input, IReadOnlyList<PreparedIntent>[] unsettled, CancellationToken cancellationToken)
+    {
+        for (int attempt = 0; attempt < SettleResendDelaysMs.Length; attempt++)
+        {
+            int pending = 0;
+            for (int i = 0; i < unsettled.Length; i++)
+                pending += unsettled[i].Count;
+
+            if (pending == 0)
+                return unsettled;
+
+            // A node that is shutting down drains its resolutions; the new leader of the partition settles what is left.
+            if (isStopping is not null && isStopping())
+                return unsettled;
+
+            await Task.Delay(SettleResendDelaysMs[attempt], cancellationToken).ConfigureAwait(false);
+
+            TransactionRecord? record = await ReadCanonicalRecordAsync(input, cancellationToken).ConfigureAwait(false);
+            if (record is null || !record.IsTerminal)
+                continue;
+
+            bool commit = record.Decision == TransactionDecision.Commit;
+
+            Task<IReadOnlyList<PreparedIntent>>[] resends = new Task<IReadOnlyList<PreparedIntent>>[unsettled.Length];
+            for (int i = 0; i < resends.Length; i++)
+            {
+                resends[i] = unsettled[i].Count == 0
+                    ? Task.FromResult(unsettled[i])
+                    : ResolvePartitionAsync(input.Partitions[i] with { Intents = unsettled[i] }, commit, localApplyGate, cancellationToken);
+            }
+
+            unsettled = await Task.WhenAll(resends).ConfigureAwait(false);
+
+            int left = 0;
+            for (int i = 0; i < unsettled.Length; i++)
+                left += unsettled[i].Count;
+
+            DurableTransactionMetrics.SettlementResent(pending - left, left);
+        }
+
+        return unsettled;
     }
 
     /// <summary>
@@ -1978,7 +2100,8 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         }
     }
 
-    private async Task ResolvePartitionAsync(
+    /// <summary>Resolves one partition group to its decision and returns the intents that are not settled after it.</summary>
+    private async Task<IReadOnlyList<PreparedIntent>> ResolvePartitionAsync(
         DurablePartitionPrepare partition,
         bool commit,
         SemaphoreSlim localApplyGate,
@@ -2014,7 +2137,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
 
             if (regrouped is not null)
             {
-                List<Task> resolves = new(regrouped.Count + 1);
+                List<Task<IReadOnlyList<PreparedIntent>>> resolves = new(regrouped.Count + 1);
 
                 if (stayed is { Count: > 0 })
                     resolves.Add(ResolvePartitionCoreAsync(partition with { Intents = stayed }, commit, localApplyGate, cancellationToken));
@@ -2022,12 +2145,17 @@ internal sealed class DurableTransactionFinalizer : IDisposable
                 foreach ((int current, List<PreparedIntent> moved) in regrouped)
                     resolves.Add(ResolvePartitionCoreAsync(partition with { PartitionId = current, Intents = moved }, commit, localApplyGate, cancellationToken));
 
-                await Task.WhenAll(resolves).ConfigureAwait(false);
-                return;
+                IReadOnlyList<PreparedIntent>[] parts = await Task.WhenAll(resolves).ConfigureAwait(false);
+
+                List<PreparedIntent> unsettled = [];
+                for (int i = 0; i < parts.Length; i++)
+                    unsettled.AddRange(parts[i]);
+
+                return unsettled;
             }
         }
 
-        await ResolvePartitionCoreAsync(partition, commit, localApplyGate, cancellationToken).ConfigureAwait(false);
+        return await ResolvePartitionCoreAsync(partition, commit, localApplyGate, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>The intent's current data partition per the wired resolver; the frozen fallback when the
@@ -2127,7 +2255,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         }
     }
 
-    private async Task ResolvePartitionCoreAsync(
+    private async Task<IReadOnlyList<PreparedIntent>> ResolvePartitionCoreAsync(
         DurablePartitionPrepare partition,
         bool commit,
         SemaphoreSlim localApplyGate,
@@ -2139,7 +2267,7 @@ internal sealed class DurableTransactionFinalizer : IDisposable
         // leaves the intent for the recovery sweep to retry. A materializing settle installs the value in the
         // same apply that removes the intent, so it carries its own precondition. On abort the actor must still
         // positively clear staged state before settlement, otherwise the intent remains for recovery.
-        List<PreparedIntent> settleable;
+        bool[] ready;
         if (commit)
         {
             // With the materializing settle, the settle's own apply installs every committed value, so nothing
@@ -2171,23 +2299,11 @@ internal sealed class DurableTransactionFinalizer : IDisposable
                     materialized = applied;
             }
 
-            settleable = partition.Intents.Where((_, index) => materialized[index]).ToList();
-
-            // A materialization record already made these values durable; a materializing settle does so only
-            // when it replicates, and is counted there.
-            if (!materializeOnResolve)
-                DurableTransactionMetrics.Materialized(ResolutionSource.Finalize, settleable.Count);
-
-            // Every intent left behind stays committed-but-unsettled until the recovery sweep — a window in
-            // which the value is visible only through the intent overlay. Surface the rate: settlement being
-            // refused (a quiesced range, backpressure, a forwarding failure) is otherwise completely silent.
-            int settleFailures = partition.Intents.Count - settleable.Count;
-            if (settleFailures > 0)
-                DurableTransactionMetrics.ResolutionSettleFailures.Add(settleFailures);
+            ready = materialized;
         }
         else
         {
-            bool[] rolledBack = applyRollbackLocally is null
+            ready = applyRollbackLocally is null
                 ? Enumerable.Repeat(true, partition.Intents.Count).ToArray()
                 : await ApplyLocallyAsync(
                     partition.PartitionId,
@@ -2196,12 +2312,34 @@ internal sealed class DurableTransactionFinalizer : IDisposable
                     (partitionId, intent) => applyRollbackLocally(partitionId, intent),
                     localApplyGate,
                     cancellationToken).ConfigureAwait(false);
-
-            settleable = partition.Intents.Where((_, index) => rolledBack[index]).ToList();
         }
 
-        if (settleable.Count > 0)
-            await SettleIntentsAsync(partition.PartitionId, settleable, commit, cancellationToken).ConfigureAwait(false);
+        List<PreparedIntent> settleable = new(partition.Intents.Count);
+        for (int i = 0; i < partition.Intents.Count; i++)
+        {
+            if (ready[i])
+                settleable.Add(partition.Intents[i]);
+        }
+
+        // A materialization record already made these values durable; a materializing settle does so only when it
+        // replicates, and is counted there.
+        if (commit && !materializeOnResolve)
+            DurableTransactionMetrics.Materialized(ResolutionSource.Finalize, settleable.Count);
+
+        if (settleable.Count == 0 || !await SettleIntentsAsync(partition.PartitionId, settleable, commit, cancellationToken).ConfigureAwait(false))
+            return partition.Intents;
+
+        if (settleable.Count == partition.Intents.Count)
+            return [];
+
+        List<PreparedIntent> unsettled = new(partition.Intents.Count - settleable.Count);
+        for (int i = 0; i < partition.Intents.Count; i++)
+        {
+            if (!ready[i])
+                unsettled.Add(partition.Intents[i]);
+        }
+
+        return unsettled;
     }
 
     private Task<bool[]> MaterializePartitionAsync(DurablePartitionPrepare partition, CancellationToken cancellationToken)
@@ -2298,16 +2436,27 @@ internal sealed class DurableTransactionFinalizer : IDisposable
     // no "resolved-but-not-removed" state can linger to block a later write to the key or serve a stale value.
     // Idempotent: a replay of [Resolve, Remove] over an already-removed intent is a pair of no-ops, and a replayed
     // materializing resolve re-installs the same row (see PreparedIntentStore.TryInstallOnResolve).
-    private async Task SettleIntentsAsync(int partitionId, IReadOnlyList<PreparedIntent> intents, bool commit, CancellationToken cancellationToken)
+    // Returns whether the delta landed; a replicate that throws is a settle that did not land, so one partition's
+    // failure leaves the others' settlement and their resends alone.
+    private async Task<bool> SettleIntentsAsync(int partitionId, IReadOnlyList<PreparedIntent> intents, bool commit, CancellationToken cancellationToken)
     {
         byte[] delta = PreparedIntentStore.SerializeDelta(BuildSettleCommands(intents, commit, commit && materializeOnResolve));
-        if (await ReplicateIntentsAsync(partitionId, delta, cancellationToken).ConfigureAwait(false))
-        {
-            if (commit && materializeOnResolve)
-                DurableTransactionMetrics.Materialized(ResolutionSource.Finalize, intents.Count);
 
-            DurableTransactionMetrics.Settled(ResolutionSource.Finalize, intents.Count);
+        try
+        {
+            if (!await ReplicateIntentsAsync(partitionId, delta, cancellationToken).ConfigureAwait(false))
+                return false;
         }
+        catch (Exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            return false;
+        }
+
+        if (commit && materializeOnResolve)
+            DurableTransactionMetrics.Materialized(ResolutionSource.Finalize, intents.Count);
+
+        DurableTransactionMetrics.Settled(ResolutionSource.Finalize, intents.Count);
+        return true;
     }
 
     /// <summary>
