@@ -435,6 +435,9 @@ internal sealed partial class KeyValuesManager : IDisposable
     internal Task<TransactionRecord?> LookupDurableRecordRouted(HLCTimestamp transactionId, long epoch, string anchorKey, CancellationToken cancellationToken) =>
         durableReplication.LookupDurableRecordRouted(transactionId, epoch, anchorKey, cancellationToken);
 
+    /// <summary>The durable-2PC replication path, for tests.</summary>
+    internal Writes.DurableReplicationGateway DurableReplicationForTesting => durableReplication;
+
     /// <summary>The inter-node calls this node's durable path has made so far (per node, for tests and diagnostics).</summary>
     internal Writes.DurableTransportCounts DurableTransportCounts => durableReplication.TransportCounts;
 

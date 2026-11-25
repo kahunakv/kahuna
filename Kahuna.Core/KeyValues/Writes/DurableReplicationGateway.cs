@@ -950,6 +950,18 @@ internal sealed class DurableReplicationGateway
     /// Undecided/absent outcome can still transition and must never be cached across a later decision).</summary>
     private readonly ConcurrentDictionary<(HLCTimestamp, long), TransactionRecord> durableRecordLookupCache = new();
 
+    /// <summary>The number of entries of <see cref="durableRecordLookupCache"/>. Kept beside the dictionary, whose own
+    /// count takes every one of its locks: a commit that writes over a committed and unsettled transaction does one
+    /// lookup for each such key, and at a high commit rate the lookups waited for one another there.</summary>
+    private int durableRecordLookupCacheSize;
+
+    /// <summary>The cap that <see cref="LookupDurableRecordRouted"/> applies. Only tests change it.</summary>
+    internal int TestDurableRecordLookupCacheMax { get; set; } = DurableRecordLookupCacheMax;
+
+    /// <summary>Test observability: the entries the lookup cache counts, and the entries it holds.</summary>
+    internal (int Counted, int Held) TestDurableRecordLookupCacheEntries =>
+        (Volatile.Read(ref durableRecordLookupCacheSize), durableRecordLookupCache.Count);
+
     /// <summary>
     /// Serves a canonical transaction-record lookup that was routed to this node because it is the record's anchor
     /// partition leader: the local record store is authoritative here. Returns the serialized record, or null when
@@ -1015,8 +1027,10 @@ internal sealed class DurableReplicationGateway
             record = serialized is null ? null : TransactionRecordStore.DeserializeRecords(serialized) is [TransactionRecord r, ..] ? r : null;
         }
 
-        if (record is { IsTerminal: true } && durableRecordLookupCache.Count < DurableRecordLookupCacheMax)
-            durableRecordLookupCache[(transactionId, epoch)] = record;
+        if (record is { IsTerminal: true }
+            && Volatile.Read(ref durableRecordLookupCacheSize) < TestDurableRecordLookupCacheMax
+            && durableRecordLookupCache.TryAdd((transactionId, epoch), record))
+            Interlocked.Increment(ref durableRecordLookupCacheSize);
 
         return record;
     }

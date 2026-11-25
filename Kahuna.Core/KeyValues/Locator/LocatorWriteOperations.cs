@@ -103,7 +103,7 @@ internal sealed class LocatorWriteOperations
         bool stagesInActor = transactionId != HLCTimestamp.Zero;
 
         if (stagesInActor
-                ? await routing.ConfirmLeadershipForActorMutation(partitionId, cancellationToken)
+                ? await routing.ConfirmLeadershipForKeyMutation(partitionId, key, durability, KeyValueActorOperation.StagedWrite, cancellationToken)
                 : await routing.AmILeaderIfHosted(partitionId, cancellationToken))
         {
             routing.RecordLocalKeyRoute(key, partitionId, routedGeneration);
@@ -318,7 +318,8 @@ internal sealed class LocatorWriteOperations
             // A transactional item stages in the actor without a proposal: the whole local group then needs the
             // quorum-confirmed gate (see the single-key set path). The check round takes the gate too, so a node
             // whose leadership no quorum confirmed refuses the batch before any other leader stages its items.
-            if (LocatorRouting.AnyTransactional(items) && !await routing.ConfirmLeadershipForGroupMutation(leader, leaderByPartition, cancellationToken))
+            if (LocatorRouting.AnyTransactional(items) && !await routing.ConfirmLeadershipForGroupMutation(
+                    leader, leaderByPartition, items, static item => (item.Key!, item.Durability), KeyValueActorOperation.StagedWrite, cancellationToken))
             {
                 lock (lockSync)
                 {
@@ -404,7 +405,8 @@ internal sealed class LocatorWriteOperations
         if (leader == localNode)
         {
             // A transactional item stages in the actor without a proposal (see the set-many path).
-            if (LocatorRouting.AnyTransactional(items) && !await routing.ConfirmLeadershipForGroupMutation(leader, leaderByPartition, cancellationToken))
+            if (LocatorRouting.AnyTransactional(items) && !await routing.ConfirmLeadershipForGroupMutation(
+                    leader, leaderByPartition, items, static item => (item.Key!, item.Durability), KeyValueActorOperation.StagedWrite, cancellationToken))
             {
                 lock (lockSync)
                 {
@@ -453,7 +455,7 @@ internal sealed class LocatorWriteOperations
         bool stagesInActor = transactionId != HLCTimestamp.Zero;
 
         if (stagesInActor
-                ? await routing.ConfirmLeadershipForActorMutation(partitionId, cancellationToken)
+                ? await routing.ConfirmLeadershipForKeyMutation(partitionId, key, durability, KeyValueActorOperation.StagedWrite, cancellationToken)
                 : await routing.AmILeaderIfHosted(partitionId, cancellationToken))
         {
             routing.RecordLocalKeyRoute(key, partitionId);
@@ -502,7 +504,7 @@ internal sealed class LocatorWriteOperations
         bool stagesInActor = transactionId != HLCTimestamp.Zero;
 
         if (stagesInActor
-                ? await routing.ConfirmLeadershipForActorMutation(partitionId, cancellationToken)
+                ? await routing.ConfirmLeadershipForKeyMutation(partitionId, key, durability, KeyValueActorOperation.StagedWrite, cancellationToken)
                 : await routing.AmILeaderIfHosted(partitionId, cancellationToken))
         {
             routing.RecordLocalKeyRoute(key, partitionId);

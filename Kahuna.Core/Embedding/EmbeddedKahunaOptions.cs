@@ -1101,8 +1101,8 @@ public sealed class EmbeddedKahunaOptions
     public bool PublishedHeadReads { get; set; } = true;
 
     /// <summary>
-    /// Let a read of named keys wait for the delivery of this node's committed log entries only while one of them can
-    /// change a key it reads. See <see cref="Server.Configuration.KahunaConfiguration.KeyScopedApplyWait"/>.
+    /// Let an operation that names its keys wait for the delivery of this node's committed log entries only while one of
+    /// them can change one of those keys. See <see cref="Server.Configuration.KahunaConfiguration.KeyScopedApplyWait"/>.
     /// </summary>
     public bool KeyScopedApplyWait { get; set; } = true;
 

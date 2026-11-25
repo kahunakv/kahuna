@@ -85,13 +85,13 @@ internal sealed class LocatorRouting
     // The keys that entries of this node, handed to Raft and not delivered yet, can still change.
     private readonly Writes.UndeliveredKeys undeliveredKeys;
 
-    /// <summary>A batched get or existence check of more keys than this waits for the whole applied frontier without
-    /// asking for each key. Under a write stream one of so many keys is likely to be marked, and asking for all of them
-    /// has its own price. A probe is bounded by the configured size of its batch.</summary>
+    /// <summary>A batch of more keys than this waits for the whole applied frontier without asking for each key. Under
+    /// a write stream one of so many keys is likely to be marked, and asking for all of them has its own price. A probe
+    /// is bounded by the configured size of its batch.</summary>
     private const int MaxKeysAsked = 512;
 
     // ── the serving gate ────────────────────────────────────────────────────────────────────────
-    // Every decision to serve a partition from this node's own state goes through one of the three
+    // Every decision to serve a partition from this node's own state goes through one of the
     // leadership helpers below or through TryWaitForLeader naming this node. A partition whose local
     // projection is proven incomplete (see PartitionDivergenceContainment) must not be served from
     // it whatever Raft says about leadership: the helpers answer "not the leader here" and the
@@ -237,6 +237,9 @@ internal sealed class LocatorRouting
     /// follower that has not yet heard of a newer term would otherwise vouch for a leadership that has ended.
     /// The term is read again after the confirmation, so the value compared is at or above the term this node
     /// was confirmed in; equality with the holder's term then pins both to one uninterrupted leadership.</para>
+    ///
+    /// <para>The proof of leadership is all the check needs. A lock, its lease and the record of a lapsed one live in
+    /// the memory of the leader, and no log entry changes them, so there is no apply to wait for.</para>
     /// </summary>
     internal async ValueTask<KeyValueResponseType> CheckLeaderTerm(string key, long term, CancellationToken cancellationToken)
     {
@@ -246,7 +249,8 @@ internal sealed class LocatorRouting
         if (current > term)
             return KeyValueResponseType.Aborted;
 
-        if (current < term || !await ConfirmLeadershipIfHosted(partitionId, cancellationToken))
+        if (current < term
+            || !await Confirm(partitionId, KeyValueActorOperation.CommitCheck, waitForApply: !configuration.KeyScopedApplyWait, cancellationToken))
             return KeyValueResponseType.MustRetry;
 
         return raft.GetPartitionTerm(partitionId) == term ? KeyValueResponseType.DoesNotExist : KeyValueResponseType.Aborted;
@@ -449,16 +453,10 @@ internal sealed class LocatorRouting
         if (!configuration.KeyScopedApplyWait)
             return ConfirmLeadershipForRead(partitionId, cancellationToken);
 
-        if (durability == KeyValueDurability.Persistent)
+        if (durability == KeyValueDurability.Persistent && AnyUndelivered(partitionId, keys, positions))
         {
-            for (int i = 0; i < positions.Count; i++)
-            {
-                if (!undeliveredKeys.MayChange(partitionId, keys[positions[i]]))
-                    continue;
-
-                KeyValueReadMetrics.UndeliveredKey();
-                return ConfirmLeadershipForRead(partitionId, cancellationToken);
-            }
+            KeyValueReadMetrics.UndeliveredKey();
+            return ConfirmLeadershipForRead(partitionId, cancellationToken);
         }
 
         return ConfirmLeadershipLeaseIfHosted(partitionId, cancellationToken);
@@ -505,23 +503,99 @@ internal sealed class LocatorRouting
         if (!configuration.KeyScopedApplyWait || keys.Count > MaxKeysAsked)
             return true;
 
-        for (int i = 0; i < keys.Count; i++)
-        {
-            if (keys[i].durability != KeyValueDurability.Persistent || !undeliveredKeys.MayChange(partitionId, keys[i].key))
-                continue;
+        if (!AnyUndelivered(partitionId, keys, static item => (item.key, item.durability)))
+            return false;
 
-            KeyValueReadMetrics.UndeliveredKey();
-            return true;
+        KeyValueReadMetrics.UndeliveredKey();
+        return true;
+    }
+
+    private bool AnyUndelivered<T>(int partitionId, List<T> items, Func<T, (string Key, KeyValueDurability Durability)> keyOf)
+    {
+        for (int i = 0; i < items.Count; i++)
+        {
+            (string key, KeyValueDurability durability) = keyOf(items[i]);
+
+            if (durability == KeyValueDurability.Persistent && undeliveredKeys.MayChange(partitionId, key))
+                return true;
+        }
+
+        return false;
+    }
+
+    private bool AnyUndelivered(int partitionId, IReadOnlyList<string> keys, IReadOnlyList<int> positions)
+    {
+        for (int i = 0; i < positions.Count; i++)
+        {
+            if (undeliveredKeys.MayChange(partitionId, keys[positions[i]]))
+                return true;
         }
 
         return false;
     }
 
     /// <summary>
+    /// The confirmation of an operation that replicates nothing, recorded in <see cref="KeyValueMutationMetrics"/> when
+    /// it holds. With <paramref name="waitForApply"/> it also waits until this node applied everything that was
+    /// committed; without it the proof of leadership is enough.
+    /// </summary>
+    private async ValueTask<bool> Confirm(int partitionId, KeyValueActorOperation operation, bool waitForApply, CancellationToken cancellationToken)
+    {
+        long start = KeyValueMutationMetrics.ConfirmMs.Enabled ? Stopwatch.GetTimestamp() : 0;
+
+        ValueTask<bool> confirmation = waitForApply
+            ? ConfirmLeadershipIfHosted(partitionId, cancellationToken)
+            : ConfirmLeadershipLeaseIfHosted(partitionId, cancellationToken);
+
+        bool leaseHit = confirmation.IsCompleted;
+
+        if (!await confirmation)
+            return false;
+
+        if (start != 0)
+            KeyValueMutationMetrics.RecordConfirm(operation, start, leaseHit);
+
+        return true;
+    }
+
+    /// <summary>
+    /// Whether an operation on one named key must wait for the applied frontier of <paramref name="partitionId"/>:
+    /// with the switch off always, else while an undelivered entry of this node can change the key. See
+    /// <see cref="ConfirmLeadershipForKeyMutation"/> for why the other entries do not matter.
+    /// </summary>
+    private bool WaitsForApply(int partitionId, string key, KeyValueDurability durability, KeyValueActorOperation operation)
+    {
+        if (!configuration.KeyScopedApplyWait)
+            return true;
+
+        if (durability != KeyValueDurability.Persistent || !undeliveredKeys.MayChange(partitionId, key))
+            return false;
+
+        KeyValueMutationMetrics.UndeliveredKey(operation);
+        return true;
+    }
+
+    /// <summary>
+    /// <see cref="WaitsForApply(int, string, KeyValueDurability, KeyValueActorOperation)"/> for the keys of a group. A
+    /// key that belongs to another partition errs on the side of the wait (see <see cref="MayChangeAny"/>).
+    /// </summary>
+    private bool WaitsForApply<T>(int partitionId, List<T> items, Func<T, (string Key, KeyValueDurability Durability)> keyOf, KeyValueActorOperation operation)
+    {
+        if (!configuration.KeyScopedApplyWait || items.Count > MaxKeysAsked)
+            return true;
+
+        if (!AnyUndelivered(partitionId, items, keyOf))
+            return false;
+
+        KeyValueMutationMetrics.UndeliveredKey(operation);
+        return true;
+    }
+
+    /// <summary>
     /// Gates an operation that mutates in-memory actor state <em>without</em> a Raft proposal on the
     /// same quorum-confirmed leadership check reads use. A transactional set/delete/extend stages an
     /// MVCC entry plus its write intent, a point/prefix/range exclusive lock is granted from the actor
-    /// (its release has its own admission, see <see cref="AdmitLockRelease"/>), and a
+    /// (its release has its own admission, see <see cref="AdmitLockRelease(int, CancellationToken)"/>), and a
     /// prepare/commit/rollback mutation ticket is answered from actor state: none of
     /// them replicate, so "replication itself fails on a deposed leader" does not protect them. A
     /// leader cut off from its voters would stage a write, hand out a lock or release one from a
@@ -531,10 +605,48 @@ internal sealed class LocatorRouting
     /// <para>A node that still believes it leads (<see cref="IRaft.AmILeaderQuick"/>, local belief)
     /// while the quorum will not confirm it is the two-leader window itself, so that case is logged
     /// at warning level, rate-limited per partition, and is the node-log evidence of the window.</para>
+    /// <para>This form waits for the applied frontier. It is for an operation that depends on keys it does
+    /// not name, such as a prefix or range lock.</para>
     /// </summary>
-    internal async ValueTask<bool> ConfirmLeadershipForActorMutation(int partitionId, CancellationToken cancellationToken)
+    internal ValueTask<bool> ConfirmLeadershipForActorMutation(int partitionId, KeyValueActorOperation operation, CancellationToken cancellationToken) =>
+        ConfirmForActorMutation(partitionId, operation, waitForApply: true, cancellationToken);
+
+    /// <summary>
+    /// <see cref="ConfirmLeadershipForActorMutation"/> for an operation that names its key. It waits for the applied
+    /// frontier only while an undelivered entry of this node can change the key, as
+    /// <see cref="ConfirmLeadershipForKeyRead"/> does.
+    ///
+    /// <para>The operation judges the committed head of the key, the prepared intent on it, the decision of that
+    /// intent's transaction, and state that lives in the memory of the leader: write intents, staged writes and locks.
+    /// The log changes the head and the intent of a key only by entries that name the key. A decision that is committed
+    /// and not delivered yet leaves the intent undecided, and the operation answers a wait or a refusal, as it does one
+    /// moment before the decision commits. The log never changes the state in memory except through the apply of the
+    /// same key. So the operation answers what it would answer after the wait.</para>
+    /// </summary>
+    internal ValueTask<bool> ConfirmLeadershipForKeyMutation(
+        int partitionId, string key, KeyValueDurability durability, KeyValueActorOperation operation, CancellationToken cancellationToken) =>
+        ConfirmForActorMutation(partitionId, operation, WaitsForApply(partitionId, key, durability, operation), cancellationToken);
+
+    /// <summary>
+    /// <see cref="ConfirmLeadershipForKeyMutation"/> for the keys at <paramref name="positions"/>, all of one partition.
+    /// </summary>
+    internal ValueTask<bool> ConfirmLeadershipForKeysMutation(
+        int partitionId, IReadOnlyList<string> keys, IReadOnlyList<int> positions, KeyValueDurability durability, KeyValueActorOperation operation, CancellationToken cancellationToken)
     {
-        if (await ConfirmLeadershipIfHosted(partitionId, cancellationToken))
+        bool wait = !configuration.KeyScopedApplyWait;
+
+        if (!wait && durability == KeyValueDurability.Persistent && AnyUndelivered(partitionId, keys, positions))
+        {
+            KeyValueMutationMetrics.UndeliveredKey(operation);
+            wait = true;
+        }
+
+        return ConfirmForActorMutation(partitionId, operation, wait, cancellationToken);
+    }
+
+    private async ValueTask<bool> ConfirmForActorMutation(int partitionId, KeyValueActorOperation operation, bool waitForApply, CancellationToken cancellationToken)
+    {
+        if (await Confirm(partitionId, operation, waitForApply, cancellationToken))
             return true;
 
         if (await AmILeaderQuickIfHosted(partitionId))
@@ -544,13 +656,16 @@ internal sealed class LocatorRouting
     }
 
     /// <summary>
-    /// <see cref="ConfirmLeadershipForActorMutation"/> for a locally-led key group: every distinct
+    /// <see cref="ConfirmLeadershipForKeyMutation"/> for a locally-led key group: every distinct
     /// partition the group's keys route to must confirm before any key in the group mutates local
     /// actor state. Mirrors <see cref="ConfirmLeadershipForGroupRead"/>.
     /// </summary>
-    internal async ValueTask<bool> ConfirmLeadershipForGroupMutation(
+    internal async ValueTask<bool> ConfirmLeadershipForGroupMutation<T>(
         string leader,
         Dictionary<int, string> leaderByPartition,
+        List<T> items,
+        Func<T, (string Key, KeyValueDurability Durability)> keyOf,
+        KeyValueActorOperation operation,
         CancellationToken cancellationToken
     )
     {
@@ -559,11 +674,38 @@ internal sealed class LocatorRouting
             if (partitionLeader != leader)
                 continue;
 
-            if (!await ConfirmLeadershipForActorMutation(partitionId, cancellationToken))
+            if (!await ConfirmForActorMutation(partitionId, operation, WaitsForApply(partitionId, items, keyOf, operation), cancellationToken))
                 return false;
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// Confirms the leadership for a commit-time check of one key. The check answers from the state that
+    /// <see cref="ConfirmLeadershipForKeyMutation"/> describes, under the same rule.
+    /// </summary>
+    internal ValueTask<bool> ConfirmLeadershipForCommitCheck(int partitionId, string key, KeyValueDurability durability, CancellationToken cancellationToken) =>
+        Confirm(partitionId, KeyValueActorOperation.CommitCheck, WaitsForApply(partitionId, key, durability, KeyValueActorOperation.CommitCheck), cancellationToken);
+
+    /// <summary>
+    /// <see cref="ConfirmLeadershipForCommitCheck(int, string, KeyValueDurability, CancellationToken)"/> for the probes
+    /// of <paramref name="partitionId"/>: those whose entry of <paramref name="partitionOf"/> names it. A leader-term
+    /// probe is not asked for its key, because it confirms by itself (<see cref="CheckLeaderTerm"/>).
+    /// </summary>
+    internal ValueTask<bool> ConfirmLeadershipForCommitCheck(int partitionId, List<KeyValueConflictProbe> probes, int[] partitionOf, CancellationToken cancellationToken)
+    {
+        bool wait = probes.Count > MaxKeysAsked;
+
+        for (int i = 0; !wait && i < probes.Count; i++)
+        {
+            KeyValueConflictProbe probe = probes[i];
+
+            if (partitionOf[i] == partitionId && (probe.Checks & KeyValueConflictChecks.LeaderTerm) == 0)
+                wait = WaitsForApply(partitionId, probe.Key, probe.Durability, KeyValueActorOperation.CommitCheck);
+        }
+
+        return Confirm(partitionId, KeyValueActorOperation.CommitCheck, wait, cancellationToken);
     }
 
     /// <summary>
@@ -586,13 +728,25 @@ internal sealed class LocatorRouting
     /// reason, and a release gated on the same confirmation was refused with it, which left the refused
     /// transaction's locks in memory until their lease ran out, with every writer into the range waiting for
     /// them.</para>
+    ///
+    /// <para>This form waits for the applied frontier, for the release of a prefix or range lock.</para>
     /// </summary>
-    internal async ValueTask<LockReleaseAdmission> AdmitLockRelease(int partitionId, CancellationToken cancellationToken)
+    internal ValueTask<LockReleaseAdmission> AdmitLockRelease(int partitionId, CancellationToken cancellationToken) =>
+        AdmitLockRelease(partitionId, waitForApply: true, cancellationToken);
+
+    /// <summary>
+    /// <see cref="AdmitLockRelease(int, CancellationToken)"/> for the release of one key, which waits for the applied
+    /// frontier under the rule of <see cref="ConfirmLeadershipForKeyMutation"/>.
+    /// </summary>
+    internal ValueTask<LockReleaseAdmission> AdmitLockRelease(int partitionId, string key, KeyValueDurability durability, CancellationToken cancellationToken) =>
+        AdmitLockRelease(partitionId, WaitsForApply(partitionId, key, durability, KeyValueActorOperation.LockRelease), cancellationToken);
+
+    private async ValueTask<LockReleaseAdmission> AdmitLockRelease(int partitionId, bool waitForApply, CancellationToken cancellationToken)
     {
         if (Stopping)
             return LockReleaseAdmission.NotHere;
 
-        if (await ConfirmLeadershipIfHosted(partitionId, cancellationToken))
+        if (await Confirm(partitionId, KeyValueActorOperation.LockRelease, waitForApply, cancellationToken))
             return LockReleaseAdmission.Confirmed;
 
         return await AmILeaderQuickIfHosted(partitionId)
@@ -601,12 +755,14 @@ internal sealed class LocatorRouting
     }
 
     /// <summary>
-    /// <see cref="AdmitLockRelease"/> for a locally-led key group: the weakest admission over every distinct
-    /// partition the group's keys route to. Mirrors <see cref="ConfirmLeadershipForGroupMutation"/>.
+    /// <see cref="AdmitLockRelease(int, string, KeyValueDurability, CancellationToken)"/> for a locally-led key group:
+    /// the weakest admission over every distinct partition the group's keys route to. Mirrors
+    /// <see cref="ConfirmLeadershipForGroupMutation"/>.
     /// </summary>
     internal async ValueTask<LockReleaseAdmission> AdmitGroupLockRelease(
         string leader,
         Dictionary<int, string> leaderByPartition,
+        List<(string key, KeyValueDurability durability)> keys,
         CancellationToken cancellationToken
     )
     {
@@ -617,7 +773,8 @@ internal sealed class LocatorRouting
             if (partitionLeader != leader)
                 continue;
 
-            LockReleaseAdmission admission = await AdmitLockRelease(partitionId, cancellationToken);
+            bool wait = WaitsForApply(partitionId, keys, static item => (item.key, item.durability), KeyValueActorOperation.LockRelease);
+            LockReleaseAdmission admission = await AdmitLockRelease(partitionId, wait, cancellationToken);
 
             if (admission == LockReleaseAdmission.NotHere)
                 return LockReleaseAdmission.NotHere;
@@ -670,7 +827,8 @@ internal sealed class LocatorRouting
     }
 }
 
-/// <summary>How a lock release is served from this node (see <see cref="LocatorRouting.AdmitLockRelease"/>).</summary>
+/// <summary>How a lock release is served from this node (see
+/// <see cref="LocatorRouting.AdmitLockRelease(int, CancellationToken)"/>).</summary>
 internal enum LockReleaseAdmission
 {
     /// <summary>A quorum confirmed that this node leads the partition: the release runs, and any answer is proof.</summary>

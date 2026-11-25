@@ -180,7 +180,7 @@ internal sealed class LocatorProbeOperations
 
             bool confirmed = lockMode == KeyValueProbeLock.None
                 ? await routing.ConfirmLeadershipForKeysRead(partitionId, keys, positions, durability, cancellationToken)
-                : await routing.ConfirmLeadershipForActorMutation(partitionId, cancellationToken);
+                : await routing.ConfirmLeadershipForKeysMutation(partitionId, keys, positions, durability, KeyValueActorOperation.LockGrant, cancellationToken);
 
             if (!confirmed)
             {
@@ -472,7 +472,7 @@ internal sealed class LocatorProbeOperations
 
             bool confirmed = lockMode == KeyValueProbeLock.None
                 ? await routing.ConfirmLeadershipForRead(partitionId, cancellationToken)
-                : await routing.ConfirmLeadershipForActorMutation(partitionId, cancellationToken);
+                : await routing.ConfirmLeadershipForActorMutation(partitionId, KeyValueActorOperation.LockGrant, cancellationToken);
 
             if (!confirmed)
             {

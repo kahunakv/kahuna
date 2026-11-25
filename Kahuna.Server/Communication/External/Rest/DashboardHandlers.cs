@@ -78,6 +78,11 @@ public static class DashboardHandlers
         "kahuna.durable_tx.session_registration_forwards",
         "kahuna.durable_tx.session_registration_forward_ms",
 
+        // The leadership confirmation of staged writes, lock operations and commit checks, and the ones that kept the
+        // wait for the apply.
+        "kahuna.kv.mutation.confirm",
+        "kahuna.kv.mutation.undelivered_key",
+
         // Persistence back-pressure: the unflushed backlog against its budget, and whether the gate is closed.
         "kahuna.persistence.unflushed_budget_fraction",
         "kahuna.persistence.backlog_gate_closed",

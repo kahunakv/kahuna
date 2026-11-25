@@ -80,7 +80,7 @@ internal sealed class LocatorMutationTicketOperations
         if (routedGeneration == 0)
             routedGeneration = freshGeneration;
 
-        if (!raft.Joined || await routing.ConfirmLeadershipForActorMutation(partitionId, cancelationToken))
+        if (!raft.Joined || await routing.ConfirmLeadershipForKeyMutation(partitionId, key, durability, KeyValueActorOperation.Ticket, cancelationToken))
             return await manager.TryPrepareMutations(transactionId, commitId, key, durability, routedGeneration, recordAnchorKey);
 
         string? leader = await routing.TryWaitForLeader(partitionId, cancelationToken);
@@ -160,7 +160,8 @@ internal sealed class LocatorMutationTicketOperations
 
         if (leader == localNode)
         {
-            if (!await routing.ConfirmLeadershipForGroupMutation(leader, leaderByPartition, cancellationToken))
+            if (!await routing.ConfirmLeadershipForGroupMutation(
+                    leader, leaderByPartition, xkeys, static item => (item.key, item.durability), KeyValueActorOperation.Ticket, cancellationToken))
             {
                 lock (lockSync)
                 {
@@ -191,7 +192,7 @@ internal sealed class LocatorMutationTicketOperations
     /// range-routed space is left out: its operations carry a routing generation that fences them against a
     /// range move, and work that bypasses the locator would bypass that fence.
     /// </summary>
-    public async Task<bool> IsLocallyLedHashKey(string key, CancellationToken cancellationToken)
+    public async Task<bool> IsLocallyLedHashKey(string key, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(key) || !raft.Joined)
             return false;
@@ -201,7 +202,7 @@ internal sealed class LocatorMutationTicketOperations
         if (isKeyRange)
             return false;
 
-        return await routing.ConfirmLeadershipForActorMutation(partitionId, cancellationToken);
+        return await routing.ConfirmLeadershipForKeyMutation(partitionId, key, durability, KeyValueActorOperation.Ticket, cancellationToken);
     }
 
     /// <summary>
@@ -228,7 +229,7 @@ internal sealed class LocatorMutationTicketOperations
 
         int partitionId = routing.RouteKey(key);
 
-        if (raft.Joined && !await routing.ConfirmLeadershipForActorMutation(partitionId, cancellationToken))
+        if (raft.Joined && !await routing.ConfirmLeadershipForKeyMutation(partitionId, key, durability, KeyValueActorOperation.Ticket, cancellationToken))
             return null;
 
         return await manager.TryFinalizeMutation(transactionId, commitId, key, durability, recordAnchorKey);
@@ -250,7 +251,7 @@ internal sealed class LocatorMutationTicketOperations
         
         int partitionId = routing.RouteKey(key);
 
-        if (!raft.Joined || await routing.ConfirmLeadershipForActorMutation(partitionId, cancelationToken))
+        if (!raft.Joined || await routing.ConfirmLeadershipForKeyMutation(partitionId, key, durability, KeyValueActorOperation.Ticket, cancelationToken))
             return await manager.TryCommitMutations(transactionId, key, ticketId, durability);
             
         string? leader = await routing.TryWaitForLeader(partitionId, cancelationToken);
@@ -325,7 +326,8 @@ internal sealed class LocatorMutationTicketOperations
         
         if (leader == localNode)
         {
-            if (!await routing.ConfirmLeadershipForGroupMutation(leader, leaderByPartition, cancelationToken))
+            if (!await routing.ConfirmLeadershipForGroupMutation(
+                    leader, leaderByPartition, xkeys, static item => (item.key, item.durability), KeyValueActorOperation.Ticket, cancelationToken))
             {
                 lock (lockSync)
                 {
@@ -366,7 +368,7 @@ internal sealed class LocatorMutationTicketOperations
         
         int partitionId = routing.RouteKey(key);
 
-        if (!raft.Joined || await routing.ConfirmLeadershipForActorMutation(partitionId, cancelationToken))
+        if (!raft.Joined || await routing.ConfirmLeadershipForKeyMutation(partitionId, key, durability, KeyValueActorOperation.Ticket, cancelationToken))
             return await manager.TryRollbackMutations(transactionId, key, ticketId, durability);
 
         string? leader = await routing.TryWaitForLeader(partitionId, cancelationToken);
@@ -441,7 +443,8 @@ internal sealed class LocatorMutationTicketOperations
         
         if (leader == localNode)
         {
-            if (!await routing.ConfirmLeadershipForGroupMutation(leader, leaderByPartition, cancelationToken))
+            if (!await routing.ConfirmLeadershipForGroupMutation(
+                    leader, leaderByPartition, xkeys, static item => (item.key, item.durability), KeyValueActorOperation.Ticket, cancelationToken))
             {
                 lock (lockSync)
                 {

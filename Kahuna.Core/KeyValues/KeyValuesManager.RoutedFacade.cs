@@ -339,8 +339,8 @@ internal sealed partial class KeyValuesManager
     ) =>
         routedScans.LocateAndTryPrepareManyMutations(transactionId, commitId, keys, cancelationToken, recordAnchorKey);
 
-    public Task<bool> IsLocallyLedHashKey(string key, CancellationToken cancellationToken) =>
-        routedScans.IsLocallyLedHashKey(key, cancellationToken);
+    public Task<bool> IsLocallyLedHashKey(string key, KeyValueDurability durability, CancellationToken cancellationToken) =>
+        routedScans.IsLocallyLedHashKey(key, durability, cancellationToken);
 
     public Task<(KeyValueResponseType, Handlers.KeyValueFinalizeStage)?> TryFinalizeMutationIfLocal(
         HLCTimestamp transactionId, HLCTimestamp commitId, string key, KeyValueDurability durability,

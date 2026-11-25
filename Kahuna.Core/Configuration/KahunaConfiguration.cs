@@ -70,8 +70,9 @@ public sealed class KahunaConfiguration
     public bool PublishedHeadReads { get; set; } = true;
 
     /// <summary>
-    /// Let a read of named keys wait for the delivery of this node's committed log entries only while one of them can
-    /// change a key it reads. Off, such a read waits for every committed entry, as a range scan does. See
+    /// Let an operation that names its keys (a read, a staged write, a lock grant or release, a commit-time check) wait
+    /// for the delivery of this node's committed log entries only while one of them can change one of those keys. Off,
+    /// such an operation waits for every committed entry, as a range scan does. See
     /// <see cref="KeyValues.Writes.UndeliveredKeys"/>.
     /// </summary>
     public bool KeyScopedApplyWait { get; set; } = true;

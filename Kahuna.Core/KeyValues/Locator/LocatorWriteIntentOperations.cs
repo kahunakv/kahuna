@@ -64,7 +64,7 @@ internal sealed class LocatorWriteIntentOperations
         if (!raft.Joined)
             return KeyValueResponseType.MustRetry;
 
-        if (await routing.ConfirmLeadershipForRead(partitionId, cancellationToken))
+        if (await routing.ConfirmLeadershipForCommitCheck(partitionId, key, durability, cancellationToken))
             return await manager.TryCheckWriteIntentValue(transactionId, key, durability);
 
         string? leader = await routing.TryWaitForLeader(partitionId, cancellationToken);
@@ -205,7 +205,7 @@ internal sealed class LocatorWriteIntentOperations
 
         foreach (int partitionId in partitions)
         {
-            if (!await routing.ConfirmLeadershipForRead(partitionId, cancellationToken))
+            if (!await routing.ConfirmLeadershipForCommitCheck(partitionId, keys, partitionOf, cancellationToken))
                 termByPartition[partitionId] = null;
         }
 

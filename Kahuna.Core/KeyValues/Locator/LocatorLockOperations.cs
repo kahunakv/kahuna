@@ -75,7 +75,7 @@ internal sealed class LocatorLockOperations
 
         long grantTerm = routing.LockGrantTermBeforeConfirmation(partitionId);
 
-        if (await routing.ConfirmLeadershipForActorMutation(partitionId, cancelationToken))
+        if (await routing.ConfirmLeadershipForKeyMutation(partitionId, key, durability, KeyValueActorOperation.LockGrant, cancelationToken))
         {
             (KeyValueResponseType, string, KeyValueDurability, HLCTimestamp, long) granted =
                 await manager.TryAcquireExclusiveLockObserved(transactionId, key, expiresMs, durability);
@@ -134,7 +134,7 @@ internal sealed class LocatorLockOperations
 
         long grantTerm = routing.LockGrantTermBeforeConfirmation(partitionId);
 
-        if (await routing.ConfirmLeadershipForActorMutation(partitionId, cancellationToken))
+        if (await routing.ConfirmLeadershipForActorMutation(partitionId, KeyValueActorOperation.LockGrant, cancellationToken))
         {
             KeyValueResponseType granted = await manager.TryAcquireExclusivePrefixLock(transactionId, prefixKey, expiresMs, durability);
 
@@ -230,7 +230,8 @@ internal sealed class LocatorLockOperations
                         grantTerms[partitionId] = raft.GetPartitionTerm(partitionId);
             }
 
-            if (!await routing.ConfirmLeadershipForGroupMutation(leader, leaderByPartition, cancellationToken))
+            if (!await routing.ConfirmLeadershipForGroupMutation(
+                    leader, leaderByPartition, xkeys, static item => (item.key, item.durability), KeyValueActorOperation.LockGrant, cancellationToken))
             {
                 lock (lockSync)
                 {
@@ -286,7 +287,7 @@ internal sealed class LocatorLockOperations
         // Served here on a confirmed leadership, or on belief alone for what this node holds of the
         // transaction (see LocatorRouting.AdmitLockRelease).
         LockReleaseAdmission admission = raft.Joined
-            ? await routing.AdmitLockRelease(partitionId, cancellationToken)
+            ? await routing.AdmitLockRelease(partitionId, key, durability, cancellationToken)
             : LockReleaseAdmission.Confirmed;
 
         if (admission == LockReleaseAdmission.Confirmed)
@@ -631,7 +632,7 @@ internal sealed class LocatorLockOperations
 
         long grantTerm = routing.LockGrantTermBeforeConfirmation(partitionId);
 
-        if (!raft.Joined || await routing.ConfirmLeadershipForActorMutation(partitionId, cancellationToken))
+        if (!raft.Joined || await ConfirmRangeLockGrant(partitionId, startKey, startInclusive, endKey, endInclusive, durability, mode, cancellationToken))
         {
             (KeyValueResponseType, HLCTimestamp) granted =
                 await manager.TryAcquireRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, mode);
@@ -658,6 +659,25 @@ internal sealed class LocatorLockOperations
         return await interNodeCommunication.TryAcquireRangeLock(leader, transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, mode, cancellationToken);
     }
 
+    /// <summary>
+    /// The confirmation that admits a range lock. A Shared or Exclusive lock on one key, <c>[k,k]</c>, judges that key
+    /// alone and waits for the apply as a point lock does. Any other range lock judges every key of its range and waits
+    /// for everything committed. So does a WriteFence, which a split or a merge takes before it copies the range.
+    /// </summary>
+    private ValueTask<bool> ConfirmRangeLockGrant(
+        int partitionId,
+        string? startKey, bool startInclusive,
+        string? endKey,   bool endInclusive,
+        KeyValueDurability durability,
+        RangeLockMode mode,
+        CancellationToken cancellationToken) =>
+        mode is RangeLockMode.Shared or RangeLockMode.Exclusive && IsOneKey(startKey, startInclusive, endKey, endInclusive)
+            ? routing.ConfirmLeadershipForKeyMutation(partitionId, startKey!, durability, KeyValueActorOperation.LockGrant, cancellationToken)
+            : routing.ConfirmLeadershipForActorMutation(partitionId, KeyValueActorOperation.LockGrant, cancellationToken);
+
+    private static bool IsOneKey(string? startKey, bool startInclusive, string? endKey, bool endInclusive) =>
+        startKey is not null && startInclusive && endInclusive && string.Equals(startKey, endKey, StringComparison.Ordinal);
+
     internal async Task<KeyValueResponseType> ReleaseRangeLockOnPartition(
         HLCTimestamp transactionId,
         int partitionId,
@@ -671,9 +691,11 @@ internal sealed class LocatorLockOperations
         // transaction: the commit-time lock proof refuses a transaction when the confirmation does not come,
         // and the cleanup that follows the refusal must still release the range locks the transaction holds
         // here (see LocatorRouting.AdmitLockRelease).
-        LockReleaseAdmission admission = raft.Joined
-            ? await routing.AdmitLockRelease(partitionId, cancellationToken)
-            : LockReleaseAdmission.Confirmed;
+        LockReleaseAdmission admission = !raft.Joined
+            ? LockReleaseAdmission.Confirmed
+            : IsOneKey(startKey, startInclusive, endKey, endInclusive)
+                ? await routing.AdmitLockRelease(partitionId, startKey!, durability, cancellationToken)
+                : await routing.AdmitLockRelease(partitionId, cancellationToken);
 
         if (admission == LockReleaseAdmission.Confirmed)
             return await manager.TryReleaseExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability);
@@ -765,7 +787,7 @@ internal sealed class LocatorLockOperations
         {
             // Served here on a confirmed leadership, or on belief alone for what this node holds of the
             // transaction (see LocatorRouting.AdmitLockRelease).
-            LockReleaseAdmission admission = await routing.AdmitGroupLockRelease(leader, leaderByPartition, cancelationToken);
+            LockReleaseAdmission admission = await routing.AdmitGroupLockRelease(leader, leaderByPartition, xkeys, cancelationToken);
 
             if (admission == LockReleaseAdmission.NotHere)
             {

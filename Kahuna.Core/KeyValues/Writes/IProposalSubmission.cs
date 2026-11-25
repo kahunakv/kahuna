@@ -57,10 +57,11 @@ internal interface IProposalSubmission
 
     /// <summary>
     /// How many keys' readable value the delivery of these entries can change, or a negative number when the producer
-    /// does not know them. A read of such a key on this node waits for the delivery once the entries were handed to
-    /// Raft, and a producer that does not know its keys makes every read of the partition wait (see
-    /// <see cref="UndeliveredKeys"/>). Zero is a claim: whatever these entries carry, a read that this node answers
-    /// before their delivery is as correct as one that it answers after it.
+    /// does not know them. An operation on such a key on this node (a read, a staged write, a lock grant or release, a
+    /// commit-time check) waits for the delivery once the entries were handed to Raft, and a producer that does not know
+    /// its keys makes every operation on the partition wait (see <see cref="UndeliveredKeys"/>). Zero is a claim:
+    /// whatever these entries carry, an operation that this node answers before their delivery is as correct as one that
+    /// it answers after it.
     /// </summary>
     int ChangedKeyCount => -1;
 

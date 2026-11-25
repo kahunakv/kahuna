@@ -143,8 +143,8 @@ internal sealed class RoutedScanOperations
     }
     
     /// <summary>Whether the hash-routed key is led by this node, with leadership confirmed.</summary>
-    public Task<bool> IsLocallyLedHashKey(string key, CancellationToken cancellationToken) =>
-        locator.IsLocallyLedHashKey(key, cancellationToken);
+    public Task<bool> IsLocallyLedHashKey(string key, KeyValueDurability durability, CancellationToken cancellationToken) =>
+        locator.IsLocallyLedHashKey(key, durability, cancellationToken);
 
     /// <summary>
     /// Finalizes one ephemeral mutation in a single actor turn when the key is led by this node; null otherwise.

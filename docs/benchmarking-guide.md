@@ -156,7 +156,9 @@ wait), `actor` (the step that reads the value, tagged
 `path=registered` for a session read and `path=direct` for a plain `get`). A read that took the actor
 path is also recorded in the `kahuna.kv.read.fallback` histogram (unit milliseconds, tag `reason`)
 under the guard that kept the published record from answering, with the time of the `actor` step as
-its value. The caching guide lists the reasons. The dashboard metrics
+its value. The caching guide lists the reasons. The confirmation of the other operations of a
+transaction is in the `kahuna.kv.mutation.confirm` histogram (unit milliseconds, tags `op` and `lease`):
+`staged_write`, `lock_grant`, `lock_release`, `commit_check` and `ticket`. The dashboard metrics
 endpoint (`/v1/dashboard/metrics`) serves it beside the write-path series, so Δtotal/Δcount over a
 scrape window gives the mean of each step. The collector behind that endpoint folds each sample into a
 per-processor stripe without a lock, so scraping this series costs the leader about 20 to 40 ns per

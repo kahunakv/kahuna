@@ -158,8 +158,8 @@ internal sealed class KeyValueLocator
     public Task<List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)>> LocateAndTryPrepareManyMutations(HLCTimestamp transactionId, HLCTimestamp commitId, List<(string key, KeyValueDurability durability)> keys, CancellationToken cancelationToken, string? recordAnchorKey = null) =>
         tickets.LocateAndTryPrepareManyMutations(transactionId, commitId, keys, cancelationToken, recordAnchorKey);
 
-    public Task<bool> IsLocallyLedHashKey(string key, CancellationToken cancellationToken) =>
-        tickets.IsLocallyLedHashKey(key, cancellationToken);
+    public Task<bool> IsLocallyLedHashKey(string key, KeyValueDurability durability, CancellationToken cancellationToken) =>
+        tickets.IsLocallyLedHashKey(key, durability, cancellationToken);
 
     public Task<(KeyValueResponseType, Handlers.KeyValueFinalizeStage)?> TryFinalizeMutationIfLocal(HLCTimestamp transactionId, HLCTimestamp commitId, string key, KeyValueDurability durability, string? recordAnchorKey, CancellationToken cancellationToken) =>
         tickets.TryFinalizeMutationIfLocal(transactionId, commitId, key, durability, recordAnchorKey, cancellationToken);

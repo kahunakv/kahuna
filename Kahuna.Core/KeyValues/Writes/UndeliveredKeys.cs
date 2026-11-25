@@ -13,9 +13,10 @@ namespace Kahuna.Server.KeyValues.Writes;
 ///
 /// <para>Raft answers a proposal when a quorum holds its entries, and delivers them to this node one at a time after
 /// that. In between an entry is committed, a follower can apply it and show it to a watch, and this node does not
-/// serve it yet. A linearizable read must not be answered from that state. The leadership confirmation protects a read
-/// by waiting until everything committed is delivered, whatever the read asks for. This type names the keys that can
-/// be affected, so a read of any other key needs the proof of leadership alone.</para>
+/// serve it yet. A linearizable read must not be answered from that state, and a staged write, a lock grant or a
+/// commit-time check must not be judged on it. The leadership confirmation protects them by waiting until everything
+/// committed is delivered, whatever the operation asks for. This type names the keys that can be affected, so an
+/// operation on any other key needs the proof of leadership alone.</para>
 ///
 /// <para><b>Why the keys of this node are enough.</b> A node publishes its leadership only after it delivered every
 /// entry of an earlier leadership, and it proposes every entry of its own leadership that changes a readable value
@@ -26,8 +27,8 @@ namespace Kahuna.Server.KeyValues.Writes;
 /// a proposal whose outcome is not a plain success: its entries may be in the log and commit later, with no index to
 /// wait for. That mark stays until an entry of a batch that was dispatched after the outcome was known is delivered:
 /// it is above any entry of the failed proposal, and delivery runs in log order. A key is kept as two cells of a table
-/// of fixed size, so keys in flight can together cover the cells of another key. That can only make a read wait that
-/// did not have to.</para>
+/// of fixed size, so keys in flight can together cover the cells of another key. That can only make an operation wait
+/// that did not have to.</para>
 ///
 /// <para><b>Representation.</b> Each submission of a partition that marks something takes the next number. A cell holds
 /// the number of the last submission that covers it, and the partition holds the number up to which all submissions
@@ -48,8 +49,8 @@ internal sealed class UndeliveredKeys
     private readonly ConcurrentDictionary<int, Partition> partitions = new();
 
     /// <summary>
-    /// Whether an undelivered entry of this node can change what a read of <paramref name="key"/> answers. False is a
-    /// proof as of the call; true can be a doubt.
+    /// Whether an undelivered entry of this node can change what an operation on <paramref name="key"/> answers. False is
+    /// a proof as of the call; true can be a doubt.
     /// </summary>
     public bool MayChange(int partitionId, string key) =>
         partitions.TryGetValue(partitionId, out Partition? partition) && partition.MayChange(key);

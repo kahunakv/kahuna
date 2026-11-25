@@ -64,7 +64,7 @@ public sealed class KahunaCommandLineOptions
     [Option("disable-published-head-reads", Required = false, HelpText = "Send every point get through the key-value actor instead of serving a quiet resident key from the actor's published head record")]
     public bool DisablePublishedHeadReads { get; set; }
 
-    [Option("disable-key-scoped-apply-wait", Required = false, HelpText = "Make every read of named keys wait until this node applied everything committed, instead of only while an unapplied entry can change a key it reads")]
+    [Option("disable-key-scoped-apply-wait", Required = false, HelpText = "Make every read, staged write, lock operation and commit check of named keys wait until this node applied everything committed, instead of only while an unapplied entry can change one of its keys")]
     public bool DisableKeyScopedApplyWait { get; set; }
 
     [Option("storage", Required = false, HelpText = "Storage (rocksdb, sqlite, memory, or a type a host registers)", Default = "rocksdb")]

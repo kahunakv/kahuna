@@ -16,90 +16,10 @@ namespace Kahuna.Server.Tests;
 /// What a read of named keys waits for on one node while the delivery of a committed batch is held: a read of a key
 /// that the batch can change waits for the delivery, and a read of any other key answers.
 /// </summary>
-public sealed class TestKeyScopedApplyWait : BaseCluster
+public sealed class TestKeyScopedApplyWait : KeyScopedApplyWaitTestBase
 {
-    /// <summary>How long a read must stay unanswered before a test says that it waits.</summary>
-    private static readonly TimeSpan Pending = TimeSpan.FromMilliseconds(300);
-
-    /// <summary>
-    /// Runs a read until one attempt answers without a wait. An attempt that meets a lapsed lease runs a round, which
-    /// waits for the delivery with it, so one attempt that waits proves nothing.
-    /// </summary>
-    private static async Task<T> Promptly<T>(Func<Task<T>> read)
+    public TestKeyScopedApplyWait(ITestOutputHelper outputHelper) : base(outputHelper)
     {
-        for (int attempt = 0; attempt < 40; attempt++)
-        {
-            Task<T> task = read();
-
-            if (await Task.WhenAny(task, Task.Delay(250, TestContext.Current.CancellationToken)) == task)
-                return await task;
-        }
-
-        throw new TimeoutException("no attempt of the read answered");
-    }
-
-    private readonly ILoggerFactory loggerFactory;
-
-    public TestKeyScopedApplyWait(ITestOutputHelper outputHelper)
-    {
-        loggerFactory = TestLogFactory.Create(outputHelper, quietKommander: true);
-    }
-
-    private async Task<EmbeddedKahunaNode> StartNode(
-        CancellationToken ct, Action<EmbeddedKahunaOptions>? configure = null, int partitions = 1)
-    {
-        EmbeddedKahunaOptions options = new()
-        {
-            TimerInitialDelay = TimeSpan.FromMilliseconds(50),
-            Storage = "memory",
-            WalStorage = "memory",
-            InitialPartitions = partitions
-        };
-        configure?.Invoke(options);
-
-        EmbeddedKahunaNode node = new(options, loggerFactory);
-
-        await node.StartAsync(ct);
-        await node.WaitForLeaderForKeyAsync("wait0/k0", ct);
-
-        return node;
-    }
-
-    private static KahunaManager ManagerOf(EmbeddedKahunaNode node) => (KahunaManager)node.Kahuna;
-
-    private static int PartitionOf(EmbeddedKahunaNode node, string key) => ManagerOf(node).KeyValues.LocateDurablePartition(key).PartitionId;
-
-    private static bool Marked(EmbeddedKahunaNode node, string key) => ManagerOf(node).KeyValues.UndeliveredKeys.MayChange(PartitionOf(node, key), key);
-
-    /// <summary>Holds the delivery of the committed entries of one partition until disposed.</summary>
-    private sealed class HeldDelivery(IRaft raft, int partition) : IAsyncDisposable
-    {
-        private bool resumed;
-
-        public static async Task<HeldDelivery> Start(IRaft raft, int partition, CancellationToken ct)
-        {
-            Assert.Equal(RaftOperationStatus.Success, await raft.HoldConsumerAppliesForTesting(partition, ct));
-            return new HeldDelivery(raft, partition);
-        }
-
-        public async Task Resume()
-        {
-            if (resumed)
-                return;
-
-            resumed = true;
-            Assert.Equal(RaftOperationStatus.Success, await raft.ResumeConsumerAppliesForTesting(partition, CancellationToken.None));
-        }
-
-        public async ValueTask DisposeAsync() => await Resume();
-    }
-
-    private static async Task Set(IKahuna kahuna, string key, string value, CancellationToken ct)
-    {
-        (KeyValueResponseType type, _, _) = await kahuna.LocateAndTrySetKeyValue(
-            HLCTimestamp.Zero, key, Encoding.UTF8.GetBytes(value), null, -1, KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct);
-
-        Assert.Equal(KeyValueResponseType.Set, type);
     }
 
     /// <summary>The ways to read one named key. Each answers the value, or null when the read was not served.</summary>
@@ -283,30 +203,6 @@ public sealed class TestKeyScopedApplyWait : BaseCluster
 
         await Set(node.Kahuna, "wait/k", "later", ct);
         Assert.Equal("later", await Read(node.Kahuna, ReadKind.Get, "wait/k", HLCTimestamp.Zero, ct));
-    }
-
-    private static async Task<TransactionHandle> Start(IKahuna kahuna, string coordinatorKey, CancellationToken ct)
-    {
-        (KeyValueResponseType type, TransactionHandle handle) = await kahuna.LocateAndStartTransaction(
-            new KeyValueTransactionOptions
-            {
-                CoordinatorKey = coordinatorKey,
-                Locking = KeyValueTransactionLocking.Optimistic,
-                ReadValidation = ReadValidation.TrackAndValidate,
-                Timeout = 60_000
-            }, ct);
-
-        Assert.Equal(KeyValueResponseType.Set, type);
-        return handle;
-    }
-
-    private static async Task Stage(IKahuna kahuna, TransactionHandle tx, string key, string value, CancellationToken ct)
-    {
-        (KeyValueResponseType type, _, _) = await kahuna.LocateAndTrySetKeyValue(
-            tx.TransactionId, key, Encoding.UTF8.GetBytes(value), null, -1, KeyValueFlags.None, 0, KeyValueDurability.Persistent, ct,
-            coordinatorKey: tx.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
-
-        Assert.Equal(KeyValueResponseType.Set, type);
     }
 
     [Theory]

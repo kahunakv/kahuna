@@ -783,7 +783,7 @@ internal sealed class ScriptTransactionExecutor
     private async Task<ActorTurnOutcome> TryRunInActorTurn(
         ScriptTransactionContext context, NodeAst ast, string key, int timeout, CancellationToken cancellationToken)
     {
-        if (!await manager.IsLocallyLedHashKey(key, cancellationToken))
+        if (!await manager.IsLocallyLedHashKey(key, KeyValueDurability.Ephemeral, cancellationToken))
             return ActorTurnOutcome.NotRun;
 
         ScriptActorTurn turn = new(

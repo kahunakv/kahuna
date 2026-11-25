@@ -30,25 +30,49 @@ This layer needs no configuration.
 round (`ConfirmLeadershipAsync`). A leader that cannot confirm answers `MustRetry`. A leadership lease
 answers the round without a message while the acknowledgements of the voters renew it.
 
-**A read of named keys waits for the apply of those keys only.** A quorum holds an entry before the
-leader applies it. A read-index confirmation therefore has a second half: it waits until this node
-applied everything that was committed when the read began. A scan of a key range keeps that wait. A
-read that names its keys (a get, an existence check, a batched get, existence check or probe without a
-lock) keeps it only while an unapplied entry of this node can change one of the keys. Otherwise the
-proof of leadership is enough (`ConfirmLeadershipLeaseAsync`), because nothing that waits for its apply
-changes what the read answers. A read of an ephemeral key never waits for the apply: ephemeral writes
-are not in the log.
+**An operation on named keys waits for the apply of those keys only.** A quorum holds an entry before
+the leader applies it. A read-index confirmation therefore has a second half: it waits until this node
+applied everything that was committed when the operation began. A scan of a key range keeps that wait.
+An operation that names its keys keeps it only while an unapplied entry of this node can change one of
+the keys. Otherwise the proof of leadership is enough (`ConfirmLeadershipLeaseAsync`), because nothing
+that waits for its apply changes what the operation answers. An operation on an ephemeral key never
+waits for the apply: ephemeral writes are not in the log.
+
+| Operation | Waits for the apply of |
+|---|---|
+| Get, existence check, batched get or existence check, probe | Its keys |
+| Staged set, delete or extend of a transaction, alone or in a batch | Its keys |
+| Point lock, locked probe, Shared or Exclusive range lock on one key (`[k,k]`) | Its keys |
+| Release of a point lock or of a range lock on one key | Its keys |
+| Commit-time check of written and read keys | Its keys |
+| Commit-time proof that the locks are in force | Nothing |
+| Ephemeral read, write, lock or ticket | Nothing |
+| Scan, prefix lock, any other range lock, WriteFence, locked range probe | Everything committed |
+| Release of a prefix lock or of a range lock on more than one key | Everything committed |
+| Batch of more than 512 keys | Everything committed |
+
+A staged write, a lock grant and a commit-time check judge the committed head of the key, the prepared
+intent on it, the decision of that intent's transaction, and state in the memory of the leader. The log
+changes the head and the intent only through entries that name the key. A decision that is committed and
+not applied yet leaves the intent undecided, so the operation answers a wait or a refusal, as it does one
+moment before the decision commits. A commit is answered after its decision is applied on the node that
+proposed it, so a client that has the answer does not meet that window. The proof of a lock asks for the
+term and for lapsed leases, and no entry changes them.
 
 The leader knows the keys because it proposes the entries. The write scheduler marks the keys of each
 submission before the proposal, and the ordered apply of the entry takes the marks back (see the
 [partition write-coalescing guide](partition-write-coalescing-guide.md), invariant 13). A submission
 whose keys are not known, such as a copied page of a range move, and a proposal whose outcome is not
-known, hold back every read of the partition. Entries of an earlier leader need no mark: a node
+known, hold back every operation on the partition. Entries of an earlier leader need no mark: a node
 publishes its leadership after it applied all of them.
 
 `KeyScopedApplyWait` (on by default, `--disable-key-scoped-apply-wait` on the server) turns the rule
-off, and every read of named keys then waits for everything committed. The counter
-`kahuna.kv.read.undelivered_key` counts the reads that kept the wait.
+off, and every operation on named keys then waits for everything committed. The counters
+`kahuna.kv.read.undelivered_key` and `kahuna.kv.mutation.undelivered_key` (tag `op`) count the
+operations that kept the wait. The histogram `kahuna.kv.mutation.confirm` (unit milliseconds, tags `op`
+and `lease`) is the confirmation of each operation that is not a read. `lease=miss` is a wait for the
+apply, or a read-index round after the lease lapsed. The values of `op` are `staged_write`,
+`lock_grant`, `lock_release`, `commit_check` and `ticket`.
 
 **Actor-only mutations confirm leadership through a quorum.** Some operations change in-memory actor
 state without a proposal:
@@ -57,7 +81,7 @@ state without a proposal:
 - an exclusive point, prefix or range lock grant,
 - a prepare, commit or rollback mutation ticket.
 
-These operations now pass the same read-index confirmation the reads pass. A cut-off leader that
+These operations pass the same confirmation the reads pass. A cut-off leader that
 receives one answers `MustRetry`. The client retries against the current view, and nothing is left in
 the cut-off leader's memory.
 
