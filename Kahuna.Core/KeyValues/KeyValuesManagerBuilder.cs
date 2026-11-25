@@ -70,6 +70,7 @@ internal sealed class KeyValuesManagerBuilder
 
     internal PartitionDivergenceContainment divergenceContainment = null!;
     internal Writes.PartitionWriteAggregator writeAggregator = null!;
+    internal Writes.UndeliveredKeys undeliveredKeys = null!;
     internal KeyValueActorRouters routers = null!;
     internal SnapshotHoldService snapshotHolds = null!;
     internal IActorRef<KeyValueCollectorActor, KeyValueCollectorRequest> keyValueCollector = null!;
@@ -260,6 +261,8 @@ internal sealed class KeyValuesManagerBuilder
 
         Writes.IPartitionBatchExecutor realBatchExecutor = new Writes.RaftPartitionBatchExecutor(raft);
 
+        undeliveredKeys = new();
+
         writeAggregator = new Writes.PartitionWriteAggregator(
             actorSystem,
             writeBatchExecutorDecorator?.Invoke(realBatchExecutor) ?? realBatchExecutor,
@@ -290,7 +293,8 @@ internal sealed class KeyValuesManagerBuilder
                 UnflushedBacklogGate = backlogMonitor is null ? null : () => backlogMonitor.IsOverBudget
             },
             new Writes.RangeMapWriteFence(keySpaceRegistry, rangeMapStore, raft),
-            logger
+            logger,
+            undeliveredKeys: undeliveredKeys
         );
 
         // Everything the collaborators share, gathered once. The locator slot is filled below, after the
@@ -318,7 +322,8 @@ internal sealed class KeyValuesManagerBuilder
             CompletionReceiptStore = completionReceiptStore,
             TransactionRecordStore = transactionRecordStore,
             PreparedIntentStore = preparedIntentStore,
-            WriteAggregator = writeAggregator
+            WriteAggregator = writeAggregator,
+            UndeliveredKeys = undeliveredKeys
         };
 
         // A durable transaction's write is reported to watches when its intent settles on the partition; the
@@ -393,7 +398,7 @@ internal sealed class KeyValuesManagerBuilder
             logger
         );
 
-        locator = new(manager, configuration, raft, interNodeCommunication, keySpaceRegistry, divergenceContainment, logger);
+        locator = new(manager, configuration, raft, interNodeCommunication, keySpaceRegistry, divergenceContainment, undeliveredKeys, logger);
         runtime.Locator = locator;
 
         // Now that the locator exists, wire the anchor/key → data-partition resolvers the durable-intent stores

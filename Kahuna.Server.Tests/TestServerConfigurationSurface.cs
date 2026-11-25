@@ -55,6 +55,7 @@ public sealed class TestServerConfigurationSurface
         BackupApplyBarrierTimeoutSeconds = 21,
         CheckpointIntervalSeconds = 17,
         DisablePublishedHeadReads = true,
+        DisableKeyScopedApplyWait = true,
         TrimFlushedRevisions = true,
         PinnedValuePayloads = true,
         PinnedValuePayloadMinBytes = 64,
@@ -367,8 +368,10 @@ public sealed class TestServerConfigurationSurface
 
         Assert.Equal(TimeSpan.FromSeconds(17), standalone.CheckpointInterval);
         Assert.False(standalone.PublishedHeadReads);
+        Assert.False(standalone.KeyScopedApplyWait);
         Assert.Equal(TimeSpan.FromSeconds(17), server.CheckpointInterval);
         Assert.False(server.PublishedHeadReads);
+        Assert.False(server.KeyScopedApplyWait);
     }
 
     [Fact]

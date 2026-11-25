@@ -119,6 +119,7 @@ public static class EmbeddedOptionsFactory
         DefaultTransactionTimeout = opts.DefaultTransactionTimeout,
         FusedEphemeralFinalize = !opts.DisableFusedEphemeralFinalize,
         PublishedHeadReads = !opts.DisablePublishedHeadReads,
+        KeyScopedApplyWait = !opts.DisableKeyScopedApplyWait,
         ScriptActorTurns = !opts.DisableScriptActorTurns,
         DefaultAdmissionWaitMs = opts.DefaultAdmissionWaitMs,
         MaxAdmissionWaitMs = opts.MaxAdmissionWaitMs,

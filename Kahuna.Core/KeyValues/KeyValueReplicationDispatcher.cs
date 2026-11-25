@@ -347,10 +347,14 @@ internal sealed class KeyValueReplicationDispatcher
     public Task<bool> OnReplicationReceived(int partitionId, RaftLog log)
     {
         ApplyProgress progress = BeginApply(partitionId, log.Id);
+        bool delivered = true;
 
         try
         {
             Task<bool> applied = ReplicateCore(partitionId, log);
+
+            // An apply that is still running releases no read. A later entry does.
+            delivered = applied.IsCompleted;
 
             // Kommander advances past an entry whose apply failed. Whatever that entry should have emitted to a
             // watch may be missing, so every watch on the partition ends instead of continuing past a gap.
@@ -374,6 +378,12 @@ internal sealed class KeyValueReplicationDispatcher
         finally
         {
             EndApply(progress, log.Id);
+
+            // After the stores hold the entry, as the applied frontier of Kommander moves after this returns. An apply
+            // that failed counts: Kommander moves on from it.
+            if (delivered)
+                runtime.UndeliveredKeys.Delivered(partitionId, log.Id);
+
             runtime.HistoryBounds?.FlushIfDue();
         }
     }

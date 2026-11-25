@@ -111,6 +111,11 @@ internal sealed class KeyValueProposalRequest : IProposalSubmission
     /// this catches one admitted just before the quiesce reached this node. Hash spaces are never quiesced.</summary>
     public bool IsQuiesced(IWriteRangeFence fence) => fence.IsQuiesced(Key);
 
+    /// <summary>A direct write changes its own key.</summary>
+    public int ChangedKeyCount => 1;
+
+    public string ChangedKey(int index) => Key;
+
     /// <summary>The same verdict every replica's apply reaches for this record (see <see cref="CommitAdmission"/>).
     /// A batch that reports no time cannot be judged here, so a write that carries a bound is released retryably
     /// rather than completed against an apply that may have refused it.</summary>

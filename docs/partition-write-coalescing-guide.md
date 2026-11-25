@@ -274,6 +274,28 @@ A maintainer changing this subsystem must preserve all of these:
     `KeyValueMessage` records are replicated as for a single-key write, follower apply and cold
     restore reconstruct identical state.
 
+13. **The keys of a submission are marked from its dispatch to its apply.** A follower can apply a
+    committed entry, and show it to a watch, before the leader applies it. The lane therefore marks the
+    keys of each submission in `UndeliveredKeys` before it hands the batch to Raft. The ordered apply of
+    the leader takes the marks of a submission back when its last key-value entry is applied. A read of
+    a marked key waits for the apply, and a read of any other key does not (see the
+    [leadership fencing guide](leadership-fencing-and-apply-fingerprint-guide.md)). Every entry that can
+    change a readable value must reach Raft through this scheduler, or its keys have no mark. A
+    submission that does not name its keys marks the partition. So does a batch that did not end as a
+    plain success, until an entry of a batch that was dispatched after that is applied. The marks of a
+    partition take 32 KiB on the node that proposes. The periodic maintenance gives them up when the
+    partition had no batch since the pass before and nothing is marked, or when the node no longer hosts
+    the partition.
+
+    | Submission | Marks |
+    |---|---|
+    | Direct write | Its key. |
+    | Prepared-intent delta (prepare, resolve, remove), one-phase bundle | The key of each intent in it. |
+    | Transaction record | Nothing. A read that meets the intent of an undecided transaction waits for the decision. |
+    | Materialization of a committed intent | Nothing. The intent answers for the key until its settlement. |
+    | Completion receipt, progress tick, lock mutation | Nothing. |
+    | Copied page of a range move, any other record | The whole partition. |
+
 ---
 
 ## 6. Configuration and tuning
@@ -518,6 +540,12 @@ aggregator does not provide exactly-once application on its own.
   byte cost, `IsStale`, exactly-once `Complete`/`Release`) and enqueue it — that is how durable-intent
   2PC records already coalesce with direct writes. A submission's completion must apply its effect and
   resolve its caller exactly once, and every entry it carries must be auto-commit for the same partition.
+  `ChangedKeyCount` and `ChangedKey` name the keys whose reads wait for the apply of the entries. The
+  default names none and marks the whole partition, which is correct and slow. Return zero only when a
+  read that is answered before the apply of the entries is as correct as one that is answered after it.
+- `kahuna.kv.read.undelivered_key` counts the reads that kept the wait for the apply. A count close to
+  the number of point reads means that a producer with unknown keys is in the write stream, or that a
+  batch ended with an unknown outcome and nothing was written to the partition since.
 - **Heterogeneous coalescing across auto-commit log types is supported and used** (direct `KeyValues`
   writes + durable `TransactionRecord`/`PreparedIntent` deltas). What remains out of scope is merging
   **manual (non-auto-commit) 2PC tickets**: those need independent commit/rollback outcomes, so coupling

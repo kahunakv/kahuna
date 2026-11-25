@@ -114,6 +114,7 @@ public sealed class TestKeyValueLocatorLeaderNotResolved
             interNodeCommunication: null!,
             keySpaceRegistry: null!,
             new PartitionDivergenceContainment(raft, NullLogger<IKahuna>.Instance),
+            new Kahuna.Server.KeyValues.Writes.UndeliveredKeys(),
             NullLogger<IKahuna>.Instance);
 
     /// <summary>

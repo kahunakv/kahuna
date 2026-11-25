@@ -49,6 +49,14 @@ internal sealed class ProposedDeltaCache<TPayload> where TPayload : class
     internal void Register(byte[] data, TPayload payload, int takeBudget) =>
         table.AddOrUpdate(data, new Entry(payload, takeBudget));
 
+    /// <summary>The payload registered for <paramref name="data"/>, without taking a reuse of it: for a reader ahead
+    /// of the apply, which takes its own.</summary>
+    internal bool TryPeek(byte[] data, [NotNullWhen(true)] out TPayload? payload)
+    {
+        payload = table.TryGetValue(data, out Entry? entry) ? entry.Payload : null;
+        return payload is not null;
+    }
+
     /// <summary>Takes one reuse of the payload registered for <paramref name="data"/>. The entry is
     /// removed when its budget is spent. A taker that races the removal can briefly overdraw the
     /// budget; the extra winner reuses the same immutable payload, which is harmless.</summary>

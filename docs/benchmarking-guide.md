@@ -146,8 +146,10 @@ puts a not yet flushed revision in front of the read.
 On the server, the same request is split by step in the `kahuna.kv.read.stage` histogram (unit
 milliseconds, tag `stage`): `register` (the coordinator registration), `confirm` (the quorum-confirmed
 leadership check, tagged `lease=hit` when the leader's lease answered it synchronously and `lease=miss`
-when the answer was asynchronous: a wait for the leader's applied frontier under a fresh lease, or an
-executor read-index round when the lease had lapsed), `actor` (the step that reads the value, tagged
+when the answer was asynchronous: a wait for the leader's applied frontier under a fresh lease, which a
+read keeps only while an unapplied entry of the leader can change its key, or an executor read-index
+round when the lease had lapsed; `kahuna.kv.read.undelivered_key` counts the reads that kept that
+wait), `actor` (the step that reads the value, tagged
 `path=published` when the owning actor's published head record answered it on the caller's thread and
 `path=actor` when a mailbox round trip did; see the caching guide for what makes a read eligible),
 `complete` (the fold of the observation into the working set), and `total` (the whole get, tagged

@@ -336,7 +336,7 @@ caller's thread when it can prove the actor would answer the same.
   turn; a snapshot read below the head's commit time, or at a timestamp the node's clock has not
   passed; a retracted or missing record; a live prefix lock on the actor; a committed head the
   replicator has sent to the actor but the actor has not processed yet (noted per key before the
-  applied frontier moves, so the lease check cannot outrun the actor); a newer head in the
+  apply of the entry ends, so the leadership check cannot outrun the actor); a newer head in the
   unflushed-writes overlay; a durable prepared intent that the head does not include; an expired
   head. The reader checks the record a second time after these guards, because a head installed
   while it read them retracts the record.

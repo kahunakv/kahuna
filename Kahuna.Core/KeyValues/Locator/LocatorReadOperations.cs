@@ -76,9 +76,10 @@ internal sealed class LocatorReadOperations
             return (KeyValueResponseType.MustRetry, null);
 
         // The leadership check is stamped on both sides and tagged by whether it completed synchronously:
-        // a synchronous answer is the leader's lease, an asynchronous one is an executor read-index round.
+        // a synchronous answer is the leader's lease, an asynchronous one waits for the applied frontier or is an
+        // executor read-index round.
         long confirmStart = Stopwatch.GetTimestamp();
-        ValueTask<bool> confirmation = routing.ConfirmLeadershipForRead(partitionId, cancellationToken);
+        ValueTask<bool> confirmation = routing.ConfirmLeadershipForKeyRead(partitionId, key, durability, cancellationToken);
         bool leaseHit = confirmation.IsCompleted;
         bool confirmed = await confirmation;
         long confirmEnd = Stopwatch.GetTimestamp();
@@ -94,7 +95,7 @@ internal sealed class LocatorReadOperations
             // again, so its answer is never older than a leadership a quorum confirmed: a node that lost the
             // partition while the read waited answers MustRetry and the caller finds the new leader.
             if (MayHaveWaited(transactionId, readTimestamp, intentWait, local.ServedFromPublishedHead)
-                && !await routing.ConfirmLeadershipForRead(partitionId, cancellationToken))
+                && !await routing.ConfirmLeadershipAfterWait(partitionId, cancellationToken))
                 return (KeyValueResponseType.MustRetry, null);
 
             return (local.Type, local.Entry);
@@ -151,7 +152,7 @@ internal sealed class LocatorReadOperations
         if (!raft.Joined)
             return (KeyValueResponseType.MustRetry, null);
 
-        if (await routing.ConfirmLeadershipForRead(partitionId, cancellationToken))
+        if (await routing.ConfirmLeadershipForKeyRead(partitionId, key, durability, cancellationToken))
         {
             routing.RecordLocalKeyRoute(key, partitionId);
             return await manager.TryExistsValue(transactionId, key, revision, readTimestamp, durability);
@@ -332,7 +333,7 @@ internal sealed class LocatorReadOperations
                 // which exist to join the answers of several nodes. One result per key, in input order.
                 logger.LogGetManyKeyValueRedirect(keys.Count, localNode);
 
-                if (!await routing.ConfirmLeadershipForGroupRead(localNode, leaderByPartition, cancellationToken))
+                if (!await routing.ConfirmLeadershipForGroupRead(localNode, leaderByPartition, keys, cancellationToken))
                 {
                     List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)> refused = new(keys.Count);
 
@@ -377,7 +378,7 @@ internal sealed class LocatorReadOperations
 
         if (leader == localNode)
         {
-            if (!await routing.ConfirmLeadershipForGroupRead(leader, leaderByPartition, cancellationToken))
+            if (!await routing.ConfirmLeadershipForGroupRead(leader, leaderByPartition, xkeys, cancellationToken))
             {
                 lock (lockSync)
                 {
@@ -419,7 +420,7 @@ internal sealed class LocatorReadOperations
 
         if (leader == localNode)
         {
-            if (!await routing.ConfirmLeadershipForGroupRead(leader, leaderByPartition, cancellationToken))
+            if (!await routing.ConfirmLeadershipForGroupRead(leader, leaderByPartition, xkeys, cancellationToken))
             {
                 lock (lockSync)
                 {

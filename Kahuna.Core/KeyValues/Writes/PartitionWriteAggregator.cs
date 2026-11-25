@@ -46,9 +46,11 @@ internal sealed class PartitionWriteAggregator : IDisposable
         PartitionWriteAggregatorOptions options,
         IWriteRangeFence fence,
         ILogger<IKahuna> logger,
-        TimeProvider? timeProvider = null
+        TimeProvider? timeProvider = null,
+        UndeliveredKeys? undeliveredKeys = null
     )
     {
+        undeliveredKeys ??= new UndeliveredKeys();
         laneCount = Math.Max(1, options.LaneCount);
         this.timeProvider = timeProvider ?? TimeProvider.System;
         stampsPerMs = Math.Max(1, this.timeProvider.TimestampFrequency / 1000);
@@ -90,6 +92,7 @@ internal sealed class PartitionWriteAggregator : IDisposable
                 logger,
                 this.timeProvider,
                 wakeTimer,
+                undeliveredKeys,
                 shutdownCts.Token
             );
 

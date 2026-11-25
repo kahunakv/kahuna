@@ -692,6 +692,7 @@ public sealed class EmbeddedKahunaNode : IAsyncDisposable
             ScanPageRetryBudgetMs = options.ScanPageRetryBudgetMs,
             SessionOwnedIntentCeilingMs = options.SessionOwnedIntentCeilingMs,
             PublishedHeadReads = options.PublishedHeadReads,
+            KeyScopedApplyWait = options.KeyScopedApplyWait,
             StagedBaseFenceRetentionMs = options.StagedBaseFenceRetentionMs,
             CommittedHeadLedgerMaxEntries = options.CommittedHeadLedgerMaxEntries,
             OnePhaseApplyTimeValidation = options.OnePhaseApplyTimeValidation,

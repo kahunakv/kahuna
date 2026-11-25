@@ -52,6 +52,7 @@ internal sealed class LocatorRouting
         IInterNodeCommunication interNodeCommunication,
         KeySpaceRegistry keySpaceRegistry,
         PartitionDivergenceContainment divergenceContainment,
+        Writes.UndeliveredKeys undeliveredKeys,
         ILogger<IKahuna> logger
     )
     {
@@ -61,6 +62,7 @@ internal sealed class LocatorRouting
         this.interNodeCommunication = interNodeCommunication;
         this.keySpaceRegistry = keySpaceRegistry;
         this.divergenceContainment = divergenceContainment;
+        this.undeliveredKeys = undeliveredKeys;
         this.dataPartitionRouter = new DataPartitionRouter(raft);
         this.advertiser = ClientEndpointAdvertiserFactory.Create(raft, configuration);
         this.logger = logger;
@@ -80,6 +82,14 @@ internal sealed class LocatorRouting
 
     internal ILogger<IKahuna> Logger => logger;
 
+    // The keys that entries of this node, handed to Raft and not delivered yet, can still change.
+    private readonly Writes.UndeliveredKeys undeliveredKeys;
+
+    /// <summary>A batched get or existence check of more keys than this waits for the whole applied frontier without
+    /// asking for each key. Under a write stream one of so many keys is likely to be marked, and asking for all of them
+    /// has its own price. A probe is bounded by the configured size of its batch.</summary>
+    private const int MaxKeysAsked = 512;
+
     // ── the serving gate ────────────────────────────────────────────────────────────────────────
     // Every decision to serve a partition from this node's own state goes through one of the three
     // leadership helpers below or through TryWaitForLeader naming this node. A partition whose local
@@ -98,6 +108,9 @@ internal sealed class LocatorRouting
 
     internal async ValueTask<bool> ConfirmLeadershipIfHosted(int partitionId, CancellationToken cancellationToken) =>
         !divergenceContainment.IsGated(partitionId) && await raft.ConfirmLeadershipIfHosted(partitionId, cancellationToken);
+
+    private async ValueTask<bool> ConfirmLeadershipLeaseIfHosted(int partitionId, CancellationToken cancellationToken) =>
+        !divergenceContainment.IsGated(partitionId) && await raft.ConfirmLeadershipLeaseIfHosted(partitionId, cancellationToken);
 
     /// <summary>
     /// Records that <paramref name="key"/> was admitted on this node, so the response can carry the
@@ -389,6 +402,69 @@ internal sealed class LocatorRouting
         ConfirmLeadershipIfHosted(partitionId, cancellationToken);
 
     /// <summary>
+    /// <see cref="ConfirmLeadershipForRead"/> for a read of one key. The quorum proof is the same. The wait for this
+    /// node's applied frontier, which makes a read see everything committed before it, is left out when nothing that
+    /// waits for its delivery can change the key (see <see cref="Writes.UndeliveredKeys"/>): the read then answers
+    /// what it would answer after the wait. A write stream keeps the leader behind its commit frontier for a large
+    /// share of the time, and without this every read that meets that window waits for the whole batch.
+    ///
+    /// <para>A read of an ephemeral key never waits. Ephemeral writes live in the memory of the leader and are not in
+    /// the log.</para>
+    ///
+    /// <para>The marks and the lease are both looked at between the start of the read and the moment it reads the
+    /// state, which is all the proof needs: an entry that was committed before the read started, and that this node
+    /// proposed, had its mark by then or is delivered, and one that another leader committed is delivered before this
+    /// node publishes a leadership that the lease can confirm.</para>
+    /// </summary>
+    internal ValueTask<bool> ConfirmLeadershipForKeyRead(int partitionId, string key, KeyValueDurability durability, CancellationToken cancellationToken)
+    {
+        if (!configuration.KeyScopedApplyWait)
+            return ConfirmLeadershipForRead(partitionId, cancellationToken);
+
+        if (durability == KeyValueDurability.Persistent && undeliveredKeys.MayChange(partitionId, key))
+        {
+            KeyValueReadMetrics.UndeliveredKey();
+            return ConfirmLeadershipForRead(partitionId, cancellationToken);
+        }
+
+        return ConfirmLeadershipLeaseIfHosted(partitionId, cancellationToken);
+    }
+
+    /// <summary>
+    /// Confirms again after a read that may have parked between its first confirmation and its answer. The answer
+    /// needs the leadership to hold still. What it answered from was read before this call, so there is nothing left
+    /// for an apply to change.
+    /// </summary>
+    internal ValueTask<bool> ConfirmLeadershipAfterWait(int partitionId, CancellationToken cancellationToken) =>
+        configuration.KeyScopedApplyWait
+            ? ConfirmLeadershipLeaseIfHosted(partitionId, cancellationToken)
+            : ConfirmLeadershipForRead(partitionId, cancellationToken);
+
+    /// <summary>
+    /// <see cref="ConfirmLeadershipForKeyRead"/> for the keys at <paramref name="positions"/>, all of one partition.
+    /// </summary>
+    internal ValueTask<bool> ConfirmLeadershipForKeysRead(
+        int partitionId, IReadOnlyList<string> keys, IReadOnlyList<int> positions, KeyValueDurability durability, CancellationToken cancellationToken)
+    {
+        if (!configuration.KeyScopedApplyWait)
+            return ConfirmLeadershipForRead(partitionId, cancellationToken);
+
+        if (durability == KeyValueDurability.Persistent)
+        {
+            for (int i = 0; i < positions.Count; i++)
+            {
+                if (!undeliveredKeys.MayChange(partitionId, keys[positions[i]]))
+                    continue;
+
+                KeyValueReadMetrics.UndeliveredKey();
+                return ConfirmLeadershipForRead(partitionId, cancellationToken);
+            }
+        }
+
+        return ConfirmLeadershipLeaseIfHosted(partitionId, cancellationToken);
+    }
+
+    /// <summary>
     /// <see cref="ConfirmLeadershipForRead"/> for a locally-led key group: confirms every distinct
     /// partition the group's keys route to. A group is served locally only when this node believes
     /// it leads all of them, so all must confirm before any key in the group is answered from
@@ -399,6 +475,7 @@ internal sealed class LocatorRouting
     internal async ValueTask<bool> ConfirmLeadershipForGroupRead(
         string leader,
         Dictionary<int, string> leaderByPartition,
+        List<(string key, long revision, KeyValueDurability durability)> keys,
         CancellationToken cancellationToken
     )
     {
@@ -407,11 +484,37 @@ internal sealed class LocatorRouting
             if (partitionLeader != leader)
                 continue;
 
-            if (!await ConfirmLeadershipForRead(partitionId, cancellationToken))
+            bool confirmed = MayChangeAny(partitionId, keys)
+                ? await ConfirmLeadershipForRead(partitionId, cancellationToken)
+                : await ConfirmLeadershipLeaseIfHosted(partitionId, cancellationToken);
+
+            if (!confirmed)
                 return false;
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// Whether a read of the group must wait for the applied frontier of <paramref name="partitionId"/>. A key of the
+    /// group that belongs to another partition can only share a slot with a marked key of this one, so asking every
+    /// key needs no route of any of them and errs on the side of the wait.
+    /// </summary>
+    private bool MayChangeAny(int partitionId, List<(string key, long revision, KeyValueDurability durability)> keys)
+    {
+        if (!configuration.KeyScopedApplyWait || keys.Count > MaxKeysAsked)
+            return true;
+
+        for (int i = 0; i < keys.Count; i++)
+        {
+            if (keys[i].durability != KeyValueDurability.Persistent || !undeliveredKeys.MayChange(partitionId, keys[i].key))
+                continue;
+
+            KeyValueReadMetrics.UndeliveredKey();
+            return true;
+        }
+
+        return false;
     }
 
     /// <summary>

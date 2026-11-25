@@ -34,6 +34,9 @@ internal sealed class LockProposalSubmission : IProposalSubmission
 
     public int ByteLength { get; }
 
+    /// <summary>A lock mutation changes no key-value key.</summary>
+    public int ChangedKeyCount => 0;
+
     /// <summary>A lock mutation is a single-entry bundle: one auto-commit, generation-zero entry of type
     /// <see cref="ReplicationTypes.Locks"/>. Lock resources route purely by key-space hash, so no key-range
     /// generation fence applies.</summary>

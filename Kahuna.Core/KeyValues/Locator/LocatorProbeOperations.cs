@@ -179,7 +179,7 @@ internal sealed class LocatorProbeOperations
             long grantTerm = routing.LockGrantTermBeforeConfirmation(partitionId);
 
             bool confirmed = lockMode == KeyValueProbeLock.None
-                ? await routing.ConfirmLeadershipForRead(partitionId, cancellationToken)
+                ? await routing.ConfirmLeadershipForKeysRead(partitionId, keys, positions, durability, cancellationToken)
                 : await routing.ConfirmLeadershipForActorMutation(partitionId, cancellationToken);
 
             if (!confirmed)
@@ -196,7 +196,7 @@ internal sealed class LocatorProbeOperations
             // A probe that may wait behind a write intent can be answered long after the confirmation above: confirm
             // again, as a single read does. A key that took a lock keeps reporting it, so the caller releases it.
             if (LocatorReadOperations.MayHaveWaited(transactionId, readTimestamp, intentWait, servedFromPublishedHead: false)
-                && !await routing.ConfirmLeadershipForRead(partitionId, cancellationToken))
+                && !await routing.ConfirmLeadershipAfterWait(partitionId, cancellationToken))
             {
                 for (int j = 0; j < answers.Length; j++)
                     answers[j] = KeyValueProbeResult.MustRetry with { Locked = answers[j].Locked };

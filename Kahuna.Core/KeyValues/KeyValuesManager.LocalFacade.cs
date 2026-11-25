@@ -276,6 +276,10 @@ internal sealed partial class KeyValuesManager
     internal void CollectExpiredCompletionReceipts(bool heapPressure) =>
         durableMaintenance.CollectExpiredCompletionReceipts(heapPressure);
 
+    /// <summary>Gives up the marks of undelivered writes of the partitions that are idle or no longer hosted here.</summary>
+    internal void ReleaseIdleUndeliveredKeys() =>
+        runtime.UndeliveredKeys.ReleaseIdle(runtime.Raft.HostsPartition);
+
     /// <summary>Whether the last record retention sweep ran under managed-heap pressure.</summary>
     internal bool DurableHeapPressureObserved => durableMaintenance.HeapPressureObserved;
 

@@ -354,6 +354,44 @@ internal sealed partial class PreparedIntentStore
     }
 
     /// <summary>
+    /// Adds the key of every intent that <paramref name="delta"/> prepares, resolves or removes to
+    /// <paramref name="keys"/>, for the node that proposes it. False when the bytes are not a delta. A delta that this
+    /// node serialized answers from its commands. One that another node sent is decoded here, and the apply of these
+    /// same bytes on this node reuses the decoded commands.
+    /// </summary>
+    internal static bool TryCollectKeys(byte[] delta, List<string> keys)
+    {
+        if (!locallyProposedDeltas.TryPeek(delta, out PreparedIntentCommand[]? commands))
+        {
+            try
+            {
+                commands = DecodeDelta(delta);
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                return false;
+            }
+
+            locallyProposedDeltas.Register(delta, commands);
+        }
+
+        string? last = null;
+
+        foreach (PreparedIntentCommand command in commands)
+        {
+            // A settlement resolves and removes each of its intents in a row: one name is enough.
+            string key = KeyOf(command);
+            if (string.Equals(key, last, StringComparison.Ordinal))
+                continue;
+
+            keys.Add(key);
+            last = key;
+        }
+
+        return true;
+    }
+
+    /// <summary>
     /// Upper bound on proto command messages retained per thread; a burst beyond the cap is dropped for the GC.
     /// Rent and return both happen inside the synchronous <see cref="SerializeDelta"/>, so unlike request pooling
     /// the pool has perfect thread locality.

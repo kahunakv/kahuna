@@ -52,10 +52,11 @@ internal sealed class KeyValueLocator
         IInterNodeCommunication interNodeCommunication,
         KeySpaceRegistry keySpaceRegistry,
         PartitionDivergenceContainment divergenceContainment,
+        Writes.UndeliveredKeys undeliveredKeys,
         ILogger<IKahuna> logger
     )
     {
-        routing = new LocatorRouting(manager, configuration, raft, interNodeCommunication, keySpaceRegistry, divergenceContainment, logger);
+        routing = new LocatorRouting(manager, configuration, raft, interNodeCommunication, keySpaceRegistry, divergenceContainment, undeliveredKeys, logger);
         writes = new LocatorWriteOperations(routing);
         reads = new LocatorReadOperations(routing);
         writeIntents = new LocatorWriteIntentOperations(routing);

@@ -116,6 +116,16 @@ internal sealed class PreparedIntentRecoveryActor : IActor<PreparedIntentRecover
         {
             logger.LogError(ex, "Failed to collect expired completion receipts");
         }
+
+        // At the same cadence, the write marks of the partitions without a write since the time before.
+        try
+        {
+            manager.ReleaseIdleUndeliveredKeys();
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Failed to release the write marks of idle partitions");
+        }
     }
 
     /// <summary>One pass over the inherited intents, and the next one after a growing wait while some partition may

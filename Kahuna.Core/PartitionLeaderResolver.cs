@@ -92,6 +92,27 @@ internal static class PartitionLeaderResolver
     }
 
     /// <summary>
+    /// <see cref="IRaft.ConfirmLeadershipLeaseAsync"/> that answers <see langword="false"/> for a partition this node
+    /// does not host instead of throwing. True proves this node's leadership as
+    /// <see cref="ConfirmLeadershipIfHosted"/> does, without the wait for the committed entries this node did not
+    /// deliver yet, so the caller must know that none of them can change what it serves.
+    /// </summary>
+    public static async ValueTask<bool> ConfirmLeadershipLeaseIfHosted(this IRaft raft, int partitionId, CancellationToken cancellationToken)
+    {
+        if (!raft.HostsPartition(partitionId))
+            return false;
+
+        try
+        {
+            return await raft.ConfirmLeadershipLeaseAsync(partitionId, cancellationToken).ConfigureAwait(false);
+        }
+        catch (PartitionNotHostedException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
     /// <see cref="IRaft.WaitForLeader"/> extended with replica-placement targeting. For a hosted
     /// partition it answers that partition's leader. For a partition this node does not host it
     /// answers the best forward target instead of throwing: the gossip-fed leader hint when one is

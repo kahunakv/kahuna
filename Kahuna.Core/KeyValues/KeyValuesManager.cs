@@ -81,6 +81,9 @@ internal sealed partial class KeyValuesManager : IDisposable
     /// as key/value writes instead of running their own Raft round trips.</summary>
     internal Writes.PartitionWriteAggregator WriteAggregator => writeAggregator;
 
+    /// <summary>The keys that undelivered log entries of this node can still change.</summary>
+    internal Writes.UndeliveredKeys UndeliveredKeys => runtime.UndeliveredKeys;
+
     /// <summary>The two consistent-hash rings of key-value actors and the send path into them.</summary>
     private readonly KeyValueActorRouters routers;
 

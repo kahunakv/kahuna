@@ -1,5 +1,8 @@
 using Kommander.Data;
 
+using Kahuna.Server.KeyValues.Transactions;
+using Kahuna.Server.Replication;
+
 namespace Kahuna.Server.KeyValues.Writes;
 
 /// <summary>
@@ -36,6 +39,12 @@ internal sealed class DurableProposalSubmission : IProposalSubmission
     // appending to a partition the range no longer routes to or is about to stop routing to.
     private readonly IReadOnlyList<RangeFence> fences;
 
+    // Shared by the submissions that name no key. Never added to.
+    private static readonly List<string> NoKeys = [];
+
+    // The keys of ChangedKey; null when one of the entries does not tell them.
+    private readonly List<string>? changedKeys;
+
     public int PartitionId { get; }
 
     public WriteAdmissionClass AdmissionClass { get; }
@@ -71,6 +80,65 @@ internal sealed class DurableProposalSubmission : IProposalSubmission
         for (int i = 0; i < entries.Count; i++)
             bytes += entries[i].Data.Length;
         ByteLength = bytes;
+
+        changedKeys = KeysChangedBy(entries, stage);
+    }
+
+    public int ChangedKeyCount => changedKeys?.Count ?? -1;
+
+    public string ChangedKey(int index) => changedKeys![index];
+
+    /// <summary>
+    /// The keys whose reads wait for the delivery of these entries, or null when the entries do not tell them.
+    ///
+    /// <list type="bullet">
+    ///   <item>A <b>prepared-intent delta</b> names the key of each intent it prepares, resolves or removes. A
+    ///   one-phase bundle decides its transaction in the same batch, so its keys get their new values with the
+    ///   delivery. A settlement hands the committed value of its intent to the actor of the key and then removes the
+    ///   intent, and a read that this node answers while it does both must not find neither.</item>
+    ///   <item>A <b>transaction record</b> names none. A read that finds the intent of an undecided transaction waits
+    ///   for the decision and does not answer, and the intents that come in the same batch name their keys.</item>
+    ///   <item>The <b>materialization</b> of a committed intent names none. It is proposed once the decision is
+    ///   terminal, and the intent answers for the key until the settlement that follows the materialization.</item>
+    ///   <item>A <b>completion receipt</b> and a <b>progress tick</b> change nothing that a read answers.</item>
+    ///   <item>Any other key-value record, such as a copied page of a range move, does not tell its keys. The move
+    ///   completes when a quorum holds the page, so a read that routes to this partition right after the cutover must
+    ///   wait for the delivery.</item>
+    /// </list>
+    /// </summary>
+    private static List<string>? KeysChangedBy(IReadOnlyList<RaftProposalEntry> entries, WriteSubmissionStage stage)
+    {
+        List<string> keys = NoKeys;
+
+        for (int i = 0; i < entries.Count; i++)
+        {
+            RaftProposalEntry entry = entries[i];
+
+            switch (entry.Type)
+            {
+                case ReplicationTypes.TransactionRecord:
+                case ReplicationTypes.CompletionReceipt:
+                case ReplicationTypes.ProgressTick:
+                    break;
+
+                case ReplicationTypes.PreparedIntent:
+                    if (ReferenceEquals(keys, NoKeys))
+                        keys = [];
+
+                    if (!PreparedIntentStore.TryCollectKeys(entry.Data, keys))
+                        return null;
+
+                    break;
+
+                case ReplicationTypes.KeyValues when stage == WriteSubmissionStage.Materialize:
+                    break;
+
+                default:
+                    return null;
+            }
+        }
+
+        return keys;
     }
 
     /// <summary>Resolves true once the batch carrying this record committed to Raft and every prepare it carried

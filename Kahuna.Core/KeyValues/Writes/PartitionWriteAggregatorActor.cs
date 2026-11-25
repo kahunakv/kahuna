@@ -47,6 +47,9 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
     // is turned off, and in the browser build, which cannot start a thread.
     private readonly PartitionWriteWakeTimer wakeTimer;
 
+    // Where a batch marks the keys it changes, from its dispatch to its delivery on this node.
+    private readonly UndeliveredKeys undeliveredKeys;
+
     private readonly long stampsPerMs;
 
     // The node's shutdown signal: cancels in-flight batch round trips so a hung executor cannot hold shutdown
@@ -70,6 +73,7 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
         ILogger<IKahuna> logger,
         TimeProvider timeProvider,
         PartitionWriteWakeTimer wakeTimer,
+        UndeliveredKeys undeliveredKeys,
         CancellationToken shutdownToken
     )
     {
@@ -82,6 +86,7 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
         this.timeProvider = timeProvider;
         this.shutdownToken = shutdownToken;
         this.wakeTimer = wakeTimer;
+        this.undeliveredKeys = undeliveredKeys;
         stampsPerMs = Math.Max(1, timeProvider.TimestampFrequency / 1000);
     }
 
@@ -385,7 +390,10 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
             if (state.Cycle.TryClose(dispatched, turnStarted, trigger, wakeFired, out PartitionWriteCycleStages stages))
                 PartitionWriteAggregatorMetrics.CycleClosed(stages);
 
-            _ = RunBatch(partitionId, valid, entries, dispatched);
+            // Before the batch reaches Raft: from here on a follower can apply its entries and show them.
+            UndeliveredKeys.Batch? undelivered = undeliveredKeys.Begin(partitionId, valid);
+
+            _ = RunBatch(partitionId, valid, entries, dispatched, undelivered);
 
             // Top up the pipeline: while another full batch is already buffered and in-flight capacity
             // remains, dispatch it now instead of waiting for a completion or a wake. A sub-threshold
@@ -402,7 +410,7 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
     /// lane state. Bounds the round trip with a linked deadline+shutdown token so it cannot outlive queue age or
     /// hang shutdown, maps each submission to its own entries' outcome, and sends the per-submission results back
     /// as priority control — every failure converted into a normal completion.</summary>
-    private async Task RunBatch(int partitionId, IReadOnlyList<IProposalSubmission> batch, RaftProposalEntry[] entries, long start)
+    private async Task RunBatch(int partitionId, IReadOnlyList<IProposalSubmission> batch, RaftProposalEntry[] entries, long start, UndeliveredKeys.Batch? undelivered)
     {
         // start is a high-resolution Stopwatch stamp. Environment.TickCount64 is a coarse clock (a jiffy — 4 ms
         // on a typical Linux kernel — and integer milliseconds at best), and with the post-completion hold
@@ -458,6 +466,11 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
         PartitionWriteAggregatorMetrics.BatchSettled(anyCommitted && !anyFailed, anyTransient, Stopwatch.GetElapsedTime(start, returned).TotalMilliseconds);
 
         self.Send(PartitionWriteMessage.BatchComplete(partitionId, outcomes, start, returned));
+
+        // After the completion is on its way: until here the marks of the batch hold, and a mark that holds a little
+        // longer only makes a read wait. Judged by the Raft outcome alone: a submission that is released because the
+        // commit admission window refuses its entries still has them in the log.
+        UndeliveredKeys.Settle(undelivered, entries, threw ? null : result);
     }
 
     /// <summary>

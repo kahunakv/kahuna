@@ -27,7 +27,28 @@ not proof that the proposal cannot later commit; durable finalize retries retain
 This layer needs no configuration.
 
 **Reads confirm leadership through a quorum.** An authoritative read first runs a Raft read-index
-round (`ConfirmLeadershipAsync`). A leader that cannot confirm answers `MustRetry`.
+round (`ConfirmLeadershipAsync`). A leader that cannot confirm answers `MustRetry`. A leadership lease
+answers the round without a message while the acknowledgements of the voters renew it.
+
+**A read of named keys waits for the apply of those keys only.** A quorum holds an entry before the
+leader applies it. A read-index confirmation therefore has a second half: it waits until this node
+applied everything that was committed when the read began. A scan of a key range keeps that wait. A
+read that names its keys (a get, an existence check, a batched get, existence check or probe without a
+lock) keeps it only while an unapplied entry of this node can change one of the keys. Otherwise the
+proof of leadership is enough (`ConfirmLeadershipLeaseAsync`), because nothing that waits for its apply
+changes what the read answers. A read of an ephemeral key never waits for the apply: ephemeral writes
+are not in the log.
+
+The leader knows the keys because it proposes the entries. The write scheduler marks the keys of each
+submission before the proposal, and the ordered apply of the entry takes the marks back (see the
+[partition write-coalescing guide](partition-write-coalescing-guide.md), invariant 13). A submission
+whose keys are not known, such as a copied page of a range move, and a proposal whose outcome is not
+known, hold back every read of the partition. Entries of an earlier leader need no mark: a node
+publishes its leadership after it applied all of them.
+
+`KeyScopedApplyWait` (on by default, `--disable-key-scoped-apply-wait` on the server) turns the rule
+off, and every read of named keys then waits for everything committed. The counter
+`kahuna.kv.read.undelivered_key` counts the reads that kept the wait.
 
 **Actor-only mutations confirm leadership through a quorum.** Some operations change in-memory actor
 state without a proposal:

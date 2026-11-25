@@ -14,7 +14,8 @@ namespace Kahuna.Server.KeyValues;
 /// sample tagged by <c>path</c>: <c>registered</c> for a transaction-scoped read, <c>direct</c> for a read
 /// without a session. The leadership check is also tagged by whether the leader's lease answered it
 /// synchronously (<c>lease=hit</c>) or the answer was asynchronous (<c>lease=miss</c>): a wait for the
-/// leader's applied frontier under a fresh lease, or an executor read-index round when the lease had lapsed.</para>
+/// leader's applied frontier under a fresh lease, which a read keeps only while an undelivered entry can change its
+/// key, or an executor read-index round when the lease had lapsed.</para>
 ///
 /// <para>The clock is <see cref="Stopwatch"/>, so a sample is wall time on the serving node and includes
 /// any wait inside the step (a mailbox queue, a lease miss waiting for its ack round). Forwarded reads
@@ -44,6 +45,15 @@ internal static class KeyValueReadMetrics
     /// </summary>
     internal static readonly Histogram<double> FallbackMs =
         Meter.CreateHistogram<double>("kahuna.kv.read.fallback", unit: "ms", description: "Point gets that took the actor path instead of the published head record, by the guard that refused the record; the value is the time of the actor step.");
+
+    /// <summary>
+    /// The reads of named keys that kept the wait for the applied frontier, because a log entry of this node that is
+    /// not delivered yet can change one of their keys (see <see cref="Writes.UndeliveredKeys"/>). Counted once per
+    /// read and partition. A counted read does not always wait: a key is marked from the dispatch of its entry, and the
+    /// wait starts with the commit.
+    /// </summary>
+    internal static readonly Counter<long> UndeliveredKeyReads =
+        Meter.CreateCounter<long>("kahuna.kv.read.undelivered_key", description: "Reads of named keys that kept the wait for the applied frontier because an undelivered log entry can change one of their keys.");
 
     private static readonly KeyValuePair<string, object?> StageRegister = new("stage", "register");
     private static readonly KeyValuePair<string, object?> StageConfirm = new("stage", "confirm");
@@ -101,13 +111,16 @@ internal static class KeyValueReadMetrics
     /// <summary>Elapsed milliseconds between two <see cref="Stopwatch.GetTimestamp"/> readings.</summary>
     internal static double ElapsedMs(long start, long end) => (end - start) * 1000.0 / Stopwatch.Frequency;
 
+    /// <summary>One read of named keys that kept the wait for the applied frontier.</summary>
+    internal static void UndeliveredKey() => UndeliveredKeyReads.Add(1);
+
     /// <summary>The coordinator registration of a transaction-scoped read, local or forwarded.</summary>
     internal static void RecordRegister(long start, long end) => StageMs.Record(ElapsedMs(start, end), StageRegister);
 
     /// <summary>
     /// The quorum-confirmed leadership check before a local read. <paramref name="leaseHit"/> is true when the
-    /// check completed synchronously, which is the leader's lease answering it with the applied frontier already
-    /// covering the commit frontier; false covers both asynchronous answers, the frontier wait and the round.
+    /// check completed synchronously, which is the leader's lease answering it with nothing left to apply that the
+    /// read depends on; false covers both asynchronous answers, the frontier wait and the round.
     /// </summary>
     internal static void RecordConfirm(long start, long end, bool leaseHit) =>
         StageMs.Record(ElapsedMs(start, end), StageConfirm, leaseHit ? LeaseHit : LeaseMiss);

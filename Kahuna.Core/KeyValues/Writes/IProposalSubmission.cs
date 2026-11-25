@@ -55,6 +55,18 @@ internal interface IProposalSubmission
     /// return false.</summary>
     bool IsQuiesced(IWriteRangeFence fence);
 
+    /// <summary>
+    /// How many keys' readable value the delivery of these entries can change, or a negative number when the producer
+    /// does not know them. A read of such a key on this node waits for the delivery once the entries were handed to
+    /// Raft, and a producer that does not know its keys makes every read of the partition wait (see
+    /// <see cref="UndeliveredKeys"/>). Zero is a claim: whatever these entries carry, a read that this node answers
+    /// before their delivery is as correct as one that it answers after it.
+    /// </summary>
+    int ChangedKeyCount => -1;
+
+    /// <summary>The key at <paramref name="index"/>, below <see cref="ChangedKeyCount"/>.</summary>
+    string ChangedKey(int index) => throw new NotSupportedException();
+
     /// <summary>Whether the commit admission window refuses this submission's entries at
     /// <paramref name="entryTime"/>, the time Kommander stamped on the proposal that carried them. Every replica's
     /// apply judges the same entries by the same time and turns a refused entry into a no-op, so the scheduler
