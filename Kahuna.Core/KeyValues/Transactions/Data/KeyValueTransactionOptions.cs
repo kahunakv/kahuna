@@ -106,8 +106,9 @@ public sealed class KeyValueTransactionOptions
     /// of a key the transaction has not read yet is answered only if every key it read before still has the
     /// revision it read; otherwise the read answers <c>Aborted</c>. Without it each key is read at its own time,
     /// and the transaction can be handed values of several keys that were never committed together, which only
-    /// its commit refuses. Honoured by the node the transaction is started on and issues its reads through; it
-    /// is not sent to another node. Experimental. See <see cref="TransactionReadFloors"/>.
+    /// its commit refuses. A read of a key the transaction wrote is answered from that staged write, a delete
+    /// included, and is not held. Honoured by the node the transaction is started on and issues its reads through;
+    /// it is not sent to another node. Experimental. See <see cref="TransactionReadFloors"/>.
     /// </summary>
     public bool ReadFloor { get; set; }
 }

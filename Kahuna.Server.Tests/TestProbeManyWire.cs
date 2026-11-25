@@ -9,7 +9,8 @@ namespace Kahuna.Server.Tests;
 
 /// <summary>
 /// The inter-node encoding of a batched probe: a forwarded probe must decode to exactly the answers the serving node
-/// produced — entry presence, an empty value apart from no value, the holder of a refusal, and the lock flag.
+/// produced — entry presence, an empty value apart from no value, the holder of a refusal, the lock flag, and the mark
+/// of an answer from the transaction's own staged write.
 /// </summary>
 public sealed class TestProbeManyWire
 {
@@ -23,7 +24,10 @@ public sealed class TestProbeManyWire
             new(KeyValueResponseType.Get, new ReadOnlyKeyValueEntry([], 1, HLCTimestamp.Zero, HLCTimestamp.Zero, new(1, 5, 0), KeyValueState.Set), HLCTimestamp.Zero, false),
             new(KeyValueResponseType.DoesNotExist, new ReadOnlyKeyValueEntry(null, 0, HLCTimestamp.Zero, HLCTimestamp.Zero, HLCTimestamp.Zero, KeyValueState.Undefined), HLCTimestamp.Zero, true),
             new(KeyValueResponseType.AlreadyLocked, null, holder, false),
-            KeyValueProbeResult.MustRetry
+            KeyValueProbeResult.MustRetry,
+            new(KeyValueResponseType.Get, new ReadOnlyKeyValueEntry([4], 8, HLCTimestamp.Zero, HLCTimestamp.Zero, new(1, 6, 0), KeyValueState.Set) { HeadSeenTicks = ReadOnlyKeyValueEntry.OwnStagedWrite }, HLCTimestamp.Zero, false),
+            new(KeyValueResponseType.DoesNotExist, KeyValueStaticResponses.DoesNotExistOwnStagedWriteResponse.Entry, HLCTimestamp.Zero, false),
+            new(KeyValueResponseType.Get, new ReadOnlyKeyValueEntry([5], 9, HLCTimestamp.Zero, HLCTimestamp.Zero, new(1, 7, 0), KeyValueState.Set) { HeadSeenTicks = 1234, ServedTicks = 1235 }, HLCTimestamp.Zero, false)
         ];
 
         GrpcTryProbeManyResponse response = new();
@@ -49,11 +53,17 @@ public sealed class TestProbeManyWire
             Assert.Equal(expected.LastUsed, actual.LastUsed);
             Assert.Equal(expected.LastModified, actual.LastModified);
             Assert.Equal(expected.State, actual.State);
+            Assert.Equal(expected.IsOwnStagedWrite, actual.IsOwnStagedWrite);
         }
 
         Assert.NotNull(decoded[1].Entry!.Value);
         Assert.Empty(decoded[1].Entry!.Value!);
         Assert.Null(decoded[2].Entry!.Value);
+
+        // The mark of an own staged write crosses the wire; a time on the serving process's clock does not.
+        Assert.True(decoded[5].Entry!.IsOwnStagedWrite);
+        Assert.True(decoded[6].Entry!.IsOwnStagedWrite);
+        Assert.Equal((0, 0), (decoded[7].Entry!.HeadSeenTicks, decoded[7].Entry!.ServedTicks));
     }
 
     [Fact]

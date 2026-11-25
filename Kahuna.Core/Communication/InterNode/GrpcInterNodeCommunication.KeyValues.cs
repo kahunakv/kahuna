@@ -402,7 +402,10 @@ public partial class GrpcInterNodeCommunication
             new(remoteResponse.LastUsedNode, remoteResponse.LastUsedPhysical, remoteResponse.LastUsedCounter),
             new(remoteResponse.LastModifiedNode, remoteResponse.LastModifiedPhysical, remoteResponse.LastModifiedCounter),
             (KeyValueState)remoteResponse.State
-        ));
+        )
+        {
+            HeadSeenTicks = remoteResponse.OwnStagedWrite ? ReadOnlyKeyValueEntry.OwnStagedWrite : 0
+        });
     }
 
     /// <summary>
@@ -454,7 +457,10 @@ public partial class GrpcInterNodeCommunication
             new(remoteResponse.LastUsedNode, remoteResponse.LastUsedPhysical, remoteResponse.LastUsedCounter),
             new(remoteResponse.LastModifiedNode, remoteResponse.LastModifiedPhysical, remoteResponse.LastModifiedCounter),
             (KeyValueState)remoteResponse.State
-        ));
+        )
+        {
+            HeadSeenTicks = remoteResponse.OwnStagedWrite ? ReadOnlyKeyValueEntry.OwnStagedWrite : 0
+        });
     }
 
     public async Task TryGetManyNodeValues(

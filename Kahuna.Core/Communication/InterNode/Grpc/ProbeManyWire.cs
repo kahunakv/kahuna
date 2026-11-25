@@ -78,6 +78,7 @@ internal static class ProbeManyWire
                 item.LastModifiedPhysical = entry.LastModified.L;
                 item.LastModifiedCounter = entry.LastModified.C;
                 item.State = (GrpcKeyValueState)entry.State;
+                item.OwnStagedWrite = entry.IsOwnStagedWrite;
 
                 if (entry.Value is not null)
                     item.Value = UnsafeByteOperations.UnsafeWrap(entry.Value);
@@ -113,6 +114,9 @@ internal static class ProbeManyWire
                     new(item.LastUsedNode, item.LastUsedPhysical, item.LastUsedCounter),
                     new(item.LastModifiedNode, item.LastModifiedPhysical, item.LastModifiedCounter),
                     (KeyValueState)item.State)
+                {
+                    HeadSeenTicks = item.OwnStagedWrite ? ReadOnlyKeyValueEntry.OwnStagedWrite : 0
+                }
                 : null;
 
             results[i] = new(

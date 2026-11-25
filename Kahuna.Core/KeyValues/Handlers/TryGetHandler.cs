@@ -285,7 +285,7 @@ internal sealed class TryGetHandler : BaseHandler
 
             if (mvccEntry.State is KeyValueState.Undefined or KeyValueState.Deleted
                 || (mvccEntry.Expires != HLCTimestamp.Zero && mvccEntry.Expires - currentTime < TimeSpan.Zero))
-                return KeyValueStaticResponses.DoesNotExistContextResponse;
+                return AbsentInOwnEntry(mvccEntry);
 
             // For the read floor of the transaction (see TransactionReadFloors): how long the served revision has
             // been the committed head, as far as this actor can vouch. A pin taken from a committed intent that

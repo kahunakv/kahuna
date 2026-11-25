@@ -134,6 +134,7 @@ internal sealed class KeyValueReadHandler
                 LastModifiedPhysical = keyValueContext.LastModified.L,
                 LastModifiedCounter = keyValueContext.LastModified.C,
                 State = (GrpcKeyValueState)keyValueContext.State,
+                OwnStagedWrite = keyValueContext.IsOwnStagedWrite,
                 TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
             };
 
@@ -330,6 +331,7 @@ internal sealed class KeyValueReadHandler
                 LastModifiedPhysical = keyValueContext.LastModified.L,
                 LastModifiedCounter = keyValueContext.LastModified.C,
                 State = (GrpcKeyValueState)keyValueContext.State,
+                OwnStagedWrite = keyValueContext.IsOwnStagedWrite,
                 TimeElapsedMs = (int)stopwatch.GetElapsedMilliseconds()
             };
 

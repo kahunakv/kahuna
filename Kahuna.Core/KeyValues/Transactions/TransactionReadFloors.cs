@@ -43,6 +43,12 @@ namespace Kahuna.Server.KeyValues.Transactions;
 /// with each other when every head was first seen no later than the earliest answer of the batch; otherwise they
 /// are checked like earlier keys.</para>
 ///
+/// <para><b>What is not judged.</b> A read that the key's actor answered from the transaction's own staged write:
+/// a staged value, or the absence that a staged delete or a staged expiry leaves
+/// (<see cref="ReadOnlyKeyValueEntry.IsOwnStagedWrite"/>, which a forwarded read carries back). The committed head
+/// is still the one below that write, so it would count as a change of the key. An absent key the transaction
+/// staged nothing on is judged like any other.</para>
+///
 /// <para>A transaction asks for the floor when it starts (<c>KeyValueTransactionOptions.ReadFloor</c>). Its state
 /// lives in memory on the node that started it and issues its reads, and is dropped when that node commits or
 /// rolls the transaction back. A state nobody dropped is removed after

@@ -74,6 +74,33 @@ public sealed class TestPointReadGrpcWire
     }
 
     /// <summary>
+    /// The mark of an answer from the reading transaction's own staged write, a value or an absence, travels with the
+    /// answer of a forwarded read, so the node that holds the transaction's read floor does not judge it.
+    /// </summary>
+    [Theory]
+    [InlineData(KeyValueResponseType.Get, true)]
+    [InlineData(KeyValueResponseType.Get, false)]
+    [InlineData(KeyValueResponseType.DoesNotExist, true)]
+    [InlineData(KeyValueResponseType.DoesNotExist, false)]
+    public async Task OwnStagedWriteMark_TravelsWithTheAnswer(KeyValueResponseType type, bool ownStagedWrite)
+    {
+        ReadOnlyKeyValueEntry entry = new(null, 7, Expires, LastUsed, LastModified, KeyValueState.Set)
+        {
+            HeadSeenTicks = ownStagedWrite ? ReadOnlyKeyValueEntry.OwnStagedWrite : 1234
+        };
+
+        KeyValuesService service = new(new FixedPointReadKahuna(type, entry), NodeTransportGate.Disabled, NullLogger<IKahuna>.Instance);
+
+        GrpcTryGetKeyValueResponse get = await service.TryGetKeyValue(
+            new GrpcTryGetKeyValueRequest { Key = "greeting", Revision = -1 }, Context());
+        Assert.Equal(ownStagedWrite, GrpcTryGetKeyValueResponse.Parser.ParseFrom(get.ToByteArray()).OwnStagedWrite);
+
+        GrpcTryExistsKeyValueResponse exists = await service.TryExistsKeyValue(
+            new GrpcTryExistsKeyValueRequest { Key = "greeting", Revision = -1 }, Context());
+        Assert.Equal(ownStagedWrite, GrpcTryExistsKeyValueResponse.Parser.ParseFrom(exists.ToByteArray()).OwnStagedWrite);
+    }
+
+    /// <summary>
     /// The wait behind a live foreign write intent crosses the wire on the point get and on the batched probe, so a
     /// forwarded read waits on the leader exactly as a local one does. A request without the fields does not wait.
     /// </summary>

@@ -51,4 +51,10 @@ internal static class KeyValueStaticResponses
     internal static readonly KeyValueResponse InvalidInputResponse = new(KeyValueResponseType.InvalidInput);
 
     internal static readonly KeyValueResponse DoesNotExistContextResponse = new(KeyValueResponseType.DoesNotExist, new ReadOnlyKeyValueEntry(null, 0, HLCTimestamp.Zero, HLCTimestamp.Zero, HLCTimestamp.Zero, KeyValueState.Undefined));
+
+    /// <summary>The answer of a latest read of a key that the reading transaction's own staged write left absent: a
+    /// staged delete, or a staged value whose time to live ran out. See <see cref="ReadOnlyKeyValueEntry.IsOwnStagedWrite"/>.</summary>
+    internal static readonly KeyValueResponse DoesNotExistOwnStagedWriteResponse = new(
+        KeyValueResponseType.DoesNotExist,
+        new ReadOnlyKeyValueEntry(null, 0, HLCTimestamp.Zero, HLCTimestamp.Zero, HLCTimestamp.Zero, KeyValueState.Undefined) { HeadSeenTicks = ReadOnlyKeyValueEntry.OwnStagedWrite });
 }

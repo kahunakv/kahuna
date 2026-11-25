@@ -234,12 +234,13 @@ internal sealed class RoutedReadOperations
 
         // Hold the read to the transaction's read floor: a key new to the transaction is answered only if the
         // keys it read before still have the revisions it read. The observation is folded either way, so the
-        // commit of a refused transaction is refused too.
+        // commit of a refused transaction is refused too. An answer from the transaction's own staged write, a
+        // value or an absence, is not judged: the committed head is still the one below that write.
         bool admitted = true;
 
         if (HoldsToReadFloor(transactionId, readTimestamp)
             && type is KeyValueResponseType.Get or KeyValueResponseType.Exists or KeyValueResponseType.DoesNotExist
-            && entry?.HeadSeenTicks != ReadOnlyKeyValueEntry.OwnStagedWrite)
+            && entry is not { IsOwnStagedWrite: true })
         {
             TransactionReadFloors.Observation[] observed =
             [
@@ -576,7 +577,7 @@ internal sealed class RoutedReadOperations
                 KeyValueProbeResult result = results[i];
 
                 if (result.Type is not (KeyValueResponseType.Get or KeyValueResponseType.DoesNotExist)
-                    || result.Entry?.HeadSeenTicks == ReadOnlyKeyValueEntry.OwnStagedWrite)
+                    || result.Entry is { IsOwnStagedWrite: true })
                     continue;
 
                 bool exists = result.Entry is not null && result.Type == KeyValueResponseType.Get;

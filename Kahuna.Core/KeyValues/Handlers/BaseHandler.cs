@@ -650,6 +650,18 @@ internal abstract class BaseHandler
     }
 
     /// <summary>
+    /// The answer of a transactional latest read when <paramref name="own"/>, the reading transaction's own entry on
+    /// the key, holds no live value. An entry the transaction staged a write on (a delete, or a value whose time to
+    /// live ran out) is absent because of that write, and the answer says so (see
+    /// <see cref="ReadOnlyKeyValueEntry.IsOwnStagedWrite"/>). A read pin, also one a lock or a delete that found
+    /// nothing left behind, is the committed absence it observed.
+    /// </summary>
+    protected static KeyValueResponse AbsentInOwnEntry(KeyValueMvccEntry own) =>
+        own.StagedUnder is null
+            ? KeyValueStaticResponses.DoesNotExistContextResponse
+            : KeyValueStaticResponses.DoesNotExistOwnStagedWriteResponse;
+
+    /// <summary>
     /// Whether a transaction older than <paramref name="writer"/> has read the key and is still running: it holds a
     /// read pin on the entry, staged nothing there, its session is open in this process, and this actor recorded
     /// no outcome for it. A writer that already staged the key is past this check. See

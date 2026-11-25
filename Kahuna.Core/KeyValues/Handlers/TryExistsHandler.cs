@@ -224,11 +224,16 @@ internal sealed class TryExistsHandler : BaseHandler
 
             if (mvccEntry.State is KeyValueState.Undefined or KeyValueState.Deleted
                 || (mvccEntry.Expires != HLCTimestamp.Zero && mvccEntry.Expires - currentTime < TimeSpan.Zero))
-                return KeyValueStaticResponses.DoesNotExistContextResponse;
+                return AbsentInOwnEntry(mvccEntry);
 
+            // For the read floor of the transaction (see TransactionReadFloors): a staged write of the transaction
+            // is marked as such, and any other answer states nothing about how long the revision has been the head.
             return new(KeyValueResponseType.Exists, new ReadOnlyKeyValueEntry(
                 null, mvccEntry.Revision, mvccEntry.Expires,
-                mvccEntry.LastUsed, mvccEntry.LastModified, mvccEntry.State));
+                mvccEntry.LastUsed, mvccEntry.LastModified, mvccEntry.State)
+            {
+                HeadSeenTicks = mvccEntry.StagedUnder is null ? 0 : ReadOnlyKeyValueEntry.OwnStagedWrite
+            });
         }
 
         // ── Snapshot visibility: serve the revision at-or-before readTimestamp ──────────────

@@ -267,6 +267,9 @@ message GrpcTryGetKeyValueResponse {
   // Additive advisory routing hint. Absent from a node that resolved no owner and from an
   // older peer, which leaves the caller on its existing endpoint selection.
   optional GrpcRouteHint Route = 16;
+  // True when the answer, a value or an absence, came from the reading transaction's own staged write of
+  // the key. An older peer leaves it unset, and the answer then counts as a read of committed state.
+  bool OwnStagedWrite = 17;
 }
 
 message GrpcTryExistsKeyValueRequest {
@@ -302,6 +305,8 @@ message GrpcTryExistsKeyValueResponse {
   // Additive advisory routing hint. Absent from a node that resolved no owner and from an
   // older peer, which leaves the caller on its existing endpoint selection.
   optional GrpcRouteHint Route = 15;
+  // As in GrpcTryGetKeyValueResponse.
+  bool OwnStagedWrite = 16;
 }
 
 message GrpcTryManyValuesRequestItem {
@@ -396,6 +401,8 @@ message GrpcTryProbeManyResponseItem {
   uint32 HolderTransactionIdCounter = 17;
   // True when the key holds the transaction's Shared [k,k] lock after the probe.
   bool Locked = 18;
+  // As in GrpcTryGetKeyValueResponse. Set only with HasEntry.
+  bool OwnStagedWrite = 19;
 }
 
 // A batched range probe forwarded to the node that leads the seeks' partitions: many bounded seeks
