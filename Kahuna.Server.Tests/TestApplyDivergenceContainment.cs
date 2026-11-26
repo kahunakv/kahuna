@@ -511,6 +511,347 @@ public sealed class TestApplyDivergenceContainment : BaseCluster
     }
 
     /// <summary>
+    /// The same miss when a commit settles with a materializing resolve and needs no materialization record. The
+    /// replica that refused the prepare installs nothing at the settle: the resolve finds no intent of that
+    /// transaction. That resolve is the one entry at which the replica can know that it holds no source for a
+    /// committed value, so it must gate there, as it does for a by-reference record, and be repaired by the
+    /// re-seed it asks for. Before, this form reported nothing and the replica kept the row one commit behind.
+    /// </summary>
+    [Fact]
+    public async Task FollowerMissingTheValueOfAMaterializingResolve_GatesAtThatEntry_AndIsRepairedByAReseed()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft[] rafts, IKahuna[] kahunas) = await AssembleCluster(
+            Nodes, "memory", Partitions, raftLogger, kahunaLogger,
+            configureKahuna: config =>
+            {
+                config.OnePhaseApplyTimeValidation = true;
+                config.DurableMaterializeOnResolve = true;
+            });
+        KahunaManager[] managers = [.. kahunas.Cast<KahunaManager>()];
+
+        using MetricCapture metrics = new("action",
+            "kahuna.kv.materialization_intent_missing",
+            "kahuna.keyvalues.apply_divergence_contained",
+            "kahuna.keyvalues.apply_divergence_repaired");
+
+        try
+        {
+            int leader = await LeaderIndexOf(Partition, rafts, ct);
+            int @short = (leader + 1) % Nodes;
+
+            string[] warm = KeysOnPartition(managers[0], Partition, "warm", 2);
+            foreach (string key in warm)
+                await CommitKey(managers[leader], key, "w", ct);
+            await WaitForAgreement(managers, warm.Length, ct);
+
+            // The key has a committed value on every replica first, so the short replica holds a durable row of
+            // the key that is older than the commit it will miss: a row of the key is not proof by itself.
+            string hole = KeysOnPartition(managers[0], Partition, "hole", 1)[0];
+            await CommitKey(managers[leader], hole, "zero", ct);
+            await WaitForAgreement(managers, warm.Length + 1, ct);
+
+            // The short replica applies the next commit's prepare and drops its settle: it keeps holding the key
+            // for a transaction every peer has finished.
+            managers[@short].KeyValues.ReplicationDispatcher.ApplySkipForTesting = (partition, log) =>
+            {
+                if (partition != Partition || log.LogType != ReplicationTypes.PreparedIntent)
+                    return false;
+
+                foreach (PreparedIntentCommand command in PreparedIntentStore.DecodeDelta(log.LogData!))
+                    if (command is PrepareIntentCommand)
+                        return false;
+
+                return true;
+            };
+
+            await CommitKey(managers[leader], hole, "first", ct);
+
+            KahunaManager shortNode = managers[@short];
+            KahunaManager leaderNode = managers[leader];
+            await WaitUntilAsync(async () =>
+            {
+                KeyValueApplyFingerprint? a = await FingerprintOf(leaderNode, ct);
+                KeyValueApplyFingerprint? b = await FingerprintOf(shortNode, ct);
+                return a is not null && b is not null
+                    && a.Value.AppliedLogId == b.Value.AppliedLogId && a.Value.LiveIntents == 0 && b.Value.LiveIntents == 1;
+            }, timeoutMs: 30_000);
+
+            managers[@short].KeyValues.ReplicationDispatcher.ApplySkipForTesting = null;
+
+            Assert.NotNull(shortNode.KeyValues.DurablePreparedIntentStore.Get(hole));
+            Assert.False(shortNode.KeyValues.DivergenceContainment.IsGated(Partition));
+            double missedBefore = metrics.Total("kahuna.kv.materialization_intent_missing");
+            double repairedBefore = metrics.Total("kahuna.keyvalues.apply_divergence_repaired");
+
+            // The next commit of the key: the short replica cannot install its prepare, and the settle's resolve
+            // finds no intent of that transaction there.
+            await CommitKey(managers[leader], hole, "second", ct);
+
+            await WaitUntilAsync(() => shortNode.KeyValues.DivergenceContainment.IsGated(Partition)
+                || metrics.Total("kahuna.keyvalues.apply_divergence_repaired") > repairedBefore, timeoutMs: 15_000);
+            Assert.True(metrics.Total("kahuna.kv.materialization_intent_missing") > missedBefore, "the short replica did not report the missing value");
+            Assert.True(metrics.Total("kahuna.keyvalues.apply_divergence_contained", "gated") >= 1);
+
+            // Nothing but the apply gated it: the partition's leader never changed, and the short replica never led.
+            Assert.Equal(leader, await LeaderIndexOf(Partition, rafts, ct));
+
+            // The re-seed replaces the projection: the stale hold is gone, the candidacy is released, and the
+            // replica holds the value it was missing.
+            await WaitUntilAsync(() => !shortNode.KeyValues.DivergenceContainment.IsGated(Partition), timeoutMs: 60_000);
+            Assert.True(metrics.Total("kahuna.keyvalues.apply_divergence_repaired") > repairedBefore);
+            await WaitUntilAsync(() => shortNode.KeyValues.DurablePreparedIntentStore.Get(hole) is null, timeoutMs: 15_000);
+            Assert.False(rafts[@short].IsCandidacyWithheld(Partition), "the repaired replica did not release its candidacy");
+
+            RaftOperationStatus transfer = await rafts[leader].TransferLeadershipAsync(Partition, EndpointOf(@short), ct);
+            Assert.True(transfer is RaftOperationStatus.Success or RaftOperationStatus.Pending, $"transfer to the repaired replica: {transfer}");
+            await WaitUntilAsync(async () => await rafts[@short].AmILeaderIfHosted(Partition, ct), timeoutMs: 30_000);
+
+            (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await RetryOnMustRetryAsync(
+                () => shortNode.LocateAndTryGetValue(HLCTimestamp.Zero, hole, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask(),
+                r => r.Item1);
+            Assert.Equal(KeyValueResponseType.Get, type);
+            Assert.Equal("second", Encoding.UTF8.GetString(entry!.Value!));
+            Assert.False(shortNode.KeyValues.DivergenceContainment.IsGated(Partition));
+        }
+        finally
+        {
+            foreach (KahunaManager manager in managers)
+                manager.KeyValues.ReplicationDispatcher.ApplySkipForTesting = null;
+
+            await LeaveCluster(rafts[0], rafts[1], rafts[2]);
+        }
+    }
+
+    /// <summary>Counts the materializing resolves that found no intent on a live apply, and passes every call on.</summary>
+    private sealed class UnresolvedSpy(IResolvedIntentInstaller inner) : IResolvedIntentInstaller
+    {
+        private int unresolvedOnApply;
+
+        public int UnresolvedOnApply => Volatile.Read(ref unresolvedOnApply);
+
+        public void Install(int partitionId, long logIndex, PreparedIntent intent, bool replay) => inner.Install(partitionId, logIndex, intent, replay);
+
+        public void CompleteEntry(int partitionId, long logIndex, bool replay) => inner.CompleteEntry(partitionId, logIndex, replay);
+
+        public void NoteUnresolvedOnReplay(int partitionId, long logIndex, HLCTimestamp transactionId, long epoch, string key, HLCTimestamp commitTimestamp) =>
+            inner.NoteUnresolvedOnReplay(partitionId, logIndex, transactionId, epoch, key, commitTimestamp);
+
+        public void NoteUnresolvedOnApply(int partitionId, long logIndex, HLCTimestamp transactionId, long epoch, string key, HLCTimestamp commitTimestamp)
+        {
+            Interlocked.Increment(ref unresolvedOnApply);
+            inner.NoteUnresolvedOnApply(partitionId, logIndex, transactionId, epoch, key, commitTimestamp);
+        }
+    }
+
+    /// <summary>
+    /// A second copy of a settle is routine: two producers can settle one transaction. Its materializing resolve
+    /// finds no intent on any replica, because the first copy installed the value and removed the intent. Every
+    /// replica must dismiss it. The second round removes the committed-head memory of every replica, so one proof
+    /// alone dismisses the copy: the durable row after the flush, or the queued write when the row is not flushed.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task SecondCopyOfAMaterializingSettle_IsDismissedOnEveryReplica_AndGatesNothing(bool rowFlushed)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft[] rafts, IKahuna[] kahunas) = await AssembleCluster(
+            Nodes, "memory", Partitions, raftLogger, kahunaLogger,
+            configureKahuna: config =>
+            {
+                config.OnePhaseApplyTimeValidation = true;
+                config.DurableMaterializeOnResolve = true;
+
+                // No flush pass runs inside the test: the committed row stays in the queue of the writer.
+                if (!rowFlushed)
+                    config.DirtyObjectsWriterDelay = 600_000;
+            });
+        KahunaManager[] managers = [.. kahunas.Cast<KahunaManager>()];
+
+        using MetricCapture metrics = new("action",
+            "kahuna.kv.materialization_intent_missing",
+            "kahuna.keyvalues.apply_divergence_contained");
+
+        try
+        {
+            UnresolvedSpy[] spies = new UnresolvedSpy[Nodes];
+            for (int i = 0; i < Nodes; i++)
+            {
+                PreparedIntentStore store = managers[i].KeyValues.DurablePreparedIntentStore;
+                spies[i] = new UnresolvedSpy(store.ResolvedIntentInstaller!);
+                store.AttachResolvedIntentInstaller(spies[i]);
+            }
+
+            int leader = await LeaderIndexOf(Partition, rafts, ct);
+            string key = KeysOnPartition(managers[0], Partition, "twice", 1)[0];
+
+            HLCTimestamp transactionId = await CommitKey(managers[leader], key, "value", ct);
+            await WaitForAgreement(managers, 1, ct);
+
+            PreparedIntentStore.SettledIdentityEntry settled = Assert.Single(
+                managers[leader].KeyValues.DurablePreparedIntentStore.SnapshotSettledIdentities(Partition),
+                entry => entry.Key == key && entry.TransactionId == transactionId);
+
+            byte[] SecondCopy() => PreparedIntentStore.SerializeDelta(
+            [
+                new ResolveIntentCommand(settled.TransactionId, settled.Epoch, key, Commit: true, MaterializeOnResolve: true, settled.SettledAt),
+                new RemoveIntentCommand(settled.TransactionId, settled.Epoch, key)
+            ]);
+
+            double missedBefore = metrics.Total("kahuna.kv.materialization_intent_missing");
+
+            for (int round = 1; round <= 2; round++)
+            {
+                if (round == 2)
+                {
+                    // The head memory is removed. After a confirmed flush no queued write is left to answer, so
+                    // the durable row alone can dismiss this copy; without a flush the queued write alone can.
+                    foreach (KahunaManager manager in managers)
+                    {
+                        PreparedIntentStore store = manager.KeyValues.DurablePreparedIntentStore;
+
+                        if (rowFlushed)
+                            await WaitUntilAsync(() => store.SettledIntentsAwaitingFlushCount == 0, timeoutMs: 30_000);
+
+                        store.ForgetCommittedHeadsForTesting();
+                    }
+                }
+
+                Assert.NotNull(await managers[leader].DurableBundleLocal(
+                    Partition, [(ReplicationTypes.PreparedIntent, SecondCopy())], terminal: true, stage: 0, [], ct));
+
+                int expected = round;
+                foreach (UnresolvedSpy spy in spies)
+                    await WaitUntilAsync(() => spy.UnresolvedOnApply >= expected, timeoutMs: 30_000);
+            }
+
+            // The check of the durable row runs off the apply path: give it time to answer.
+            await Task.Delay(1_000, ct);
+
+            // The settled intent of a row is kept until the flush of that row is confirmed.
+            if (!rowFlushed)
+            {
+                foreach (KahunaManager manager in managers)
+                    Assert.True(manager.KeyValues.DurablePreparedIntentStore.SettledIntentsAwaitingFlushCount > 0, "the row was flushed");
+            }
+
+            Assert.Equal(missedBefore, metrics.Total("kahuna.kv.materialization_intent_missing"));
+            Assert.Equal(0, metrics.Total("kahuna.keyvalues.apply_divergence_contained", "gated"));
+
+            foreach (KahunaManager manager in managers)
+                Assert.False(manager.KeyValues.DivergenceContainment.AnyGated);
+
+            (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await RetryOnMustRetryAsync(
+                () => managers[leader].LocateAndTryGetValue(HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).AsTask(),
+                r => r.Item1);
+            Assert.Equal(KeyValueResponseType.Get, type);
+            Assert.Equal("value", Encoding.UTF8.GetString(entry!.Value!));
+        }
+        finally
+        {
+            await LeaveCluster(rafts[0], rafts[1], rafts[2]);
+        }
+    }
+
+    /// <summary>
+    /// Three materializing resolves with no intent and no row of their key that must not gate. A resolve with no
+    /// commit timestamp cannot be judged. A key that routes to another partition is not this partition's to
+    /// hold. An entry that an installed snapshot reflects is counted and logged, and the installed projection
+    /// answers for it.
+    /// </summary>
+    [Fact]
+    public async Task ResolveWithNoIntent_WithoutACommitTime_AtAForeignKey_OrAtAnInstalledEntry_GatesNothing()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        (IRaft[] rafts, IKahuna[] kahunas) = await AssembleCluster(
+            Nodes, "memory", Partitions, raftLogger, kahunaLogger,
+            configureKahuna: config =>
+            {
+                config.OnePhaseApplyTimeValidation = true;
+                config.DurableMaterializeOnResolve = true;
+            });
+        KahunaManager[] managers = [.. kahunas.Cast<KahunaManager>()];
+
+        using MetricCapture metrics = new("action",
+            "kahuna.kv.materialization_intent_missing",
+            "kahuna.keyvalues.apply_divergence_contained");
+
+        try
+        {
+            UnresolvedSpy[] spies = new UnresolvedSpy[Nodes];
+            for (int i = 0; i < Nodes; i++)
+            {
+                PreparedIntentStore store = managers[i].KeyValues.DurablePreparedIntentStore;
+                spies[i] = new UnresolvedSpy(store.ResolvedIntentInstaller!);
+                store.AttachResolvedIntentInstaller(spies[i]);
+            }
+
+            int leader = await LeaderIndexOf(Partition, rafts, ct);
+
+            // The partition has applied entries on every replica before the resolves arrive.
+            await CommitKey(managers[leader], KeysOnPartition(managers[0], Partition, "warm", 1)[0], "w", ct);
+            await WaitForAgreement(managers, 1, ct);
+
+            HLCTimestamp commit = new(0, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), 0);
+            int sent = 0;
+
+            async Task ResolveWithNoIntent(string key, HLCTimestamp commitTimestamp)
+            {
+                HLCTimestamp transactionId = new(0, commit.L - 1_000 + sent, 0);
+                byte[] delta = PreparedIntentStore.SerializeDelta(
+                [
+                    new ResolveIntentCommand(transactionId, 1, key, Commit: true, MaterializeOnResolve: true, commitTimestamp),
+                    new RemoveIntentCommand(transactionId, 1, key)
+                ]);
+
+                Assert.NotNull(await managers[leader].DurableBundleLocal(
+                    Partition, [(ReplicationTypes.PreparedIntent, delta)], terminal: true, stage: 0, [], ct));
+
+                int expected = ++sent;
+                foreach (UnresolvedSpy spy in spies)
+                    await WaitUntilAsync(() => spy.UnresolvedOnApply >= expected, timeoutMs: 30_000);
+
+                // The check of the durable row runs off the apply path: give it time to answer.
+                await Task.Delay(1_000, ct);
+            }
+
+            double missedBefore = metrics.Total("kahuna.kv.materialization_intent_missing");
+
+            await ResolveWithNoIntent(KeysOnPartition(managers[0], Partition, "untimed", 1)[0], HLCTimestamp.Zero);
+            Assert.Equal(missedBefore, metrics.Total("kahuna.kv.materialization_intent_missing"));
+
+            await ResolveWithNoIntent(KeysOnPartition(managers[0], Partition + 1, "away", 1)[0], commit);
+            Assert.Equal(missedBefore, metrics.Total("kahuna.kv.materialization_intent_missing"));
+
+            // Every replica takes its own slice back as an installed one that reflects the entries to come.
+            foreach (KahunaManager manager in managers)
+            {
+                PreparedIntentStore store = manager.KeyValues.DurablePreparedIntentStore;
+                using MemoryStream payload = new();
+                store.WritePartitionSection(payload, Partition, static _ => true);
+                PreparedIntentStore.PartitionIntentSection section = PreparedIntentStore.DeserializePartitionIntents(payload.ToArray());
+                store.ReplacePartitionIntents(
+                    Partition, section with { ReflectedThroughIndex = long.MaxValue / 2 }, requireLedger: true, static _ => true);
+            }
+
+            await ResolveWithNoIntent(KeysOnPartition(managers[0], Partition, "installed", 1)[0], commit);
+            Assert.Equal(missedBefore + Nodes, metrics.Total("kahuna.kv.materialization_intent_missing"));
+
+            Assert.Equal(0, metrics.Total("kahuna.keyvalues.apply_divergence_contained", "gated"));
+            foreach (KahunaManager manager in managers)
+                Assert.False(manager.KeyValues.DivergenceContainment.AnyGated);
+        }
+        finally
+        {
+            await LeaveCluster(rafts[0], rafts[1], rafts[2]);
+        }
+    }
+
+    /// <summary>
     /// A replica that applied the prepares of committed transactions but dropped their settlements holds their
     /// intents forever once the records age out: record absence cannot be told from a reclaimed commit. Asking the
     /// partition's other replicas resolves it — a majority that settled the intent at or past this node's applied id

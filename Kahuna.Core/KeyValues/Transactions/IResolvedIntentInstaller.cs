@@ -27,4 +27,11 @@ internal interface IResolvedIntentInstaller
     /// durable here (the row's last-modified is the commit timestamp, and a key's commits are HLC-ordered) or the
     /// restart left it missing.</summary>
     void NoteUnresolvedOnReplay(int partitionId, long logIndex, HLCTimestamp transactionId, long epoch, string key, HLCTimestamp commitTimestamp);
+
+    /// <summary>A live apply reached the materializing resolve of the given transaction attempt at
+    /// <paramref name="key"/> (entry <paramref name="logIndex"/>) and this node holds no intent of that
+    /// transaction to install from. A second copy of a settle is routine, and the value is then already here. The
+    /// installer decides which it is: the value is queued or durable here at or after the commit timestamp, or
+    /// this node is missing a committed value that its peers installed.</summary>
+    void NoteUnresolvedOnApply(int partitionId, long logIndex, HLCTimestamp transactionId, long epoch, string key, HLCTimestamp commitTimestamp);
 }

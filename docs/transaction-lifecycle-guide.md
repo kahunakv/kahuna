@@ -471,7 +471,11 @@ the settled-identity memory. That memory is fed by the settle whether or not the
 when the settle applies, and a prepare is rejected as a settled replay when any slice of the node
 remembers its identity: a key that moved between its prepare and its settle has the two in different
 logs, and a node that applies the destination's log first must not re-install the leg from the source's
-(see the [key-range sharding guide](key-range-sharding-guide.md)). So apply lag no longer leaves a commit unattested; only an unreachable
+(see the [key-range sharding guide](key-range-sharding-guide.md)). The same guide describes the carrier
+of a live intent: a prepare is refused as held by another transaction only by an intent that the same
+partition's log carried, and the fence does not judge a replayed prepare of a moved key against a head
+of another partition's slice that is its own commit.
+So apply lag no longer leaves a commit unattested; only an unreachable
 replica (or one on a build that ignores the probes) still does, and the lag breaker still bounds how
 long such a replica can hold a commit. Under a range-split cascade, where replicas lag the prepares of
 freshly created partitions, this closes the window in which the detached stale-base veto raced

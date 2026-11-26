@@ -142,6 +142,11 @@ public sealed class TestRestartReplayByReferenceMaterialization : IDisposable
 
         public void NoteUnresolvedOnReplay(int partitionId, long logIndex, HLCTimestamp transactionId, long epoch, string key, HLCTimestamp commitTimestamp) =>
             restorer.NoteUnresolvedMaterializingResolve(partitionId, logIndex, transactionId, epoch, key, commitTimestamp);
+
+        // The restorer serves a restart replay only.
+        public void NoteUnresolvedOnApply(int partitionId, long logIndex, HLCTimestamp transactionId, long epoch, string key, HLCTimestamp commitTimestamp)
+        {
+        }
     }
 
     // ── store: what the fully reflected fence keeps ─────────────────────────────

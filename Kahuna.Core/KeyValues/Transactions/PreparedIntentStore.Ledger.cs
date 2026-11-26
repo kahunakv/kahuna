@@ -37,6 +37,35 @@ internal sealed partial class PreparedIntentStore
         return false;
     }
 
+    /// <summary>
+    /// Whether a ledger slice remembers a committed head of <paramref name="key"/> with a commit timestamp at or
+    /// after <paramref name="commitTimestamp"/>. A key's commits are ordered by commit timestamp, so such a head
+    /// is that commit or a later one. The slice of <paramref name="partitionId"/> is asked first: the caller is
+    /// an entry of that partition's log, and a second copy of a settle finds there the head that the first copy
+    /// recorded, so the cost of the routine case does not grow with the number of slices. The other slices are
+    /// asked after it, because a range that moved leaves its history in another slice. Lock-free. The limits of
+    /// <see cref="TryGetCommittedHead"/> apply: false proves nothing.
+    /// </summary>
+    internal bool HasCommittedHeadAtOrAfter(int partitionId, string key, HLCTimestamp commitTimestamp)
+    {
+        int shardHash = OrdinalShardHasher.ShardHash(key);
+
+        if (ledgers.TryGetValue(partitionId, out PartitionLedger? own)
+            && own.Heads.TryGetValue(key, shardHash, out CommittedHead head)
+            && head.CommittedAt >= commitTimestamp)
+            return true;
+
+        foreach (KeyValuePair<int, PartitionLedger> slice in ledgers)
+        {
+            if (slice.Key != partitionId
+                && slice.Value.Heads.TryGetValue(key, shardHash, out head)
+                && head.CommittedAt >= commitTimestamp)
+                return true;
+        }
+
+        return false;
+    }
+
     /// <summary>Number of keys currently held across every committed-head ledger slice. Observability only —
     /// logged in the leadership-change fingerprint so a promotion with an empty memory is visible in the node
     /// log, and exported as a gauge.</summary>
@@ -259,9 +288,9 @@ internal sealed partial class PreparedIntentStore
         {
             for (int i = 0; i < keys.Count; i++)
             {
-                if (!intents.TryGetValue(keys[i], out PreparedIntent? intent)
-                    || intent.TransactionId != transactionId
-                    || intent.Epoch != epoch)
+                PreparedIntent? intent = GetByIdentity(transactionId, epoch, keys[i]);
+
+                if (intent is null)
                 {
                     verdicts[i] = probed
                         ? JudgeFromMemory(transactionId, epoch, keys[i], probes![i])

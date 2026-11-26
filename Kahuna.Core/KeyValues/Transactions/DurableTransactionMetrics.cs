@@ -445,6 +445,29 @@ internal static class DurableTransactionMetrics
             description: "Prepares rejected at apply as re-driven duplicates of transactions that had already settled on the partition's log.");
 
     /// <summary>
+    /// Prepares that installed at a key where the node already held a live intent that another partition's log
+    /// carried. A node that applies the two logs of a moved key out of step holds both intents until each log
+    /// settles its own. Zero on a node that applies its logs as they were written, so a rising count names a
+    /// node that catches up a range move.
+    /// </summary>
+    internal static readonly Counter<long> CoveredIntentInstalls =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.covered_intent_installs",
+            description: "Prepares installed beside a live intent of the same key that another partition's log carried.");
+
+    /// <summary>
+    /// Fence verdicts that were not given because the head the prepare would be judged against is the
+    /// transaction's own commit, or is a head that only the slice of another partition remembers for a key this
+    /// node routes away from the prepare's partition. Both are a prepare replayed after the state it was
+    /// validated against had moved on by its own outcome, never a competitor's commit. Tagged by reason
+    /// (own_commit, foreign_slice).
+    /// </summary>
+    internal static readonly Counter<long> StagedBaseFenceReplayedPrepares =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.staged_base_fence_replayed_prepares",
+            description: "Prepares the staged-base fence did not judge because the head was their own commit or belonged to another partition's slice of a moved key, tagged by reason.");
+
+    /// <summary>
     /// Cache-miss hydrations refused because the loaded persistent row (or its absence) sits strictly below the
     /// staged-base fence's committed-head memory for the key. That state is provably stale: every recorded head
     /// is a real durable-transaction commit, so a lower local row means this node's visible state lost committed
@@ -843,7 +866,9 @@ internal static class DurableTransactionMetrics
 
     /// <summary>
     /// By-reference materialization records that found no matching prepared intent on this node AND could not
-    /// be proven redundant — the key's newest durable write is still below the record's revision. Every other
+    /// be proven redundant — the key's newest durable write is still below the record's revision. A live
+    /// materializing resolve that finds no intent of its transaction is counted on the same terms, with the
+    /// commit timestamp in place of the revision. Every other
     /// miss is the benign duplicate (a second producer's record arriving after the settle removed the intent)
     /// and is not counted. A non-zero count means one replica is missing a committed value the rest of the
     /// cluster has: the paired error log names the transaction, the epoch, the key and the log index, and the
@@ -852,7 +877,7 @@ internal static class DurableTransactionMetrics
     internal static readonly Counter<long> MaterializationIntentMissing =
         Meter.CreateCounter<long>(
             "kahuna.kv.materialization_intent_missing",
-            description: "By-reference materialization records whose prepared intent was absent and whose value is not durable here.");
+            description: "By-reference materialization records and materializing resolves whose prepared intent was absent and whose value is not durable here.");
 
     /// <summary>
     /// By-reference materializations (records and materializing resolves) a restart replay resolved, tagged by

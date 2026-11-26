@@ -188,4 +188,17 @@ message PreparedIntentSnapshotMessage {
   // exactly as past the retention horizon. Part of the replicated slice, because the floor only rises and a
   // reader cannot derive it from the heads that remain. Zero when the bound never raised it (or an older writer).
   int64  ledgerSizeFloorPhysical = 12;
+  // Live intents of the file's keys whose prepare the log of another partition carried: history of a key that
+  // a range move brought to the file's partition, held by a node that applies the two logs out of step. A
+  // reader installs each one with its carrier, so it does not refuse a prepare of the file's partition after a
+  // restart. Written by a checkpoint only, never by a whole-partition export. A reader that does not know the
+  // field does not load these intents.
+  repeated ForeignCarriedIntentMessage foreignCarriedIntents = 13;
+}
+
+// A live intent together with the partition whose log carried its prepare, for an intent that the snapshot's
+// own partition did not carry.
+message ForeignCarriedIntentMessage {
+  int32 carrierPartitionId = 1;
+  PreparedIntentCommandMessage intent = 2;
 }

@@ -14,11 +14,12 @@ using Microsoft.Extensions.Logging;
 namespace Kahuna.Server.KeyValues.Transactions;
 
 /// <summary>
-/// The partition-scoped authority for durable prepared intents. Holds at most one live intent per logical key and
-/// routes every prepare/resolve/remove transition through the deterministic
+/// The partition-scoped authority for durable prepared intents. Holds at most one live intent per logical key
+/// for each partition's log and routes every prepare/resolve/remove transition through the deterministic
 /// <see cref="PreparedIntentStateMachine"/>, so leader apply, follower apply, WAL replay, and state-transfer
 /// replay converge. It is the source of truth for a key's pending mutation after its prepare commits — the
-/// actor-local write intent is only a cache.
+/// actor-local write intent is only a cache. A node shows one intent for each key; a second one exists only
+/// while the node applies the two logs of a moved key out of step (see <see cref="coveredIntents"/>).
 ///
 /// <para>Mutation happens on the single per-partition apply path (Raft apply / restore); reads (visibility
 /// lookups and the recovery sweep) may run concurrently, which the concurrent map makes safe. This type owns no
@@ -47,17 +48,93 @@ internal sealed partial class PreparedIntentStore
     /// Guarded by <see cref="orderedKeysGate"/>: a window read holds it for the descent and the window, a mutation
     /// for one tree update. Count is the live intent count without the map's per-bucket lock sweep.
     /// </summary>
-    private readonly SortedSet<string> orderedKeys = new(StringComparer.Ordinal);
+    private readonly SortedSet<LiveKey> orderedKeys = new(LiveKeyOrder.Instance);
 
     private readonly object orderedKeysGate = new();
 
-    /// <summary>Installs or replaces the live intent at <paramref name="key"/>: the map first, so a key the index
-    /// names has its intent, then the index. Every caller holds the apply gate, except the load of the
-    /// snapshot files at construction; a reader between the two steps misses an intent whose apply has not
-    /// completed, which is the state before the apply. <paramref name="partitionId"/> is the partition whose log
-    /// (or snapshot) installed the intent. Returns true when the install resolved the last pending intent of its
-    /// transaction on that partition (tracked only while the commit admission window is on).</summary>
-    private bool InstallLive(string key, PreparedIntent intent, int partitionId)
+    /// <summary>One entry of <see cref="orderedKeys"/>: the key of a live intent, and the carrier of that intent
+    /// (see <see cref="AnyCarrier"/>). The carrier rides in the index entry, which every install already writes,
+    /// so it costs the install and the removal no operation of their own. The order and the identity of an entry
+    /// are those of its key.</summary>
+    private readonly struct LiveKey(string key, int carrier)
+    {
+        public readonly string Key = key;
+
+        public readonly int Carrier = carrier;
+    }
+
+    private sealed class LiveKeyOrder : IComparer<LiveKey>
+    {
+        public static readonly LiveKeyOrder Instance = new();
+
+        public int Compare(LiveKey x, LiveKey y) => string.CompareOrdinal(x.Key, y.Key);
+    }
+
+    // ── the log that carried a live intent ──────────────────────────────────────────
+    //
+    // The carrier of a live intent is the partition whose log delivered its prepare. A prepare is refused as
+    // "key held by another transaction" only by an intent that the same log carried: the verdict on an entry of
+    // a log is then a function of that log, which is what every replica of the partition has in common. The
+    // intent map is one map for the node, and a node applies the logs of its partitions on separate threads. A
+    // key that a range move took from one partition to another has entries in both logs, and a node that
+    // catches up both applies them in an order no other replica saw: the source's prepare of a transaction that
+    // prepared, committed and settled before the cutover, then the destination's prepare of the key's next
+    // transaction, and the source's settle only after that. With the carrier ignored, the replayed source
+    // intent refused the destination's prepare, the bundled commit gate refused the bundle on that node alone,
+    // and the node stayed one revision behind on every key of the bundle (CamusDB bank-split-kill-window,
+    // 2026-11-22). In the opposite order an intent of the destination refused the replayed source prepare: the
+    // gate refused the source bundle on that node alone, and its source slice never recorded that head.
+    //
+    // A move settles every intent of the moving range on the source before the cutover, or hands the intent to
+    // the destination through the destination's log, so no replica that applies the two logs as they were
+    // written holds an intent of one log when the other log prepares the key. The rule changes nothing there.
+
+    /// <summary>The carrier of an intent whose prepare more than one log delivered: a range move handed the
+    /// unsettled intent to the destination through the destination's log. It holds its key against every log.</summary>
+    private const int AnyCarrier = int.MinValue;
+
+    /// <summary>Whether an intent with <paramref name="carrier"/> holds its key against a prepare of
+    /// <paramref name="partitionId"/>'s log. An apply with no log partition (<see cref="UnattributedPartition"/>,
+    /// the direct applies of the unit tests) keeps one holder for each key on both sides.</summary>
+    private static bool HoldsAgainst(int carrier, int partitionId) =>
+        carrier == partitionId || carrier == AnyCarrier || carrier == UnattributedPartition || partitionId == UnattributedPartition;
+
+    /// <summary>The carrier of the intent the map holds at <paramref name="key"/>. An intent with no index entry
+    /// holds against every log. Called on the paths where a prepare meets an intent, never for a settle of the
+    /// intent the map holds.</summary>
+    private int CarrierOfVisible(string key)
+    {
+        lock (orderedKeysGate)
+            return orderedKeys.TryGetValue(new LiveKey(key, 0), out LiveKey entry) ? entry.Carrier : AnyCarrier;
+    }
+
+    /// <summary>The intent the map holds at <paramref name="key"/> with its carrier, read as one pair: every
+    /// writer changes the map and the index inside the index gate. For a reader that does not hold the apply
+    /// gate (a snapshot or an export walk).</summary>
+    private bool TryGetVisible(string key, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out PreparedIntent? intent, out int carrier)
+    {
+        lock (orderedKeysGate)
+        {
+            if (intents.TryGetValue(key, out intent) && orderedKeys.TryGetValue(new LiveKey(key, 0), out LiveKey entry))
+            {
+                carrier = entry.Carrier;
+                return true;
+            }
+        }
+
+        intent = null;
+        carrier = AnyCarrier;
+        return false;
+    }
+
+    /// <summary>Installs or replaces the live intent at <paramref name="key"/>. The map and the index change
+    /// inside the index gate, so a reader that holds that gate finds both or neither; a point lookup reads the
+    /// map with no lock. Every caller holds the apply gate, except the load of the snapshot files at
+    /// construction. <paramref name="carrier"/> is the partition whose log (or snapshot) installed the intent;
+    /// a replacement of an intent the key already holds keeps the carrier of the index entry. Returns true when
+    /// the install resolved the last pending intent of its transaction on its partition (tracked only while the
+    /// commit admission window is on).</summary>
+    private bool InstallLive(string key, PreparedIntent intent, int carrier)
     {
         // Add or replace, counting only an add: the live count is kept beside the map, which has no count of its
         // own. The count is raised before the add and lowered again when the key was already held, so it is
@@ -65,40 +142,355 @@ internal sealed partial class PreparedIntentStore
         // store that holds none, with no hash and no lookup.
         Interlocked.Increment(ref liveCount);
 
-        while (true)
+        lock (orderedKeysGate)
         {
-            if (intents.TryAdd(key, intent))
-                break;
-
-            if (intents.TryGetValue(key, out PreparedIntent? existing) && intents.TryUpdate(key, intent, existing))
+            while (true)
             {
-                Interlocked.Decrement(ref liveCount);
-                break;
+                if (intents.TryAdd(key, intent))
+                    break;
+
+                if (intents.TryGetValue(key, out PreparedIntent? existing) && intents.TryUpdate(key, intent, existing))
+                {
+                    Interlocked.Decrement(ref liveCount);
+                    break;
+                }
             }
+
+            orderedKeys.Add(new LiveKey(key, carrier));
         }
 
-        lock (orderedKeysGate)
-            orderedKeys.Add(key);
-
-        return trackPendingCommits && TrackPendingCommit(key, intent, partitionId);
+        return trackPendingCommits && TrackPendingCommit(key, intent, carrier == AnyCarrier ? UnattributedPartition : carrier);
     }
 
-    /// <summary>Removes the live intent at <paramref name="key"/> from the map and the index; false when the map held
-    /// none. A reader between the two steps finds the key in the index and no intent in the map, and skips it.</summary>
+    /// <summary>Removes the live intent at <paramref name="key"/> from the map and the index; false when the map
+    /// held none. A covered intent of the key then takes the place in the map (see <see cref="coveredIntents"/>).</summary>
     private bool RemoveLive(string key, out PreparedIntent? removed)
     {
-        bool found = intents.TryRemove(key, out removed);
+        bool found;
+
+        lock (orderedKeysGate)
+        {
+            found = intents.TryRemove(key, out removed);
+            orderedKeys.Remove(new LiveKey(key, 0));
+        }
 
         if (found)
             Interlocked.Decrement(ref liveCount);
 
-        lock (orderedKeysGate)
-            orderedKeys.Remove(key);
-
         if (trackPendingCommits)
             TrackPendingCommit(key, null, UnattributedPartition);
 
+        if (Volatile.Read(ref coveredCount) != 0)
+            PromoteCovered(key);
+
         return found;
+    }
+
+    /// <summary>Moves the covered intent of <paramref name="key"/> with the latest commit timestamp into the
+    /// map, which holds no intent for the key. Caller holds the apply gate.</summary>
+    private void PromoteCovered(string key)
+    {
+        if (!coveredIntents.TryGetValue(key, out CoveredIntent[]? covered))
+            return;
+
+        CoveredIntent latest = covered[0];
+
+        for (int i = 1; i < covered.Length; i++)
+        {
+            if (covered[i].Intent.CommitTimestamp.CompareTo(latest.Intent.CommitTimestamp) > 0)
+                latest = covered[i];
+        }
+
+        // The map first, then the table: a lookup by identity that holds no gate finds the intent in one of the
+        // two at every instant.
+        InstallLive(key, latest.Intent, latest.Carrier);
+        RemoveCovered(key, latest.Intent.TransactionId, latest.Intent.Epoch);
+    }
+
+    /// <summary>Puts <paramref name="intent"/> in the map at a key that holds an intent, with
+    /// <paramref name="carrier"/>, in one step: a point lookup finds the old intent or the new one and never an
+    /// empty key. <paramref name="trackedPartition"/> is the partition a pending intent is counted under in the
+    /// pending-commit index. Caller holds the apply gate.</summary>
+    private void ReplaceVisible(string key, PreparedIntent intent, int carrier, int trackedPartition)
+    {
+        lock (orderedKeysGate)
+        {
+            intents[key] = intent;
+            orderedKeys.Remove(new LiveKey(key, 0));
+            orderedKeys.Add(new LiveKey(key, carrier));
+        }
+
+        if (trackPendingCommits)
+            TrackPendingCommit(key, intent, trackedPartition);
+    }
+
+    // ── covered intents: a second live intent of one key ────────────────────────────
+    //
+    // The map holds one intent for each key, the one the node shows to reads, scans and the recovery sweep. A
+    // prepare that no intent of its own log refuses, at a key where the map holds an intent of another log,
+    // gives the key two live intents. Each is live for its own log: the settle of its transaction finds it, and
+    // the bundled commit gate of its log finds it. The one with the later commit timestamp is in the map, and
+    // the other is covered: it is in this table, where only a lookup by transaction identity or by log reaches
+    // it. When the intent in the map settles first, the covered intent with the latest commit timestamp takes
+    // its place, so the map always shows the latest live intent of the key, and the recovery sweep, which walks
+    // the map, finds an intent whose own settle never arrives.
+    //
+    // The state exists only on a node that applies the two logs of a moved key out of step, for the time between
+    // one log's prepare and its settle. Written under the apply gate as a new array for each change, read with no
+    // lock. The count lets every path that finds nothing covered skip the table.
+
+    private readonly record struct CoveredIntent(PreparedIntent Intent, int Carrier);
+
+    private readonly ConcurrentDictionary<string, CoveredIntent[]> coveredIntents = new(StringComparer.Ordinal);
+
+    private int coveredCount;
+
+    /// <summary>Covered intents across every key (observability / tests).</summary>
+    internal int CoveredIntentCount => Volatile.Read(ref coveredCount);
+
+    private bool TryFindCovered(string key, HLCTimestamp transactionId, long epoch, out CoveredIntent found)
+    {
+        if (coveredIntents.TryGetValue(key, out CoveredIntent[]? covered))
+        {
+            foreach (CoveredIntent candidate in covered)
+            {
+                if (candidate.Intent.TransactionId == transactionId && candidate.Intent.Epoch == epoch)
+                {
+                    found = candidate;
+                    return true;
+                }
+            }
+        }
+
+        found = default;
+        return false;
+    }
+
+    private bool TryFindCoveredHolder(string key, int partitionId, out CoveredIntent found)
+    {
+        if (coveredIntents.TryGetValue(key, out CoveredIntent[]? covered))
+        {
+            foreach (CoveredIntent candidate in covered)
+            {
+                if (HoldsAgainst(candidate.Carrier, partitionId))
+                {
+                    found = candidate;
+                    return true;
+                }
+            }
+        }
+
+        found = default;
+        return false;
+    }
+
+    // The key a covered pending intent is counted under in the pending-commit index. That index holds one entry
+    // for each key it is given, and the map's intent has the key itself.
+    private static string CoveredTrackKey(string key, HLCTimestamp transactionId, long epoch) =>
+        string.Create(
+            System.Globalization.CultureInfo.InvariantCulture,
+            $"{key}\0{transactionId.N}:{transactionId.L}:{transactionId.C}:{epoch}");
+
+    /// <summary>Adds a covered intent. Caller holds the apply gate.</summary>
+    private void AddCovered(string key, PreparedIntent intent, int carrier)
+    {
+        CoveredIntent added = new(intent, carrier);
+
+        coveredIntents[key] = coveredIntents.TryGetValue(key, out CoveredIntent[]? current) ? [.. current, added] : [added];
+        Interlocked.Increment(ref coveredCount);
+
+        if (trackPendingCommits)
+            TrackPendingCommit(CoveredTrackKey(key, intent.TransactionId, intent.Epoch), intent, carrier);
+    }
+
+    /// <summary>Replaces the covered intent of <paramref name="replacement"/>'s transaction at
+    /// <paramref name="key"/> and gives it <paramref name="carrier"/>. <paramref name="trackedPartition"/> is the
+    /// partition a pending replacement is counted under in the pending-commit index. Returns true when the
+    /// replacement resolved the last pending intent of the transaction on its partition. Caller holds the apply
+    /// gate.</summary>
+    private bool ReplaceCovered(string key, PreparedIntent replacement, int carrier, int trackedPartition)
+    {
+        if (!coveredIntents.TryGetValue(key, out CoveredIntent[]? current))
+            return false;
+
+        CoveredIntent[] next = [.. current];
+
+        for (int i = 0; i < next.Length; i++)
+        {
+            if (next[i].Intent.TransactionId == replacement.TransactionId && next[i].Intent.Epoch == replacement.Epoch)
+                next[i] = new CoveredIntent(replacement, carrier);
+        }
+
+        coveredIntents[key] = next;
+
+        return trackPendingCommits
+            && TrackPendingCommit(CoveredTrackKey(key, replacement.TransactionId, replacement.Epoch), replacement, trackedPartition);
+    }
+
+    /// <summary>Removes the covered intent of the given transaction at <paramref name="key"/>; false when the
+    /// table held none. Caller holds the apply gate.</summary>
+    private bool RemoveCovered(string key, HLCTimestamp transactionId, long epoch)
+    {
+        if (!coveredIntents.TryGetValue(key, out CoveredIntent[]? current))
+            return false;
+
+        int index = -1;
+
+        for (int i = 0; i < current.Length; i++)
+        {
+            if (current[i].Intent.TransactionId == transactionId && current[i].Intent.Epoch == epoch)
+            {
+                index = i;
+                break;
+            }
+        }
+
+        if (index < 0)
+            return false;
+
+        if (current.Length == 1)
+            coveredIntents.TryRemove(key, out _);
+        else
+        {
+            CoveredIntent[] next = new CoveredIntent[current.Length - 1];
+            Array.Copy(current, 0, next, 0, index);
+            Array.Copy(current, index + 1, next, index, current.Length - index - 1);
+            coveredIntents[key] = next;
+        }
+
+        Interlocked.Decrement(ref coveredCount);
+
+        if (trackPendingCommits)
+            TrackPendingCommit(CoveredTrackKey(key, transactionId, epoch), null, UnattributedPartition);
+
+        return true;
+    }
+
+    /// <summary>Installs an intent that no live intent of its key refused. With no intent in the map it goes
+    /// there. Otherwise the map holds an intent of another log, and the two are ordered by commit timestamp: the
+    /// later one is the write the key's partition has now, and the earlier one is history of a key that left its
+    /// partition. Returns what <see cref="InstallLive"/> returns. Caller holds the apply gate.</summary>
+    private bool InstallNew(string key, PreparedIntent intent, int carrier, PreparedIntent? visible)
+    {
+        if (visible is null)
+            return InstallLive(key, intent, carrier);
+
+        if (intent.CommitTimestamp.CompareTo(visible.CommitTimestamp) > 0)
+        {
+            // The table first, then the map: a lookup by identity that holds no gate finds the older intent in
+            // one of the two at every instant.
+            AddCovered(key, visible, CarrierOfVisible(key));
+            ReplaceVisible(key, intent, carrier, carrier);
+        }
+        else
+            AddCovered(key, intent, carrier);
+
+        DurableTransactionMetrics.CoveredIntentInstalls.Add(1);
+        return false;
+    }
+
+    /// <summary>
+    /// What a command of <paramref name="partitionId"/>'s log acts on at its key: the live intent of the command's
+    /// own transaction, in the map or covered; with none, the intent of another transaction that holds the key
+    /// against the log (see <see cref="HoldsAgainst"/>); otherwise nothing. An intent that another log carried
+    /// is nothing to the command: a prepare installs beside it, and a settle folds as one of an absent intent.
+    /// <paramref name="carrier"/> is the carrier of the answer. It is read from the index only when the map holds
+    /// an intent that a prepare repeats or that belongs to another transaction, never for the settle of the
+    /// intent the map holds. Caller holds the apply gate.
+    /// </summary>
+    private PreparedIntent? TargetOf(PreparedIntentCommand command, string key, int partitionId, PreparedIntent? visible, out bool covered, out int carrier)
+    {
+        covered = false;
+        carrier = partitionId;
+
+        HLCTimestamp transactionId;
+        long epoch;
+        bool isPrepare = false;
+
+        switch (command)
+        {
+            case PrepareIntentCommand prepare:
+                transactionId = prepare.Intent.TransactionId;
+                epoch = prepare.Intent.Epoch;
+                isPrepare = true;
+                break;
+
+            case ResolveIntentCommand resolve:
+                transactionId = resolve.TransactionId;
+                epoch = resolve.Epoch;
+                break;
+
+            case RemoveIntentCommand remove:
+                transactionId = remove.TransactionId;
+                epoch = remove.Epoch;
+                break;
+
+            default:
+                return visible;
+        }
+
+        if (visible is not null && visible.TransactionId == transactionId && visible.Epoch == epoch)
+        {
+            if (isPrepare)
+                carrier = CarrierOfVisible(key);
+
+            return visible;
+        }
+
+        bool anyCovered = Volatile.Read(ref coveredCount) != 0;
+
+        if (anyCovered && TryFindCovered(key, transactionId, epoch, out CoveredIntent own))
+        {
+            covered = true;
+            carrier = own.Carrier;
+            return own.Intent;
+        }
+
+        if (visible is not null)
+        {
+            int visibleCarrier = CarrierOfVisible(key);
+
+            if (HoldsAgainst(visibleCarrier, partitionId))
+            {
+                carrier = visibleCarrier;
+                return visible;
+            }
+        }
+
+        if (anyCovered && TryFindCoveredHolder(key, partitionId, out CoveredIntent holder))
+        {
+            covered = true;
+            carrier = holder.Carrier;
+            return holder.Intent;
+        }
+
+        return null;
+    }
+
+    /// <summary>The live intent of a transaction other than the given one that holds <paramref name="key"/>
+    /// against <paramref name="partitionId"/>'s log and is not aborted, in the map or covered; null when there is
+    /// none. The carrier is read from the index only when the map holds an intent of another transaction at the
+    /// key. Caller holds the apply gate.</summary>
+    private PreparedIntent? FindCompetitorAgainst(string key, int partitionId, HLCTimestamp transactionId, long epoch)
+    {
+        if (intents.TryGetValue(key, out PreparedIntent? visible)
+            && (visible.TransactionId != transactionId || visible.Epoch != epoch)
+            && visible.Resolution != PreparedIntentResolution.Aborted
+            && HoldsAgainst(CarrierOfVisible(key), partitionId))
+            return visible;
+
+        if (Volatile.Read(ref coveredCount) == 0 || !coveredIntents.TryGetValue(key, out CoveredIntent[]? covered))
+            return null;
+
+        foreach (CoveredIntent candidate in covered)
+        {
+            if ((candidate.Intent.TransactionId != transactionId || candidate.Intent.Epoch != epoch)
+                && candidate.Intent.Resolution != PreparedIntentResolution.Aborted
+                && HoldsAgainst(candidate.Carrier, partitionId))
+                return candidate.Intent;
+        }
+
+        return null;
     }
 
     // ── pending commit timestamps, per partition ────────────────────────────────────
@@ -136,11 +528,6 @@ internal sealed partial class PreparedIntentStore
 
     // The pending intent each key is counted under, for the per-transaction count.
     private readonly Dictionary<string, (HLCTimestamp TransactionId, long Epoch)> pendingTransactionByKey = new(StringComparer.Ordinal);
-
-    // The partition of each intent the on-disk snapshots loaded, kept from construction until the commit admission
-    // window is configured, which runs after the load.
-    // A sharded map: one dictionary of the intents of a restart under load is an array of megabytes.
-    private ShardedConcurrentMap<string, int, OrdinalShardHasher>? loadedIntentPartitions;
 
     // Moves the key's entry in the index from its previous pending intent (if any) to the new one (if pending).
     // Returns true when that took the previous intent's transaction to zero pending intents on its partition.
@@ -197,16 +584,14 @@ internal sealed partial class PreparedIntentStore
 
     /// <summary>
     /// Turns the per-partition index of pending commit timestamps on or off. On, it is rebuilt from the live
-    /// intents: those the on-disk snapshots loaded are counted under the partition of the file they came from, any
-    /// other under the partition the key routes to. Called once at manager construction, before any apply.
+    /// intents: each is counted under its carrier, which for an intent that the on-disk snapshots loaded is the
+    /// partition of the file it came from, and an intent with no single carrier under the partition the key
+    /// routes to. Called once at manager construction, before any apply.
     /// </summary>
     public void ConfigureCommitAdmission(bool enabled)
     {
         lock (applyGate)
         {
-            ShardedConcurrentMap<string, int, OrdinalShardHasher>? loaded = loadedIntentPartitions;
-            loadedIntentPartitions = null;
-
             lock (pendingCommitsGate)
             {
                 pendingCommitByKey.Clear();
@@ -219,16 +604,30 @@ internal sealed partial class PreparedIntentStore
             if (!enabled)
                 return;
 
-            foreach (KeyValuePair<string, PreparedIntent> entry in intents)
+            // The index names the carrier of each intent: the partition of the file that loaded it.
+            lock (orderedKeysGate)
             {
-                if (!entry.Value.IsPending)
-                    continue;
+                foreach (LiveKey entry in orderedKeys)
+                {
+                    if (!intents.TryGetValue(entry.Key, out PreparedIntent? intent) || !intent.IsPending)
+                        continue;
 
-                int partitionId = loaded is not null && loaded.TryGetValue(entry.Key, out int filePartition)
-                    ? filePartition
-                    : resolvePartition is { } resolver && TryResolvePartition(resolver, entry.Key, out int routed) ? routed : UnattributedPartition;
+                    int partitionId = entry.Carrier != AnyCarrier && entry.Carrier != UnattributedPartition
+                        ? entry.Carrier
+                        : resolvePartition is { } resolver && TryResolvePartition(resolver, entry.Key, out int routed) ? routed : UnattributedPartition;
 
-                TrackPendingCommit(entry.Key, entry.Value, partitionId);
+                    TrackPendingCommit(entry.Key, intent, partitionId);
+                }
+            }
+
+            // A covered intent is counted under the partition whose log carried it.
+            foreach (KeyValuePair<string, CoveredIntent[]> entry in coveredIntents)
+            {
+                foreach (CoveredIntent covered in entry.Value)
+                {
+                    if (covered.Intent.IsPending && covered.Carrier != AnyCarrier)
+                        TrackPendingCommit(CoveredTrackKey(entry.Key, covered.Intent.TransactionId, covered.Intent.Epoch), covered.Intent, covered.Carrier);
+                }
             }
         }
     }
@@ -1183,7 +1582,11 @@ internal sealed partial class PreparedIntentStore
 
         lock (applyGate)
         {
-            intents.TryGetValue(key, out PreparedIntent? existing);
+            intents.TryGetValue(key, out PreparedIntent? visible);
+
+            // The intent the command acts on: the one of its own transaction, or, for a prepare, the one that
+            // holds the key against this log. An intent that another log carried is neither (see TargetOf).
+            PreparedIntent? existing = TargetOf(command, key, partitionId, visible, out bool existingCovered, out int existingCarrier);
 
             // ── Fully reflected history: nothing to install ──
             // The installed intent set is exact for entries at or below the fully reflected position (the
@@ -1279,16 +1682,48 @@ internal sealed partial class PreparedIntentStore
             {
                 if (result.Intent is null)
                 {
-                    RemoveLive(key, out _);
+                    // The state machine removes only the intent it was given.
+                    if (existingCovered)
+                        RemoveCovered(key, existing!.TransactionId, existing.Epoch);
+                    else
+                        RemoveLive(key, out _);
+
                     if (existing is not null)
                         Interlocked.Add(ref totalBytes, -IntentBytes(existing));
                 }
+                else if (existing is null)
+                {
+                    transactionDrained = InstallNew(key, result.Intent, partitionId, visible);
+                    ObserveInstalled(result.Intent);
+                    Interlocked.Add(ref totalBytes, IntentBytes(result.Intent));
+                }
                 else
                 {
-                    transactionDrained = InstallLive(key, result.Intent, partitionId);
+                    // A transition of the intent in its place. It leaves the intent resolved, so the carrier
+                    // stays as it is and the pending-commit index only drops the entry.
+                    transactionDrained = existingCovered
+                        ? ReplaceCovered(key, result.Intent, existingCarrier, existingCarrier)
+                        : InstallLive(key, result.Intent, existingCarrier);
+
                     ObserveInstalled(result.Intent);
-                    Interlocked.Add(ref totalBytes, IntentBytes(result.Intent) - (existing is null ? 0 : IntentBytes(existing)));
+                    Interlocked.Add(ref totalBytes, IntentBytes(result.Intent) - IntentBytes(existing));
                 }
+
+                StampDirty(key);
+            }
+            else if (command is PrepareIntentCommand
+                     && existing is not null
+                     && result.Outcome == TransactionApplyOutcome.IdempotentNoop
+                     && !HoldsAgainst(existingCarrier, partitionId))
+            {
+                // A second log delivered the prepare of a live intent: a range move handed the unsettled intent
+                // to its destination. Every replica of the destination holds it from this entry on, so it holds
+                // the key against the destination's log too. A pending intent is counted from here on under
+                // this log, through which its settle arrives.
+                if (existingCovered)
+                    ReplaceCovered(key, existing, AnyCarrier, partitionId);
+                else
+                    ReplaceVisible(key, existing, AnyCarrier, partitionId);
 
                 StampDirty(key);
             }
@@ -1299,6 +1734,18 @@ internal sealed partial class PreparedIntentStore
             // (already settled and garbage-collected, decision replaying) has no mutation left to record.
             if (existing is not null)
             {
+                // A committing settle that finds the key held by another transaction of this log. Its own
+                // transaction is decided, and its intent is not on this node: an earlier copy of the settle
+                // removed it, or its prepare is in another partition's log that this node has not applied yet.
+                // The identity is remembered, as for a settle of an absent intent, so that prepare installs
+                // nothing when it arrives. An aborting settle is not remembered here: it follows a prepare that
+                // this log refused over the holder, and the same attempt can be prepared again.
+                if (result.Outcome == TransactionApplyOutcome.Rejected
+                    && command is ResolveIntentCommand { Commit: true } decided
+                    && decided.CommitTimestamp != HLCTimestamp.Zero
+                    && (existing.TransactionId != decided.TransactionId || existing.Epoch != decided.Epoch))
+                    RecordSettledIdentity(decided.TransactionId, decided.Epoch, decided.Key, decided.CommitTimestamp, partitionId, overwrite: true);
+
                 bool committedNow = command is ResolveIntentCommand { Commit: true }
                     && result.Outcome is TransactionApplyOutcome.Applied or TransactionApplyOutcome.IdempotentNoop;
                 bool removedCommitted = command is RemoveIntentCommand
@@ -1491,14 +1938,19 @@ internal sealed partial class PreparedIntentStore
         return intents.TryGetValue(key, out PreparedIntent? intent) ? intent : null;
     }
 
-    /// <summary>The intent at <paramref name="key"/> only when it belongs to the given transaction attempt.
-    /// Lock-free for the same reason as <see cref="Get"/>.</summary>
-    public PreparedIntent? GetByIdentity(HLCTimestamp transactionId, long epoch, string key) =>
-        Get(key) is { } intent
-        && intent.TransactionId == transactionId
-        && intent.Epoch == epoch
-            ? intent
+    /// <summary>The live intent of the given transaction attempt at <paramref name="key"/>: the one
+    /// <see cref="Get"/> answers when it belongs to the attempt, or a covered one (see
+    /// <see cref="coveredIntents"/>). Lock-free for the same reason as <see cref="Get"/>; a store with nothing
+    /// covered pays one read of a count for the second half.</summary>
+    public PreparedIntent? GetByIdentity(HLCTimestamp transactionId, long epoch, string key)
+    {
+        if (Get(key) is { } intent && intent.TransactionId == transactionId && intent.Epoch == epoch)
+            return intent;
+
+        return Volatile.Read(ref coveredCount) != 0 && TryFindCovered(key, transactionId, epoch, out CoveredIntent covered)
+            ? covered.Intent
             : null;
+    }
 
     /// <summary>Every intent currently held on this partition, as one copy that is atomic across keys: the copy
     /// is taken under the apply gate, which every writer of the map holds. A caller that runs on a timer uses

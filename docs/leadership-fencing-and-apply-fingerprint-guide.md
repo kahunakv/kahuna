@@ -407,6 +407,18 @@ A divergence that indicts the local node is confirmed by a second comparison and
   Recovery time depends on checkpoint, export, staging, installation and quorum availability; there
   is no subsecond operational guarantee. See the [snapshot guide](snapshot-and-raft-recovery-guide.md).
 
+The apply path contains a partition without a comparison when a commit names a value that the node
+cannot install. A by-reference materialization record, or a materializing resolve, that finds no
+prepared intent of its transaction is checked against the node's own state: a queued write of the key,
+the committed-head memory, and then the durable row, which is read off the apply path. A record is
+checked by revision and a resolve by commit timestamp. A second copy of a settlement passes the check,
+because the first copy installed the value. When nothing reaches the commit, the replica holds no
+source for a committed value: it counts `kahuna.kv.materialization_intent_missing`, logs the
+transaction, the key and the log entry at error level, and gates the partition as above. A replica
+whose apply refused a prepare that its peers installed is found this way at the settlement of that
+transaction. A key that the partition no longer owns is not counted. An entry that an installed
+snapshot already reflects is counted and does not gate.
+
 The split's pre-copy comparison (below) reports through the same path but does not contain: it runs
 on the meta-partition leader, not on the diverged node.
 
@@ -473,6 +485,7 @@ Completion of committed durable entry #4917 on partition 2 (PreparedIntent) did 
 | `kahuna.keyvalues.apply_fingerprint_inconclusive` | counter | Leader-change comparisons that could not compare every peer inside the retry window |
 | `kahuna.keyvalues.apply_divergence_contained{action}` | counter | Containment actions on this node: `gated`, `transferred`, `stepped_down`, `relinquish_failed` |
 | `kahuna.keyvalues.apply_divergence_repaired` | counter | Gated partitions whose projection a whole-partition install replaced |
+| `kahuna.kv.materialization_intent_missing` | counter | Committed values with no source at apply: a by-reference record or a materializing resolve found no prepared intent, and the node's state is below the commit |
 | `kahuna.transactions.recordless_intents_stale_detected` | counter | Record-less holds a majority of the replica set had already settled (transaction lifecycle guide, §6.7) |
 | `kahuna.kv.staged_chain_breaks` | counter | Transactions observed to have lost a confirmed staging: a leader change under the transaction, or a read answered by a node that does not lead |
 | `kahuna.kv.staged_chain_break_aborts` | counter | Commits refused because the transaction lost a confirmed staging |

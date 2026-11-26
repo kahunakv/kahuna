@@ -257,6 +257,9 @@ public sealed class TestOnePhaseOverCommittedPredecessorCluster : BaseCluster
 
         public void NoteUnresolvedOnReplay(int partitionId, long logIndex, HLCTimestamp transactionId, long epoch, string key, HLCTimestamp commitTimestamp) =>
             inner.NoteUnresolvedOnReplay(partitionId, logIndex, transactionId, epoch, key, commitTimestamp);
+
+        public void NoteUnresolvedOnApply(int partitionId, long logIndex, HLCTimestamp transactionId, long epoch, string key, HLCTimestamp commitTimestamp) =>
+            inner.NoteUnresolvedOnApply(partitionId, logIndex, transactionId, epoch, key, commitTimestamp);
     }
 
     /// <summary>

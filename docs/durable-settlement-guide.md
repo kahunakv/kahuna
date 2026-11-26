@@ -62,8 +62,14 @@ retained for restart replay; it is also included in the durable intent snapshot.
 Duplicate settlement is idempotent, and it is routine with materialization at settlement apply: a
 one-phase bundle that writes a key of a committed and unsettled transaction carries that transaction's
 settlement (see the [transaction lifecycle guide](transaction-lifecycle-guide.md), section 6.3.1), and the
-transaction's own resolution proposes it too. Live apply does not install an already removed intent again;
-restart replay can reconstruct from the retained settled intent while its row is not yet durable.
+transaction's own resolution proposes it too. Live apply does not install an already removed intent again.
+It checks that the value is on the node: a queued write of the key or a committed head at or after the
+commit timestamp of the resolve, or else the durable row, which is read off the apply path. A resolve that
+fails the check names a committed value that this replica never held, because its apply refused the prepare
+that the peers installed. The replica counts `kahuna.kv.materialization_intent_missing` and gates the
+partition for a re-seed (see the
+[leadership fencing guide](leadership-fencing-and-apply-fingerprint-guide.md#containment)).
+Restart replay can reconstruct from the retained settled intent while its row is not yet durable.
 A crash after the decision but before settlement leaves committed prepared intents for the recovery
 sweep to settle and install. Whole-partition snapshot seeding also carries the intent state needed for
 a subsequent materializing settlement.

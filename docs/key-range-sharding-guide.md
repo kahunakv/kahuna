@@ -554,6 +554,62 @@ the source's older entries, and judging those entries against the seeds refused 
 vetoes that found their commits already recorded (`kahuna.durable_tx.stale_base_vetoes_late` with no
 loss behind it).
 
+**A prepare is refused only by an intent that the same log carried.** The intent store is one map for
+the node, and each live intent has a carrier: the partition whose log delivered its prepare. A prepare of
+a partition's log is refused as held by another transaction only when an intent with that carrier holds
+the key, and a bundled commit's read dependency is refused by a foreign intent under the same condition.
+The verdict on an entry of a log is then a function of that log. A move settles every intent of the
+moving range on the source before the cutover, or hands it to the destination through the destination's
+log, so a replica that applies the two logs as they were written never holds an intent of one log when
+the other log prepares the key. A node that catches up both logs applies them in another order: the
+source's prepare of a transaction that prepared, committed and settled before the cutover, then the
+destination's bundle of the key's next transaction, and the source's settle after that. With the carrier
+ignored, the replayed source intent refused the destination's prepare, the bundled commit gate refused
+the bundle on that node alone, and the node stayed one revision behind on every key of the bundle. The
+opposite order also differed from the peers: an intent of the destination refused the replayed source
+prepare of the key, the gate refused the source bundle on that node alone, and the source slice of the
+node never recorded the head of that transaction for the key.
+
+A key can then hold two live intents on such a node, one for each log. The one with the later commit
+timestamp is in the map, where reads, scans and the recovery sweep find it. The other is covered: it is
+found by its transaction identity and by its log only. When the intent in the map settles first, the
+covered intent takes its place, so the map always shows the latest live intent of the key. The settle of
+a transaction finds its own intent in either place, and it records the committed head and the settled
+identity in the slice of the log that delivered the settle, as on every other replica. A settle that
+finds no intent of its transaction, and no intent that holds the key against its own log, is a settle of
+an absent intent, and it records the settled identity. A committing settle records the settled identity
+when another transaction of its own log holds the key too. An aborting settle does not: it follows a
+prepare that the log refused over that holder, and the same attempt can be prepared again. An intent
+that a move handed to the destination has its prepare in both logs and holds the key against both.
+`kahuna.durable_tx.covered_intent_installs` counts the prepares that installed beside an intent of
+another log. It is zero on a node that applies its logs in step.
+
+A checkpoint writes a live intent with its carrier when the carrier is not the partition of the file
+(`foreignCarriedIntents` of the prepared-intent snapshot), so a restart inside the catch-up keeps the
+rule. A build that does not read the field does not load those intents. A whole-partition export carries
+the intents that hold their key against the exported partition. An install replaces the intents of the
+partition's keys that hold against the partition's log, and it keeps an intent of one of those keys that
+another log carried: that intent is the state of the other log, and its settle arrives through that log.
+
+The rule depends on the settle barrier. An intent that is prepared on the source after the hand-off
+gather and is not handed to the destination does not refuse the destination's prepares at apply. The
+destination's leader still finds it as a foreign holder before it proposes a prepare of the key. A node
+on a build without the rule refuses a prepare that a node with the rule admits only in the catch-up
+order, where the older build already differs from its peers.
+
+**A replayed prepare is not judged against its own outcome.** A head that only another slice remembers
+is used when the slice of the prepare's own log holds nothing for the key. The apply-time fence does not
+use such a head when the node routes the key to a partition other than the one whose log carries the
+prepare: the prepare is then history of a key that left the partition, and the head is from a later
+time. A node that cannot route the key keeps the head, which preserves the protection of a range that
+moved before the hand-off carried heads. On such a node the fence still does not judge the prepare
+against a head of another slice that has the prepare's own revision and commit timestamp. That head is
+the transaction's own commit, which the node holds when it applied the destination's seed of the commit
+before the source's prepare. A head of the prepare's own slice is always judged. Both cases are counted
+by `kahuna.durable_tx.staged_base_fence_replayed_prepares` with the reason `own_commit` or
+`foreign_slice`. Before, each one fired a veto that found the commit recorded and counted an
+acknowledged write as lost.
+
 ### Node-global storage and orphan retention
 
 - **The persistence backend is node-global, keyed by the full key string** — *not* physically

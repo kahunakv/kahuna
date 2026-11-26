@@ -477,6 +477,8 @@ internal sealed class KeyValuesManagerBuilder
             keyOwner: key => locator.LocateRange(key).PartitionId,
             // A record verified missing gates the partition at that entry: candidacy withheld, MustRetry, re-seed.
             materializationMissing: divergenceContainment.ContainMissingMaterialization,
+            // The same gate for a commit that settles with a materializing resolve and finds no intent here.
+            resolvedValueMissing: divergenceContainment.ContainMissingResolvedValue,
             // A committed write made outside a transaction is reported to watches after its apply.
             watchBroker: runtime.WatchBroker);
 

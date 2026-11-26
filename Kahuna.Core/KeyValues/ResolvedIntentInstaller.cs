@@ -39,4 +39,7 @@ internal sealed class ResolvedIntentInstaller : IResolvedIntentInstaller
 
     public void NoteUnresolvedOnReplay(int partitionId, long logIndex, HLCTimestamp transactionId, long epoch, string key, HLCTimestamp commitTimestamp) =>
         restorer.NoteUnresolvedMaterializingResolve(partitionId, logIndex, transactionId, epoch, key, commitTimestamp);
+
+    public void NoteUnresolvedOnApply(int partitionId, long logIndex, HLCTimestamp transactionId, long epoch, string key, HLCTimestamp commitTimestamp) =>
+        replicator.NoteUnresolvedMaterializingResolve(partitionId, logIndex, transactionId, epoch, key, commitTimestamp);
 }

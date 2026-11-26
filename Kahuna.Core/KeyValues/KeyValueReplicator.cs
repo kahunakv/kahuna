@@ -84,6 +84,10 @@ internal sealed class KeyValueReplicator
     // Null (bare unit-test construction) leaves the miss to its counter and its error line.
     private readonly Action<int, long, string, long>? materializationMissing;
 
+    // The same report for a materializing resolve, which names its commit by timestamp and carries no revision
+    // (partition, log entry, key, commit timestamp). Null leaves the miss to its counter and its error line.
+    private readonly Action<int, long, string, HLCTimestamp>? resolvedValueMissing;
+
     // The node's open watches. A committed write made outside a transaction is published here after its apply;
     // a durable transaction's writes are published by the prepared-intent store when they settle. Null (bare
     // unit-test construction) publishes nothing.
@@ -110,8 +114,10 @@ internal sealed class KeyValueReplicator
         Transactions.PreparedIntentStore? preparedIntentStore = null,
         Func<string, int>? keyOwner = null,
         Action<int, long, string, long>? materializationMissing = null,
-        KeyValueWatchBroker? watchBroker = null)
+        KeyValueWatchBroker? watchBroker = null,
+        Action<int, long, string, HLCTimestamp>? resolvedValueMissing = null)
     {
+        this.resolvedValueMissing       = resolvedValueMissing;
         this.watchBroker                = watchBroker;
         this.preparedIntentStore        = preparedIntentStore;
         this.keyOwner                   = keyOwner;
@@ -873,6 +879,123 @@ internal sealed class KeyValueReplicator
             partitionId, logIndex, mutation,
             witnessBelowHead: true,
             witnessCollision: intent.State != KeyValueState.Deleted);
+    }
+
+    /// <summary>
+    /// A live materializing resolve found no intent of its transaction to install from (see
+    /// <see cref="Transactions.IResolvedIntentInstaller.NoteUnresolvedOnApply"/>). The row's last-modified is the
+    /// commit timestamp of the commit that wrote it, and a key's commits are ordered by commit timestamp, so a
+    /// write at or after this commit's timestamp holds its value or a later one.
+    ///
+    /// <para>The routine case is a second copy of a settle whose first copy installed the value. The node's
+    /// memory dismisses it with no I/O (see <see cref="ResolvedValueInMemory"/>). Anything else is settled off
+    /// the apply path from the persisted row.</para>
+    ///
+    /// <para>This resolve is the one entry at which a node can know that it holds no source for the commit. A
+    /// node whose apply alone refused the prepare of a one-phase bundle refuses the bundle too and installs
+    /// nothing at the settle: with no report its row stays one commit behind, and it can be elected.</para>
+    /// </summary>
+    internal void NoteUnresolvedMaterializingResolve(
+        int partitionId, long logIndex, HLCTimestamp transactionId, long epoch, string key, HLCTimestamp commitTimestamp)
+    {
+        if (commitTimestamp == HLCTimestamp.Zero)
+            return;
+
+        if (ResolvedValueInMemory(unflushedWrites, preparedIntentStore, partitionId, logIndex, key, commitTimestamp))
+            return;
+
+        VerifyResolvedValueMiss(partitionId, logIndex, transactionId, epoch, key, commitTimestamp);
+    }
+
+    /// <summary>
+    /// Settles from the persisted row a materializing resolve with no intent that the node's memory could not
+    /// dismiss. A row at or after the commit means the value is durable here. A row before it, or no row, means
+    /// this replica is missing a committed value. A method of its own: the closure of the read is then
+    /// allocated for this path only and not for each second copy of a settle that the memory dismisses.
+    /// </summary>
+    private void VerifyResolvedValueMiss(
+        int partitionId, long logIndex, HLCTimestamp transactionId, long epoch, string key, HLCTimestamp commitTimestamp)
+    {
+        Func<int, string, Task<ReadOnlyKeyValueEntry?>>? hydrate = hydrateFromBackend;
+
+        if (hydrate is null)
+        {
+            ReportResolvedValueMiss(partitionId, logIndex, transactionId, epoch, key, commitTimestamp);
+            return;
+        }
+
+        // Fire-and-forget on purpose, as for a by-reference miss: the caller is the ordered apply path.
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                ReadOnlyKeyValueEntry? row = await hydrate(partitionId, key).ConfigureAwait(false);
+                if (row is not null && row.LastModified >= commitTimestamp)
+                    return;
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex,
+                    "Could not verify the materializing resolve with no intent for key {Key}; reporting its value as missing",
+                    key);
+            }
+
+            ReportResolvedValueMiss(partitionId, logIndex, transactionId, epoch, key, commitTimestamp);
+        });
+    }
+
+    /// <summary>
+    /// Whether the node's memory proves, with no I/O, that the value of the commit at
+    /// <paramref name="commitTimestamp"/> or of a later commit of <paramref name="key"/> is on this node. Two
+    /// proofs: the unflushed overlay holds a write of the key at or after the commit, or the committed-head
+    /// memory holds a head at or after it. The head proves the row only for an entry this node reached through
+    /// its own apply: at an entry that an installed snapshot already reflects, the head is the installer's and
+    /// says nothing of the rows here, as for a by-reference record (see <see cref="MaterializationRedundant"/>).
+    /// False proves nothing: the flush removes the overlay entry, and the head memory is pruned.
+    /// </summary>
+    internal static bool ResolvedValueInMemory(
+        UnflushedKeyValueWritesIndex? overlay, Transactions.PreparedIntentStore? intents,
+        int partitionId, long logIndex, string key, HLCTimestamp commitTimestamp)
+    {
+        if (overlay is not null
+            && overlay.TryGet(key, out UnflushedKeyValueWrite pending)
+            && pending.LastModified >= commitTimestamp)
+            return true;
+
+        return intents is not null
+            && !intents.IsHistoricalApply(partitionId, logIndex)
+            && intents.HasCommittedHeadAtOrAfter(partitionId, key, commitTimestamp);
+    }
+
+    /// <summary>
+    /// The verdict on a materializing resolve with no intent that nothing could dismiss: the committed value is
+    /// missing on this node. Counted and logged with the full identity, and handed to the containment, with the
+    /// two exceptions of a by-reference miss: a key the partition no longer owns, and an entry that an installed
+    /// snapshot already reflects.
+    /// </summary>
+    private void ReportResolvedValueMiss(
+        int partitionId, long logIndex, HLCTimestamp transactionId, long epoch, string key, HLCTimestamp commitTimestamp)
+    {
+        if (IsForeign(partitionId, key))
+        {
+            if (logger.IsEnabled(LogLevel.Debug))
+                logger.LogDebug(
+                    "Materializing resolve for key {Key} (transaction {TransactionId} epoch {Epoch}, committed at {CommitTimestamp}) has no source on partition {PartitionId} (log entry {LogIndex}); the key routes to another partition",
+                    key, transactionId, epoch, commitTimestamp, partitionId, logIndex);
+            return;
+        }
+
+        Transactions.DurableTransactionMetrics.MaterializationIntentMissing.Add(1);
+        logger.LogError(
+            "Materializing resolve for key {Key} found no prepared intent for transaction {TransactionId} epoch {Epoch}, and this node's durable state is below its commit at {CommitTimestamp} (log entry {LogIndex})",
+            key, transactionId, epoch, commitTimestamp, logIndex);
+
+        // Judged here and not at the apply: an install can land while the read of the row is in flight, and the
+        // installed projection then answers for this entry.
+        if (preparedIntentStore is not null && preparedIntentStore.IsHistoricalApply(partitionId, logIndex))
+            return;
+
+        resolvedValueMissing?.Invoke(partitionId, logIndex, key, commitTimestamp);
     }
 
     /// <summary>Raises the Receipts resolve ceiling over a materializing resolve's entry, after every receipt its

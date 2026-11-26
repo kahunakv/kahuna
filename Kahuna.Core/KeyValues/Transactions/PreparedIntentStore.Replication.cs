@@ -47,7 +47,9 @@ internal sealed partial class PreparedIntentStore
     /// or the snapshot was written after the settle and the source is the settled intent retained until its row
     /// is durable. Absent from all three on a replay, the installer verifies the row is already durable here
     /// (the settle applied before the crash and the row flushed before the snapshot dropped the retained copy)
-    /// and otherwise counts the entry as an unresolved materialization of the restart.
+    /// and otherwise counts the entry as an unresolved materialization of the restart. On a live apply with no
+    /// intent of the transaction, the installer verifies that the value is here and otherwise reports a missing
+    /// committed value (see <see cref="IResolvedIntentInstaller.NoteUnresolvedOnApply"/>).
     /// </summary>
     private bool TryInstallOnResolve(int partitionId, long logIndex, ResolveIntentCommand resolve, bool replay)
     {
@@ -57,10 +59,11 @@ internal sealed partial class PreparedIntentStore
 
         PreparedIntent? source = null;
 
-        if (intents.TryGetValue(resolve.Key, out PreparedIntent? live)
-            && live.TransactionId == resolve.TransactionId
-            && live.Epoch == resolve.Epoch
-            && live.Resolution != PreparedIntentResolution.Aborted)
+        // By the identity of the transaction, in the map or covered: the resolve installs the value of its own
+        // intent whatever other log's intent the key shows.
+        PreparedIntent? live = GetByIdentity(resolve.TransactionId, resolve.Epoch, resolve.Key);
+
+        if (live is not null && live.Resolution != PreparedIntentResolution.Aborted)
             source = live;
         else if (replay && TryGetReplayHistoryIntent(partitionId, resolve.TransactionId, resolve.Epoch, resolve.Key, out PreparedIntent? history))
             source = history;
@@ -69,8 +72,13 @@ internal sealed partial class PreparedIntentStore
 
         if (source is null)
         {
+            // Nothing installs. The installer is told, because the value must then be on this node already: on a
+            // live apply only when the node holds no intent of the transaction at all. The prepare of a
+            // transaction that one node alone refused leaves that node here, with a commit its peers installed.
             if (replay)
                 installer.NoteUnresolvedOnReplay(partitionId, logIndex, resolve.TransactionId, resolve.Epoch, resolve.Key, resolve.CommitTimestamp);
+            else if (live is null)
+                installer.NoteUnresolvedOnApply(partitionId, logIndex, resolve.TransactionId, resolve.Epoch, resolve.Key, resolve.CommitTimestamp);
 
             return false;
         }

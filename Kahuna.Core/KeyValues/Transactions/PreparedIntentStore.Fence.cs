@@ -109,7 +109,8 @@ internal sealed partial class PreparedIntentStore
     private string? EvaluateStagedBaseFence(PreparedIntent intent, int partitionId, out bool revisionCollision, out long headRevision) =>
         JudgeStagedBase(
             intent.Key, intent.TransactionId, intent.HasValidatedBase, intent.BaseRevision, intent.BaseState,
-            intent.NoRevision, intent.Revision, countAbsentHeadAdmission: true, out headRevision, out revisionCollision, sliceOf: partitionId);
+            intent.NoRevision, intent.Revision, countAbsentHeadAdmission: true, out headRevision, out revisionCollision,
+            sliceOf: partitionId, ownCommit: intent.CommitTimestamp);
 
     /// <summary>The ADVISORY fence decision of the replica verdict read (<see cref="EvaluateReplicaFenceVerdicts"/>)
     /// for an applied intent. Judges by key across every ledger slice this node holds — the two-phase
@@ -128,11 +129,13 @@ internal sealed partial class PreparedIntentStore
     /// replica verdict read judges a prepare this node has not applied from the fields the ask carries, against
     /// the same memory and the same rules. With <paramref name="sliceOf"/> the head is read from that partition's
     /// slice when it remembers the key, and from every slice otherwise (see
-    /// <see cref="EvaluateStagedBaseFence"/>). Caller holds <see cref="applyGate"/>.</summary>
+    /// <see cref="EvaluateStagedBaseFence"/>). <paramref name="ownCommit"/> is the commit timestamp of the judged
+    /// write when the caller judges a prepare at its apply, and <see cref="HLCTimestamp.Zero"/> otherwise.
+    /// Caller holds <see cref="applyGate"/>.</summary>
     private string? JudgeStagedBase(
         string key, HLCTimestamp transactionId, bool hasValidatedBase, long baseRevision, KeyValueState baseState,
         bool noRevision, long revision, bool countAbsentHeadAdmission, out long headRevision, out bool revisionCollision,
-        int? sliceOf = null)
+        int? sliceOf = null, HLCTimestamp ownCommit = default)
     {
         headRevision = -1;
         revisionCollision = false;
@@ -148,7 +151,7 @@ internal sealed partial class PreparedIntentStore
         if (hasValidatedBase && (IsOlderThanRetention(transactionId, ledgerWatermark) || transactionId.L < ledgerSizeFloor))
             return $"transaction began before the staged-base fence retention horizon; its validated base for key {key} cannot be verified";
 
-        if (!TryFindHeadFor(sliceOf, key, out CommittedHead head))
+        if (!TryFindHeadFor(sliceOf, key, out CommittedHead head, out bool fromAnotherSlice))
         {
             // The only silent path around the fence: nothing to check is indistinguishable from "no commit
             // ever happened" — count it so a loss investigation can tell proof-of-currency from absence.
@@ -158,6 +161,21 @@ internal sealed partial class PreparedIntentStore
         }
 
         headRevision = head.Revision;
+
+        // A head that only another slice remembers, with the revision and the commit timestamp of the judged
+        // write: it is that write. A commit timestamp is one mint of a coordinator's clock, so one transaction
+        // attempt alone has it. The slice of the prepare's own log never held the key, and the other slice holds
+        // the commit of this prepare: the source's prepare of a moved key on a node that already applied the
+        // destination's seed of that commit. A competitor did not make this head, so there is nothing to
+        // refuse, and a veto here would find the commit and count an acknowledged write as lost (CamusDB
+        // append-split, 2026-11-23: 115 such vetoes on one restarted node, each for an insert that validated an
+        // absent key against the head its own commit had made). A head of the prepare's own slice is always
+        // judged: there the log orders every commit of the key before the prepare that follows it.
+        if (fromAnotherSlice && ownCommit != HLCTimestamp.Zero && !noRevision && head.Revision == revision && head.CommittedAt == ownCommit)
+        {
+            DurableTransactionMetrics.StagedBaseFenceReplayedPrepares.Add(1, new KeyValuePair<string, object?>("reason", "own_commit"));
+            return null;
+        }
 
         if (hasValidatedBase)
         {
@@ -244,17 +262,42 @@ internal sealed partial class PreparedIntentStore
 
     /// <summary>The head the apply-time fence judges a prepare of <paramref name="sliceOf"/>'s log against: the
     /// head that slice remembers for the key, or, when it remembers none (or no slice is named), the highest
-    /// head across every slice (<see cref="TryFindHead"/>). Lock-free, like the probes it serves.</summary>
-    private bool TryFindHeadFor(int? sliceOf, string key, out CommittedHead head)
+    /// head across every slice (<see cref="TryFindHead"/>). Lock-free, like the probes it serves.
+    ///
+    /// <para>A head that only another slice remembers is not used when this node routes the key to a partition
+    /// other than the one whose log carries the prepare. The prepare is then history of a key that left the
+    /// partition, the other slice is the key's present partition, and its head is from a later time than the
+    /// entry. The routing is read only after another slice answered, which a key that never moved does not
+    /// reach. A node that cannot route the key keeps the head: the verdict is advice, and the protection of a
+    /// range moved before the hand-off carried heads depends on it.</para></summary>
+    private bool TryFindHeadFor(int? sliceOf, string key, out CommittedHead head, out bool fromAnotherSlice)
     {
         int shardHash = OrdinalShardHasher.ShardHash(key);
+        fromAnotherSlice = false;
 
-        if (sliceOf is int partitionId
-            && ledgers.TryGetValue(partitionId, out PartitionLedger? slice)
-            && slice.Heads.TryGetValue(key, shardHash, out head))
+        if (sliceOf is not int partitionId)
+            return TryFindHead(key, shardHash, out head);
+
+        if (ledgers.TryGetValue(partitionId, out PartitionLedger? slice) && slice.Heads.TryGetValue(key, shardHash, out head))
             return true;
 
-        return TryFindHead(key, shardHash, out head);
+        if (!TryFindHead(key, shardHash, out head))
+            return false;
+
+        fromAnotherSlice = true;
+
+        if (partitionId != UnattributedPartition
+            && resolvePartition is { } resolver
+            && TryResolvePartition(resolver, key, out int owner)
+            && owner != partitionId)
+        {
+            DurableTransactionMetrics.StagedBaseFenceReplayedPrepares.Add(1, new KeyValuePair<string, object?>("reason", "foreign_slice"));
+            head = default;
+            fromAnotherSlice = false;
+            return false;
+        }
+
+        return true;
     }
 
     /// <summary>Finds a key's committed head across every ledger slice (the highest revision when several
@@ -305,9 +348,11 @@ internal sealed partial class PreparedIntentStore
             {
                 foreach (string bundledKey in commit.BundledPrepareKeys)
                 {
-                    if (!intents.TryGetValue(bundledKey, out PreparedIntent? intent)
-                        || intent.TransactionId != commit.TransactionId
-                        || intent.Epoch != commit.Epoch)
+                    // By the identity of the transaction, in the map or covered: an intent of another log at
+                    // the key did not refuse the bundle's prepare and does not hide its intent from the gate.
+                    PreparedIntent? intent = GetByIdentity(commit.TransactionId, commit.Epoch, bundledKey);
+
+                    if (intent is null)
                         return new(BundledCommitVerdict.PrepareMissing, $"bundled prepare for key {bundledKey} is not held by transaction {commit.TransactionId}");
 
                     if (!commit.ApplyTimeValidation || !IsFenceJudged(intent))
@@ -351,10 +396,11 @@ internal sealed partial class PreparedIntentStore
             {
                 // A foreign intent on a read key is a competitor's write that this transaction's validation
                 // never saw: undecided, it may still commit over the read; committed, it already did. An
-                // aborted holder never materializes and is no objection.
-                if (intents.TryGetValue(read.Key, out PreparedIntent? holder)
-                    && (holder.TransactionId != commit.TransactionId || holder.Epoch != commit.Epoch)
-                    && holder.Resolution != PreparedIntentResolution.Aborted)
+                // aborted holder never materializes and is no objection. Only an intent that holds the key
+                // against this partition's log counts, as for a prepare: an intent that another log carried
+                // is history of a key that moved, and no replica that applies the logs in step holds it here.
+                PreparedIntent? holder = FindCompetitorAgainst(read.Key, partitionId, commit.TransactionId, commit.Epoch);
+                if (holder is not null)
                     return new(BundledCommitVerdict.StaleRead, $"read key {read.Key} is held by a live prepared intent of transaction {holder.TransactionId}");
 
                 if (ledger is null

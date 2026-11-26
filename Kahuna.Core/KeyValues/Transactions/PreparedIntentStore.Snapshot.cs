@@ -111,16 +111,33 @@ internal sealed partial class PreparedIntentStore
                     // a restart replays it on top of the file: a prepare the walk missed installs, a settle
                     // of an intent the walk still wrote settles it, and the head of an intent that settled
                     // before the walk reached it is added below.
+                    //
+                    // Each intent is written with the partition whose log carried it. The walk gives the keys, and
+                    // the intent and its carrier are read as one pair, so an intent that was replaced after the
+                    // walk read its key is not written with the carrier of its successor.
+                    ForeignCarriedIntentMessage? foreign = null;
+
                     foreach (KeyValuePair<string, PreparedIntent> kv in intents)
                     {
-                        PreparedIntent intent = kv.Value;
-
-                        if (resolvePartition(intent.Key) != partitionId)
+                        if (resolvePartition(kv.Key) != partitionId)
                             continue;
 
-                        FillPrepareProto(entry, intent);
-                        output.WriteTag(PreparedIntentSnapshotMessage.IntentsFieldNumber, WireFormat.WireType.LengthDelimited);
-                        output.WriteMessage(entry);
+                        if (TryGetVisible(kv.Key, out PreparedIntent? intent, out int carrier))
+                            WriteSnapshotIntent(output, entry, ref foreign, intent, carrier, partitionId);
+                    }
+
+                    // The covered intents of the partition's keys are live too: each waits for the settle of its
+                    // own log, which a restart replays.
+                    if (Volatile.Read(ref coveredCount) != 0)
+                    {
+                        foreach (KeyValuePair<string, CoveredIntent[]> kv in coveredIntents)
+                        {
+                            if (resolvePartition(kv.Key) != partitionId)
+                                continue;
+
+                            foreach (CoveredIntent covered in kv.Value)
+                                WriteSnapshotIntent(output, entry, ref foreign, covered.Intent, covered.Carrier, partitionId);
+                        }
                     }
 
                     if (settledAwaitingFlushSlice is not null)
@@ -191,11 +208,9 @@ internal sealed partial class PreparedIntentStore
 
                     SnapshotHeader header = ReadSnapshot(
                         file, verify: false,
-                        onIntent: loaded =>
-                        {
-                            MergeLoad(loaded, filePartition);
-                            (loadedIntentPartitions ??= new(IntentMapShards, concurrencyLevel: 1))[loaded.Key] = filePartition;
-                        },
+                        // An intent is carried by the partition of its file unless the file names another.
+                        onIntent: loaded => MergeLoad(loaded, filePartition),
+                        onForeignIntent: MergeLoad,
                         // Retained settled intents reload into their own set — never into the live set, where a
                         // settled intent would hold its key as a phantom. Nothing is queued yet, so no probe
                         // applies here; the partition's restore completion re-checks them (see
@@ -219,7 +234,7 @@ internal sealed partial class PreparedIntentStore
                         ledgerMissingPartitions.Add(filePartition);
                 }
             }
-            catch (InvalidProtocolBufferException ex)
+            catch (Exception ex) when (ex is InvalidProtocolBufferException or InvalidDataException)
             {
                 throw new InvalidDataException($"Corrupt prepared-intent snapshot {path}; refusing to start empty and lose a prepared intent", ex);
             }
@@ -254,7 +269,8 @@ internal sealed partial class PreparedIntentStore
     private static SnapshotHeader ReadSnapshot(
         Stream payload, bool verify,
         Action<PreparedIntent>? onIntent, Action<PreparedIntent>? onSettledAwaitingFlush,
-        Action<string, CommittedHead>? onHead, Action<SettledIdentityEntry>? onSettled)
+        Action<string, CommittedHead>? onHead, Action<SettledIdentityEntry>? onSettled,
+        Action<PreparedIntent, int>? onForeignIntent = null)
     {
         CodedInputStream input = new(payload, leaveOpen: true);
 
@@ -292,6 +308,23 @@ internal sealed partial class PreparedIntentStore
 
                 case PreparedIntentSnapshotMessage.SettledIntentsAwaitingFlushFieldNumber:
                     ReadIntentEntry(input, verify, onSettledAwaitingFlush);
+                    break;
+
+                case PreparedIntentSnapshotMessage.ForeignCarriedIntentsFieldNumber:
+                    if (onForeignIntent is null && !verify)
+                    {
+                        input.SkipLastField();
+                        break;
+                    }
+
+                    ForeignCarriedIntentMessage foreign = new();
+                    input.ReadMessage(foreign);
+
+                    if (foreign.Intent is null)
+                        throw new InvalidDataException("A foreign-carried intent entry of a prepared-intent snapshot has no intent.");
+
+                    PreparedIntent carried = IntentOf(foreign.Intent);
+                    onForeignIntent?.Invoke(carried, foreign.CarrierPartitionId);
                     break;
 
                 case PreparedIntentSnapshotMessage.CommittedHeadsFieldNumber:
@@ -359,6 +392,30 @@ internal sealed partial class PreparedIntentStore
         // The conversion runs in a verify pass too: it is part of what a later pass does with the entry.
         PreparedIntent intent = IntentOf(entry);
         handler?.Invoke(intent);
+    }
+
+    /// <summary>Writes one live intent of a checkpoint file. An intent that the file's own partition carried, or
+    /// that holds its key against every log, is an intent of the file, and a reader gives it the file's partition
+    /// as its carrier. An intent that another partition's log carried is written with that partition.</summary>
+    private static void WriteSnapshotIntent(
+        CodedOutputStream output, PreparedIntentCommandMessage entry, ref ForeignCarriedIntentMessage? foreign,
+        PreparedIntent intent, int carrier, int partitionId)
+    {
+        FillPrepareProto(entry, intent);
+
+        if (HoldsAgainst(carrier, partitionId))
+        {
+            output.WriteTag(PreparedIntentSnapshotMessage.IntentsFieldNumber, WireFormat.WireType.LengthDelimited);
+            output.WriteMessage(entry);
+            return;
+        }
+
+        foreign ??= new ForeignCarriedIntentMessage();
+        foreign.CarrierPartitionId = carrier;
+        foreign.Intent = entry;
+
+        output.WriteTag(PreparedIntentSnapshotMessage.ForeignCarriedIntentsFieldNumber, WireFormat.WireType.LengthDelimited);
+        output.WriteMessage(foreign);
     }
 
     // A per-partition snapshot file is named "{prefix}_p{partitionId}.snapshot".
@@ -501,34 +558,77 @@ internal sealed partial class PreparedIntentStore
                 m.Key,
                 new HLCTimestamp(m.SettledAtNode, m.SettledAtPhysical, m.SettledAtCounter)));
 
-    // Load-time merge across (possibly overlapping) per-partition files: at most one live intent per key. A more
-    // resolved intent for the same identity is authoritative; a different transaction on the same key is a
-    // conflict that keeps the existing intent and is logged rather than silently overwritten.
-    private void MergeLoad(PreparedIntent incoming, int partitionId)
+    // Load-time merge across (possibly overlapping) per-partition files, and the install of a transferred set.
+    // A more resolved intent for the same identity is authoritative. A different transaction on the same key is
+    // a conflict when a live intent holds the key against the incoming intent's carrier: the existing intent
+    // stays and the conflict is logged. An intent that another log carried is no conflict, and the two are
+    // live together as the apply path leaves them (see InstallNew).
+    private void MergeLoad(PreparedIntent incoming, int carrier)
     {
-        if (!intents.TryGetValue(incoming.Key, out PreparedIntent? existing))
+        string key = incoming.Key;
+
+        intents.TryGetValue(key, out PreparedIntent? visible);
+
+        PreparedIntent? same = null;
+        bool sameCovered = false;
+        int sameCarrier = carrier;
+
+        if (visible is not null && visible.TransactionId == incoming.TransactionId && visible.Epoch == incoming.Epoch)
         {
-            InstallLive(incoming.Key, incoming, partitionId);
-            ObserveInstalled(incoming);
-            Interlocked.Add(ref totalBytes, IntentBytes(incoming));
-            StampDirty(incoming.Key);
+            same = visible;
+            sameCarrier = CarrierOfVisible(key);
+        }
+        else if (Volatile.Read(ref coveredCount) != 0 && TryFindCovered(key, incoming.TransactionId, incoming.Epoch, out CoveredIntent ownCovered))
+        {
+            same = ownCovered.Intent;
+            sameCovered = true;
+            sameCarrier = ownCovered.Carrier;
+        }
+
+        if (same is not null)
+        {
+            bool resolved = same.IsPending && incoming.IsResolved;
+
+            // Two sources hold the intent under different carriers: more than one log delivered its prepare.
+            bool widened = !HoldsAgainst(sameCarrier, carrier);
+
+            if (!resolved && !widened)
+                return;
+
+            PreparedIntent kept = resolved ? incoming : same;
+            int keptCarrier = widened ? AnyCarrier : sameCarrier;
+
+            if (sameCovered)
+                ReplaceCovered(key, kept, keptCarrier, carrier);
+            else
+                ReplaceVisible(key, kept, keptCarrier, carrier);
+
+            if (resolved)
+            {
+                ObserveInstalled(incoming);
+                Interlocked.Add(ref totalBytes, IntentBytes(incoming) - IntentBytes(same));
+            }
+
+            StampDirty(key);
             return;
         }
 
-        if (existing.TransactionId != incoming.TransactionId || existing.Epoch != incoming.Epoch)
+        PreparedIntent? holder =
+            visible is not null && HoldsAgainst(CarrierOfVisible(key), carrier) ? visible
+            : Volatile.Read(ref coveredCount) != 0 && TryFindCoveredHolder(key, carrier, out CoveredIntent coveredHolder) ? coveredHolder.Intent
+            : null;
+
+        if (holder is not null)
         {
             logger?.LogError("Conflicting prepared intents on load for key {Key}: {A} vs {B}",
-                incoming.Key, existing.TransactionId, incoming.TransactionId);
+                key, holder.TransactionId, incoming.TransactionId);
             return;
         }
 
-        if (existing.IsPending && incoming.IsResolved)
-        {
-            InstallLive(incoming.Key, incoming, partitionId);
-            ObserveInstalled(incoming);
-            Interlocked.Add(ref totalBytes, IntentBytes(incoming) - IntentBytes(existing));
-            StampDirty(incoming.Key);
-        }
+        InstallNew(key, incoming, carrier, visible);
+        ObserveInstalled(incoming);
+        Interlocked.Add(ref totalBytes, IntentBytes(incoming));
+        StampDirty(key);
     }
 
     // ── state transfer (split/merge) ────────────────────────────────────────────────
@@ -557,6 +657,22 @@ internal sealed partial class PreparedIntentStore
                     continue;
 
                 result.Add(intent);
+            }
+
+            // A covered intent is live for its own log, so a move must settle it or hand it over as well.
+            if (Volatile.Read(ref coveredCount) != 0)
+            {
+                foreach (KeyValuePair<string, CoveredIntent[]> kv in coveredIntents)
+                {
+                    if (startKey is not null && string.CompareOrdinal(kv.Key, startKey) < 0)
+                        continue;
+
+                    if (endKey is not null && string.CompareOrdinal(kv.Key, endKey) >= 0)
+                        continue;
+
+                    foreach (CoveredIntent covered in kv.Value)
+                        result.Add(covered.Intent);
+                }
             }
         }
 
@@ -606,15 +722,42 @@ internal sealed partial class PreparedIntentStore
 
         PreparedIntentCommandMessage entry = new();
 
+        // The section is the state of this partition's log, so it carries the intents that hold their key
+        // against it. An intent that another partition's log carried is history of a key that moved here. The
+        // receiver gets it from that log if it replicates it, and installed as this partition's intent it would
+        // refuse the prepares of this partition on the receiver alone.
         foreach (KeyValuePair<string, PreparedIntent> kv in intents)
         {
             if (!isOwnedKey(kv.Key))
                 continue;
 
-            FillPrepareProto(entry, kv.Value);
+            if (!TryGetVisible(kv.Key, out PreparedIntent? intent, out int carrier) || !HoldsAgainst(carrier, partitionId))
+                continue;
+
+            FillPrepareProto(entry, intent);
             coded.WriteTag(PreparedIntentSnapshotMessage.IntentsFieldNumber, WireFormat.WireType.LengthDelimited);
             coded.WriteMessage(entry);
             written++;
+        }
+
+        if (Volatile.Read(ref coveredCount) != 0)
+        {
+            foreach (KeyValuePair<string, CoveredIntent[]> kv in coveredIntents)
+            {
+                if (!isOwnedKey(kv.Key))
+                    continue;
+
+                foreach (CoveredIntent covered in kv.Value)
+                {
+                    if (!HoldsAgainst(covered.Carrier, partitionId))
+                        continue;
+
+                    FillPrepareProto(entry, covered.Intent);
+                    coded.WriteTag(PreparedIntentSnapshotMessage.IntentsFieldNumber, WireFormat.WireType.LengthDelimited);
+                    coded.WriteMessage(entry);
+                    written++;
+                }
+            }
         }
 
         // The reflected position is read AFTER the walk: every entry at or below it was applied through this
@@ -666,9 +809,7 @@ internal sealed partial class PreparedIntentStore
 
         foreach (PreparedIntent intent in pendingBeforeCapture)
         {
-            if (intents.TryGetValue(intent.Key, out PreparedIntent? current)
-                && current.TransactionId == intent.TransactionId
-                && current.Epoch == intent.Epoch)
+            if (GetByIdentity(intent.TransactionId, intent.Epoch, intent.Key) is not null)
                 continue;
 
             if (slice.Heads.TryGetValue(intent.Key, out CommittedHead head))
@@ -700,12 +841,14 @@ internal sealed partial class PreparedIntentStore
 
             // Every key with the prefix sorts at or after the prefix and before any key without it that sorts
             // after the prefix, so the keys with the prefix are one run at the head of this view.
-            string last = orderedKeys.Max!;
+            string last = orderedKeys.Max.Key;
             if (string.CompareOrdinal(prefix, last) > 0)
                 return [];
 
-            foreach (string key in orderedKeys.GetViewBetween(prefix, last))
+            foreach (LiveKey entry in orderedKeys.GetViewBetween(new LiveKey(prefix, 0), new LiveKey(last, 0)))
             {
+                string key = entry.Key;
+
                 if (!key.StartsWith(prefix, StringComparison.Ordinal))
                     break;
 
@@ -751,14 +894,16 @@ internal sealed partial class PreparedIntentStore
                 return [];
 
             // The view is inclusive at both ends; the exclusive bounds skip the one key that can equal them.
-            string lower = startKey ?? orderedKeys.Min!;
-            string upper = endKey ?? orderedKeys.Max!;
+            string lower = startKey ?? orderedKeys.Min.Key;
+            string upper = endKey ?? orderedKeys.Max.Key;
 
             if (string.CompareOrdinal(lower, upper) > 0)
                 return [];
 
-            foreach (string key in orderedKeys.GetViewBetween(lower, upper))
+            foreach (LiveKey entry in orderedKeys.GetViewBetween(new LiveKey(lower, 0), new LiveKey(upper, 0)))
             {
+                string key = entry.Key;
+
                 if (!startInclusive && startKey is not null && string.CompareOrdinal(key, startKey) == 0)
                     continue;
 
@@ -771,6 +916,37 @@ internal sealed partial class PreparedIntentStore
         }
 
         return result ?? [];
+    }
+
+    /// <summary>Drops the covered intents of the keys that <paramref name="shouldRemove"/> accepts: all of them,
+    /// or, when <paramref name="against"/> names a partition, those that hold their key against that partition's
+    /// log. Returns how many were dropped. Caller holds the apply gate.</summary>
+    private int PurgeCoveredLocked(Func<string, bool> shouldRemove, int? against)
+    {
+        if (Volatile.Read(ref coveredCount) == 0)
+            return 0;
+
+        int purged = 0;
+
+        foreach (KeyValuePair<string, CoveredIntent[]> kv in coveredIntents)
+        {
+            if (!shouldRemove(kv.Key))
+                continue;
+
+            foreach (CoveredIntent covered in kv.Value)
+            {
+                if (against is int partition && !HoldsAgainst(covered.Carrier, partition))
+                    continue;
+
+                if (!RemoveCovered(kv.Key, covered.Intent.TransactionId, covered.Intent.Epoch))
+                    continue;
+
+                Interlocked.Add(ref totalBytes, -IntentBytes(covered.Intent));
+                purged++;
+            }
+        }
+
+        return purged;
     }
 
     /// <summary>
@@ -797,12 +973,16 @@ internal sealed partial class PreparedIntentStore
                     (toRemove ??= []).Add(kv.Key);
             }
 
+            // The covered intents of the keys go with them, and first, so that none takes the place of an
+            // intent removed below.
+            int coveredPurged = PurgeCoveredLocked(shouldRemove, against: null);
+
             if (toRemove is null)
             {
-                if (settledPurged)
+                if (settledPurged || coveredPurged > 0)
                     StampAllDirty();
 
-                return 0;
+                return coveredPurged;
             }
 
             foreach (string key in toRemove)
@@ -812,7 +992,7 @@ internal sealed partial class PreparedIntentStore
             }
 
             StampAllDirty();
-            removedCount = toRemove.Count;
+            removedCount = toRemove.Count + coveredPurged;
         }
 
         SignalFenceWaiters();
@@ -1048,20 +1228,34 @@ internal sealed partial class PreparedIntentStore
         // carried over by the swap below, which never regresses them.
         lock (applyGate)
         {
+            // The install replaces the state of this partition's log for the partition's keys, so it drops the
+            // intents of those keys that hold against the log. An intent of one of those keys that another
+            // partition's log carried stays: it is the state of that log, which this install does not replace,
+            // and its settle arrives through that log. The covered intents go first, so that one of them does
+            // not take the place of an intent removed below.
+            purged += PurgeCoveredLocked(isOwned, partitionId);
+
+            // The index names the carrier of each intent. The keys are collected under its gate, and the
+            // ownership of each is asked outside it.
+            //
             // A chunked list: a node that restarted under load holds enough intents to make one list an array
             // above 1 MiB, allocated here under the gate.
-            ChunkedList<string>? owned = null;
-            foreach (KeyValuePair<string, PreparedIntent> kv in intents)
+            ChunkedList<string>? held = null;
+
+            lock (orderedKeysGate)
             {
-                if (isOwned(kv.Key))
-                    (owned ??= new()).Add(kv.Key);
+                foreach (LiveKey entry in orderedKeys)
+                {
+                    if (HoldsAgainst(entry.Carrier, partitionId))
+                        (held ??= new()).Add(entry.Key);
+                }
             }
 
-            if (owned is not null)
+            if (held is not null)
             {
-                foreach (string key in owned)
+                foreach (string key in held)
                 {
-                    if (!RemoveLive(key, out PreparedIntent? removed))
+                    if (!isOwned(key) || !RemoveLive(key, out PreparedIntent? removed))
                         continue;
 
                     Interlocked.Add(ref totalBytes, -IntentBytes(removed!));

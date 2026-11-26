@@ -2146,6 +2146,8 @@ public sealed class TestDurableTransactionFinalizer
         public void CompleteEntry(int partitionId, long logIndex, bool replay) { }
 
         public void NoteUnresolvedOnReplay(int partitionId, long logIndex, HLCTimestamp transactionId, long epoch, string key, HLCTimestamp commitTimestamp) { }
+
+        public void NoteUnresolvedOnApply(int partitionId, long logIndex, HLCTimestamp transactionId, long epoch, string key, HLCTimestamp commitTimestamp) { }
     }
 
     /// <summary>

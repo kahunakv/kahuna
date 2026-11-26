@@ -59,6 +59,9 @@ public sealed class TestMaterializeOnResolveSnapshotInstall : BaseCluster
 
         public void NoteUnresolvedOnReplay(int partitionId, long logIndex, HLCTimestamp transactionId, long epoch, string key, HLCTimestamp commitTimestamp) =>
             inner.NoteUnresolvedOnReplay(partitionId, logIndex, transactionId, epoch, key, commitTimestamp);
+
+        public void NoteUnresolvedOnApply(int partitionId, long logIndex, HLCTimestamp transactionId, long epoch, string key, HLCTimestamp commitTimestamp) =>
+            inner.NoteUnresolvedOnApply(partitionId, logIndex, transactionId, epoch, key, commitTimestamp);
     }
 
     private static async Task<int> LeaderIndexOf(IRaft[] rafts, CancellationToken ct)

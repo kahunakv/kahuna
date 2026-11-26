@@ -41,7 +41,9 @@ internal readonly record struct PreparedIntentApplyResult(
 ///
 /// <para>The single-live-intent-per-key rule is enforced here: a prepare for a key already held by a different
 /// transaction is rejected (never overwritten), whether that holder is pending or merely resolved-not-yet-removed
-/// — the caller retries after the holder is cleaned up.</para>
+/// — the caller retries after the holder is cleaned up. The rule is one of a log: the store passes the intent
+/// of the command's own transaction, or the intent that holds the key against the log that carries the
+/// command, and never an intent that another partition's log carried.</para>
 /// </summary>
 internal static class PreparedIntentStateMachine
 {

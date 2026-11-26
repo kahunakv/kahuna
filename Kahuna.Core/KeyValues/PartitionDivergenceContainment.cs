@@ -3,6 +3,7 @@ using Kommander;
 using Kommander.Data;
 
 using Kahuna.Server.KeyValues.Logging;
+using Kommander.Time;
 
 namespace Kahuna.Server.KeyValues;
 
@@ -183,6 +184,22 @@ internal sealed class PartitionDivergenceContainment
         ContainDetached(
             partitionId,
             $"the by-reference materialization of key {key} at revision {revision} (log entry {logIndex}) found no prepared intent on this node and its durable state is below that revision",
+            "apply");
+    }
+
+    /// <summary>
+    /// The form of <see cref="ContainMissingMaterialization"/> for a commit that settles with a materializing
+    /// resolve: the resolve at <paramref name="logIndex"/> found no intent of its transaction on this node, and
+    /// neither the node's queued writes nor its durable row reach <paramref name="commitTimestamp"/>.
+    /// </summary>
+    internal void ContainMissingResolvedValue(int partitionId, long logIndex, string key, HLCTimestamp commitTimestamp)
+    {
+        if (IsGated(partitionId))
+            return;
+
+        ContainDetached(
+            partitionId,
+            $"the materializing resolve of key {key} for the commit at {commitTimestamp} (log entry {logIndex}) found no prepared intent on this node and its durable state is below that commit",
             "apply");
     }
 

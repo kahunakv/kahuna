@@ -205,6 +205,8 @@ public sealed class TestMaterializeOnResolve : BaseCluster, IDisposable
         public void CompleteEntry(int partitionId, long logIndex, bool replay) => Completed.Add((logIndex, replay));
 
         public void NoteUnresolvedOnReplay(int partitionId, long logIndex, HLCTimestamp transactionId, long epoch, string key, HLCTimestamp commitTimestamp) { }
+
+        public void NoteUnresolvedOnApply(int partitionId, long logIndex, HLCTimestamp transactionId, long epoch, string key, HLCTimestamp commitTimestamp) { }
     }
 
     private static (PreparedIntentStore Store, RecordingInstaller Installer) PreparedStore(params PreparedIntent[] intents)
@@ -322,6 +324,9 @@ public sealed class TestMaterializeOnResolve : BaseCluster, IDisposable
 
         public void NoteUnresolvedOnReplay(int partitionId, long logIndex, HLCTimestamp transactionId, long epoch, string key, HLCTimestamp commitTimestamp) =>
             inner.NoteUnresolvedOnReplay(partitionId, logIndex, transactionId, epoch, key, commitTimestamp);
+
+        public void NoteUnresolvedOnApply(int partitionId, long logIndex, HLCTimestamp transactionId, long epoch, string key, HLCTimestamp commitTimestamp) =>
+            inner.NoteUnresolvedOnApply(partitionId, logIndex, transactionId, epoch, key, commitTimestamp);
     }
 
     private sealed class RestorerInstaller(KeyValueRestorer restorer) : IResolvedIntentInstaller
@@ -334,6 +339,11 @@ public sealed class TestMaterializeOnResolve : BaseCluster, IDisposable
 
         public void NoteUnresolvedOnReplay(int partitionId, long logIndex, HLCTimestamp transactionId, long epoch, string key, HLCTimestamp commitTimestamp) =>
             restorer.NoteUnresolvedMaterializingResolve(partitionId, logIndex, transactionId, epoch, key, commitTimestamp);
+
+        // The restorer serves a restart replay only.
+        public void NoteUnresolvedOnApply(int partitionId, long logIndex, HLCTimestamp transactionId, long epoch, string key, HLCTimestamp commitTimestamp)
+        {
+        }
     }
 
     [Fact]
