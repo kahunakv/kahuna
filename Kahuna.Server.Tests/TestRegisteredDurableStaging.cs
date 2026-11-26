@@ -82,6 +82,8 @@ public sealed class TestRegisteredDurableStaging
             // Deferred settlement emits them later on a background task, so pin synchronous settlement here — the
             // coalescing behavior under test is identical either way; only when it runs differs.
             DurableDeferredSettlement = false,
+            // Only the shape with materialization records has records to coalesce.
+            DurableMaterializeOnResolve = false,
             WriteBatchExecutorDecorator = inner => counter = new CountingExecutor(inner)
         }, loggerFactory);
         await node.StartAsync(ct);

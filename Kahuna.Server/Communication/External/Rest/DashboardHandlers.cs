@@ -50,6 +50,16 @@ public static class DashboardHandlers
         "kahuna.kv.write.rejections",
         "kahuna.kv.write.outcomes",
 
+        // What the entries of each commit are: the entries by the stage that produced them, the runs of adjacent
+        // settles in each batch, and the settles that a merged settle entry carried.
+        "kahuna.kv.write.stage_entries",
+        "kahuna.kv.write.settle_runs",
+        "kahuna.kv.write.settles_merged",
+
+        // The ordered apply path: the entries applied and the time their apply took, by entry type.
+        "kahuna.kv.apply.entries",
+        "kahuna.kv.apply.ms",
+
         // Write aggregator cycle: the dispatch-to-dispatch stages, what triggered each dispatch, how late the
         // wakes fired, the completion tail, the batch fill against the item cap and the learned fill target.
         "kahuna.kv.write.cycle_stage",
@@ -66,10 +76,12 @@ public static class DashboardHandlers
         // The per-key releases that end a transaction: sent, or left to the apply of a one-phase commit.
         "kahuna.transactions.working_set_release_keys",
 
-        // The one-phase commits, the attempts that fell back, and the settlements that a bundle carried.
+        // The one-phase commits, the attempts that fell back, the settlements that a bundle carried, and the commits that
+        // used three entries because a replica had not confirmed the bundle entry.
         "kahuna.durable_tx.one_phase_commits",
         "kahuna.durable_tx.one_phase_fallbacks",
         "kahuna.durable_tx.one_phase_carried_settles",
+        "kahuna.durable_tx.one_phase_bundle_guard_fallbacks",
 
         // The point-read path per step, and the coordinator registration hops a transaction-scoped read takes.
         "kahuna.kv.read.stage",

@@ -92,7 +92,10 @@ internal sealed class DurableOrderedApplyAwaiter
         {
             RaftProposalEntry entry = entries[i];
 
-            if (entry.Type != ReplicationTypes.TransactionRecord && entry.Type != ReplicationTypes.PreparedIntent)
+            // A one-phase bundle entry has the result of its prepare part, as a prepared-intent entry has.
+            bool carriesPrepares = entry.Type is ReplicationTypes.PreparedIntent or ReplicationTypes.OnePhaseBundle;
+
+            if (!carriesPrepares && entry.Type != ReplicationTypes.TransactionRecord)
                 continue;
 
             long logIndex = entryLogIndices is not null && i < entryLogIndices.Count ? entryLogIndices[i] : 0;
@@ -106,13 +109,13 @@ internal sealed class DurableOrderedApplyAwaiter
             switch (outcome.Status)
             {
                 case DurableApplyWaitStatus.Recorded:
-                    if (entry.Type == ReplicationTypes.PreparedIntent && !outcome.Result)
+                    if (carriesPrepares && !outcome.Result)
                         answer = DurableCompletionAnswer.Refused;
                     break;
 
                 case DurableApplyWaitStatus.AppliedResultDisplaced:
                     DurableTransactionMetrics.OrderedApplyResultDisplaced();
-                    if (entry.Type == ReplicationTypes.PreparedIntent && !PreparesHeldUnderOwnIdentity(entry.Data))
+                    if (carriesPrepares && !PreparesHeldUnderOwnIdentity(entry.Type, entry.Data))
                         answer = DurableCompletionAnswer.Refused;
                     break;
 
@@ -134,9 +137,12 @@ internal sealed class DurableOrderedApplyAwaiter
     /// every prepare it carries holds its key under its own (transaction, epoch). A prepare the ordered apply refused
     /// left a foreign holder (or nothing) at the key and reads as unacknowledged, exactly as its recorded result
     /// would have.</summary>
-    private bool PreparesHeldUnderOwnIdentity(byte[] prepareDelta)
+    private bool PreparesHeldUnderOwnIdentity(string logType, byte[] data)
     {
-        foreach (PreparedIntentCommand command in PreparedIntentStore.DecodeDelta(prepareDelta))
+        if (!OnePhaseBundleEntry.TryGetIntentCommands(logType, data, out PreparedIntentCommand[]? commands))
+            return true;
+
+        foreach (PreparedIntentCommand command in commands)
         {
             if (command is PrepareIntentCommand prepare
                 && preparedIntentStore.GetByIdentity(prepare.Intent.TransactionId, prepare.Intent.Epoch, prepare.Intent.Key) is null)

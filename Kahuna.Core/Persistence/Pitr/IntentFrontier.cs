@@ -91,10 +91,11 @@ internal sealed class IntentFrontier
             long from = FoldStart(wal, range, walk);
             ForEachEntry(wal, range.PartitionId, from, range.ToIndex, log =>
             {
-                if (log.LogType != ReplicationTypes.PreparedIntent || log.LogData is null || log.LogData.Length == 0)
+                // A prepared-intent delta, or the prepare part of a one-phase bundle entry.
+                if (!OnePhaseBundleEntry.TryGetIntentCommands(log.LogType, log.LogData, out PreparedIntentCommand[]? commands))
                     return;
 
-                foreach (PreparedIntentCommand command in PreparedIntentStore.DecodeDelta(log.LogData))
+                foreach (PreparedIntentCommand command in commands)
                 {
                     switch (command)
                     {
@@ -204,10 +205,10 @@ internal sealed class IntentFrontier
                     return;
                 }
 
-                if (log.LogType != ReplicationTypes.PreparedIntent)
+                if (!OnePhaseBundleEntry.TryGetIntentCommands(log.LogType, log.LogData, out PreparedIntentCommand[]? commands))
                     return;
 
-                foreach (PreparedIntentCommand command in PreparedIntentStore.DecodeDelta(log.LogData))
+                foreach (PreparedIntentCommand command in commands)
                 {
                     switch (command)
                     {

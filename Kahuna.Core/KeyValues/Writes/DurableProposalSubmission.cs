@@ -1,6 +1,7 @@
 using Kommander.Data;
 
 using Kahuna.Server.KeyValues.Transactions;
+using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Replication;
 
 namespace Kahuna.Server.KeyValues.Writes;
@@ -131,6 +132,17 @@ internal sealed class DurableProposalSubmission : IProposalSubmission
 
                     break;
 
+                // The prepare part names the keys of the commit, which decides in the same entry. The record parts name
+                // none.
+                case ReplicationTypes.OnePhaseBundle:
+                    if (ReferenceEquals(keys, NoKeys))
+                        keys = [];
+
+                    if (!TryCollectBundleKeys(entry.Data, keys))
+                        return null;
+
+                    break;
+
                 case ReplicationTypes.KeyValues when stage == WriteSubmissionStage.Materialize:
                     break;
 
@@ -140,6 +152,27 @@ internal sealed class DurableProposalSubmission : IProposalSubmission
         }
 
         return keys;
+    }
+
+    private static bool TryCollectBundleKeys(byte[] data, List<string> keys)
+    {
+        PreparedIntentCommand[] commands;
+        try
+        {
+            commands = OnePhaseBundleEntry.PrepareCommandsOf(data);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            return false;
+        }
+
+        foreach (PreparedIntentCommand command in commands)
+        {
+            if (command is PrepareIntentCommand prepare)
+                keys.Add(prepare.Intent.Key);
+        }
+
+        return true;
     }
 
     /// <summary>Resolves true once the batch carrying this record committed to Raft and every prepare it carried
@@ -231,6 +264,41 @@ internal sealed class DurableProposalSubmission : IProposalSubmission
             TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);
     }
+
+    /// <summary>
+    /// The commands of this submission when its one entry can go into a merged settle entry: the stage is
+    /// <see cref="WriteSubmissionStage.Settle"/>, the entry is one auto-commit prepared-intent delta at generation zero, no range
+    /// fence applies, and every command of the delta is a resolve or a remove. <paramref name="expectedTerm"/> is the
+    /// term fence of the entry. False for any other submission, which keeps its own entry.
+    /// </summary>
+    internal bool TryGetMergeableSettle([System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out PreparedIntentCommand[]? commands, out long expectedTerm)
+    {
+        commands = null;
+        expectedTerm = 0;
+
+        if (Stage != WriteSubmissionStage.Settle || Entries.Count != 1 || fences.Count != 0)
+            return false;
+
+        RaftProposalEntry entry = Entries[0];
+        if (entry.Type != ReplicationTypes.PreparedIntent || !entry.AutoCommit || entry.ExpectedGeneration != 0 || entry.Data is not { Length: > 0 } data)
+            return false;
+
+        if (!PreparedIntentStore.TryGetProposedCommands(data, out PreparedIntentCommand[]? decoded))
+            return false;
+
+        foreach (PreparedIntentCommand command in decoded)
+        {
+            if (command is not (ResolveIntentCommand or RemoveIntentCommand))
+                return false;
+        }
+
+        commands = decoded;
+        expectedTerm = entry.ExpectedTerm;
+        return true;
+    }
+
+    /// <summary>Ends this submission with the answer of the merged settle entry that carried it.</summary>
+    internal void ResolveMerged(DurableCompletionAnswer outcome) => Resolve(outcome);
 
     private void Resolve(DurableCompletionAnswer outcome)
     {

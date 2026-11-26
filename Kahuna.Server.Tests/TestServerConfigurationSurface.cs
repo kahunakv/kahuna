@@ -132,6 +132,67 @@ public sealed class TestServerConfigurationSurface
         Assert.True(new EmbeddedKahunaOptions().KeyValueWritePreciseWake);
     }
 
+    /// <summary>
+    /// The flags that select the record shape of a durable commit take a value on both node shapes, and a node
+    /// that states nothing runs the defaults of the embedded options. A bare switch could not turn a true default
+    /// off, so each flag takes "true" or "false".
+    /// </summary>
+    [Theory]
+    [InlineData(null, null, null, null)]
+    [InlineData("true", null, null, null)]
+    [InlineData("false", null, null, null)]
+    [InlineData(null, "true", null, null)]
+    [InlineData(null, "false", null, null)]
+    [InlineData(null, null, "true", null)]
+    [InlineData(null, null, "false", null)]
+    [InlineData(null, null, null, "true")]
+    [InlineData(null, null, null, "false")]
+    [InlineData("true", "true", "true", "true")]
+    public void CommitShapeFlags_TakeTheValueGiven_AndKeepTheEmbeddedDefaults(string? materializeOnResolve, string? applyTimeValidation, string? mergeSettles, string? bundleEntry)
+    {
+        List<string> args = ["--storage-revision", "v1"];
+        if (materializeOnResolve is not null)
+            args.AddRange(["--durable-materialize-on-resolve", materializeOnResolve]);
+        if (applyTimeValidation is not null)
+            args.AddRange(["--one-phase-apply-time-validation", applyTimeValidation]);
+        if (mergeSettles is not null)
+            args.AddRange(["--durable-merge-adjacent-settles", mergeSettles]);
+        if (bundleEntry is not null)
+            args.AddRange(["--durable-one-phase-bundle-entry", bundleEntry]);
+
+        CommandLine.ParserResult<KahunaCommandLineOptions> result = CommandLine.Parser.Default.ParseArguments<KahunaCommandLineOptions>(args);
+        Assert.Equal(CommandLine.ParserResultType.Parsed, result.Tag);
+
+        EmbeddedKahunaOptions defaults = new();
+        bool expectedMaterialize = materializeOnResolve is null ? defaults.DurableMaterializeOnResolve : bool.Parse(materializeOnResolve);
+        bool expectedValidation = applyTimeValidation is null ? defaults.OnePhaseApplyTimeValidation : bool.Parse(applyTimeValidation);
+        bool expectedMerge = mergeSettles is null ? defaults.DurableMergeAdjacentSettles : bool.Parse(mergeSettles);
+        bool expectedBundle = bundleEntry is null ? defaults.DurableOnePhaseBundleEntry : bool.Parse(bundleEntry);
+
+        KahunaConfiguration server = ServerConfigurationFactory.Create(result.Value);
+        KahunaConfiguration embedded = EmbeddedKahunaNode.CreateKahunaConfiguration(
+            EmbeddedOptionsFactory.CreateEmbeddedOptions(result.Value), singleProcessRaftGroup: false);
+
+        Assert.Equal(expectedMaterialize, server.DurableMaterializeOnResolve);
+        Assert.Equal(expectedMaterialize, embedded.DurableMaterializeOnResolve);
+        Assert.Equal(expectedValidation, server.OnePhaseApplyTimeValidation);
+        Assert.Equal(expectedValidation, embedded.OnePhaseApplyTimeValidation);
+        Assert.Equal(expectedMerge, server.DurableMergeAdjacentSettles);
+        Assert.Equal(expectedMerge, embedded.DurableMergeAdjacentSettles);
+        Assert.Equal(expectedBundle, server.DurableOnePhaseBundleEntry);
+        Assert.Equal(expectedBundle, embedded.DurableOnePhaseBundleEntry);
+
+        // The configuration of an embedding host that sets nothing has the same defaults.
+        KahunaConfiguration plain = new();
+        Assert.Equal(plain.DurableMaterializeOnResolve, defaults.DurableMaterializeOnResolve);
+        Assert.Equal(plain.OnePhaseApplyTimeValidation, defaults.OnePhaseApplyTimeValidation);
+        Assert.Equal(plain.DurableMergeAdjacentSettles, defaults.DurableMergeAdjacentSettles);
+        Assert.Equal(plain.DurableOnePhaseBundleEntry, defaults.DurableOnePhaseBundleEntry);
+
+        // The settle installs the committed values unless a node states otherwise.
+        Assert.True(defaults.DurableMaterializeOnResolve);
+    }
+
     [Fact]
     public void FlagsTheClusterUsedToIgnore_ReachTheServerConfiguration()
     {

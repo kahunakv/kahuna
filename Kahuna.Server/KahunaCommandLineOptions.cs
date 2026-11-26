@@ -968,6 +968,23 @@ public sealed class KahunaCommandLineOptions
     [Option("durable-maintenance-interval", Required = false, HelpText = "Seconds between durable-2PC maintenance ticks (prepared-intent recovery and the record retention sweep, TTL and memory budget). Shorter than the collection interval so a memory budget is enforced within seconds of being exceeded. Clamped to --range-collection-interval; 0 uses it. Default 5.", Default = 5)]
     public int DurableMaintenanceIntervalSeconds { get; set; } = 5;
 
+    // Nullable so it takes an explicit value: a bare switch cannot turn a true default off, and a node that states
+    // nothing keeps the default of the embedded options.
+    [Option("durable-materialize-on-resolve", Required = false, HelpText = "Install the committed values of a durable transaction at the apply of its settle, on every replica, from the replica's own prepared intent, so that no materialization record is written: true or false (default true). A node of a build before 1.10.1 removes the intent and loses the value: a group that comes from such a build sets this to false on every node, runs a build from 1.10.1 on every node, and then removes the option. Turning it off is safe at any time.")]
+    public bool? DurableMaterializeOnResolve { get; set; }
+
+    // Nullable for the same reason as --durable-materialize-on-resolve.
+    [Option("one-phase-apply-time-validation", Required = false, HelpText = "Let a durable transaction that reads keys take the one-phase commit in a multi-node group: every replica judges its read dependencies and validated bases at apply against the committed-head ledger: true or false (default false). Turn it on only after every node of the group runs a build that persists the ledger. A node refuses to start with it on over a prepared-intent snapshot that has no ledger (start once with it off). The staged-base fence retention must be equal on every node while it is on.")]
+    public bool? OnePhaseApplyTimeValidation { get; set; }
+
+    // Nullable for the same reason as --durable-materialize-on-resolve.
+    [Option("durable-merge-adjacent-settles", Required = false, HelpText = "Put the settles of decided durable transactions that are adjacent in one batch of the write scheduler into one log entry, with the commands of each settle in queue order: true or false (default false). It needs no upgrade order, and off is always safe.")]
+    public bool? DurableMergeAdjacentSettles { get; set; }
+
+    // Nullable for the same reason as --durable-materialize-on-resolve.
+    [Option("durable-one-phase-bundle-entry", Required = false, HelpText = "Propose the record init, the prepare and the decision of a one-phase commit as one log entry in place of three: true or false (default false). Turn it on only after every node of the group runs a build that applies the entry: an older node skips it with no error. A leader also proposes three entries while a replica of the partition did not confirm that it applies the entry. Turning it off is safe at any time.")]
+    public bool? DurableOnePhaseBundleEntry { get; set; }
+
     // Nullable so it takes an explicit value: a bare switch cannot turn a true default off.
     [Option("fail-fast-on-oom", Required = false, HelpText = "Terminate the process on any OutOfMemoryException so the orchestrator restarts the node with an empty heap, instead of leaving a reachable replica whose WAL/apply pipeline is dead. When false the node still never swallows the fault in its own apply paths and reports itself not ready on /v1/cluster/health from the first fatal fault on: true or false (default true)")]
     public bool? FailFastOnOutOfMemory { get; set; }

@@ -1547,6 +1547,19 @@ internal static class DurableTransactionMetrics
     }
 
     /// <summary>
+    /// One-phase commits that a leader proposed as three entries (record init, prepare, decision) with the bundle entry
+    /// turned on, because a replica of the partition did not confirm that it applies the bundle entry in the current
+    /// term and replica set, or the leader had not asked yet. Zero in a group where every replica runs a build that
+    /// applies the entry, apart from the first commits after a leadership change or a change of the replicas.
+    /// </summary>
+    internal static readonly Counter<long> OnePhaseBundleGuardFallbacks =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.one_phase_bundle_guard_fallbacks",
+            description: "One-phase commits proposed as three entries because a replica had not confirmed that it applies the one-phase bundle entry.");
+
+    internal static void OnePhaseBundleGuardFallback() => OnePhaseBundleGuardFallbacks.Add(1);
+
+    /// <summary>
     /// Commits refused with MustRetry because the commit probe proved nothing about a probed key: the key's
     /// leader could not confirm its leadership (a failed read-index, or a partition gated as incomplete), no
     /// leader was known for the partition, or the answer was one this node does not know. No conflict was found

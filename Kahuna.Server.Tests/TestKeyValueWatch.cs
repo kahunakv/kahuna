@@ -136,6 +136,74 @@ public sealed class TestKeyValueWatch : BaseCluster
         });
     }
 
+    /// <summary>
+    /// The settles of concurrent commits that leave in one merged entry: every replica reports each key one time, with
+    /// the identity of its own transaction, although several transactions settle at the index of one entry.
+    /// </summary>
+    [Fact]
+    public async Task MergedSettles_ReportEachKeyOnce_WithItsOwnTransaction()
+    {
+        await WithCluster(configure: c =>
+        {
+            c.DurableMaterializeOnResolve = true;
+            c.DurableMergeAdjacentSettles = true;
+            c.KeyValueWritePostCompletionHoldMs = 5;
+        }, body: async (nodes, ct) =>
+        {
+            const int transactions = 24;
+            string space = $"watch-merged-{Guid.NewGuid():N}";
+            List<Collector> collectors = await OpenOnEveryNode(nodes, KeyValueWatchScope.ForPrefix(space + "/"));
+
+            await Task.WhenAll(Enumerable.Range(0, transactions).Select(i =>
+                RunScript(nodes[i % nodes.Length], "BEGIN SET @a @v SET @b @v COMMIT END",
+                    ("@a", $"{space}/{i}/a"), ("@b", $"{space}/{i}/b"), ("@v", $"v{i}"))));
+
+            foreach (Collector collector in collectors)
+            {
+                List<KeyValueWatchEvent> events = await collector.WaitForEvents(2 * transactions);
+                await collector.AssertNoMoreEvents(2 * transactions);
+
+                Assert.Equal(2 * transactions, events.Select(e => e.Key).Distinct(StringComparer.Ordinal).Count());
+
+                // The two keys of a transaction carry its identity and its commit timestamp, and only they do.
+                foreach (IGrouping<string, KeyValueWatchEvent> transaction in events.GroupBy(e => e.Key.Split('/')[1]))
+                {
+                    KeyValueWatchEvent[] pair = [.. transaction];
+                    Assert.Equal(2, pair.Length);
+                    Assert.Equal(pair[0].TransactionId, pair[1].TransactionId);
+                    Assert.Equal(pair[0].CommitTimestamp, pair[1].CommitTimestamp);
+                    Assert.All(pair, e => Assert.Equal("v" + transaction.Key, Encoding.UTF8.GetString(e.Value!)));
+                }
+
+                Assert.Equal(transactions, events.Select(e => e.TransactionId).Distinct().Count());
+            }
+
+            // At least one entry of a log carried the settles of several transactions.
+            int merged = 0;
+            foreach (KahunaManager node in nodes)
+            {
+                foreach (Kommander.System.RaftPartitionRange partition in node.Raft.GetPartitionMap())
+                {
+                    foreach (RaftLog log in node.Raft.WalAdapter.ReadLogsRange(partition.PartitionId, 1))
+                    {
+                        if (log.LogType != ReplicationTypes.PreparedIntent || log.LogData is not { Length: > 0 })
+                            continue;
+
+                        PreparedIntentCommand[] commands = Kahuna.Server.KeyValues.Transactions.PreparedIntentStore.DecodeDelta(log.LogData);
+                        if (!commands.Any(c => c is PrepareIntentCommand)
+                            && commands.OfType<ResolveIntentCommand>().Select(c => c.TransactionId).Distinct().Count() > 1)
+                            merged++;
+                    }
+                }
+            }
+
+            Assert.True(merged > 0, "no settle entry carried more than one transaction");
+
+            foreach (Collector collector in collectors)
+                await collector.DisposeAsync();
+        });
+    }
+
     [Fact]
     public async Task TransactionAcrossPartitions_IsReportedOnEach_WithTheSameIdentity()
     {

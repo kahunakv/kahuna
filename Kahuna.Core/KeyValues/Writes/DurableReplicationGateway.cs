@@ -762,14 +762,29 @@ internal sealed class DurableReplicationGateway
 
         TaskCompletionSource<bool> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        RaftProposalEntry init = new(ReplicationTypes.TransactionRecord, recordInitDelta, AutoCommit: true, ExpectedGeneration: 0, ExpectedTerm: expectedTerm);
-        RaftProposalEntry prepare = new(ReplicationTypes.PreparedIntent, anchorPrepareDelta, AutoCommit: true, ExpectedGeneration: 0, ExpectedTerm: expectedTerm);
-        RaftProposalEntry decision = new(ReplicationTypes.TransactionRecord, decisionDelta, AutoCommit: true, ExpectedGeneration: 0, ExpectedTerm: expectedTerm);
+        RaftProposalEntry[] commit;
+
+        // One entry for the three parts while every replica of the partition confirmed that it applies the type in this
+        // term; the three entries of the same parts otherwise. Every replica applies both shapes to the same stores.
+        if (runtime.BundlePeerGuard?.ShouldProposeBundle(partitionId, expectedTerm) == true)
+        {
+            byte[] bundle = Transactions.OnePhaseBundleEntry.Serialize(recordInitDelta, anchorPrepareDelta, decisionDelta);
+            commit = [new RaftProposalEntry(ReplicationTypes.OnePhaseBundle, bundle, AutoCommit: true, ExpectedGeneration: 0, ExpectedTerm: expectedTerm)];
+        }
+        else
+        {
+            commit =
+            [
+                new RaftProposalEntry(ReplicationTypes.TransactionRecord, recordInitDelta, AutoCommit: true, ExpectedGeneration: 0, ExpectedTerm: expectedTerm),
+                new RaftProposalEntry(ReplicationTypes.PreparedIntent, anchorPrepareDelta, AutoCommit: true, ExpectedGeneration: 0, ExpectedTerm: expectedTerm),
+                new RaftProposalEntry(ReplicationTypes.TransactionRecord, decisionDelta, AutoCommit: true, ExpectedGeneration: 0, ExpectedTerm: expectedTerm)
+            ];
+        }
 
         // The settlement of the committed predecessors goes first: the prepare applies after it, to free keys.
         RaftProposalEntry[] entries = predecessorSettleDelta is null
-            ? [init, prepare, decision]
-            : [new(ReplicationTypes.PreparedIntent, predecessorSettleDelta, AutoCommit: true, ExpectedGeneration: 0, ExpectedTerm: expectedTerm), init, prepare, decision];
+            ? commit
+            : [new(ReplicationTypes.PreparedIntent, predecessorSettleDelta, AutoCommit: true, ExpectedGeneration: 0, ExpectedTerm: expectedTerm), .. commit];
 
         Writes.DurableProposalSubmission submission = new(
             partitionId,

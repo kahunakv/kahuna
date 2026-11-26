@@ -103,4 +103,18 @@ internal sealed record PartitionWriteAggregatorOptions
     /// queue on every replica. Terminal submissions bypass it, like the reserve headroom.
     /// </summary>
     public Func<bool>? UnflushedBacklogGate { get; init; }
+
+    /// <summary>Puts each run of settle submissions that are adjacent in a batch into one log entry (see
+    /// <see cref="SettleRunMerger"/>). Off by default.</summary>
+    public bool MergeAdjacentSettles { get; init; }
+
+    /// <summary>The most commands one merged settle entry carries. A run with more gives more than one entry. The bound
+    /// limits the transactions that one apply fault of a merged entry stops.</summary>
+    public int MergedSettleMaxCommands { get; init; } = DefaultMergedSettleMaxCommands;
+
+    internal const int DefaultMergedSettleMaxCommands = 512;
+
+    /// <summary>Waits for the ordered apply of a merged settle entry on this node and answers how it went. A lane with
+    /// none does not merge settles.</summary>
+    public Func<int, IReadOnlyList<Kommander.Data.RaftProposalEntry>, IReadOnlyList<long>?, Task<DurableCompletionAnswer>>? MergedSettleAwaiter { get; init; }
 }

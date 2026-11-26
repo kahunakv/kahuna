@@ -76,7 +76,9 @@ public sealed class TestSubmissionStageAttribution
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 2,
-            KeyValueWriteLingerMs = 1
+            KeyValueWriteLingerMs = 1,
+            // The attribution covers the materialize stage, which only the shape with materialization records has.
+            DurableMaterializeOnResolve = false
         }, loggerFactory);
         await node.StartAsync(ct);
         await node.WaitForLeaderForKeyAsync("sa0/k0", ct);

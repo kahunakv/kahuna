@@ -109,6 +109,7 @@ public abstract class BaseCluster : IAsyncLifetime
             DefaultTransactionTimeout = 5000,
             ScriptCacheExpiration = TimeSpan.FromMinutes(1),
         };
+        ApplyTestRunShape(configuration);
         configure?.Invoke(configuration);
 
         // ActorSystem actorSystem, IRaft raft, KahunaConfiguration configuration, ILogger<IKahuna> logger
@@ -187,6 +188,7 @@ public abstract class BaseCluster : IAsyncLifetime
             DefaultTransactionTimeout = 5000,
             ScriptCacheExpiration = TimeSpan.FromMinutes(1),
         };
+        ApplyTestRunShape(configuration);
         configure?.Invoke(configuration);
 
         // ActorSystem actorSystem, IRaft raft, KahunaConfiguration configuration, ILogger<IKahuna> logger
@@ -265,6 +267,7 @@ public abstract class BaseCluster : IAsyncLifetime
             DefaultTransactionTimeout = 5000,
             ScriptCacheExpiration = TimeSpan.FromMinutes(1),
         };
+        ApplyTestRunShape(configuration);
         configure?.Invoke(configuration);
 
         // ActorSystem actorSystem, IRaft raft, KahunaConfiguration configuration, ILogger<IKahuna> logger
@@ -283,6 +286,40 @@ public abstract class BaseCluster : IAsyncLifetime
         return (raft, kahuna);
     }
     
+    /// <summary>
+    /// The variables that select the record shape of a durable commit for every node this class builds, before the
+    /// test's own configuration runs, so that one test run takes the durable suites in one shape. Each takes
+    /// <c>true</c> or <c>false</c>, and no value keeps the default of the configuration:
+    /// <see cref="MaterializeOnResolveVariable"/> (<c>false</c> writes materialization records),
+    /// <see cref="MergeAdjacentSettlesVariable"/> and <see cref="OnePhaseBundleEntryVariable"/>.
+    /// </summary>
+    internal const string MaterializeOnResolveVariable = "KAHUNA_TEST_MATERIALIZE_ON_RESOLVE";
+
+    internal const string MergeAdjacentSettlesVariable = "KAHUNA_TEST_MERGE_ADJACENT_SETTLES";
+
+    internal const string OnePhaseBundleEntryVariable = "KAHUNA_TEST_ONE_PHASE_BUNDLE_ENTRY";
+
+    private static readonly bool? TestRunMaterializeOnResolve = TestRunFlag(MaterializeOnResolveVariable);
+
+    private static readonly bool? TestRunMergeAdjacentSettles = TestRunFlag(MergeAdjacentSettlesVariable);
+
+    private static readonly bool? TestRunOnePhaseBundleEntry = TestRunFlag(OnePhaseBundleEntryVariable);
+
+    private static bool? TestRunFlag(string variable) =>
+        bool.TryParse(Environment.GetEnvironmentVariable(variable), out bool value) ? value : null;
+
+    private static void ApplyTestRunShape(KahunaConfiguration configuration)
+    {
+        if (TestRunMaterializeOnResolve is { } materializeOnResolve)
+            configuration.DurableMaterializeOnResolve = materializeOnResolve;
+
+        if (TestRunMergeAdjacentSettles is { } mergeAdjacentSettles)
+            configuration.DurableMergeAdjacentSettles = mergeAdjacentSettles;
+
+        if (TestRunOnePhaseBundleEntry is { } onePhaseBundleEntry)
+            configuration.DurableOnePhaseBundleEntry = onePhaseBundleEntry;
+    }
+
     /// <param name="decorateWriteBatchExecutor">Optional per-node decorator over the key/value write aggregator's
     /// Raft batch executor, keyed by node id (1..3), so a test can capture, stall or replay a node's batches
     /// while driving the real public entry points. Null for a node keeps the real executor.</param>
@@ -458,6 +495,7 @@ public abstract class BaseCluster : IAsyncLifetime
             DefaultTransactionTimeout = 5000,
             ScriptCacheExpiration = TimeSpan.FromMinutes(1)
         };
+        ApplyTestRunShape(configuration);
         configureKahuna?.Invoke(configuration);
 
         IRaft kahunaRaft = wrapRaft?.Invoke(raft) ?? raft;

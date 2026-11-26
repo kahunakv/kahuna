@@ -95,6 +95,36 @@ public sealed class TestPartitionWriteAggregator
         public void Release(bool transient) => sink?.Released.TryAdd(ProposalId, transient);
     }
 
+    /// <summary>A submission of a chosen stage, for the tests of the settle runs of a batch.</summary>
+    private sealed class StageSubmission(WriteSubmissionStage stage) : IProposalSubmission
+    {
+        public int PartitionId => 1;
+        public WriteAdmissionClass AdmissionClass => WriteAdmissionClass.Terminal;
+        public WriteSubmissionStage Stage => stage;
+        public int ByteLength => 1;
+        public IReadOnlyList<RaftProposalEntry> Entries { get; } = [new RaftProposalEntry(ReplicationTypes.PreparedIntent, [1], AutoCommit: true, ExpectedGeneration: 0)];
+        public long EnqueueTicks { get; set; }
+        public bool IsStale(IWriteRangeFence fence) => false;
+        public bool IsQuiesced(IWriteRangeFence fence) => false;
+        public void Complete(IReadOnlyList<long>? entryLogIndices) { }
+        public void Release(bool transient) { }
+    }
+
+    [Theory]
+    [InlineData("", 0)]
+    [InlineData("o", 0)]
+    [InlineData("s", 1)]
+    [InlineData("sss", 1)]
+    [InlineData("sos", 2)]
+    [InlineData("ossoss", 2)]
+    [InlineData("sosos", 3)]
+    [InlineData("oossoo", 1)]
+    public void SettleRuns_CountTheGroupsOfAdjacentSettles(string stages, int expected)
+    {
+        List<IProposalSubmission> batch = [.. stages.Select(c => new StageSubmission(c == 's' ? WriteSubmissionStage.Settle : WriteSubmissionStage.OnePhase))];
+        Assert.Equal(expected, PartitionWriteAggregatorActor.CountSettleRuns(batch));
+    }
+
     // ── pure state ────────────────────────────────────────────────────────────
 
     [Fact]
@@ -439,6 +469,8 @@ public sealed class TestPartitionWriteAggregator
         public readonly ConcurrentQueue<(int Partition, int Count)> Calls = new();
         // Per-call ordered entry signatures (first byte of each entry's Data), so a test can assert bundle order.
         public readonly ConcurrentQueue<int[]> CallSignatures = new();
+        // Per-call entries as dispatched, so a test can decode what one proposal carried.
+        public readonly ConcurrentQueue<RaftProposalEntry[]> CallEntries = new();
         private readonly ConcurrentDictionary<int, TaskCompletionSource> gates = new();
         public bool SucceedResult = true;
         public RaftOperationStatus ResultStatus = RaftOperationStatus.Success;
@@ -459,6 +491,7 @@ public sealed class TestPartitionWriteAggregator
         {
             Calls.Enqueue((partitionId, entries.Count));
             CallSignatures.Enqueue([.. entries.Select(e => e.Data.Length > 0 ? e.Data[0] : -1)]);
+            CallEntries.Enqueue([.. entries]);
             // Consume the scripted status at arrival so it maps to the dispatch order even when calls overlap.
             ScriptedCallStatuses.TryDequeue(out RaftOperationStatus? scripted);
             if (gates.TryGetValue(partitionId, out TaskCompletionSource? gate))
@@ -757,6 +790,152 @@ public sealed class TestPartitionWriteAggregator
 
         await WaitUntil(() => router.Released.Count == 8);
         Assert.Empty(router.Completed);
+    }
+
+    // ── merged settles ────────────────────────────────────────────────────────────
+
+    private static readonly Func<int, IReadOnlyList<RaftProposalEntry>, IReadOnlyList<long>?, Task<DurableCompletionAnswer>> AcknowledgeAtOnce =
+        static (_, _, _) => Task.FromResult(DurableCompletionAnswer.Acknowledged);
+
+    /// <summary>A lane with no ordered apply to wait for does not merge: each settle keeps its own entry and answers
+    /// after it.</summary>
+    [Fact]
+    public async Task Aggregator_WithNoApplyAwaiter_DoesNotMergeSettles()
+    {
+        RecordingExecutor exec = new();
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
+        {
+            MaxBatchItems = 64,
+            LingerMs = 0,
+            // The batch completion is a priority message, so the lane can read it before the queued submissions. The
+            // hold after the completion keeps them together until the lane has read them all.
+            PostCompletionHoldMs = 100,
+            MaxQueueDelayMs = 10_000,
+            MergeAdjacentSettles = true
+        });
+
+        exec.Gate(4);
+        Assert.True(agg.TryEnqueue(Item(4, 1)));
+        await WaitUntil(() => exec.Calls.Count == 1);
+
+        DurableProposalSubmission[] settles = [.. Enumerable.Range(0, 3).Select(i => SettleSubmission(4, 300 + i))];
+        foreach (DurableProposalSubmission settle in settles)
+            Assert.True(agg.TryEnqueue(settle));
+
+        exec.Release(4);
+        foreach (DurableProposalSubmission settle in settles)
+            Assert.True(await settle.Committed.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+
+        Assert.Equal(3, exec.CallEntries.Last().Length);
+    }
+
+    private static DurableProposalSubmission SettleSubmission(int partitionId, long transaction)
+    {
+        HLCTimestamp id = new(0, transaction, 0);
+        byte[] delta = Kahuna.Server.KeyValues.Transactions.PreparedIntentStore.SerializeDelta([
+            new Kahuna.Server.KeyValues.Transactions.Data.ResolveIntentCommand(id, 1, "settle/" + transaction, Commit: true),
+            new Kahuna.Server.KeyValues.Transactions.Data.RemoveIntentCommand(id, 1, "settle/" + transaction)]);
+
+        return new DurableProposalSubmission(
+            partitionId,
+            [new RaftProposalEntry(ReplicationTypes.PreparedIntent, delta, AutoCommit: true, ExpectedGeneration: 0, ExpectedTerm: 0)],
+            new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously),
+            WriteAdmissionClass.Terminal,
+            WriteSubmissionStage.Settle);
+    }
+
+    /// <summary>The settles that queue behind an in-flight batch dispatch together. With the merge on they leave in one
+    /// entry, each ends committed, and the lane frees the admission of each of them.</summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Aggregator_AdjacentSettles_LeaveInOneEntry_WhenTheMergeIsOn(bool merge)
+    {
+        RecordingExecutor exec = new();
+        RecordingRouter router = new();
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
+        {
+            MaxBatchItems = 64,
+            LingerMs = 0,
+            // The batch completion is a priority message, so the lane can read it before the queued submissions. The
+            // hold after the completion keeps them together until the lane has read them all.
+            PostCompletionHoldMs = 100,
+            MaxQueueDelayMs = 10_000,
+            MergeAdjacentSettles = merge,
+            MergedSettleAwaiter = AcknowledgeAtOnce
+        });
+
+        exec.Gate(4);
+        Assert.True(agg.TryEnqueue(Item(4, 1, sink: router)));
+        await WaitUntil(() => exec.Calls.Count == 1);
+
+        DurableProposalSubmission[] settles = [.. Enumerable.Range(0, 5).Select(i => SettleSubmission(4, 100 + i))];
+        foreach (DurableProposalSubmission settle in settles)
+            Assert.True(agg.TryEnqueue(settle));
+
+        Assert.True(agg.TryEnqueue(Item(4, 2, sink: router)));
+        Assert.Equal(7, agg.ReservedItems(4));
+
+        exec.Release(4);
+
+        foreach (DurableProposalSubmission settle in settles)
+            Assert.True(await settle.Committed.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+
+        await WaitUntil(() => router.Completed.ContainsKey(2));
+        await WaitUntil(() => agg.ReservedItems(4) == 0);
+
+        RaftProposalEntry[][] calls = [.. exec.CallEntries];
+        Assert.True(calls.Length == 2, "calls: " + string.Join(" | ", calls.Select(c => string.Join(",", c.Select(e => e.Type + ":" + e.Data.Length)))));
+        RaftProposalEntry[] second = calls[1];
+
+        if (merge)
+        {
+            Assert.Equal(2, second.Length);
+            Assert.Equal(ReplicationTypes.PreparedIntent, second[0].Type);
+            Assert.Equal(10, Kahuna.Server.KeyValues.Transactions.PreparedIntentStore.DecodeDelta([.. second[0].Data]).Length);
+            Assert.Equal(ReplicationTypes.KeyValues, second[1].Type);
+        }
+        else
+            Assert.Equal(6, second.Length);
+    }
+
+    [Fact]
+    public async Task Aggregator_FailedBatchWithAMergedSettle_ReleasesEveryMember_AndItsAdmission()
+    {
+        RecordingExecutor exec = new();
+        using AggregatorHarness agg = Build(exec, new PartitionWriteAggregatorOptions
+        {
+            MaxBatchItems = 64,
+            LingerMs = 0,
+            // The batch completion is a priority message, so the lane can read it before the queued submissions. The
+            // hold after the completion keeps them together until the lane has read them all.
+            PostCompletionHoldMs = 100,
+            MaxQueueDelayMs = 10_000,
+            MergeAdjacentSettles = true,
+            MergedSettleAwaiter = AcknowledgeAtOnce
+        });
+
+        exec.Gate(4);
+        Assert.True(agg.TryEnqueue(Item(4, 1)));
+        await WaitUntil(() => exec.Calls.Count == 1);
+
+        exec.SucceedResult = false;
+        exec.ResultStatus = RaftOperationStatus.NodeIsNotLeader;
+
+        DurableProposalSubmission[] settles = [.. Enumerable.Range(0, 3).Select(i => SettleSubmission(4, 200 + i))];
+        foreach (DurableProposalSubmission settle in settles)
+            Assert.True(agg.TryEnqueue(settle));
+
+        exec.Release(4);
+
+        foreach (DurableProposalSubmission settle in settles)
+        {
+            Assert.False(await settle.Committed.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+            Assert.Equal(DurableCompletionAnswer.NotCommitted, settle.Answer);
+        }
+
+        await WaitUntil(() => agg.ReservedItems(4) == 0);
+        Assert.Single(exec.CallEntries.Last());
     }
 
     [Fact]

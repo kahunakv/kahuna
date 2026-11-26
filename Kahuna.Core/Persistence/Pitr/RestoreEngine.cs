@@ -178,10 +178,11 @@ internal static class RestoreEngine
                         // Track intent transitions before the as-of cut, never after it: the cut selects which
                         // MUTATIONS are restored, and an intent skipped here would leave a by-reference record
                         // inside the cut with nothing to expand from.
-                        if (entry.LogType == ReplicationTypes.PreparedIntent)
+                        // A one-phase bundle entry carries its prepare part here; its record parts restore nothing.
+                        if (OnePhaseBundleEntry.TryGetIntentCommands(entry.LogType, entry.LogData, out PreparedIntentCommand[]? intentCommands))
                         {
                             installs.Clear();
-                            TrackIntentTransitions(liveIntents, settledIntents, entry, installs, manifest.BackupId);
+                            TrackIntentTransitions(liveIntents, settledIntents, entry, intentCommands, installs, manifest.BackupId);
 
                             // A materializing resolve installs its rows at this entry. Each row carries the
                             // transaction's commit timestamp, so the cut includes or excludes it on the same
@@ -556,13 +557,11 @@ internal static class RestoreEngine
         Dictionary<PreparedIntentIdentity, PreparedIntent> liveIntents,
         SettledIntentWindow settledIntents,
         WalSegmentEntry entry,
+        PreparedIntentCommand[] commands,
         List<(PersistenceRequestItem Item, HLCTimestamp CommitHlc)> installs,
         Guid backupId)
     {
-        if (entry.LogData is null || entry.LogData.Length == 0)
-            return;
-
-        foreach (PreparedIntentCommand command in PreparedIntentStore.DecodeDelta(entry.LogData))
+        foreach (PreparedIntentCommand command in commands)
         {
             switch (command)
             {

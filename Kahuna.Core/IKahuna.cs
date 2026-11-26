@@ -804,6 +804,13 @@ public interface IKahuna
         GetPartitionApplyFingerprint(int partitionId, CancellationToken ct);
 
     /// <summary>
+    /// The replicated log types that this node applies, so the leader of a partition proposes an entry of a type only
+    /// while every replica applies it. Null when the node does not answer the question, which the asker reads as a node
+    /// that does not apply the type.
+    /// </summary>
+    public IReadOnlyList<string>? GetAppliedLogTypes() => null;
+
+    /// <summary>
     /// Whether this node still holds a prepared intent for exactly this transaction attempt on
     /// <paramref name="key"/>, with its applied kv log id for <paramref name="partitionId"/> so the asker
     /// can tell "settled in a range I missed" from "settled in a range I have not applied yet". Type is

@@ -615,6 +615,8 @@ public sealed partial class KahunaManager
         GetPartitionApplyFingerprint(int partitionId, CancellationToken ct) =>
         keyValues.GetPartitionApplyFingerprint(partitionId, ct);
 
+    public IReadOnlyList<string>? GetAppliedLogTypes() => keyValues.GetAppliedLogTypes();
+
     public Task<(KeyValueResponseType Type, bool Held, long AppliedLogId)>
         GetPreparedIntentPresence(int partitionId, HLCTimestamp transactionId, long epoch, string key, CancellationToken ct) =>
         keyValues.GetPreparedIntentPresence(partitionId, transactionId, epoch, key, ct);

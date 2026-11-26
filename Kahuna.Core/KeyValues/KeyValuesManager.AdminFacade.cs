@@ -246,6 +246,7 @@ internal sealed partial class KeyValuesManager
     public Task<bool> OnLeaderChanged(int partitionId, string node)
     {
         NoteLeaderOfPartition(partitionId, node);
+        runtime.BundlePeerGuard?.OnLeaderChanged(partitionId, node);
 
         return replicationDispatcher.OnLeaderChanged(partitionId, node);
     }
@@ -279,6 +280,18 @@ internal sealed partial class KeyValuesManager
             ? (raft.HostsPartition(partitionId) ? KeyValueResponseType.MustRetry : KeyValueResponseType.DoesNotExist, default)
             : (KeyValueResponseType.Get, fingerprint.Value));
     }
+
+    /// <summary>The replicated log types that this node applies (see <see cref="IKahuna.GetAppliedLogTypes"/>), or what
+    /// the test seam of the peer guard answers in their place.</summary>
+    internal IReadOnlyList<string>? GetAppliedLogTypes()
+    {
+        Func<IReadOnlyList<string>?>? overrideForTesting = AppliedLogTypesOverrideForTesting;
+        return overrideForTesting is null ? Writes.OnePhaseBundlePeerGuard.AppliedLogTypes : overrideForTesting();
+    }
+
+    /// <summary>Test-only: what this node answers when a leader asks which log types it applies, in place of the real
+    /// list. Null answers the real list. Never wired in production paths.</summary>
+    internal Func<IReadOnlyList<string>?>? AppliedLogTypesOverrideForTesting { get; set; }
 
     /// <summary>
     /// Opens a watch served by this replica (see <see cref="IKahuna.WatchKeyValues"/>).

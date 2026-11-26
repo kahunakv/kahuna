@@ -182,6 +182,38 @@ public partial class GrpcInterNodeCommunication
     }
 
     /// <summary>
+    /// Asks a node which replicated log types it applies, as a plain unary call on the shared channel: a partition leader
+    /// asks when it takes the leadership or the replicas change, and has nothing to coalesce. A node of an older build
+    /// answers that it does not implement the call, and any failure answers null: the leader then reads the node as one
+    /// that does not apply a new type, and asks again later.
+    /// </summary>
+    public async Task<IReadOnlyList<string>?> GetAppliedLogTypes(string node, CancellationToken cancellationToken)
+    {
+        try
+        {
+            global::KeyValuer.KeyValuerClient client = new(SharedChannels.GetChannel(ResolveNodeUrl(node), transportSecurity));
+
+            GrpcGetAppliedLogTypesResponse response = await client
+                .GetAppliedLogTypesAsync(new GrpcGetAppliedLogTypesRequest(), headers: InterNodeHeaders.ForwardedCall, cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+
+            return [.. response.LogTypes];
+        }
+        catch (RpcException ex)
+        {
+            if (ex.StatusCode != StatusCode.Unimplemented)
+                LogForwardingTransportFailure("GetAppliedLogTypes", node, ex.StatusCode);
+
+            return null;
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException && !cancellationToken.IsCancellationRequested)
+        {
+            // The channel could not be opened (a stopped node, a bad address): no answer.
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Asks a node for its share of a cluster-wide backup on a bidirectional stream: the node sends each artifact
     /// in chunks, a full share waits for Proceed once every share is captured, then the node sends the result. A transport failure throws (the composing node names the share); a cancellation
     /// the caller asked for surfaces as one, not as a transport failure.

@@ -103,6 +103,10 @@ internal sealed class KeyValuesRuntime
     /// released by the ordered apply, and asked by the reads of named keys.</summary>
     internal required Writes.UndeliveredKeys UndeliveredKeys { get; init; }
 
+    /// <summary>Whether a one-phase commit of a partition that this node leads goes to the log as one bundle entry.
+    /// Assigned once the runtime exists; null in direct-construction tests, which then propose three entries.</summary>
+    internal Writes.OnePhaseBundlePeerGuard? BundlePeerGuard { get; set; }
+
     /// <summary>The node's open key-value watches. Published to by the replicator and the prepared-intent store
     /// on the apply path, and ended by the dispatcher and the state transfers when a partition loses
     /// continuity.</summary>

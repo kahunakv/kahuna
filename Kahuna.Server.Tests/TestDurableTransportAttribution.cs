@@ -114,8 +114,9 @@ public sealed class TestDurableTransportAttribution : BaseCluster
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
+        // The counts include the forwards of the materialization records, which only this shape writes.
         (IRaft[] rafts, IKahuna[] kahunas) = await AssembleCluster(
-            3, "memory", Partitions, raftLogger, kahunaLogger, replicationFactor: 1);
+            3, "memory", Partitions, raftLogger, kahunaLogger, replicationFactor: 1, configureKahuna: c => c.DurableMaterializeOnResolve = false);
 
         KahunaManager[] managers = [.. kahunas.Cast<KahunaManager>()];
 
@@ -171,8 +172,9 @@ public sealed class TestDurableTransportAttribution : BaseCluster
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
+        // The counts include the forwards of the materialization records, which only this shape writes.
         (IRaft[] rafts, IKahuna[] kahunas) = await AssembleCluster(
-            3, "memory", Partitions, raftLogger, kahunaLogger, replicationFactor: 1);
+            3, "memory", Partitions, raftLogger, kahunaLogger, replicationFactor: 1, configureKahuna: c => c.DurableMaterializeOnResolve = false);
 
         KahunaManager[] managers = [.. kahunas.Cast<KahunaManager>()];
 

@@ -61,6 +61,8 @@ public sealed class BenchmarkRegisteredTransactionThroughput
                 WalPath = Path.Combine(rootPath, "wal"),
                 WalSyncWrites = true,
                 InitialPartitions = 1,
+                // The report counts the materialization records of the commit, which only this shape writes.
+                DurableMaterializeOnResolve = false,
                 WriteBatchExecutorDecorator = inner => counter = new CountingExecutor(inner)
             }, loggerFactory);
             await node.StartAsync(cancellationToken);

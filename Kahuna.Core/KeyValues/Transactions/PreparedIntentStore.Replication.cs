@@ -173,13 +173,31 @@ internal sealed partial class PreparedIntentStore
     /// <inheritdoc cref="ApplyDeltaAckPrepares(RaftLog)"/>
     /// <param name="partitionId">The partition whose log carries the delta; selects the committed-head ledger
     /// slice its settlements feed (see <see cref="Apply(PreparedIntentCommand, int)"/>).</param>
-    public bool ApplyDeltaAckPrepares(int partitionId, RaftLog log)
+    public bool ApplyDeltaAckPrepares(int partitionId, RaftLog log) => ApplyDeltaAckPrepares(partitionId, log, out _);
+
+    /// <inheritdoc cref="ApplyDeltaAckPrepares(int, RaftLog)"/>
+    /// <param name="carriedPrepare">Whether the delta carried at least one prepare. A delta with none is a settle.</param>
+    public bool ApplyDeltaAckPrepares(int partitionId, RaftLog log, out bool carriedPrepare)
     {
+        carriedPrepare = false;
+
         if (log.LogType != ReplicationTypes.PreparedIntent || log.LogData is null)
             return true;
 
         if (!locallyProposedDeltas.TryTake(log.LogData, out PreparedIntentCommand[]? commands))
             commands = DecodeDelta(log.LogData);
+
+        return ApplyCommandsAckPrepares(partitionId, log.Id, log.Time, commands, out carriedPrepare);
+    }
+
+    /// <summary>
+    /// The live apply of the commands of one delta, which a log entry of <paramref name="partitionId"/> at
+    /// <paramref name="logIndex"/> and <paramref name="logTime"/> carries; see <see cref="ApplyDeltaAckPrepares(RaftLog)"/>
+    /// for the answer. The prepare part of a one-phase bundle entry applies through here.
+    /// </summary>
+    internal bool ApplyCommandsAckPrepares(int partitionId, long logIndex, HLCTimestamp logTime, PreparedIntentCommand[] commands, out bool carriedPrepare)
+    {
+        carriedPrepare = false;
 
         bool allPreparesAccepted = true;
         List<(PreparedIntent Intent, long HeadRevision)>? staleFlagged = null;
@@ -187,16 +205,21 @@ internal sealed partial class PreparedIntentStore
         // History below an installed snapshot's reflected position applies without the advisory fence: the
         // ledger is ahead of these entries by construction, so a verdict here could only be a false refusal and
         // a false veto (see IsHistoricalApply).
-        HistoryWindow window = WindowOf(partitionId, log.Id);
+        HistoryWindow window = WindowOf(partitionId, logIndex);
         bool installed = false;
 
         foreach (PreparedIntentCommand command in commands)
         {
-            if (command is ResolveIntentCommand resolve && TryInstallOnResolve(partitionId, log.Id, resolve, replay: false))
+            if (command is ResolveIntentCommand resolve && TryInstallOnResolve(partitionId, logIndex, resolve, replay: false))
                 installed = true;
 
-            PreparedIntentApplyResult result = Apply(command, partitionId, window, replay: false, log.Time, log.Id);
-            if (command is PrepareIntentCommand prepare && (result.Outcome == TransactionApplyOutcome.Rejected || result.StaleBase))
+            PreparedIntentApplyResult result = Apply(command, partitionId, window, replay: false, logTime, logIndex);
+            if (command is not PrepareIntentCommand prepare)
+                continue;
+
+            carriedPrepare = true;
+
+            if (result.Outcome == TransactionApplyOutcome.Rejected || result.StaleBase)
             {
                 allPreparesAccepted = false;
                 if (result.StaleBase)
@@ -215,10 +238,10 @@ internal sealed partial class PreparedIntentStore
             }
         }
 
-        MarkApplied(partitionId, log.Id);
+        MarkApplied(partitionId, logIndex);
 
         if (installed)
-            resolvedIntentInstaller!.CompleteEntry(partitionId, log.Id, replay: false);
+            resolvedIntentInstaller!.CompleteEntry(partitionId, logIndex, replay: false);
 
         FireStaleBaseVetoes(staleFlagged);
         return allPreparesAccepted;
@@ -253,15 +276,27 @@ internal sealed partial class PreparedIntentStore
         if (!locallyProposedDeltas.TryTake(log.LogData, out PreparedIntentCommand[]? commands))
             commands = DecodeDelta(log.LogData);
 
-        HistoryWindow window = WindowOf(partitionId, log.Id);
+        ApplyCommands(partitionId, log.Id, log.Time, commands, replay);
+        return true;
+    }
+
+    /// <summary>
+    /// Applies the commands of one delta, which a log entry of <paramref name="partitionId"/> at
+    /// <paramref name="logIndex"/> and <paramref name="logTime"/> carries, as a restart replay
+    /// (<paramref name="replay"/> true) or as a live apply that answers nothing. The prepare part of a one-phase
+    /// bundle entry replays through here.
+    /// </summary>
+    internal void ApplyCommands(int partitionId, long logIndex, HLCTimestamp logTime, PreparedIntentCommand[] commands, bool replay)
+    {
+        HistoryWindow window = WindowOf(partitionId, logIndex);
         bool installed = false;
 
         foreach (PreparedIntentCommand command in commands)
         {
-            if (command is ResolveIntentCommand resolve && TryInstallOnResolve(partitionId, log.Id, resolve, replay))
+            if (command is ResolveIntentCommand resolve && TryInstallOnResolve(partitionId, logIndex, resolve, replay))
                 installed = true;
 
-            PreparedIntentApplyResult result = Apply(command, partitionId, window, replay, log.Time, log.Id);
+            PreparedIntentApplyResult result = Apply(command, partitionId, window, replay, logTime, logIndex);
 
             if (!replay)
                 continue;
@@ -282,12 +317,10 @@ internal sealed partial class PreparedIntentStore
             }
         }
 
-        MarkApplied(partitionId, log.Id);
+        MarkApplied(partitionId, logIndex);
 
         if (installed)
-            resolvedIntentInstaller!.CompleteEntry(partitionId, log.Id, replay);
-
-        return true;
+            resolvedIntentInstaller!.CompleteEntry(partitionId, logIndex, replay);
     }
 
 }

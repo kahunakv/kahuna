@@ -502,6 +502,118 @@ public sealed class TestMaterializeOnResolve : BaseCluster, IDisposable
         Assert.Equal(expected, ValueOf(restored, "acct/1"));
     }
 
+    /// <summary>
+    /// The settles of two transactions in one merged entry, which is how the write scheduler sends adjacent settles.
+    /// Each command keeps the commit timestamp of its own transaction, so the cut of a restore takes each transaction
+    /// by its own commit and not by the entry.
+    /// </summary>
+    [Theory]
+    [InlineData(320, "committed:acct/1", null)]
+    [InlineData(400, "committed:acct/1", "second:acct/2")]
+    [InlineData(250, null, null)]
+    public async Task Pitr_MergedSettleOfTwoTransactions_RestoresEachByItsOwnCommit(long target, string? first, string? second)
+    {
+        PreparedIntent one = CommittedAt300("acct/1");
+        PreparedIntent two = CommittedAt300("acct/2") with
+        {
+            TransactionId = Ts(1_300), CommitTimestamp = Ts(350), Value = Encoding.UTF8.GetBytes("second:acct/2")
+        };
+
+        MemoryPersistenceBackend restored = await RestoreChainAsync("merged-" + target, SeededWal(), [
+            IntentLog(2, 200, new PrepareIntentCommand(one)),
+            IntentLog(3, 210, new PrepareIntentCommand(two)),
+            IntentLog(4, 410, [.. Settle(materialize: true, one), .. Settle(materialize: true, two)])
+        ], Ts(target));
+
+        Assert.Equal(first, ValueOf(restored, "acct/1"));
+        Assert.Equal(second, ValueOf(restored, "acct/2"));
+    }
+
+    [Fact]
+    public void BackupBarrier_CountsTheLatestCommitOfAMergedSettle()
+    {
+        PreparedIntent one = CommittedAt300("acct/1") with { CommitTimestamp = Ts(305) };
+        PreparedIntent two = CommittedAt300("acct/2") with { TransactionId = Ts(1_300), CommitTimestamp = Ts(309) };
+
+        InMemoryWAL wal = SeededWal();
+        wal.Write([(1, [
+            IntentLog(2, 200, new PrepareIntentCommand(one)),
+            IntentLog(3, 201, new PrepareIntentCommand(two)),
+            IntentLog(4, 310, [.. Settle(materialize: true, two), .. Settle(materialize: true, one)])
+        ])]);
+
+        Assert.Equal(Ts(309), BackupDriver.MaxCommittedKeyValueCommitHlc(wal, 1, 4, TestContext.Current.CancellationToken));
+    }
+
+    /// <summary>A one-phase commit as one bundle entry: the record init, the prepare and the decision of
+    /// <paramref name="intent"/>, with the commit admitted by the gate.</summary>
+    private static RaftLog BundleLog(long id, long timeMs, PreparedIntent intent)
+    {
+        List<TransactionParticipantRef> manifest = [new(intent.Key, KeyValueDurability.Persistent)];
+        long hash = TransactionManifest.ComputeHash(intent.TransactionId, intent.Epoch, intent.Key, intent.CommitTimestamp, manifest);
+        HLCTimestamp opId = new(0, intent.TransactionId.L + 1, 0);
+
+        byte[] init = TransactionRecordStore.SerializeDelta([new InitializeTransactionCommand(
+            intent.TransactionId, intent.Epoch, "coord", intent.Key, intent.CommitTimestamp, Ts(90_000), hash, manifest, opId, intent.TransactionId)]);
+        byte[] prepare = PreparedIntentStore.SerializeDelta([new PrepareIntentCommand(intent with { ManifestHash = hash, RecordAnchorKey = intent.Key })]);
+        byte[] decision = TransactionRecordStore.SerializeDelta([new CommitTransactionCommand(
+            intent.TransactionId, intent.Epoch, hash, opId, opId, BundledPrepareKeys: [intent.Key])]);
+
+        return new RaftLog
+        {
+            Id = id,
+            Type = RaftLogType.Committed,
+            Time = new HLCTimestamp(0, timeMs, 0),
+            LogType = ReplicationTypes.OnePhaseBundle,
+            LogData = [.. OnePhaseBundleEntry.Serialize(init, prepare, decision)]
+        };
+    }
+
+    [Fact]
+    public async Task Pitr_ExpandsAMaterializingSettleFromThePreparePartOfABundleEntry()
+    {
+        PreparedIntent intent = CommittedAt300("acct/1");
+
+        MemoryPersistenceBackend restored = await RestoreChainAsync("bundle", SeededWal(), [
+            BundleLog(2, 200, intent),
+            IntentLog(3, 310, Settle(materialize: true, intent))
+        ], Ts(400));
+
+        Assert.Equal("committed:acct/1", ValueOf(restored, "acct/1"));
+    }
+
+    /// <summary>The bundle entry is below the cut of the full backup and its settle is in the incremental: the intent
+    /// frontier of the full backup folds the prepare part, so the restore expands the settle from it.</summary>
+    [Fact]
+    public async Task Pitr_ABundleEntryBeforeTheFullBackup_IsInTheIntentFrontier()
+    {
+        PreparedIntent intent = CommittedAt300("acct/1");
+
+        InMemoryWAL wal = SeededWal();
+        wal.Write([(1, [BundleLog(2, 200, intent)])]);
+
+        MemoryPersistenceBackend restored = await RestoreChainAsync("bundle-frontier", wal, [
+            IntentLog(3, 310, Settle(materialize: true, intent))
+        ], Ts(400));
+
+        Assert.Equal("committed:acct/1", ValueOf(restored, "acct/1"));
+    }
+
+    /// <summary>A bundle entry whose commit the gate refused leaves its intent, and the recovery aborts it: the restore
+    /// installs no value of it.</summary>
+    [Fact]
+    public async Task Pitr_ABundleEntryThatIsAborted_RestoresNoValue()
+    {
+        PreparedIntent intent = CommittedAt300("acct/1");
+
+        MemoryPersistenceBackend restored = await RestoreChainAsync("bundle-abort", SeededWal(), [
+            BundleLog(2, 200, intent),
+            IntentLog(3, 310, DurableTransactionFinalizer.BuildSettleCommands([intent], commit: false, materializeOnResolve: true))
+        ], Ts(400));
+
+        Assert.Null(ValueOf(restored, "acct/1"));
+    }
+
     [Fact]
     public async Task Pitr_MaterializingSettleWithNoPrepare_FailsTheRestore()
     {

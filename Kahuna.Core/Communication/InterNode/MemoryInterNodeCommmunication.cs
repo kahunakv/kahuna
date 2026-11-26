@@ -1966,6 +1966,16 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         throw Unreachable(node);
     }
 
+    public Task<IReadOnlyList<string>?> GetAppliedLogTypes(string node, CancellationToken cancellationToken)
+    {
+        // A node that is gone, or not yet registered here, does not answer.
+        if (!TryGetNode(node, out IKahuna? kahunaNode))
+            return Task.FromResult<IReadOnlyList<string>?>(null);
+
+        using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
+        return Task.FromResult(kahunaNode.GetAppliedLogTypes());
+    }
+
     public async Task<(KeyValueResponseType Type, KeyValueApplyFingerprint Fingerprint)>
         GetPartitionApplyFingerprint(string node, int partitionId, CancellationToken cancellationToken)
     {

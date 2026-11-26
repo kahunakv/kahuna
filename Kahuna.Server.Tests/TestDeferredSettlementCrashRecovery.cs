@@ -84,6 +84,9 @@ public sealed class TestDeferredSettlementCrashRecovery
         WalRevision = "crash-recovery-wal",
         WalSyncWrites = true,
         DurableDeferredSettlement = true,
+        // The crash falls between the decision and the materialization records, which only this shape writes. The
+        // same crash before the materializing settle is in TestMaterializeOnResolve.
+        DurableMaterializeOnResolve = false,
         CollectionInterval = collectionInterval,
         WriteBatchExecutorDecorator = decorator
     };

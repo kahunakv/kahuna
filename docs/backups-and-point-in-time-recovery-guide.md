@@ -385,9 +385,9 @@ Two properties make this safe to run, and safe to *re-run*:
 
 Restore classifies key/value records by their encoded kind. Value-carrying materializations include
 the committed row; by-reference materializations reconstruct it from the corresponding prepared intent.
-With `DurableMaterializeOnResolve`, a committed settlement itself installs those rows, without separate
-key/value materialization records. Restore seeds the prepared intents from the full's intent frontier (§5), tracks prepares through the WAL
-segments, expands these resolves before their intent removals, and cuts rows on the transaction's commit
+With `DurableMaterializeOnResolve` (the default), a committed settlement itself installs those rows, without
+separate key/value materialization records. Restore seeds the prepared intents from the full's intent frontier (§5), tracks prepares through the WAL
+segments (the prepare part of a one-phase bundle entry included), expands these resolves before their intent removals, and cuts rows on the transaction's commit
 HLC. The backup applied
 barrier also includes that HLC, rather than treating a settlement as timestamp-free bookkeeping.
 

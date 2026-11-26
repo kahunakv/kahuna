@@ -38,6 +38,17 @@ internal static class PartitionWriteAggregatorMetrics
     internal static readonly Counter<long> DispatchedStageEntries =
         Meter.CreateCounter<long>("kahuna.kv.write.stage_entries", description: "Log entries dispatched across all aggregator batches, tagged by the stage that produced the submission.");
 
+    /// <summary>The runs of settle submissions in each dispatched batch that carries a settle. A run is a group of
+    /// settle submissions that are adjacent in the batch. The sum of the samples divided by the committed
+    /// transactions is the number of settle entries for each commit when each run is one entry.</summary>
+    internal static readonly Histogram<int> SettleRuns =
+        Meter.CreateHistogram<int>("kahuna.kv.write.settle_runs", unit: "{runs}", description: "Runs of adjacent settle submissions in each dispatched batch that carries a settle.");
+
+    /// <summary>The settle submissions that a merged settle entry carried (see <see cref="SettleRunMerger"/>). The
+    /// admitted terminal submissions minus this count are the submissions that had an entry of their own.</summary>
+    internal static readonly Counter<long> MergedSettles =
+        Meter.CreateCounter<long>("kahuna.kv.write.settles_merged", unit: "{submissions}", description: "Settle submissions that a merged settle entry carried.");
+
     internal static readonly Counter<long> BatchOutcomes =
         Meter.CreateCounter<long>("kahuna.kv.write.outcomes", description: "Batch outcomes tagged success/transient/permanent.");
 
@@ -54,7 +65,7 @@ internal static class PartitionWriteAggregatorMetrics
         Meter.CreateHistogram<long>("kahuna.kv.write.queue_age", unit: "ms", description: "Age of the oldest item in a dispatched batch, tagged by its admission class.");
 
     /// <summary>Per-submission time from admission to dispatch, tagged by admission class, by the log type of
-    /// the submission's first entry (<c>kv</c>, <c>record</c>, <c>intent</c>, <c>other</c>), and by the stage
+    /// the submission's first entry (<c>kv</c>, <c>record</c>, <c>intent</c>, <c>bundle</c>, <c>other</c>), and by the stage
     /// that produced the submission (<c>one_phase</c>, <c>record_init</c>, <c>prepare</c>, <c>re_prepare</c>,
     /// <c>decision</c>, <c>materialize</c>, <c>settle</c>, <c>other</c>). One sample per submission, so a
     /// decision that waited behind a materialization window shows up on its own series even when it was not the
@@ -66,12 +77,14 @@ internal static class PartitionWriteAggregatorMetrics
     private static readonly KeyValuePair<string, object?> TypeKv = new("type", "kv");
     private static readonly KeyValuePair<string, object?> TypeRecord = new("type", "record");
     private static readonly KeyValuePair<string, object?> TypeIntent = new("type", "intent");
+    private static readonly KeyValuePair<string, object?> TypeBundle = new("type", "bundle");
     private static readonly KeyValuePair<string, object?> TypeOther = new("type", "other");
 
-    private static KeyValuePair<string, object?> TypeTag(string logType) =>
+    internal static KeyValuePair<string, object?> TypeTag(string logType) =>
         logType == ReplicationTypes.KeyValues ? TypeKv
         : logType == ReplicationTypes.TransactionRecord ? TypeRecord
         : logType == ReplicationTypes.PreparedIntent ? TypeIntent
+        : logType == ReplicationTypes.OnePhaseBundle ? TypeBundle
         : TypeOther;
 
     private static readonly KeyValuePair<string, object?> StageOnePhase = new("stage", "one_phase");
@@ -236,6 +249,10 @@ internal static class PartitionWriteAggregatorMetrics
         BatchBytes.Record(bytes);
         QueueAgeMs.Record(oldestAgeMs, ClassTag(oldestClass));
     }
+
+    internal static void SettleRunsDispatched(int runs) => SettleRuns.Record(runs);
+
+    internal static void SettlesMerged(int members) => MergedSettles.Add(members);
 
     internal static void BatchSettled(bool success, bool transient, double durationMs)
     {

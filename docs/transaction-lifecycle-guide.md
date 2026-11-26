@@ -275,8 +275,8 @@ still be durably aborted), while `Commit` **cannot** — a commit requires an `U
    validation passed; otherwise `Abort`. This is the point of no return. The finalizer reports whatever the
    record *became* — a concurrent recovery abort can win the race.
 5. **Resolve** — install committed values and settle (resolve + remove) their intents, or discard aborted
-   staging and settle aborted intents. By default commits write materialization records before settlement;
-   with `DurableMaterializeOnResolve`, the settlement apply installs the values itself. **When** this runs
+   staging and settle aborted intents. By default (`DurableMaterializeOnResolve`) the settlement apply installs
+   the values itself; with the option off, commits write materialization records before settlement. **When** this runs
    is §8; the two encodings and their upgrade requirements are in the
    [durable settlement guide](durable-settlement-guide.md).
 
@@ -340,6 +340,26 @@ flow with the reason `foreign_intent`, and the helping pass of step 2 deals with
 
 A leader change between the validation and the propose refuses the bundle, as it does without a holder: the bundle
 is fenced to the term the validation was made under. The attempt answers a retry and nothing is durable.
+
+**One log entry for the bundle.** With `DurableOnePhaseBundleEntry` on (server option
+`--durable-one-phase-bundle-entry true`), the anchor leader proposes the record init, the prepare and the commit
+decision as one log entry of the type `onephasebundle`, in place of three entries. The entry holds the three deltas
+in their own encodings, in apply order. Every replica applies them at the position of the one entry, to the same
+stores and in the same order as the three entries: the gate of the decision reads the intent store that the prepare
+left, and the rejection memo, the stale-base vetoes and the term comparison do not change. A carried settlement of a
+holder stays an entry of its own, ahead of the bundle entry, in the same submission. A checkpoint or a snapshot
+boundary cannot fall between the prepare and the decision of a one-phase commit.
+
+The leader that proposes the commit selects the shape by its own setting, so a forwarded one-phase commit takes the
+shape of the receiving leader. A node of this build applies the entry whatever its setting. An older build skips the
+entry with no error and then has no record and no intent of the transaction, so turn the option on only after every
+node runs a build that applies it. The leader also asks each voter and learner of the partition which log types it
+applies, when it takes the leadership, when the replicas change, and at an interval while one of them did not
+confirm. While a replica did not confirm the type in the current term, the leader proposes the three entries, and
+`kahuna.durable_tx.one_phase_bundle_guard_fallbacks` counts each such commit. The check does not see a node of an
+older build that joins later or starts again on an older build between two asks, so the upgrade order stays the
+rule. Turning the option off is safe at any time. An older build is safe again only when no log and no backup
+segment that it can read holds a bundle entry.
 
 On the receiving leader, a forwarded durable request (an operation, a bundle, a one-phase bundle, a
 decision or a record lookup) starts as soon as the inter-node stream delivers it. It does not wait for

@@ -2,6 +2,7 @@ using System.Diagnostics;
 using Nixie;
 using Kommander;
 using Kommander.Data;
+using Kahuna.Server.Replication;
 
 namespace Kahuna.Server.KeyValues.Writes;
 
@@ -220,7 +221,14 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
             else
                 outcome.Item.Release(outcome.Transient);
 
-            admission.Release(message.PartitionId, outcome.Item.ByteLength);
+            // A merged settle holds no admission of its own: each member holds the one it was admitted with.
+            if (outcome.Item is MergedSettleSubmission merged)
+            {
+                foreach (DurableProposalSubmission member in merged.Members)
+                    admission.Release(message.PartitionId, member.ByteLength);
+            }
+            else
+                admission.Release(message.PartitionId, outcome.Item.ByteLength);
         }
 
         // Re-drive the buffer that accumulated behind the just-completed batch, then re-arm a wake so any
@@ -351,6 +359,18 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
                 continue;
             }
 
+            int settleRuns = CountSettleRuns(valid);
+            if (settleRuns > 0)
+            {
+                PartitionWriteAggregatorMetrics.SettleRunsDispatched(settleRuns);
+
+                // After the selection: only submissions that go to Raft now are merged, and the order of their
+                // commands in the log stays as it was. A lane with no ordered apply to wait for does not merge: each
+                // settle answers after the apply of its entry.
+                if (options.MergeAdjacentSettles && options.MergedSettleAwaiter is { } awaiter)
+                    valid = SettleRunMerger.Merge(valid, options.MergedSettleMaxCommands, awaiter);
+            }
+
             long batchBytes = 0;
             int ordinaryEntries = 0;
             int terminalEntries = 0;
@@ -370,8 +390,18 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
                     ordinaryEntries += item.Entries.Count;
 
                 // Per-submission queue delay by class: the batch's oldest-item age below cannot tell whether a
-                // decision waited behind background terminal work, this can.
-                PartitionWriteAggregatorMetrics.SubmissionDispatched(now - item.EnqueueTicks, item.AdmissionClass, item.Entries.Count > 0 ? item.Entries[0].Type : string.Empty, item.Stage, item.Entries.Count);
+                // decision waited behind background terminal work, this can. A merged settle records the delay of each
+                // member, and its one entry once.
+                if (item is MergedSettleSubmission merged)
+                {
+                    IReadOnlyList<DurableProposalSubmission> members = merged.Members;
+                    for (int m = 0; m < members.Count; m++)
+                        PartitionWriteAggregatorMetrics.SubmissionDispatched(now - members[m].EnqueueTicks, members[m].AdmissionClass, ReplicationTypes.PreparedIntent, WriteSubmissionStage.Settle, m == 0 ? 1 : 0);
+
+                    PartitionWriteAggregatorMetrics.SettlesMerged(members.Count);
+                }
+                else
+                    PartitionWriteAggregatorMetrics.SubmissionDispatched(now - item.EnqueueTicks, item.AdmissionClass, item.Entries.Count > 0 ? item.Entries[0].Type : string.Empty, item.Stage, item.Entries.Count);
             }
 
             RaftProposalEntry[] entries = [.. entryList];
@@ -404,6 +434,24 @@ internal sealed class PartitionWriteAggregatorActor : IActor<PartitionWriteMessa
             if (state.PendingCount < options.MaxBatchItems && state.QueuedBytes < options.MaxBatchBytes)
                 return;
         }
+    }
+
+    /// <summary>The runs of settle submissions in <paramref name="batch"/>: the groups of settle submissions that are
+    /// adjacent in it.</summary>
+    internal static int CountSettleRuns(IReadOnlyList<IProposalSubmission> batch)
+    {
+        int runs = 0;
+        bool previousSettle = false;
+
+        for (int i = 0; i < batch.Count; i++)
+        {
+            bool settle = batch[i].Stage == WriteSubmissionStage.Settle;
+            if (settle && !previousSettle)
+                runs++;
+            previousSettle = settle;
+        }
+
+        return runs;
     }
 
     /// <summary>Detached Raft round trip for one batch. Owns only the immutable batch + payloads; never touches

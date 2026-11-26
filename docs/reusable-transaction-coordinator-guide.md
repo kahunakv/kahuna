@@ -426,8 +426,8 @@ this path.
 4. **Decision barrier** — compare-and-set the canonical record: `Commit` only when every prepare is
    durable **and** validation passed; otherwise drive an abort with the appropriate class. An unresolved
    proposal remains `MustRetry`; a canonical terminal abort is reported as `Aborted`.
-5. **Resolve** — on commit, install values through materialization records and then settle the intents,
-   or let the settlement apply install them when `DurableMaterializeOnResolve` is enabled. On abort,
+5. **Resolve** — on commit, let the settlement apply install the values (`DurableMaterializeOnResolve`,
+   the default), or install them through materialization records and then settle the intents. On abort,
    clear staged write intent/MVCC before settling. Settlement resolves and removes intents in one delta.
    See the [durable settlement guide](durable-settlement-guide.md) for encoding, persistence and upgrade
    requirements.

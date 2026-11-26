@@ -65,4 +65,13 @@ public static class ReplicationTypes
     /// their WAL retained from which timestamp, so a watch can resume there on any replica.
     /// </summary>
     public const string HistoryHold = "historyhold";
+
+    /// <summary>
+    /// The record init, the prepare and the commit decision of a one-phase commit in one entry, on the partition of
+    /// the transaction's record anchor. The three parts keep the encoding of a <see cref="TransactionRecord"/> delta,
+    /// a <see cref="PreparedIntent"/> delta and a <see cref="TransactionRecord"/> delta, and every replica applies
+    /// them in that order at the position of the entry. A build that does not know the type skips the entry, so a
+    /// leader proposes it only while every replica of the partition confirmed that it applies the type.
+    /// </summary>
+    public const string OnePhaseBundle = "onephasebundle";
 }

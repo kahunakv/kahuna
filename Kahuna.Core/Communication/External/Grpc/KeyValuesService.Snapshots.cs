@@ -51,6 +51,15 @@ public sealed partial class KeyValuesService
     public override Task<GrpcGetPartitionApplyFingerprintResponse> GetPartitionApplyFingerprint(GrpcGetPartitionApplyFingerprintRequest request, ServerCallContext context)
         => Guard(request, context, static (s, r, c) => s.snapshots.GetPartitionApplyFingerprintCore(r, c), static _ => KeyValueMustRetry.GetPartitionApplyFingerprint());
 
+    public override Task<GrpcGetAppliedLogTypesResponse> GetAppliedLogTypes(GrpcGetAppliedLogTypesRequest request, ServerCallContext context)
+    {
+        GrpcGetAppliedLogTypesResponse response = new();
+        if (keyValues.GetAppliedLogTypes() is { } types)
+            response.LogTypes.Add(types);
+
+        return Task.FromResult(response);
+    }
+
     public override Task<GrpcGetPreparedIntentPresenceResponse> GetPreparedIntentPresence(GrpcGetPreparedIntentPresenceRequest request, ServerCallContext context)
         => Guard(request, context, static (s, r, c) => s.snapshots.GetPreparedIntentPresenceCore(r, c), static _ => KeyValueMustRetry.GetPreparedIntentPresence());
 

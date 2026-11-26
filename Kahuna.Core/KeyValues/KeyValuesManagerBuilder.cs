@@ -263,6 +263,10 @@ internal sealed class KeyValuesManagerBuilder
 
         undeliveredKeys = new();
 
+        // A merged settle entry waits for its ordered apply the way each settle did, with no producer's cancellation:
+        // the answer goes to every settle that it carries.
+        Writes.DurableOrderedApplyAwaiter mergedSettleApply = new(durableApplyResults, preparedIntentStore, logger);
+
         writeAggregator = new Writes.PartitionWriteAggregator(
             actorSystem,
             writeBatchExecutorDecorator?.Invoke(realBatchExecutor) ?? realBatchExecutor,
@@ -290,7 +294,10 @@ internal sealed class KeyValuesManagerBuilder
                 LaneCount = Math.Max(1, configuration.KeyValueWorkers),
                 // Persistence back-pressure: ordinary writes are refused while this node's unflushed
                 // backlog is over budget (see PersistenceBacklogMonitor).
-                UnflushedBacklogGate = backlogMonitor is null ? null : () => backlogMonitor.IsOverBudget
+                UnflushedBacklogGate = backlogMonitor is null ? null : () => backlogMonitor.IsOverBudget,
+                MergeAdjacentSettles = configuration.DurableMergeAdjacentSettles,
+                MergedSettleAwaiter = (partitionId, entries, entryLogIndices) =>
+                    mergedSettleApply.AwaitAppliedAsync(partitionId, entries, entryLogIndices, CancellationToken.None)
             },
             new Writes.RangeMapWriteFence(keySpaceRegistry, rangeMapStore, raft),
             logger,
@@ -325,6 +332,10 @@ internal sealed class KeyValuesManagerBuilder
             WriteAggregator = writeAggregator,
             UndeliveredKeys = undeliveredKeys
         };
+
+        // Asks the replicas of each partition that this node leads whether they apply the one-phase bundle entry.
+        runtime.BundlePeerGuard = new Writes.OnePhaseBundlePeerGuard(
+            raft, interNodeCommunication, logger, configuration.DurableOnePhaseBundleEntry, configuration.SingleProcessRaftGroup);
 
         // A durable transaction's write is reported to watches when its intent settles on the partition; the
         // store publishes there, so it needs the broker before any delta applies.

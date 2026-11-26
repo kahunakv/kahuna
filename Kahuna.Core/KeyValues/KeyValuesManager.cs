@@ -361,6 +361,12 @@ internal sealed partial class KeyValuesManager : IDisposable
 
     internal PreparedIntentStore DurablePreparedIntentStore => preparedIntentStore;
 
+    /// <summary>The results of the ordered apply of durable entries, which the write scheduler's completion waits for. Test access.</summary>
+    internal Transactions.DurableApplyResultLedger DurableApplyResults => durableApplyResults;
+
+    /// <summary>Whether a one-phase commit of a partition that this node leads goes to the log as one entry. Test access.</summary>
+    internal Writes.OnePhaseBundlePeerGuard? BundlePeerGuard => runtime.BundlePeerGuard;
+
     /// <summary>The ephemeral and persistent actor rings with their published-head tables. Diagnostic/test access.</summary>
     internal KeyValueActorRouters Routers => routers;
 
@@ -805,6 +811,8 @@ internal sealed partial class KeyValuesManager : IDisposable
         runtime.HistoryHoldStore.Dispose();
         admissionGaugeMeter.Dispose();
         applyGaugeMeter.Dispose();
+        replicationDispatcher.ApplyTotals.Dispose();
+        runtime.BundlePeerGuard?.Dispose();
         functionGaugeMeter.Dispose();
 
         // Fail anything still waiting for a slot rather than leaving callers awaiting an admission that a

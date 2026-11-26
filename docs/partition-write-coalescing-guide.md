@@ -490,9 +490,18 @@ slowly to batch, or are spread across too many partitions.
 ---
 
 `kahuna.kv.write.stage_entries{stage}` counts log entries dispatched by their producing stage, alongside
-the cycle and submission metrics above. Materialization entries can disappear when an embedded host
-enables `DurableMaterializeOnResolve`; settlement then installs the committed values at apply instead.
-See the [durable settlement guide](durable-settlement-guide.md) for semantics and upgrade ordering.
+the cycle and submission metrics above. With `DurableMaterializeOnResolve` (the default; server option
+`--durable-materialize-on-resolve`) there are no materialization entries: settlement installs the
+committed values at apply instead. See the
+[durable settlement guide](durable-settlement-guide.md) for semantics and upgrade ordering.
+
+`kahuna.kv.write.settle_runs` records one sample for each dispatched batch that carries a settle: the
+number of groups of settle submissions that are adjacent in the batch. With
+`DurableMergeAdjacentSettles` (server option `--durable-merge-adjacent-settles true`), the lane puts each
+such group into one log entry at dispatch, and `kahuna.kv.write.settles_merged` counts the settles that a
+merged entry carried. The [durable settlement guide](durable-settlement-guide.md) describes the merged
+entry. The [benchmarking guide](benchmarking-guide.md#33-the-log-cost-of-a-durable-commit) shows how to
+read the entries, the settle runs and the apply time of each commit.
 
 ## 8. Failure and lifecycle behavior
 

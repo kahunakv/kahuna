@@ -302,8 +302,9 @@ internal sealed class KeyValueWatchReplayer
             if (log.LogType == ReplicationTypes.KeyValues)
                 return await ReplayRecordAsync(log).ConfigureAwait(false);
 
-            if (log.LogType == ReplicationTypes.PreparedIntent)
-                return await ReplayDeltaAsync(log).ConfigureAwait(false);
+            // A prepared-intent delta, or the prepare part of a one-phase bundle entry, judged by the time of its entry.
+            if (OnePhaseBundleEntry.TryGetIntentCommands(log.LogType, log.LogData, out PreparedIntentCommand[]? commands))
+                return await ReplayDeltaAsync(log, commands).ConfigureAwait(false);
 
             return true;
         }
@@ -356,9 +357,9 @@ internal sealed class KeyValueWatchReplayer
             return await watch.DeliverReplayedAsync(KeyValueWatchFrame.ForEvent(@event), holdKey, lifetime).ConfigureAwait(false);
         }
 
-        private async ValueTask<bool> ReplayDeltaAsync(RaftLog log)
+        private async ValueTask<bool> ReplayDeltaAsync(RaftLog log, PreparedIntentCommand[] commands)
         {
-            foreach (PreparedIntentCommand command in PreparedIntentStore.DecodeDelta(log.LogData!))
+            foreach (PreparedIntentCommand command in commands)
             {
                 if (!await ApplyAsync(log, command).ConfigureAwait(false))
                     return false;

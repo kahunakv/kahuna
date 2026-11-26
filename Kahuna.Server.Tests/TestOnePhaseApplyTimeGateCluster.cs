@@ -25,7 +25,8 @@ namespace Kahuna.Server.Tests;
 /// proposal whose acknowledgement was lost), then replays them through the real executor immediately ahead of
 /// the next record-carrying batch (the healed partition delivering the stalled entry in log order). The tap
 /// also counts the bundle shapes it sees, which is how a test tells a one-phase bundle
-/// ([record init, prepare, decision]) from a two-phase anchor bundle ([record init, prepare]) without reading
+/// ([record init, prepare, decision], or one bundle entry that carries the three) from a two-phase anchor bundle
+/// ([record init, prepare]) without reading
 /// process-global counters that concurrent test classes also move. A bundle is recognized as a contiguous
 /// one-transaction entry run inside a batch — never as the whole batch — because the aggregator coalesces a
 /// bundle with unrelated same-partition submissions, such as a predecessor's deferred settlement.</para>
@@ -85,9 +86,9 @@ public sealed class TestOnePhaseApplyTimeGateCluster : BaseCluster
         {
             bool carriesRecord = false;
             foreach (RaftProposalEntry entry in entries)
-                carriesRecord |= entry.Type == ReplicationTypes.TransactionRecord;
+                carriesRecord |= entry.Type == ReplicationTypes.TransactionRecord || entry.Type == ReplicationTypes.OnePhaseBundle;
 
-            CountBundleShapes(entries);
+            CountBundleShapes(BundleEntryTap.ExpandBundles(entries));
 
             if (armed && carriesRecord)
             {
@@ -225,6 +226,8 @@ public sealed class TestOnePhaseApplyTimeGateCluster : BaseCluster
                         Kahuna!.DurableTransactionRecordStore.Replicate(partition, log);
                     else if (entry.Type == ReplicationTypes.PreparedIntent)
                         Kahuna!.DurablePreparedIntentStore.ApplyDeltaAckPrepares(partition, log);
+                    else if (entry.Type == ReplicationTypes.OnePhaseBundle)
+                        OnePhaseBundleEntry.Apply(Kahuna!.DurableTransactionRecordStore, Kahuna.DurablePreparedIntentStore, tracker: null, partition, log, entry.Data, replay: false);
                 }
             }
         }
@@ -482,7 +485,16 @@ public sealed class TestOnePhaseApplyTimeGateCluster : BaseCluster
         Assert.Equal((0, 0), await CountsOf(RecordInit(txId), Settle(predecessor, "p")));
         Assert.Equal((0, 0), await CountsOf(RecordInit(txId), Prepare(other, "k")));
         Assert.Equal((0, 0), await CountsOf(Settle(predecessor, "p"), Materialization()));
+
+        // One bundle entry that carries the three parts counts as one one-phase bundle, also beside a settlement.
+        Assert.Equal((1, 0), await CountsOf(BundleEntry(txId, "k")));
+        Assert.Equal((1, 0), await CountsOf(Settle(predecessor, "p"), BundleEntry(txId, "k1", "k2"), Materialization()));
     }
+
+    private static RaftProposalEntry BundleEntry(HLCTimestamp txId, params string[] keys) => new(
+        ReplicationTypes.OnePhaseBundle,
+        OnePhaseBundleEntry.Serialize(RecordInit(txId).Data, Prepare(txId, keys).Data, RecordCommit(txId).Data),
+        AutoCommit: true, ExpectedGeneration: 0);
 
     // ── ledger size bound ─────────────────────────────────────────────────────────
 

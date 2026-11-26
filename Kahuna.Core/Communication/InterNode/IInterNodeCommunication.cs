@@ -268,6 +268,13 @@ public interface IInterNodeCommunication
     public Task<(KeyValueResponseType Type, KeyValueApplyFingerprint Fingerprint)> GetPartitionApplyFingerprint(string node, int partitionId, CancellationToken cancellationToken);
 
     /// <summary>
+    /// The replicated log types that <paramref name="node"/> applies. Null when the node does not implement the
+    /// question (an older build), when it cannot be reached, or when it does not answer: the asker then reads the node
+    /// as one that does not apply a new type.
+    /// </summary>
+    public Task<IReadOnlyList<string>?> GetAppliedLogTypes(string node, CancellationToken cancellationToken);
+
+    /// <summary>
     /// Asks <paramref name="node"/> to capture its share of a cluster-wide backup — the partitions in
     /// <paramref name="request"/>, which it hosts — and streams the share's artifacts into
     /// <paramref name="sink"/> before it returns the share's manifest. A refusal is an answer, not an exception;

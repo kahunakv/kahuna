@@ -85,6 +85,58 @@ public sealed class TestKeyValueWatchResume : BaseCluster
         });
     }
 
+    /// <summary>One-phase commits that went to the log as one bundle entry each, missed while no watch was open: the
+    /// resume replays the prepare part of each bundle entry and reports each commit once, at its settle.</summary>
+    [Fact]
+    public async Task Resume_ReplaysTheCommitsOfBundleEntries()
+    {
+        await WithCluster(lagMs: 1_000, bundleEntry: true, body: async (nodes, ct) =>
+        {
+            string group = $"resb{Guid.NewGuid():N}|";
+            string anchor = group + "anchor";
+
+            HLCTimestamp cursor;
+            await using (FrameCollector first = await Open(nodes[0], new(KeyValueWatchScope.ForPrefix(group)), ct))
+            {
+                await SetValue(nodes[1], anchor, "v0", ct);
+                await first.WaitUntil(c => c.Events(anchor).Count == 1);
+                HLCTimestamp lastSeen = first.Events(anchor)[^1].CommitTimestamp;
+                await first.WaitUntil(c => c.Watermarks().Any(w => w >= lastSeen), timeoutMs: 15_000);
+                cursor = first.Watermarks()[^1];
+            }
+
+            string[] keys = [.. Enumerable.Range(0, 4).Select(i => $"{group}tx{i}")];
+            foreach (string key in keys)
+            {
+                KeyValueTransactionResult committed = await RetryOnMustRetry(nodes[1], Encoding.UTF8.GetBytes("BEGIN SET @k 'tx' COMMIT END"), null, [new KeyValueParameter { Key = "@k", Value = key }]);
+                Assert.Equal(KeyValueResponseType.Set, committed.Type);
+            }
+
+            foreach (KahunaManager node in nodes)
+                foreach (string key in keys)
+                    await WaitUntilAsync(() => node.DurablePreparedIntentStore.Get(key) is null);
+
+            // The commits went to the log as bundle entries.
+            int bundles = 0;
+            foreach (Kommander.System.RaftPartitionRange partition in nodes[0].Raft.GetPartitionMap())
+                foreach (Kommander.Data.RaftLog log in nodes[0].Raft.WalAdapter.ReadLogsRange(partition.PartitionId, 1))
+                    if (log.LogType == Kahuna.Server.Replication.ReplicationTypes.OnePhaseBundle
+                        && Kahuna.Server.KeyValues.Transactions.OnePhaseBundleEntry.PrepareCommandsOf(log.LogData!)
+                            .OfType<Kahuna.Server.KeyValues.Transactions.Data.PrepareIntentCommand>().Any(p => p.Intent.Key.StartsWith(group, StringComparison.Ordinal)))
+                        bundles++;
+            Assert.True(bundles >= keys.Length, $"{bundles} bundle entries for {keys.Length} commits");
+
+            await using FrameCollector resumed = await Open(nodes[2], new(KeyValueWatchScope.ForPrefix(group), ResumeFrom: cursor), ct);
+            await resumed.WaitUntil(c => keys.All(k => c.Events(k).Count >= 1));
+
+            // One commit for each key, with its own transaction.
+            foreach (string key in keys)
+                Assert.Single(resumed.Events(key).Select(e => e.TransactionId).Distinct());
+            Assert.Equal(keys.Length, keys.Select(k => resumed.Events(k)[0].TransactionId).Distinct().Count());
+            Assert.DoesNotContain(resumed.Frames(), f => f.IsTerminal);
+        });
+    }
+
     [Fact]
     public async Task Resume_DuringConcurrentWrites_LosesNothing()
     {
@@ -409,12 +461,21 @@ public sealed class TestKeyValueWatchResume : BaseCluster
 
     // ── helpers ──────────────────────────────────────────────────────────────────
 
-    private async Task WithCluster(long lagMs, Func<KahunaManager[], CancellationToken, Task> body)
+    private async Task WithCluster(long lagMs, Func<KahunaManager[], CancellationToken, Task> body, bool bundleEntry = false)
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
         (IRaft r1, IRaft r2, IRaft r3, IKahuna k1, IKahuna k2, IKahuna k3) =
-            await AssembleThreNodeCluster("memory", 4, raftLogger, kahunaLogger, c => c.CommitAdmissionLagMs = (int)lagMs);
+            await AssembleThreNodeCluster("memory", 4, raftLogger, kahunaLogger, c =>
+            {
+                c.CommitAdmissionLagMs = (int)lagMs;
+                if (bundleEntry)
+                {
+                    c.DurableMaterializeOnResolve = true;
+                    c.DurableOnePhaseBundleEntry = true;
+                    c.OnePhaseApplyTimeValidation = true;
+                }
+            });
 
         try
         {

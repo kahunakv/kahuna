@@ -8,7 +8,8 @@ using Kommander.Time;
 
 namespace Kahuna.Server.Tests;
 
-/// <summary>The write executor of a node, which keeps every batch it was asked to replicate, in order.</summary>
+/// <summary>The write executor of a node, which keeps every batch it was asked to replicate, in order, with each one-phase
+/// bundle entry kept as its three parts.</summary>
 internal sealed class BundleEntryTap(IPartitionBatchExecutor inner) : IPartitionBatchExecutor
 {
     private readonly Lock gate = new();
@@ -17,8 +18,9 @@ internal sealed class BundleEntryTap(IPartitionBatchExecutor inner) : IPartition
 
     public Task<RaftBatchReplicationResult> ReplicateAsync(int partitionId, IReadOnlyList<RaftProposalEntry> batch, CancellationToken cancellationToken)
     {
+        RaftProposalEntry[] parts = ExpandBundles(batch);
         lock (gate)
-            batches.Add([.. batch]);
+            batches.Add(parts);
 
         return inner.ReplicateAsync(partitionId, batch, cancellationToken);
     }
@@ -53,6 +55,31 @@ internal sealed class BundleEntryTap(IPartitionBatchExecutor inner) : IPartition
     {
         lock (gate)
             return batches.Sum(batch => batch.Count(entry => CommandsOf(entry).OfType<ResolveIntentCommand>().Any(resolve => resolve.TransactionId == transactionId)));
+    }
+
+    /// <summary>
+    /// The entries of a batch with each one-phase bundle entry replaced by its three parts in their order: the record
+    /// init, the prepare and the decision. A reader of the batch then sees the same entries whether the leader proposed
+    /// the bundle as one entry or as three.
+    /// </summary>
+    internal static RaftProposalEntry[] ExpandBundles(IReadOnlyList<RaftProposalEntry> batch)
+    {
+        List<RaftProposalEntry> expanded = new(batch.Count + 2);
+        foreach (RaftProposalEntry entry in batch)
+        {
+            if (entry.Type != ReplicationTypes.OnePhaseBundle || entry.Data is null)
+            {
+                expanded.Add(entry);
+                continue;
+            }
+
+            OnePhaseBundleEntry.Parts parts = OnePhaseBundleEntry.ReadParts(entry.Data);
+            expanded.Add(entry with { Type = ReplicationTypes.TransactionRecord, Data = entry.Data[parts.Init] });
+            expanded.Add(entry with { Type = ReplicationTypes.PreparedIntent, Data = entry.Data[parts.Prepare] });
+            expanded.Add(entry with { Type = ReplicationTypes.TransactionRecord, Data = entry.Data[parts.Decision] });
+        }
+
+        return [.. expanded];
     }
 
     private static PreparedIntentCommand[] CommandsOf(RaftProposalEntry entry) =>

@@ -702,18 +702,49 @@ public sealed class KahunaConfiguration
     public bool DurableMaterializeByReference { get; set; } = true;
 
     /// <summary>
-    /// When true, a committed durable transaction needs no materialization record at all: its settle — the one
-    /// post-decision entry that resolves and removes the prepared intents — also installs each committed value, on
+    /// When true (default), a committed durable transaction needs no materialization record at all: its settle — the
+    /// one post-decision entry that resolves and removes the prepared intents — also installs each committed value, on
     /// every replica, from that replica's own copy of the intent, at the settle's position in the log. A commit
     /// then costs its decision path plus one settle entry per partition instead of one materialization entry per
     /// written key plus the settle. <see cref="DurableMaterializeByReference"/> no longer applies while this is on.
-    /// <para><b>Rolling upgrade.</b> Default off. Every node in the cluster must run a build that installs on a
-    /// materializing settle before any node turns this on: an older node reads the settle as a plain resolve and
-    /// removes the intent without installing the value, which is a silently lost write on that node. Turn it on
-    /// only after the whole cluster runs the new build; turning it off again is safe at any time, because every
-    /// build that installs on a settle also applies materialization records.</para>
+    /// <para><b>Rolling upgrade.</b> Every build from 1.10.1 installs on a materializing settle. A node of an older
+    /// build reads the settle as a plain resolve and removes the intent without installing the value, which is a
+    /// silently lost write on that node. A group that comes from a build before 1.10.1 sets this to false on every
+    /// node, runs a build from 1.10.1 on every node, and then removes the setting. Turning it off is safe at any
+    /// time, because every build that installs on a settle also applies materialization records.</para>
     /// </summary>
-    public bool DurableMaterializeOnResolve { get; set; }
+    public bool DurableMaterializeOnResolve { get; set; } = DefaultDurableMaterializeOnResolve;
+
+    /// <summary>The default of <see cref="DurableMaterializeOnResolve"/>, shared with the embedded options and the
+    /// server option.</summary>
+    public const bool DefaultDurableMaterializeOnResolve = true;
+
+    /// <summary>
+    /// When true, the write scheduler of a partition leader puts the settles that are adjacent in one batch into one
+    /// log entry. A settle is the entry that resolves and removes the prepared intents of a decided transaction. The
+    /// merged entry has the commands of each settle, in the order of the queue, and each command carries the identity
+    /// of its own transaction. The order of the commands in the log does not change, and only the borders of the
+    /// entries move. Each settle keeps its own admission and its own answer: the answer of the merged entry goes to
+    /// every settle in it.
+    /// <para>Every build that applies a settle reads a merged one, so this needs no upgrade order, and turning it off
+    /// is safe at any time. Off by default.</para>
+    /// </summary>
+    public bool DurableMergeAdjacentSettles { get; set; }
+
+    /// <summary>
+    /// When true, the leader of a record anchor partition proposes the record init, the prepare and the commit decision
+    /// of a one-phase commit as one log entry of the type <c>onephasebundle</c>, in place of three entries. Every replica
+    /// applies the three parts in the same order, at the position of the one entry, with the same stores and the same
+    /// gate. A node of this build applies the entry whatever its own setting.
+    /// <para><b>Rolling upgrade.</b> Off by default. Turn it on only after every node of the group runs a build that
+    /// applies the type: an older node skips the entry with no error, so it has no record and no intent of the
+    /// transaction. A leader also proposes the entry only while each voter and learner of the partition confirmed
+    /// that it applies the type, and proposes the three entries otherwise. That check does not see a node of an older
+    /// build that joins later or starts again on an older build, so the upgrade order stays the rule. Turning it off
+    /// is safe at any time. An older build is safe again only when no log and no backup segment that it can read holds
+    /// an entry of the type.</para>
+    /// </summary>
+    public bool DurableOnePhaseBundleEntry { get; set; }
 
     /// <summary>
     /// Strict upper bound on the number of prepared intents resident across all partitions on this node. Checked

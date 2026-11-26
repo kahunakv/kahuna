@@ -411,21 +411,37 @@ internal sealed class TransactionRecordStore
         if (log.LogType != ReplicationTypes.TransactionRecord || log.LogData is null)
             return true;
 
-        if (locallyProposedDeltas.TryTake(log.LogData, out TransactionRecordCommand[]? proposed))
-        {
-            foreach (TransactionRecordCommand command in proposed)
-                Apply(command, partitionId, log.Term);
-
-            return true;
-        }
-
-        TransactionRecordDeltaMessage delta = ReplicationSerializer.UnserializeTransactionRecordDeltaMessage(log.LogData);
-
-        foreach (TransactionRecordCommandMessage message in delta.Commands)
-            Apply(ToCommand(message, keyStrings), partitionId, log.Term);
-
+        locallyProposedDeltas.TryTake(log.LogData, out TransactionRecordCommand[]? proposed);
+        ApplyDelta(partitionId, log.Term, proposed, log.LogData);
         return true;
     }
+
+    /// <summary>
+    /// Applies one record delta that a log entry of <paramref name="partitionId"/> carries, in the term of that entry:
+    /// the <paramref name="commands"/> that this node decoded when it serialized the delta, or a decode of
+    /// <paramref name="delta"/> when it has none. A part of a one-phase bundle entry applies through here, from a span
+    /// of the entry.
+    /// </summary>
+    internal void ApplyDelta(int partitionId, long logTerm, TransactionRecordCommand[]? commands, ReadOnlySpan<byte> delta)
+    {
+        if (commands is not null)
+        {
+            foreach (TransactionRecordCommand command in commands)
+                Apply(command, partitionId, logTerm);
+
+            return;
+        }
+
+        TransactionRecordDeltaMessage message = ReplicationSerializer.UnserializeTransactionRecordDeltaMessage(delta);
+
+        foreach (TransactionRecordCommandMessage command in message.Commands)
+            Apply(ToCommand(command, keyStrings), partitionId, logTerm);
+    }
+
+    /// <summary>The commands that this node registered for <paramref name="delta"/> when it serialized it, without
+    /// taking the reuse that the apply of the same bytes takes.</summary>
+    internal static bool TryPeekProposedCommands(byte[] delta, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out TransactionRecordCommand[]? commands) =>
+        locallyProposedDeltas.TryPeek(delta, out commands);
 
     /// <summary>Serializes a batch of transitions for one atomic data-partition log entry. The produced bytes
     /// remember their decoded commands so the local apply of this same entry can skip re-parsing them.</summary>

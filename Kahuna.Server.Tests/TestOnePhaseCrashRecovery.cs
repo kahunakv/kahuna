@@ -88,6 +88,9 @@ public sealed class TestOnePhaseCrashRecovery
         WalSyncWrites = true,
         DurableDeferredSettlement = true,
         OnePhaseApplyTimeValidation = true,
+        // The crash falls between the decision and the materialization records, which only this shape writes. The
+        // same crash before the materializing settle is in TestMaterializeOnResolve.
+        DurableMaterializeOnResolve = false,
         CollectionInterval = TimeSpan.FromMinutes(10),
         WriteBatchExecutorDecorator = decorator
     };

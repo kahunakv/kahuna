@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using Kommander;
 using Kahuna.Server.KeyValues.Logging;
 using Kahuna.Server.KeyValues.Data;
@@ -54,6 +55,9 @@ internal sealed class KeyValueReplicationDispatcher
 
         // The entry an apply in progress applies, so a watch that registers mid-apply can replay through it.
         public long Applying;
+
+        // The entries and the apply time of the ordered apply path of this partition, by entry type.
+        public readonly KeyValueApplyTotals.PartitionTotals Totals = new();
     }
 
     private ApplyProgress ProgressOf(int partitionId) =>
@@ -131,6 +135,17 @@ internal sealed class KeyValueReplicationDispatcher
         this.replicator = replicator;
 
         ApplyFingerprintProbe = new PartitionApplyFingerprintProbe(runtime.Raft, runtime.InterNodeCommunication, GetApplyFingerprint);
+        ApplyTotals = new KeyValueApplyTotals(EnumeratePartitionTotals);
+    }
+
+    /// <summary>The entries and the apply time of the ordered apply path of this node, by entry type. The manager
+    /// disposes it with the node.</summary>
+    internal KeyValueApplyTotals ApplyTotals { get; }
+
+    private IEnumerable<KeyValueApplyTotals.PartitionTotals> EnumeratePartitionTotals()
+    {
+        foreach (KeyValuePair<int, ApplyProgress> entry in applyProgressByPartition)
+            yield return entry.Value.Totals;
     }
 
     /// <summary>Compares this partition's apply fingerprint across replicas; shared with the split path.</summary>
@@ -317,6 +332,9 @@ internal sealed class KeyValueReplicationDispatcher
             return BoolTask(result);
         }
 
+        if (log.LogType == ReplicationTypes.OnePhaseBundle)
+            return BoolTask(ApplyOnePhaseBundle(partitionId, log, replay: true));
+
         if (log.LogType == ReplicationTypes.CompletionReceipt)
         {
             durabilityTracker?.RegisterPending(partitionId, log.Id, DurabilityChannel.Receipts);
@@ -348,10 +366,16 @@ internal sealed class KeyValueReplicationDispatcher
     {
         ApplyProgress progress = BeginApply(partitionId, log.Id);
         bool delivered = true;
+        KeyValueApplyEntryType type = KeyValueApplyEntryType.Other;
+        long started = ApplyTotals.TimingEnabled ? Stopwatch.GetTimestamp() : 0;
+        long applyTicks = 0;
 
         try
         {
-            Task<bool> applied = ReplicateCore(partitionId, log);
+            Task<bool> applied = ReplicateCore(partitionId, log, out type);
+
+            if (started != 0)
+                applyTicks = Math.Max(1, Stopwatch.GetTimestamp() - started);
 
             // An apply that is still running releases no read. A later entry does.
             delivered = applied.IsCompleted;
@@ -377,6 +401,7 @@ internal sealed class KeyValueReplicationDispatcher
         }
         finally
         {
+            progress.Totals.Count(type, applyTicks);
             EndApply(progress, log.Id);
 
             // After the stores hold the entry, as the applied frontier of Kommander moves after this returns. An apply
@@ -392,8 +417,10 @@ internal sealed class KeyValueReplicationDispatcher
     /// whether the partitions they cover changed. Runs on the meta partition's apply path; must not block.</summary>
     internal Action? RangeMapApplied { get; set; }
 
-    private Task<bool> ReplicateCore(int partitionId, RaftLog log)
+    private Task<bool> ReplicateCore(int partitionId, RaftLog log, out KeyValueApplyEntryType type)
     {
+        type = KeyValueApplyEntryType.Other;
+
         Func<int, RaftLog, bool>? skipForTesting = ApplySkipForTesting;
         if (skipForTesting is not null && skipForTesting(partitionId, log))
             return TrueTask;
@@ -439,6 +466,7 @@ internal sealed class KeyValueReplicationDispatcher
         // long after it); it waits on the ledger for the result recorded here.
         if (log.LogType == ReplicationTypes.TransactionRecord)
         {
+            type = KeyValueApplyEntryType.Record;
             durabilityTracker?.RegisterPending(partitionId, log.Id, DurabilityChannel.TransactionRecords);
 
             bool applied = transactionRecordStore.Replicate(partitionId, log);
@@ -454,7 +482,8 @@ internal sealed class KeyValueReplicationDispatcher
 
             // The prepare acknowledgement is what a local producer needs from this apply; a prepare rejected on its
             // merits is still a successfully applied log entry, so it never fails replication.
-            durableApplyResults.RecordApplied(partitionId, log.Id, preparedIntentStore.ApplyDeltaAckPrepares(partitionId, log));
+            durableApplyResults.RecordApplied(partitionId, log.Id, preparedIntentStore.ApplyDeltaAckPrepares(partitionId, log, out bool carriedPrepare));
+            type = carriedPrepare ? KeyValueApplyEntryType.Prepare : KeyValueApplyEntryType.Settle;
 
             // A rejected prepare is still an applied entry (the store recorded the rejection), so the
             // snapshot that covers this apply certifies it either way.
@@ -463,12 +492,19 @@ internal sealed class KeyValueReplicationDispatcher
             return TrueTask;
         }
 
+        if (log.LogType == ReplicationTypes.OnePhaseBundle)
+        {
+            type = KeyValueApplyEntryType.Bundle;
+            return BoolTask(ApplyOnePhaseBundle(partitionId, log, replay: false));
+        }
+
         // Carries nothing: its only effect is its entry time, which moves the partition's watch watermark.
         if (log.LogType == ReplicationTypes.ProgressTick)
             return TrueTask;
 
         if (log.LogType == ReplicationTypes.CompletionReceipt)
         {
+            type = KeyValueApplyEntryType.Receipt;
             durabilityTracker?.RegisterPending(partitionId, log.Id, DurabilityChannel.Receipts);
             bool result = completionReceiptStore.Replicate(partitionId, log);
             if (result)
@@ -476,7 +512,33 @@ internal sealed class KeyValueReplicationDispatcher
             return BoolTask(result);
         }
 
-        return BoolTask(log.LogType != ReplicationTypes.KeyValues || replicator.Replicate(partitionId, log));
+        if (log.LogType != ReplicationTypes.KeyValues)
+            return TrueTask;
+
+        type = KeyValueApplyEntryType.Kv;
+        return BoolTask(replicator.Replicate(partitionId, log));
+    }
+
+    /// <summary>
+    /// Applies the one entry of a one-phase commit: the record init to the record store, the prepare to the intent store
+    /// and the decision to the record store, in that order, with the index, the term and the time of the entry. These
+    /// are the applies of the three entries that the same commit has without the bundle entry, so the bundled commit
+    /// gate of the decision reads the intent store that the prepare left, and the rejection memo and the stale-base
+    /// vetoes of the prepare are the same. The entry is open on the record and the intent channels of the durability
+    /// tracker until both store snapshots cover it. On the live path the prepare acknowledgement is the result of the
+    /// entry in the apply-result ledger, for the leader that proposed it.
+    /// </summary>
+    private bool ApplyOnePhaseBundle(int partitionId, RaftLog log, bool replay)
+    {
+        if (log.LogData is not { Length: > 0 } data)
+            return true;
+
+        bool acknowledged = OnePhaseBundleEntry.Apply(transactionRecordStore, preparedIntentStore, durabilityTracker, partitionId, log, data, replay);
+
+        if (!replay)
+            durableApplyResults.RecordApplied(partitionId, log.Id, acknowledged);
+
+        return true;
     }
 
     /// <summary>

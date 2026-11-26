@@ -39,7 +39,8 @@ internal static class ReplicationLogRouter
             or ReplicationTypes.PreparedIntent
             or ReplicationTypes.CompletionReceipt
             or ReplicationTypes.ProgressTick
-            or ReplicationTypes.HistoryHold => ReplicationLogOwner.KeyValues,
+            or ReplicationTypes.HistoryHold
+            or ReplicationTypes.OnePhaseBundle => ReplicationLogOwner.KeyValues,
         ReplicationTypes.Locks => ReplicationLogOwner.Locks,
         _ => ReplicationLogOwner.None
     };

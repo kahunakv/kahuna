@@ -175,6 +175,51 @@ kahuna-bench -c http://localhost:8087 --workload txn-get --keys-per-txn 2 --read
   --key-space 2000 --concurrency 128 --txn-locking optimistic --duration 180
 ```
 
+### 3.3 The log cost of a durable commit
+
+The `bank` and `txn` workloads commit durable transactions. The server splits the cost of each commit
+into log entries and apply time. Two server options select the record shape of a commit:
+
+| Server option | Effect |
+|---|---|
+| `--durable-materialize-on-resolve true` | The settle installs the committed values. No materialization record is written. |
+| `--one-phase-apply-time-validation true` | A transaction that reads keys can take the one-phase commit in a group of several nodes. |
+| `--durable-merge-adjacent-settles true` | The settles that are adjacent in one batch of the write scheduler go into one log entry. |
+| `--durable-one-phase-bundle-entry true` | The record init, the prepare and the decision of a one-phase commit go into one log entry. |
+
+Set each option to the same value on every node. The durable settlement guide gives the upgrade
+order of the first option, and the transaction lifecycle guide gives the rules of the second.
+
+Read these series from the dashboard metrics endpoint (`/v1/dashboard/metrics`) of the leader of
+the partition. Take the difference of two scrapes, and divide it by the commits of the same window:
+
+| Series | What it gives for each commit |
+|---|---|
+| `kahuna.kv.write.stage_entries{stage}` | The log entries by the stage that produced them: `one_phase`, `record_init`, `prepare`, `re_prepare`, `decision`, `materialize`, `settle` and `other`. |
+| `kahuna.kv.write.admitted{class}` | The submissions to the write scheduler, by admission class. |
+| `kahuna.kv.write.settle_runs` | A histogram with one sample for each batch that carries a settle. The sample is the number of groups of settle submissions that are adjacent in the batch. |
+| `kahuna.kv.write.settles_merged` | The settle submissions that a merged settle entry carried. A settle stays one submission when it is merged, so `kahuna.kv.write.admitted` does not change. |
+| `kahuna.kv.apply.entries{type}` | The entries that the ordered apply path applied, by type: `kv`, `record`, `prepare`, `settle`, `bundle`, `receipt` and `other`. An intent delta with a prepare counts as `prepare`, and one with no prepare counts as `settle`. |
+| `kahuna.kv.apply.ms{type}` | The time of the synchronous apply of those entries, by type. The node reads the clock for it only while a listener collects the series; the collector of the dashboard endpoint of a server is such a listener. |
+| `kahuna.durable_tx.one_phase_bundle_guard_fallbacks` | The one-phase commits that the leader proposed as three entries with the bundle entry on, because a replica had not confirmed the type. |
+
+`kahuna.kv.apply.ms{type}` divided by `kahuna.kv.apply.entries{type}` is the mean apply time of one
+entry of that type. The entries of one partition apply in order on one thread, so this time is on
+the path of every commit of the partition. A follower counts the same entries as the leader.
+
+Compare these ratios between two builds or two option sets, and not the rates. The placement of the
+partition leaders changes in each start of a cluster, and it changes the rate. Compare the rates
+only when the leader of each partition is on the same node in each run.
+
+```sh
+# The same bank load with and without the settle install
+kahuna-server ... --durable-materialize-on-resolve false
+kahuna-bench -c http://localhost:8087 --workload bank --concurrency 64 --duration 120
+
+kahuna-server ... --durable-materialize-on-resolve true
+kahuna-bench -c http://localhost:8087 --workload bank --concurrency 64 --duration 120
+```
+
 ## 4. Flag reference
 
 | Flag | Default | Meaning |

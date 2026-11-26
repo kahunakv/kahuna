@@ -428,14 +428,28 @@ public sealed class EmbeddedKahunaOptions
     public bool DurableMaterializeByReference { get; set; } = true;
 
     /// <summary>
-    /// When true, a committed durable transaction's settle also installs each committed value from the prepared
-    /// intent on every replica, so no materialization record is written at all (see
+    /// When true (default), a committed durable transaction's settle also installs each committed value from the
+    /// prepared intent on every replica, so no materialization record is written at all (see
     /// <c>KahunaConfiguration.DurableMaterializeOnResolve</c>).
-    /// <para><b>Rolling upgrade.</b> Default off. Every node must run a build that installs on a materializing
-    /// settle before any node turns this on; an older node resolves the intent without installing the value,
-    /// losing that write locally. Turning it off is safe at any time.</para>
+    /// <para><b>Rolling upgrade.</b> A node of a build before 1.10.1 resolves the intent without installing the value,
+    /// losing that write locally. A group that comes from such a build sets this to false on every node, runs a build
+    /// from 1.10.1 on every node, and then removes the setting. Turning it off is safe at any time.</para>
     /// </summary>
-    public bool DurableMaterializeOnResolve { get; set; }
+    public bool DurableMaterializeOnResolve { get; set; } = Server.Configuration.KahunaConfiguration.DefaultDurableMaterializeOnResolve;
+
+    /// <summary>
+    /// When true, the settles that are adjacent in one batch of the write scheduler go into one log entry (see
+    /// <c>KahunaConfiguration.DurableMergeAdjacentSettles</c>). Needs no upgrade order; off is always safe. Off by
+    /// default.
+    /// </summary>
+    public bool DurableMergeAdjacentSettles { get; set; }
+
+    /// <summary>
+    /// When true, a one-phase commit is one log entry (record init, prepare and decision) in place of three (see
+    /// <c>KahunaConfiguration.DurableOnePhaseBundleEntry</c>). Off by default. Turn it on only after every node of the
+    /// group runs a build that applies the entry; an older node skips it. Turning it off is safe at any time.
+    /// </summary>
+    public bool DurableOnePhaseBundleEntry { get; set; }
 
     public int DurablePreparedIntentMaxCount { get; set; } = 500_000;
 

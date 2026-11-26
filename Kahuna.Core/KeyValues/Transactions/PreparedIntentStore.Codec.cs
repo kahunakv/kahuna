@@ -39,10 +39,11 @@ internal sealed partial class PreparedIntentStore
     /// <see cref="ToCommand"/> together — the encoding test decodes every delta both ways and fails on any
     /// disagreement.</para>
     /// </summary>
-    internal static PreparedIntentCommand[] DecodeDelta(byte[] data)
-    {
-        ReadOnlySpan<byte> bytes = data;
+    internal static PreparedIntentCommand[] DecodeDelta(byte[] data) => DecodeDelta((ReadOnlySpan<byte>)data);
 
+    /// <inheritdoc cref="DecodeDelta(byte[])"/>
+    internal static PreparedIntentCommand[] DecodeDelta(ReadOnlySpan<byte> bytes)
+    {
         List<(int Offset, int Length)> slices = scratchCommandSlices ??= [];
         slices.Clear();
 
@@ -351,6 +352,29 @@ internal sealed partial class PreparedIntentStore
         ReturnCommandMessages(delta);
 
         return data;
+    }
+
+    /// <summary>
+    /// The decoded commands of <paramref name="delta"/>: those that this node registered when it serialized or first
+    /// decoded the bytes, or a decode of them. The registered commands stay for the apply of the same bytes. False
+    /// when the bytes are not a delta.
+    /// </summary>
+    internal static bool TryGetProposedCommands(byte[] delta, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out PreparedIntentCommand[]? commands)
+    {
+        if (locallyProposedDeltas.TryPeek(delta, out commands))
+            return true;
+
+        try
+        {
+            commands = DecodeDelta(delta);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            commands = null;
+            return false;
+        }
+
+        return true;
     }
 
     /// <summary>
