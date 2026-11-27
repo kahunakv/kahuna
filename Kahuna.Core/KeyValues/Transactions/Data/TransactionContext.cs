@@ -683,7 +683,7 @@ internal class TransactionContext
             else
                 locksReserved += reserved;
 
-            operations[operationId] = new() { Kind = kind, PayloadDigest = payloadDigest, Reserved = reserved };
+            operations[operationId] = new() { Kind = kind, PayloadDigest = payloadDigest, Reserved = reserved, RegisteredTicks = Environment.TickCount64 };
             pendingOperationCount++;
             retainedOperationCount++;
             return new(OperationRegistrationOutcome.New, recordAnchorKey: RecordAnchorKey, conflictPolicy: ConflictPolicy);
@@ -934,15 +934,28 @@ internal class TransactionContext
     /// <summary>
     /// Cancels the operation if it is still pending. Returns true when the cancel succeeded.
     /// </summary>
-    internal bool TryCancelOperation(TransactionOperationId operationId)
+    internal bool TryCancelOperation(TransactionOperationId operationId) =>
+        CancelPendingOperation(operationId, onlyOnceClosed: false) == OperationCancelOutcome.Cancelled;
+
+    /// <summary>
+    /// Cancels the operation if it is still pending, and says what it did. With <paramref name="onlyOnceClosed"/>
+    /// a pending record is cancelled only after the session stops taking new operations; before that the answer is
+    /// <see cref="OperationCancelOutcome.Deferred"/> and nothing changes (see
+    /// <see cref="OperationCompletionPayload.ReleaseOnceClosed"/>). An absent or completed record is
+    /// <see cref="OperationCancelOutcome.NotPending"/> in both forms.
+    /// </summary>
+    internal OperationCancelOutcome CancelPendingOperation(TransactionOperationId operationId, bool onlyOnceClosed)
     {
         lock (registryLock)
         {
             if (operations is null || !operations.TryGetValue(operationId, out OperationRecord? record))
-                return false;
+                return OperationCancelOutcome.NotPending;
 
             if (record.Status != OperationStatus.Pending)
-                return false;
+                return OperationCancelOutcome.NotPending;
+
+            if (onlyOnceClosed && lifecycle == SessionLifecycle.AcceptingOperations)
+                return OperationCancelOutcome.Deferred;
 
             // Remove the record entirely rather than leaving a terminal marker. BeginOperation maps every
             // non-completed record to AlreadyPending, so a lingering cancelled entry would wedge every
@@ -952,7 +965,37 @@ internal class TransactionContext
             operations.Remove(operationId);
             ReleaseReservationLocked(record);
             DecrementPending();
-            return true;
+            return OperationCancelOutcome.Cancelled;
+        }
+    }
+
+    /// <summary>
+    /// The pending operations of this session, oldest first, at most <paramref name="max"/> of them, and the number
+    /// of pending operations in all. For the log of a finalize that waits on them; not used on a normal path.
+    /// </summary>
+    internal (List<PendingOperationInfo> Operations, int Total) SnapshotPendingOperations(int max)
+    {
+        long now = Environment.TickCount64;
+
+        lock (registryLock)
+        {
+            List<PendingOperationInfo> pending = new(Math.Min(max, pendingOperationCount));
+
+            if (operations is not null)
+            {
+                foreach (KeyValuePair<TransactionOperationId, OperationRecord> pair in operations)
+                {
+                    if (pair.Value.Status == OperationStatus.Pending)
+                        pending.Add(new(pair.Key, pair.Value.Kind, now - pair.Value.RegisteredTicks));
+                }
+            }
+
+            pending.Sort(static (a, b) => b.AgeMs.CompareTo(a.AgeMs));
+
+            if (pending.Count > max)
+                pending.RemoveRange(max, pending.Count - max);
+
+            return (pending, pendingOperationCount);
         }
     }
 

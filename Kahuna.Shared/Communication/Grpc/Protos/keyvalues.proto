@@ -1287,6 +1287,9 @@ message GrpcCompleteOperationRequest
   int32 ReadDependencyNode = 28;
   int64 ReadDependencyPhysical = 29;
   uint32 ReadDependencyCounter = 30;
+  // A release sent again by a detached retry: the coordinator cancels the pending record only after the session
+  // stops taking new operations. An older receiver ignores the field and cancels at once.
+  bool ReleaseOnceClosed = 31;
 }
 
 message GrpcCompleteOperationResponse

@@ -449,6 +449,21 @@ public static partial class KahunaLoggerExtensions
     [LoggerMessage(Level = LogLevel.Warning, Message = "Transaction {TransactionId}: {Count} mandatory lock release(s) after the commit finalize were not acknowledged after {Attempts} attempt(s) and {ElapsedMs} ms, and the retry stopped because {Reason}; the locks stay until their lease ends")]
     public static partial void LogLockReleasesLeftToLease(this ILogger<IKahuna> logger, HLCTimestamp transactionId, int count, int attempts, long elapsedMs, string reason);
 
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Transaction {TransactionId}: the {Phase} drain still waits for {Count} pending operation(s) after {WaitedMs} ms: {Operations}. {Suppressed} other slow drain log(s) of this node were suppressed since the last one")]
+    public static partial void LogFinalizeDrainWaits(this ILogger<IKahuna> logger, HLCTimestamp transactionId, string phase, int count, long waitedMs, string operations, int suppressed);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Completion of transaction operation {OperationId} of transaction {TransactionId} was acknowledged by the detached retry after {Attempts} attempt(s) and {ElapsedMs} ms")]
+    public static partial void LogCompletionDrivenOnRetry(this ILogger<IKahuna> logger, TransactionOperationId operationId, HLCTimestamp transactionId, int attempts, long elapsedMs);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Completion of transaction operation {OperationId} of transaction {TransactionId} was not acknowledged after {Attempts} attempt(s) and {ElapsedMs} ms, and the detached retry stopped because {Reason}; the operation can stay pending on the coordinator until the session ends")]
+    public static partial void LogCompletionRetryGivenUp(this ILogger<IKahuna> logger, TransactionOperationId operationId, HLCTimestamp transactionId, int attempts, long elapsedMs, string reason);
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Retry of the completion of transaction operation {OperationId} was not acknowledged")]
+    public static partial void LogCompletionRetryAttemptFailed(this ILogger<IKahuna> logger, TransactionOperationId operationId, Exception exception);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Completion of transaction operation {OperationId} of transaction {TransactionId} was not acknowledged, and no detached retry started because this node already runs {Limit} of them ({Count} completion(s) not retried so far); only a retry with the same operation id can complete it")]
+    public static partial void LogCompletionRetryNotStarted(this ILogger<IKahuna> logger, TransactionOperationId operationId, HLCTimestamp transactionId, int limit, long count);
+
     [LoggerMessage(Level = LogLevel.Information, Message = "Node shutdown refused {Count} request(s) after the shutdown signal (new sessions, forwarded commits and lock grants)")]
     public static partial void LogNodeShutdownRefusedRequests(this ILogger<IKahuna> logger, long count);
 }

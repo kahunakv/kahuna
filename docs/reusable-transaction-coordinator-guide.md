@@ -282,6 +282,32 @@ response and completion payload before sending completion. If that RPC is lost, 
 operation again. The cache is node-local and bounded, so it is a short-lived retry mechanism, not a
 durable transaction log.
 
+A caller can stop retrying: its deadline ends, another statement fails, or the client goes away. Then
+no same-ID retry comes, and the record stays pending until the drain deadline of each commit and
+rollback. So the participant also sends the completion again itself, detached from the caller:
+
+- The first attempt is 50 ms after the refusal. The wait doubles up to 1 s, and up to 5 s after 30 s.
+  Each attempt resolves the route again, so a new leader of the coordinator partition is found, and that
+  leader probes its peers for the session owner.
+- A completion with an effect is sent again as it is. The fold is idempotent, so the detached retry can
+  run beside a same-ID retry of the caller.
+- A release (a transient outcome, which the coordinator turns into a cancel) is sent again with
+  `ReleaseOnceClosed` set. The coordinator applies that copy only after the session stops taking new
+  operations, and answers `MustRetry` before that. An earlier copy can have cancelled the record, and the
+  caller can then register the same operation ID again; a plain copy would cancel that new registration.
+- The retry stops when the coordinator acknowledges the completion, when a same-ID retry of the caller
+  completes it first, at the node shutdown, or when the transaction is older than the longest span a
+  session can matter (`MaxTransactionTimeout` plus the reaper grace and the participant-effect window,
+  by this node's clock and configuration). An effect that never folds stays on its participant until
+  its lock lease or intent lease ends.
+- A node runs at most one detached retry for each result the cache can keep, and sends at most 32 of
+  them at the same time.
+
+An answer that a node holds no session does not stop the retry, because the owner probe can miss the
+owner. For the same reason, a node that is a member of a cluster does not acknowledge a release for a
+session that it does not hold. A node outside a cluster is the only node, so there a missing session
+means that no record is pending.
+
 ---
 
 ## 5. The server-owned working set
@@ -919,7 +945,11 @@ The coordinator currently relies primarily on structured logs. Useful messages i
 
 - interactive transaction started, committed, or rolled back;
 - unknown commit/rollback handles;
-- unacknowledged operation completion retained for retry;
+- unacknowledged operation completion retained for retry, acknowledged by the detached retry, or given
+  up by it (with the reason);
+- a finalize drain that still waits after 2 s, with the id, kind and age of each pending operation (at
+  most one such log a second for each node), so a pending record can be matched with the participant's
+  warning for the same operation ID;
 - read dependency revision changes and write-skew aborts;
 - participant commit/rollback retry exhaustion;
 - canonical-record and prepared-intent replication errors;
@@ -937,6 +967,13 @@ histogram (the adaptive margin being chosen). A rising rejection/expiry rate is 
 deadline configuration; a rising `extended` rate shows the healthy commits the frozen deadline alone
 would have presumed aborted.
 
+Two counters cover completions that are not acknowledged. `kahuna.transactions.unacknowledged_completions`
+has the tag `result`: `kept` (a detached retry started), `driven` (it got the completion acknowledged),
+`recovered` (a same-ID retry of the caller completed it first), `given_up` (the retry stopped with no
+acknowledgement) and `not_started` (the node already ran its limit of retries). A `given_up` or
+`not_started` count can leave a record pending. `kahuna.transactions.slow_finalize_drains` (tag `phase`:
+commit, rollback, close) counts the drains that waited past the 2 s report threshold.
+
 The focused server tests are organized around the same boundaries:
 
 | Area | Test file |
@@ -947,6 +984,7 @@ The focused server tests are organized around the same boundaries:
 | Concurrent commit/rollback/finalize attempts | `TestFinalizeSlot.cs` |
 | Public SDK session behavior | `TestClientTransactionRegisterRemote.cs` |
 | Reaper/finalize-slot interaction | `TestSessionReaping.cs` |
+| Completions that are not acknowledged | `TestReadCompletionNotAcknowledged.cs`, `TestUnacknowledgedCompletionRetry.cs`, `TestUnacknowledgedCompletionRetryCluster.cs` |
 | Completion receipt persistence and movement | `TestCompletionReceiptDurability.cs`, `TestCompletionReceiptTransfer.cs`, `TestReceiptReleaseReplication.cs` |
 | Canonical record state machine and store | `TestTransactionRecordStateMachine.cs`, `TestPreparedIntentStore.cs` |
 | Durable finalize protocol and recovery | `TestDurableTransactionFinalizer.cs`, `TestDurableTransactionRecovery.cs`, `TestDurableFinalizeInputBuilder.cs` |

@@ -92,10 +92,16 @@ public sealed class TestReadCompletionNotAcknowledged
         return ws!;
     }
 
+    /// <summary>
+    /// Refuses the first completion of <paramref name="operationId"/>. These cases test the recovery by a same-id
+    /// retry, so the detached retry of the participant is turned off: it would complete the record before the
+    /// test reads it as pending.
+    /// </summary>
     private static OneShotRefusal ArmRefusal(EmbeddedKahunaNode node, TransactionOperationId operationId)
     {
         OneShotRefusal refusal = new(operationId);
         ((KahunaManager)node.Kahuna).KeyValues.Registrar.TestCompletionRefusal = refusal.Refuse;
+        ((KahunaManager)node.Kahuna).KeyValues.Registrar.TestDisableRedrive = true;
         return refusal;
     }
 

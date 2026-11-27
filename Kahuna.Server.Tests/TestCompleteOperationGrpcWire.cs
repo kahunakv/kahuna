@@ -80,7 +80,8 @@ public sealed class TestCompleteOperationGrpcWire
             CachedType = KeyValueResponseType.Set,
             CachedRevision = 42,
             CachedTimestamp = new HLCTimestamp(2, 300, 4),
-            ReadDependency = new HLCTimestamp(3, 400, 5)
+            ReadDependency = new HLCTimestamp(3, 400, 5),
+            ReleaseOnceClosed = true
         };
 
         OperationCompletionPayload restored = RoundTrip(payload);
@@ -108,6 +109,7 @@ public sealed class TestCompleteOperationGrpcWire
         Assert.Equal(payload.CachedRevision, restored.CachedRevision);
         Assert.Equal(payload.CachedTimestamp, restored.CachedTimestamp);
         Assert.Equal(payload.ReadDependency, restored.ReadDependency);
+        Assert.True(restored.ReleaseOnceClosed);
     }
 
     /// <summary>

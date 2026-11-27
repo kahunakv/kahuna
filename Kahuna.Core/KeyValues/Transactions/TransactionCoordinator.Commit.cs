@@ -190,7 +190,7 @@ internal sealed partial class TransactionCoordinator
         // Drain in-flight operations so the working set is frozen before 2PC reads it. Operations registered
         // before finalization are part of the commit; later ones are rejected. A drain timeout is a non-terminal
         // MustRetry.
-        if (!await FreezeForFinalize(context))
+        if (!await FreezeForFinalize(context, FinalizeDrainPhase.Commit))
             return new(KeyValueResponseType.MustRetry, null, CommitRefusalClass.Unresolved, "In-flight operations did not drain before the finalize");
 
         context.CommitTimeline?.Enter(CommitCallStage.Freeze);
@@ -572,7 +572,7 @@ internal sealed partial class TransactionCoordinator
     private async Task<FinalizeOutcome> ExecuteRollback(TransactionContext context, HLCTimestamp transactionId)
     {
         // Freeze the coordinator-owned working set before rolling back its operations.
-        if (!await FreezeForFinalize(context))
+        if (!await FreezeForFinalize(context, FinalizeDrainPhase.Rollback))
             return new(KeyValueResponseType.MustRetry, null);
 
         context.Action = KeyValueTransactionAction.Abort;

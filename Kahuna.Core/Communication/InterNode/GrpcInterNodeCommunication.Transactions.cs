@@ -240,7 +240,8 @@ public partial class GrpcInterNodeCommunication
             CachedTimestampCounter = payload.CachedTimestamp.C,
             ReadDependencyNode = payload.ReadDependency.N,
             ReadDependencyPhysical = payload.ReadDependency.L,
-            ReadDependencyCounter = payload.ReadDependency.C
+            ReadDependencyCounter = payload.ReadDependency.C,
+            ReleaseOnceClosed = payload.ReleaseOnceClosed
         };
 
         if (payload.ModifiedKey is not null) request.ModifiedKey = payload.ModifiedKey;

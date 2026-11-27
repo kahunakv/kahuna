@@ -27,4 +27,8 @@ internal sealed class OperationRecord
     /// many keys it may write, or how many locks it may take. Released when it completes or is cancelled.
     /// </summary>
     public int Reserved { get; init; }
+
+    /// <summary>When the operation registered, in <see cref="Environment.TickCount64"/> milliseconds. A finalize that
+    /// waits on pending operations logs their age from it.</summary>
+    public long RegisteredTicks { get; init; }
 }

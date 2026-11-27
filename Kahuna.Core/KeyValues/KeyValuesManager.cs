@@ -175,6 +175,11 @@ internal sealed partial class KeyValuesManager : IDisposable
     public string? CompleteOperation(HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload) =>
         operationRegistrar.CompleteOperation(transactionId, operationId, payload);
 
+    /// <summary>Coordinator-side recording of an operation's confirmed effect, and whether it counts as acknowledged
+    /// (see <see cref="OperationRegistrar.FoldCompletion"/>).</summary>
+    internal (bool Acknowledged, string? Anchor) FoldCompletion(HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload) =>
+        operationRegistrar.FoldCompletion(transactionId, operationId, payload);
+
     /// <summary>The inbound leg of a routed completion, gated on this node still leading the coordinator.</summary>
     public Task<(KeyValueResponseType outcome, string? anchor)> CompleteOperationInbound(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload) =>
         operationRegistrar.CompleteOperationInbound(coordinatorKey, transactionId, operationId, payload);

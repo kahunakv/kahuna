@@ -1,6 +1,7 @@
 
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Text;
 using DotNext;
 using Kommander;
 using Kommander.Time;
@@ -70,12 +71,20 @@ internal sealed partial class TransactionCoordinator
     /// <summary>
     /// Cancels the specified operation if it is still in the pending state.
     /// </summary>
-    public bool CancelOperation(HLCTimestamp transactionId, TransactionOperationId operationId)
+    public bool CancelOperation(HLCTimestamp transactionId, TransactionOperationId operationId) =>
+        CancelPendingOperation(transactionId, operationId, onlyOnceClosed: false) == OperationCancelOutcome.Cancelled;
+
+    /// <summary>
+    /// Cancels the specified operation if it is still pending, and says what it did; see
+    /// <see cref="TransactionContext.CancelPendingOperation"/>. <see cref="OperationCancelOutcome.NoSession"/> when
+    /// this node holds no session for the transaction.
+    /// </summary>
+    internal OperationCancelOutcome CancelPendingOperation(HLCTimestamp transactionId, TransactionOperationId operationId, bool onlyOnceClosed)
     {
         if (!sessions.TryGetValue(transactionId, out TransactionContext? context))
-            return false;
+            return OperationCancelOutcome.NoSession;
 
-        return context.TryCancelOperation(operationId);
+        return context.CancelPendingOperation(operationId, onlyOnceClosed);
     }
 
     // ---- working-set query and close snapshot ----
@@ -97,14 +106,14 @@ internal sealed partial class TransactionCoordinator
     /// reads a stable working set. Returns false on the drain deadline; the session stays closed so the
     /// caller retries and rejoins the same drain.
     /// </summary>
-    private async Task<bool> FreezeForFinalize(TransactionContext context)
+    private async Task<bool> FreezeForFinalize(TransactionContext context, FinalizeDrainPhase phase)
     {
         // The caller owns the finalize slot, which closed the session to new operations on install
         // (Accepting→Finalizing). Only wait for in-flight ones; a retry after a timeout rejoins this drain.
         using CancellationTokenSource cts = new(context.Timeout <= 0 ? configuration.DefaultTransactionTimeout : context.Timeout);
         try
         {
-            await context.WaitForPendingOperations(cts.Token);
+            await DrainPendingOperations(context, phase, cts.Token);
             return true;
         }
         catch (OperationCanceledException)
@@ -162,7 +171,7 @@ internal sealed partial class TransactionCoordinator
 
             try
             {
-                await context.WaitForPendingOperations(cts.Token);
+                await DrainPendingOperations(context, FinalizeDrainPhase.Close, cts.Token);
             }
             catch (OperationCanceledException)
             {
@@ -186,6 +195,80 @@ internal sealed partial class TransactionCoordinator
             context.CompleteFinalize(attempt!, new FinalizeOutcome(KeyValueResponseType.MustRetry, null));
             throw;
         }
+    }
+
+    // ---- slow finalize drains ----
+
+    /// <summary>A finalize drain that still waits after this many milliseconds logs the operations it waits for.</summary>
+    internal const int SlowDrainReportMs = 2_000;
+
+    /// <summary>The shortest interval, in milliseconds, between two slow-drain logs of this node.</summary>
+    private const int SlowDrainLogIntervalMs = 1_000;
+
+    /// <summary>The most pending operations one slow-drain log names.</summary>
+    private const int SlowDrainLogMaxOperations = 8;
+
+    private long nextSlowDrainLogTicks;
+
+    private int suppressedSlowDrainLogs;
+
+    /// <summary>
+    /// Waits for the session's pending operations, as <see cref="TransactionContext.WaitForPendingOperations"/> does.
+    /// A drain that still waits after <see cref="SlowDrainReportMs"/> is counted, and its pending operations (id,
+    /// kind, age) are logged once, at most once a second for this node. A pending operation that nobody completes
+    /// holds the drain until its deadline, and the log names it, so it can be matched with the participant's
+    /// warning for the same operation id. A drain with nothing pending returns at once and allocates nothing.
+    /// </summary>
+    private async Task DrainPendingOperations(TransactionContext context, FinalizeDrainPhase phase, CancellationToken cancellationToken)
+    {
+        Task drained = context.WaitForPendingOperations(cancellationToken);
+
+        if (!drained.IsCompleted)
+        {
+            long started = Environment.TickCount64;
+
+            try
+            {
+                await drained.WaitAsync(TimeSpan.FromMilliseconds(SlowDrainReportMs), CancellationToken.None).ConfigureAwait(false);
+                return;
+            }
+            catch (TimeoutException)
+            {
+                ReportSlowDrain(context, phase, Environment.TickCount64 - started);
+            }
+        }
+
+        await drained.ConfigureAwait(false);
+    }
+
+    private void ReportSlowDrain(TransactionContext context, FinalizeDrainPhase phase, long waitedMs)
+    {
+        DurableTransactionMetrics.CountSlowFinalizeDrain(phase);
+
+        long now = Environment.TickCount64;
+        long next = Volatile.Read(ref nextSlowDrainLogTicks);
+
+        if (now < next || Interlocked.CompareExchange(ref nextSlowDrainLogTicks, now + SlowDrainLogIntervalMs, next) != next)
+        {
+            Interlocked.Increment(ref suppressedSlowDrainLogs);
+            return;
+        }
+
+        int suppressed = Interlocked.Exchange(ref suppressedSlowDrainLogs, 0);
+        (List<PendingOperationInfo> pending, int total) = context.SnapshotPendingOperations(SlowDrainLogMaxOperations);
+
+        StringBuilder text = new();
+        foreach (PendingOperationInfo operation in pending)
+        {
+            if (text.Length > 0)
+                text.Append(", ");
+            text.Append(operation.OperationId).Append(' ').Append(operation.Kind).Append(' ').Append(operation.AgeMs).Append(" ms");
+        }
+
+        if (total > pending.Count)
+            text.Append(" and ").Append(total - pending.Count).Append(" more");
+
+        logger.LogFinalizeDrainWaits(context.TransactionId, FinalizeDrainPhases.Name(phase), total, waitedMs, text.ToString(), suppressed);
     }
 
     // ---- terminal outcome retention (idempotency window) ----

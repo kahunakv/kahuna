@@ -1079,6 +1079,98 @@ internal static class DurableTransactionMetrics
     }
 
     /// <summary>
+    /// Completions and releases of registered operations that the coordinator did not acknowledge, tagged by
+    /// <c>result</c>: <c>kept</c> (not acknowledged; a detached retry started), <c>driven</c> (the detached retry
+    /// got it acknowledged), <c>recovered</c> (the caller's retry with the same operation id, or an answer that
+    /// the operation completed, took it first), <c>given_up</c> (the retry stopped at the session lifespan or at
+    /// the node shutdown with no acknowledgement) and <c>not_started</c> (no retry started, because the node
+    /// already ran its limit of detached retries). A <c>given_up</c> or <c>not_started</c> count can leave a
+    /// record pending on the coordinator, and each finalize of that transaction then waits out its drain.
+    /// </summary>
+    internal static readonly Counter<long> UnacknowledgedCompletions =
+        Meter.CreateCounter<long>(
+            "kahuna.transactions.unacknowledged_completions",
+            description: "Completions and releases of registered operations not acknowledged by the coordinator, tagged by result: kept, driven, recovered, given_up, not_started.");
+
+    private static readonly KeyValuePair<string, object?> CompletionKept = new("result", "kept");
+    private static readonly KeyValuePair<string, object?> CompletionDriven = new("result", "driven");
+    private static readonly KeyValuePair<string, object?> CompletionRecovered = new("result", "recovered");
+    private static readonly KeyValuePair<string, object?> CompletionGivenUp = new("result", "given_up");
+    private static readonly KeyValuePair<string, object?> CompletionNotStarted = new("result", "not_started");
+
+    private static long completionsKept;
+    private static long completionsDriven;
+    private static long completionsRecovered;
+    private static long completionsGivenUp;
+    private static long completionsNotStarted;
+
+    /// <summary>Process-wide counts behind <see cref="UnacknowledgedCompletions"/>, by result, readable for tests.</summary>
+    internal static (long Kept, long Driven, long Recovered, long GivenUp, long NotStarted) UnacknowledgedCompletionCounts =>
+        (Interlocked.Read(ref completionsKept), Interlocked.Read(ref completionsDriven), Interlocked.Read(ref completionsRecovered),
+         Interlocked.Read(ref completionsGivenUp), Interlocked.Read(ref completionsNotStarted));
+
+    internal static void CompletionKeptForRetry()
+    {
+        Interlocked.Increment(ref completionsKept);
+        UnacknowledgedCompletions.Add(1, CompletionKept);
+    }
+
+    internal static void CompletionDrivenByRetry()
+    {
+        Interlocked.Increment(ref completionsDriven);
+        UnacknowledgedCompletions.Add(1, CompletionDriven);
+    }
+
+    internal static void CompletionRecoveredFirst()
+    {
+        Interlocked.Increment(ref completionsRecovered);
+        UnacknowledgedCompletions.Add(1, CompletionRecovered);
+    }
+
+    internal static void CompletionRetryGivenUp()
+    {
+        Interlocked.Increment(ref completionsGivenUp);
+        UnacknowledgedCompletions.Add(1, CompletionGivenUp);
+    }
+
+    /// <summary>Counts a completion whose retry did not start, and returns the process-wide count of them.</summary>
+    internal static long CompletionRetryNotStarted()
+    {
+        UnacknowledgedCompletions.Add(1, CompletionNotStarted);
+        return Interlocked.Increment(ref completionsNotStarted);
+    }
+
+    /// <summary>
+    /// Finalize drains (commit, rollback, close) that still waited for pending operations after
+    /// <see cref="TransactionCoordinator.SlowDrainReportMs"/>, tagged by <c>phase</c>. A pending operation that no
+    /// completion ends holds its drain until the session timeout; the paired warning names its id, kind and age.
+    /// </summary>
+    internal static readonly Counter<long> SlowFinalizeDrains =
+        Meter.CreateCounter<long>(
+            "kahuna.transactions.slow_finalize_drains",
+            description: "Finalize drains that still waited for pending operations after the report threshold, tagged by phase: commit, rollback, close.");
+
+    private static readonly KeyValuePair<string, object?> DrainPhaseCommit = new("phase", "commit");
+    private static readonly KeyValuePair<string, object?> DrainPhaseRollback = new("phase", "rollback");
+    private static readonly KeyValuePair<string, object?> DrainPhaseClose = new("phase", "close");
+
+    private static long slowFinalizeDrains;
+
+    /// <summary>Process-wide count behind <see cref="SlowFinalizeDrains"/>, readable for tests.</summary>
+    internal static long SlowFinalizeDrainsCount => Interlocked.Read(ref slowFinalizeDrains);
+
+    internal static void CountSlowFinalizeDrain(FinalizeDrainPhase phase)
+    {
+        Interlocked.Increment(ref slowFinalizeDrains);
+        SlowFinalizeDrains.Add(1, phase switch
+        {
+            FinalizeDrainPhase.Commit => DrainPhaseCommit,
+            FinalizeDrainPhase.Rollback => DrainPhaseRollback,
+            _ => DrainPhaseClose
+        });
+    }
+
+    /// <summary>
     /// Retries of a mandatory lock release that no node acknowledged when the commit finalized: one count per
     /// release per attempt. The first attempt fails in an election window, when no node is confirmed yet, or
     /// on a coordinator whose leadership belief is stale and whose lock lives on the new leader; a retry

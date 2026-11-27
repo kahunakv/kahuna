@@ -2407,6 +2407,10 @@ public sealed class TestTransactionRegistrationRouting : RaftTrackingTest
             (TransactionHandle handle, Node coordinatorLeader, Node remoteEntry) =
                 await StartSessionWithRemoteEntry(nodes, interNode, KeyValueTransactionLocking.Optimistic, ct);
 
+            // The case tests the recovery by a same-id retry: the detached retry of the entry node would complete the
+            // record before the test reads it as pending.
+            remoteEntry.Kahuna.KeyValues.Registrar.TestDisableRedrive = true;
+
             TransactionOperationId scanOp = TransactionOperationId.NewRandom();
             bool refused = false;
             interNode.CompleteOperationRedirectFault = (_, opId) =>

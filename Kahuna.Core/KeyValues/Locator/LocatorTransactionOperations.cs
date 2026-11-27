@@ -412,7 +412,7 @@ internal sealed class LocatorTransactionOperations
     /// here; without it the local count would miss every completion a peer sent to this node, and the remote
     /// share computed from these counters would be wrong.
     /// </summary>
-    internal void CountInboundCompletionServedLocally() => sessionRegistration.Local(SessionRegistrationOp.Complete, true);
+    internal void CountInboundCompletionServedLocally(bool acknowledged) => sessionRegistration.Local(SessionRegistrationOp.Complete, acknowledged);
 
     /// <summary>
     /// Opens a completion this node forwards as a receiver, after finding that the sender routed it to a
@@ -458,10 +458,10 @@ internal sealed class LocatorTransactionOperations
                     return answer;
             }
 
-            string? localAnchor = manager.CompleteOperation(transactionId, operationId, payload);
+            (bool acknowledged, string? localAnchor) = manager.FoldCompletion(transactionId, operationId, payload);
 
-            sessionRegistration.Local(SessionRegistrationOp.Complete, true);
-            return (KeyValueResponseType.Set, localAnchor);
+            sessionRegistration.Local(SessionRegistrationOp.Complete, acknowledged);
+            return acknowledged ? (KeyValueResponseType.Set, localAnchor) : (KeyValueResponseType.MustRetry, null);
         }
 
         string? leader = await routing.TryWaitForLeader(partitionId, cancellationToken);

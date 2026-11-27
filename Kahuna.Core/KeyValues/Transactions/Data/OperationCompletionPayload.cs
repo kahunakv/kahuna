@@ -142,6 +142,16 @@ public sealed class OperationCompletionPayload
     public HLCTimestamp CachedTimestamp { get; set; }
 
     /// <summary>
+    /// Set on a release (a completion with a transient outcome, which the coordinator turns into a cancel) that a
+    /// detached retry sends again. The coordinator cancels the pending record only after the session stops taking
+    /// new operations, and answers not acknowledged before that. A copy of a release can land after an earlier copy
+    /// already cancelled the record and the caller registered the same operation id again; while the session takes
+    /// operations, that copy would cancel the new registration, and the effect of the new attempt would never fold.
+    /// After the close no registration can start, so the copy can only end a record that was pending at the close.
+    /// </summary>
+    public bool ReleaseOnceClosed { get; set; }
+
+    /// <summary>
     /// Resets every property to its post-construction default so a recycled shell is
     /// indistinguishable from a fresh <c>new()</c>. Only the shell's references are dropped: the
     /// objects they pointed to may live on in the coordinator working set. A property added to this
@@ -169,5 +179,6 @@ public sealed class OperationCompletionPayload
         CachedType = default;
         CachedRevision = 0;
         CachedTimestamp = default;
+        ReleaseOnceClosed = false;
     }
 }

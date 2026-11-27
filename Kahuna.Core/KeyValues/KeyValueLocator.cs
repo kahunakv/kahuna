@@ -203,8 +203,8 @@ internal sealed class KeyValueLocator
     public int LocatePartition(string coordinatorKey) =>
         transactions.LocatePartition(coordinatorKey);
 
-    internal void CountInboundCompletionServedLocally() =>
-        transactions.CountInboundCompletionServedLocally();
+    internal void CountInboundCompletionServedLocally(bool acknowledged) =>
+        transactions.CountInboundCompletionServedLocally(acknowledged);
 
     internal SessionRegistrationForward BeginInboundCompletionRedirect() =>
         transactions.BeginInboundCompletionRedirect();

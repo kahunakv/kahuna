@@ -23,7 +23,7 @@ public class TestOperationCompletionPayloadPool
     /// is excluded from this count. When a new settable property is added, it must join
     /// <see cref="OperationCompletionPayload.Clear"/> and the population + assertions below, then this count.
     /// </summary>
-    private const int ExpectedPropertyCount = 20;
+    private const int ExpectedPropertyCount = 21;
 
     private static OperationCompletionPayload FullyPopulated()
     {
@@ -50,7 +50,8 @@ public class TestOperationCompletionPayloadPool
             Durability = KeyValueDurability.Ephemeral,
             CachedType = KeyValueResponseType.Locked,
             CachedRevision = 7,
-            CachedTimestamp = new HLCTimestamp(1, 2, 3)
+            CachedTimestamp = new HLCTimestamp(1, 2, 3),
+            ReleaseOnceClosed = true
         };
     }
 
@@ -81,6 +82,7 @@ public class TestOperationCompletionPayloadPool
         Assert.Equal(default, payload.CachedType);
         Assert.Equal(0, payload.CachedRevision);
         Assert.Equal(default, payload.CachedTimestamp);
+        Assert.False(payload.ReleaseOnceClosed);
     }
 
     [Fact]
