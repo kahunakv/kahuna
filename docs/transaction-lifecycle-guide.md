@@ -280,6 +280,26 @@ still be durably aborted), while `Commit` **cannot** — a commit requires an `U
    is §8; the two encodings and their upgrade requirements are in the
    [durable settlement guide](durable-settlement-guide.md).
 
+**The staged-base check before the first proposal.** Before step 0, and on the one-phase path again just
+before the bundle is proposed, the finalizer compares the validated base of each read-modify-write key with
+what the coordinator node knows. A committed head in the node's memory at or above the staged revision of any
+write is a conflict. A foreign intent on the key is judged by its record:
+
+- An undecided holder decides nothing, and the attempt answers `MustRetry`.
+- A committed holder that is the validated base is accepted: the same revision for an existing base, and a
+  committed delete or a value that expired before the transaction began for an absent base.
+- A committed holder above an existing base, at its revision in another state, or a committed value over an
+  absent base is a moved base, and the commit aborts with `StagedBaseMoved`.
+- A committed holder below an existing base is history that the base was written over. Its settlement has
+  not applied on this node yet, for example after a non-transactional write installed it and wrote the next
+  revision (§8.1), or on a replica behind the leader of the key's partition. The key is then judged as a key
+  with no intent, and `kahuna.durable_tx.staged_base_superseded_holders` counts it.
+
+A key with no intent, or with an aborted holder, is compared on its leader by the staged-base conflict
+probe. An absent base records no revision, so a committed value on the key stays a conflict until it
+settles, also under a later delete. This check is an early one: the fence at the prepare's apply position
+and the bundled commit gate judge the base again.
+
 #### 6.3.1 The one-phase bundle and its gate
 
 When the whole participant set is the anchor partition, steps 1, 3 and 4 collapse into one durable
@@ -748,6 +768,7 @@ intent with resolution `Pending`**. Anything touching that key in the window mus
 | First transactional read of the key (no MVCC entry yet) | Does not answer from the overlay: it records its MVCC pin from the committed intent (`DurableSnapshotSource`), exactly as a transactional scan does, so a competing commit that lands afterwards makes the transaction's next read or write of the key answer `Aborted` early rather than only failing read-set validation at commit. Undecided → wait. |
 | Write (set/delete/extend) | `ForeignIntentWriteResolver` materializes a committed intent into the entry *before* the write derives its next revision, flags and existence checks. Undecided → `WaitingForReplication` naming the holder: lag, not a lock conflict (the holder is inside its decision window and waits on no one), so a client can give it a longer budget than a deadlock wait. The same answer covers a live write intent whose owner is already durably decided and only waiting for its settlement to clear it; a live undecided write intent, a prefix lock and a foreign range lock keep `MustRetry`. |
 | Any read after a later write moved the head past the intent | A non-transactional write does not wait for settlement: it materializes the committed intent and writes the next revision, and the intent lingers until settled. A head **strictly newer** than the intent wins everywhere — point reads (latest and snapshot; a persistent cache miss loads the head first), transactional pins, and scans (a newer row stands, and a newer delete stays deleted) — so a client never reads back the value its own write replaced. An equal revision is not proof (an extend reuses it), so there the intent is served. |
+| Staged-base check of a read-modify-write that read the newer head | The intent is below the validated base, so it is history that the base was written over: the check before the first proposal compares the base on the key's leader, as for a key with no intent (§6.3). |
 | Point lock acquire | Resolved exactly like a write before the lock is granted: a committed intent is materialized into the entry, so the new holder never holds a key whose committed head it cannot see; undecided → `WaitingForReplication`, which the acquire loop waits out (routing the holder's decision when it is not local). A wait budget that runs out answers `WaitingForReplication` too, never `MustRetry`. |
 | Transactional read that already holds its own MVCC entry on the key | Skips the overlay (its own view is authoritative), but if a committed intent is newer than the resident entry, the pin is behind the committed head and the read answers `Aborted` — the same answer it gives once the entry has advanced. It never returns the pinned pre-commit value. |
 | A new transaction's prepare | A one-phase bundle carries the settlement of a committed predecessor and applies behind it (§6.3.1). Any other prepare is blocked (one live intent per key) until the predecessor settles — absorbed by the prepare retry in §6.3, which a decided predecessor bounds by the decision deadline (renewed while the wait lasts, §6.4) and a live one by eight rounds. |

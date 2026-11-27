@@ -518,6 +518,18 @@ internal static class DurableTransactionMetrics
             description: "Validated-base prepares admitted because the fence held no committed head for the key.");
 
     /// <summary>
+    /// Written keys whose staged-base check before the first proposal found a committed foreign intent with a
+    /// revision below the validated base. A later write moved the head past that intent before its settlement
+    /// applied on this node: a non-transactional write over the intent, or a settle that this replica has not
+    /// applied yet. The check then asks the key's leader, as for a key with no intent. A high count on one node
+    /// names a replica whose apply is behind for the keys that its coordinators write.
+    /// </summary>
+    internal static readonly Counter<long> StagedBaseSupersededHolders =
+        Meter.CreateCounter<long>(
+            "kahuna.durable_tx.staged_base_superseded_holders",
+            description: "Written keys whose staged-base check found a committed foreign intent below the validated base and asked the key's leader.");
+
+    /// <summary>
     /// Stale-base vetoes dispatched by replicas. When a node applies a replicated validated-base prepare and its
     /// own fence memory proves the base moved, that verdict is deterministically correct (heads record only real
     /// commits, in log order) even when the acknowledging leader's memory is frozen and admitted the prepare —

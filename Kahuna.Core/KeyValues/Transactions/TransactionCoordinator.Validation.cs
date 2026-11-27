@@ -358,8 +358,10 @@ internal sealed partial class TransactionCoordinator
     /// Valid.</item>
     /// <item>A foreign durable intent: its record decides. A committed winner whose revision is not this
     /// transaction's validated base is a moved-base conflict, even before it materializes into MVCC. Ordinary
-    /// reads cannot answer this: they wait behind the intent or serve this transaction's own staged view. An
-    /// aborted holder falls through to the committed read; an undecided one is a retryable unknown.</item>
+    /// reads cannot answer this: they wait behind the intent or serve this transaction's own staged view. A
+    /// committed holder below an existing base is history that the base was written over, and an aborted holder
+    /// never materializes: both fall through to the committed read. An undecided holder is a retryable
+    /// unknown.</item>
     /// <item>No intent: the key's actor compares the committed head's revision and existence to the base via the
     /// staged-base conflict probe. Unlike an ordinary read, the transaction's own prefix lock over the key's
     /// bucket does not refuse it.</item>
@@ -427,24 +429,39 @@ internal sealed partial class TransactionCoordinator
 
                     if (holderDecision == TransactionDecision.Commit)
                     {
-                        // The holder's mutation is the key's next committed state, materialized or not. It is a
-                        // valid base only if it is the base this transaction validated against. That is the usual
-                        // case under deferred settlement: the observed base was materialized by this holder, whose
-                        // intent awaits removal. An existing base matches by revision; an absent base matches by
-                        // what the holder left behind, since an absent observation records no revision.
+                        // The holder's mutation is the key's next committed state, materialized or not, unless a
+                        // later write moved the head past it. It is a valid base if it is the base this transaction
+                        // validated against. That is the usual case under deferred settlement: the observed base
+                        // was materialized by this holder, whose intent awaits removal. An existing base matches by
+                        // revision; an absent base matches by what the holder left behind, since an absent
+                        // observation records no revision.
                         if (CommittedHolderIsTheValidatedBase(holder, staged, input.TransactionId))
                             continue;
 
-                        logger.LogWarning(
-                            "Staged base for {Key} was overtaken by committed transaction {HolderTransactionId} at revision {HolderRevision} state {HolderState} (validated base was {BaseRevision} {BaseState})",
-                            staged.Key, holder.TransactionId, holder.Revision, holder.State, staged.BaseRevision, staged.BaseState);
-                        return StagedBaseValidation.Conflict;
+                        // A holder below an existing base is history that the base was written over: a write
+                        // staged over a value takes the next revision or keeps it, so no write that overtook the
+                        // base has a lower revision. Its intent is still here because its settlement has not applied on this
+                        // node, for example after a non-transactional write installed it and wrote the next
+                        // revision without a wait, or on a replica that is behind the leader of the key's
+                        // partition. The holder proves nothing about the base, so the key is judged as a key with
+                        // no intent: by the probe on its leader below, and again by the fence at the prepare's
+                        // apply position.
+                        if (!CommittedHolderIsBelowTheValidatedBase(holder, staged))
+                        {
+                            logger.LogWarning(
+                                "Staged base for {Key} was overtaken by committed transaction {HolderTransactionId} at revision {HolderRevision} state {HolderState} (validated base was {BaseRevision} {BaseState})",
+                                staged.Key, holder.TransactionId, holder.Revision, holder.State, staged.BaseRevision, staged.BaseState);
+                            return StagedBaseValidation.Conflict;
+                        }
+
+                        DurableTransactionMetrics.StagedBaseSupersededHolders.Add(1);
                     }
 
                     if (holderDecision == TransactionDecision.Undecided)
                         return StagedBaseValidation.Unknown;
 
-                    // Aborted holder: its value never materializes; the committed state beneath it decides.
+                    // An aborted holder never materializes, and a committed holder below the base is history: the
+                    // committed state decides.
                 }
 
                 // The frozen base is the transaction's own exact pre-write observation. The probe carries its
@@ -507,7 +524,8 @@ internal sealed partial class TransactionCoordinator
     /// does not say which mutation left the key absent. So an existing base matches by revision (and the holder
     /// must be a value, not a tombstone at that revision). An absent base matches by effect: a committed delete,
     /// or a committed value that expired before this transaction began, so every read it made saw the key
-    /// absent. Any other committed holder overtook the base.
+    /// absent. Any other committed holder overtook the base, except one below an existing base
+    /// (<see cref="CommittedHolderIsBelowTheValidatedBase"/>).
     /// </summary>
     private static bool CommittedHolderIsTheValidatedBase(PreparedIntent holder, PreparedIntent staged, HLCTimestamp transactionId)
     {
@@ -519,6 +537,17 @@ internal sealed partial class TransactionCoordinator
 
         return holder.Expires != HLCTimestamp.Zero && holder.Expires.CompareTo(transactionId) < 0;
     }
+
+    /// <summary>
+    /// Whether a committed foreign intent still on a key is older than the existing base the staged write validated
+    /// against. A set or a delete staged over an existing value takes the next revision and an extend keeps it, so
+    /// a key's revisions never go down, and a holder below the base was written before the base. An absent base
+    /// records no revision, so a holder is never shown older than it: a committed value under a later delete stays
+    /// a conflict until the holder settles. The probe on the key's leader cannot replace the comparison there,
+    /// because it compares the resident entry and does not see a committed intent that has not settled.
+    /// </summary>
+    private static bool CommittedHolderIsBelowTheValidatedBase(PreparedIntent holder, PreparedIntent staged) =>
+        staged.BaseState == KeyValueState.Set && holder.Revision < staged.BaseRevision;
 
     /// <summary>
     /// Claims every staged intent of a two-phase finalize before its first proposal, and returns the highest
