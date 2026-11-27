@@ -639,6 +639,14 @@ public sealed class EmbeddedKahunaOptions
     public int RaftWalGroupCommitLingerMs { get; set; }
 
     /// <summary>
+    /// Longest a synced WAL write is held, in microseconds, for partitions that are expected back with their next
+    /// write, so one fsync covers them (0 or a value below 100 = off). It applies only to a RocksDB WAL with synced
+    /// writes. Mirrors <c>RaftConfiguration.WalGroupCommitReturnWindow</c>; defaults to Kommander's own default of
+    /// 1,000 microseconds.
+    /// </summary>
+    public int RaftWalGroupCommitReturnWindowMicroseconds { get; set; } = 1000;
+
+    /// <summary>
     /// Longest an idle Raft worker spins, in microseconds, before it parks on a kernel wait
     /// (0 = park at once). Mirrors <c>RaftConfiguration.IdleWorkerMaxSpinBeforePark</c>; defaults to
     /// Kommander's own default of 20 microseconds.

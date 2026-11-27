@@ -228,9 +228,11 @@ public sealed class TestUnacknowledgedCompletionRetry
 
         Assert.Equal(KeyValueResponseType.RolledBack, rolledBack);
         Assert.True(clock.ElapsedMilliseconds < FinalizeBoundMs, $"the rollback waited on the finalize drain: {clock.ElapsedMilliseconds} ms");
-        Assert.True(DurableTransactionMetrics.UnacknowledgedCompletionCounts.Driven > drivenBefore);
 
+        // The rollback can end as soon as the coordinator folds the completion, before the detached retry counts it.
+        // The retry counts how it ended before it leaves the count of live retries.
         await WaitUntil(() => Registrar(node).ActiveRedrives == 0, ct);
+        Assert.True(DurableTransactionMetrics.UnacknowledgedCompletionCounts.Driven > drivenBefore);
         Assert.Equal(0, Registrar(node).ParticipantOperationCache.Count);
 
         Registrar(node).TestCompletionRefusal = null;

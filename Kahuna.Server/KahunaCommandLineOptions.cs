@@ -328,6 +328,9 @@ public sealed class KahunaCommandLineOptions
     [Option("raft-wal-group-commit-linger-ms", Required = false, HelpText = "Group-commit linger window in milliseconds (0 = disabled; raise on networks where fsync rate is the bottleneck)", Default = 0)]
     public int RaftWalGroupCommitLingerMs { get; set; }
 
+    [Option("raft-wal-group-commit-return-window-us", Required = false, HelpText = "Longest a synced WAL write is held, in microseconds, for partitions that are expected back with their next write, so one fsync covers them (0 or a value below 100 = off; applies to a RocksDB WAL with synced writes only)", Default = 1000)]
+    public int RaftWalGroupCommitReturnWindowMicroseconds { get; set; } = 1000;
+
     [Option("raft-idle-worker-max-spin-before-park-us", Required = false, HelpText = "Longest an idle Raft worker spins, in microseconds, before it parks on a kernel wait (0 = park at once; raise on a host with idle cores to cut hand-off latency)", Default = 20)]
     public int RaftIdleWorkerMaxSpinBeforeParkMicroseconds { get; set; } = 20;
 

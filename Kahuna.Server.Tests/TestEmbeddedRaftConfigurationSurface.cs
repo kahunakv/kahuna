@@ -16,6 +16,7 @@ public sealed class TestEmbeddedRaftConfigurationSurface
 
         Assert.Equal(kommanderDefaults.MaxWalGroupBatchPartitions, options.RaftMaxWalGroupBatchPartitions);
         Assert.Equal(kommanderDefaults.WalGroupCommitLingerMs, options.RaftWalGroupCommitLingerMs);
+        Assert.Equal(kommanderDefaults.WalGroupCommitReturnWindow, TimeSpan.FromMicroseconds(options.RaftWalGroupCommitReturnWindowMicroseconds));
         Assert.False(options.RaftWalSingleFsyncCommit);
     }
 
@@ -26,6 +27,7 @@ public sealed class TestEmbeddedRaftConfigurationSurface
         {
             RaftMaxWalGroupBatchPartitions = 17,
             RaftWalGroupCommitLingerMs = 3,
+            RaftWalGroupCommitReturnWindowMicroseconds = 400,
             RaftWalSingleFsyncCommit = true
         };
 
@@ -33,6 +35,7 @@ public sealed class TestEmbeddedRaftConfigurationSurface
 
         Assert.Equal(17, configuration.MaxWalGroupBatchPartitions);
         Assert.Equal(3, configuration.WalGroupCommitLingerMs);
+        Assert.Equal(TimeSpan.FromMicroseconds(400), configuration.WalGroupCommitReturnWindow);
         Assert.True(configuration.WalSingleFsyncCommit);
     }
 

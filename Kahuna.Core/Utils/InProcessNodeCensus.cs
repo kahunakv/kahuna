@@ -6,8 +6,8 @@ namespace Kahuna.Utils;
 /// embedded cluster (tests, in-process consumers) hosts several, and an in-process transport can hand
 /// the same proposal byte array to every one of them. Process-wide caches keyed on such shared arrays
 /// read this count as their take budget: it says how many local consumers may come for one entry. The
-/// count is a hint, never a correctness input — an overcount only delays an entry's release to its
-/// weakly held key, and an undercount only costs one redundant decode.
+/// count is a hint, never a correctness input — an overcount keeps an entry until the cache drops its
+/// generation, and an undercount only costs one redundant decode.
 /// </summary>
 internal static class InProcessNodeCensus
 {

@@ -57,6 +57,13 @@ internal static class OnePhaseBundleEntry
         TransactionRecordStore.TryClaimProposedCommands(recordInit, out TransactionRecordCommand[]? init);
         TransactionRecordStore.TryClaimProposedCommands(decision, out TransactionRecordCommand[]? decided);
 
+        // The cache does not register an entry this long, so the prepare part is not decoded for it.
+        if (!locallyProposed.Accepts(data.Length))
+        {
+            PreparedIntentStore.ForgetProposedCommands(prepare);
+            return data;
+        }
+
         if (PreparedIntentStore.TryClaimProposedCommands(prepare, out PreparedIntentCommand[]? prepared))
             locallyProposed.Register(data, new Commands(init, prepared, decided));
 

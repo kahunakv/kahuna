@@ -862,15 +862,18 @@ Two WAL behaviours dominate commit latency:
 
 - **Group commit.** A WAL worker can coalesce several partitions' writes into one storage flush —
   one `fsync` for many partitions. `MaxWalGroupBatchPartitions` bounds the batch;
-  `WalGroupCommitLingerMs` optionally waits to gather a denser batch.
+  `WalGroupCommitLingerMs` optionally waits to gather a denser batch. `WalGroupCommitReturnWindow`
+  (default 1 ms) holds a synced write for partitions that are expected back with their next write, so one
+  fsync covers them; it applies only to a RocksDB WAL with synced writes.
 - **Single-fsync commit.** By default an auto-commit proposal costs *two* serial fsyncs (propose, then the
   committed marker). `WalSingleFsyncCommit` releases the client ticket once the **propose quorum is
   durable** and demotes the committed marker to a lazy write. Durability is unchanged,
   because propose-quorum-durable *is* the commit point; the setting moves one fsync off the caller's
   critical path.
 
-`Kahuna.Server` exposes all three on the command line; embedded consumers set them on
-`EmbeddedKahunaOptions` (`RaftMaxWalGroupBatchPartitions`, `RaftWalGroupCommitLingerMs`,
+`Kahuna.Server` exposes these on the command line (the return window as
+`--raft-wal-group-commit-return-window-us`); embedded consumers set them on `EmbeddedKahunaOptions`
+(`RaftMaxWalGroupBatchPartitions`, `RaftWalGroupCommitLingerMs`, `RaftWalGroupCommitReturnWindowMicroseconds`,
 `RaftWalSingleFsyncCommit`). Check the host's effective configuration rather than assuming the server
 and embedded defaults match:
 `RaftWalSingleFsyncCommit` is **false** by default on `EmbeddedKahunaOptions`, whereas the server's

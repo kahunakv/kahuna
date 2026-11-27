@@ -111,6 +111,35 @@ public sealed class TestOnePhaseBundleEntry
     }
 
     [Fact]
+    public void Serialize_OfAnEntryLongerThanTheCacheLimit_RegistersNothing_AndTheApplyDecodesIt()
+    {
+        HLCTimestamp txId = Ts(4_000);
+        const string key = "registrations/large";
+        List<TransactionParticipantRef> manifest = [new(key, KeyValueDurability.Persistent)];
+        long hash = TransactionManifest.ComputeHash(txId, 1, key, Ts(txId.L + 1), manifest);
+        byte[] value = new byte[ProposedDeltaCache<OnePhaseBundleEntry.Commands>.DefaultMaxRegisteredBytes];
+        value.AsSpan().Fill(7);
+
+        byte[] init = TransactionRecordStore.SerializeDelta([new InitializeTransactionCommand(txId, 1, "coord", key, Ts(txId.L + 1), Ts(txId.L + 9_000), hash, manifest, Ts(txId.L + 2), txId)]);
+        PreparedIntent intent = Intent(key, txId, 1, PreparedIntent.UnknownBaseRevision, KeyValueState.Undefined, hash) with { Value = value };
+        byte[] prepare = PreparedIntentStore.SerializeDelta([new PrepareIntentCommand(intent)]);
+        byte[] decision = TransactionRecordStore.SerializeDelta([new CommitTransactionCommand(txId, 1, hash, Ts(txId.L + 2), Ts(txId.L + 2), BundledPrepareKeys: [key])]);
+
+        byte[] entry = OnePhaseBundleEntry.Serialize(init, prepare, decision);
+
+        Assert.True(entry.Length > ProposedDeltaCache<OnePhaseBundleEntry.Commands>.DefaultMaxRegisteredBytes);
+        Assert.False(OnePhaseBundleEntry.TryTakeCommands(entry, out _));
+        Assert.False(TransactionRecordStore.TryClaimProposedCommands(init, out _));
+        Assert.False(TransactionRecordStore.TryClaimProposedCommands(decision, out _));
+
+        Replica replica = new();
+        RaftLog log = Log(1, 10, ReplicationTypes.OnePhaseBundle, entry);
+        Assert.True(OnePhaseBundleEntry.Apply(replica.Records, replica.Intents, tracker: null, Partition, log, entry, replay: false));
+        Assert.Equal(TransactionDecision.Commit, replica.Records.Get(txId, 1)!.Decision);
+        Assert.Equal(value, replica.Intents.GetByIdentity(txId, 1, key)!.Value);
+    }
+
+    [Fact]
     public void Codec_AFieldOfANewerWriter_IsSkipped()
     {
         (byte[] init, byte[] prepare, byte[] decision) = Parts(Ts(1_000), "codec/b");

@@ -20,6 +20,7 @@ public sealed class TestStandaloneRaftOptionSurface
             WriteIOThreads = 5,
             RaftMaxWalGroupBatchPartitions = 7,
             RaftWalGroupCommitLingerMs = 2,
+            RaftWalGroupCommitReturnWindowMicroseconds = 250,
             RaftIdleWorkerMaxSpinBeforeParkMicroseconds = 50,
             RaftWalSingleFsyncCommit = false,
             RaftSnapshotStagingDirectory = "/var/lib/kahuna/staging"
@@ -31,6 +32,7 @@ public sealed class TestStandaloneRaftOptionSurface
         Assert.Equal(5, options.WriteIOThreads);
         Assert.Equal(7, options.RaftMaxWalGroupBatchPartitions);
         Assert.Equal(2, options.RaftWalGroupCommitLingerMs);
+        Assert.Equal(250, options.RaftWalGroupCommitReturnWindowMicroseconds);
         Assert.False(options.RaftWalSingleFsyncCommit);
         Assert.Equal("/var/lib/kahuna/staging", options.RaftSnapshotStagingDirectory);
 
@@ -40,6 +42,7 @@ public sealed class TestStandaloneRaftOptionSurface
         Assert.Equal(5, configuration.WriteIOThreads);
         Assert.Equal(7, configuration.MaxWalGroupBatchPartitions);
         Assert.Equal(2, configuration.WalGroupCommitLingerMs);
+        Assert.Equal(TimeSpan.FromMicroseconds(250), configuration.WalGroupCommitReturnWindow);
         Assert.Equal(TimeSpan.FromMicroseconds(50), configuration.IdleWorkerMaxSpinBeforePark);
         Assert.False(configuration.WalSingleFsyncCommit);
         Assert.Equal("/var/lib/kahuna/staging", configuration.SnapshotStagingDirectory);
@@ -61,9 +64,34 @@ public sealed class TestStandaloneRaftOptionSurface
         Assert.Equal(commandLine.WriteIOThreads, configuration.WriteIOThreads);
         Assert.Equal(commandLine.RaftMaxWalGroupBatchPartitions, configuration.MaxWalGroupBatchPartitions);
         Assert.Equal(commandLine.RaftWalGroupCommitLingerMs, configuration.WalGroupCommitLingerMs);
+        Assert.Equal(new RaftConfiguration().WalGroupCommitReturnWindow, configuration.WalGroupCommitReturnWindow);
         Assert.Equal(new RaftConfiguration().IdleWorkerMaxSpinBeforePark, configuration.IdleWorkerMaxSpinBeforePark);
         Assert.Null(commandLine.RaftWalSingleFsyncCommit);
         Assert.True(configuration.WalSingleFsyncCommit);
+    }
+
+    /// <summary>
+    /// The WAL return window is given in microseconds on the command line and reaches the configuration of a
+    /// standalone node. Unset, it is Kommander's default; 0 turns it off.
+    /// </summary>
+    [Theory]
+    [InlineData(null, 1_000)]
+    [InlineData("0", 0)]
+    [InlineData("300", 300)]
+    public void TheWalReturnWindow_TakesTheMicrosecondsGivenOnTheCommandLine(string? value, int expectedMicroseconds)
+    {
+        string[] args = value is null ? [] : ["--raft-wal-group-commit-return-window-us", value];
+
+        ParserResult<KahunaCommandLineOptions> result = Parser.Default.ParseArguments<KahunaCommandLineOptions>(args);
+
+        Assert.Equal(ParserResultType.Parsed, result.Tag);
+
+        RaftConfiguration configuration = EmbeddedKahunaNode.CreateRaftConfiguration(
+            EmbeddedOptionsFactory.CreateEmbeddedOptions(result.Value));
+
+        Assert.Equal(TimeSpan.FromMicroseconds(expectedMicroseconds), configuration.WalGroupCommitReturnWindow);
+        if (value is null)
+            Assert.Equal(new RaftConfiguration().WalGroupCommitReturnWindow, configuration.WalGroupCommitReturnWindow);
     }
 
     /// <summary>
