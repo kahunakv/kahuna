@@ -83,7 +83,7 @@ public partial class GrpcInterNodeCommunication
                        
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TrySetKeyValue", node).ConfigureAwait(false);
         if (!response.IsAnswered)
-            return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
+            return UnansweredResults.TrySetKeyValue;
 
         GrpcTrySetKeyValueResponse remoteResponse = response.TrySetKeyValue!;
         
@@ -121,12 +121,7 @@ public partial class GrpcInterNodeCommunication
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TrySetManyNodeKeyValue", node).ConfigureAwait(false);
         if (!response.IsAnswered)
         {
-            lock (lockSync)
-            {
-                foreach (KahunaSetKeyValueRequestItem item in items)
-                    responses.Add(new() { Key = item.Key, Type = KeyValueResponseType.MustRetry, Durability = item.Durability });
-            }
-
+            UnansweredResults.TrySetManyNodeKeyValue(items, lockSync, responses);
             return;
         }
 
@@ -164,12 +159,7 @@ public partial class GrpcInterNodeCommunication
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryDeleteManyNodeKeyValue", node).ConfigureAwait(false);
         if (!response.IsAnswered)
         {
-            lock (lockSync)
-            {
-                foreach (KahunaDeleteKeyValueRequestItem item in items)
-                    responses.Add(new() { Key = item.Key, Type = KeyValueResponseType.MustRetry, Durability = item.Durability });
-            }
-
+            UnansweredResults.TryDeleteManyNodeKeyValue(items, lockSync, responses);
             return;
         }
 
@@ -286,7 +276,7 @@ public partial class GrpcInterNodeCommunication
         
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryDeleteKeyValue", node).ConfigureAwait(false);
         if (!response.IsAnswered)
-            return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
+            return UnansweredResults.TryDeleteKeyValue;
 
         GrpcTryDeleteKeyValueResponse remoteResponse = response.TryDeleteKeyValue!;
         
@@ -332,7 +322,7 @@ public partial class GrpcInterNodeCommunication
         
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryExtendKeyValue", node).ConfigureAwait(false);
         if (!response.IsAnswered)
-            return (KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero);
+            return UnansweredResults.TryExtendKeyValue;
 
         GrpcTryExtendKeyValueResponse remoteResponse = response.TryExtendKeyValue!;
         
@@ -386,7 +376,7 @@ public partial class GrpcInterNodeCommunication
         
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryGetValue", node).ConfigureAwait(false);
         if (!response.IsAnswered)
-            return (KeyValueResponseType.MustRetry, null);
+            return UnansweredResults.TryGetValue;
 
         GrpcTryGetKeyValueResponse remoteResponse = response.TryGetKeyValue!;
         
@@ -445,7 +435,7 @@ public partial class GrpcInterNodeCommunication
         
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryExistsValue", node).ConfigureAwait(false);
         if (!response.IsAnswered)
-            return (KeyValueResponseType.MustRetry, null);
+            return UnansweredResults.TryExistsValue;
 
         GrpcTryExistsKeyValueResponse remoteResponse = response.TryExistsKeyValue!;
         
@@ -490,12 +480,7 @@ public partial class GrpcInterNodeCommunication
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryGetManyNodeValues", node).ConfigureAwait(false);
         if (!response.IsAnswered)
         {
-            lock (lockSync)
-            {
-                foreach ((string key, _, KeyValueDurability durability) in keys)
-                    responses.Add((KeyValueResponseType.MustRetry, key, durability, null));
-            }
-
+            UnansweredResults.TryGetManyNodeValues(keys, lockSync, responses);
             return;
         }
 
@@ -527,11 +512,7 @@ public partial class GrpcInterNodeCommunication
 
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryProbeMany", node).ConfigureAwait(false);
         if (!response.IsAnswered)
-        {
-            KeyValueProbeResult[] refused = new KeyValueProbeResult[keys.Length];
-            Array.Fill(refused, KeyValueProbeResult.MustRetry);
-            return refused;
-        }
+            return UnansweredResults.TryProbeMany(keys.Length);
 
         GrpcTryProbeManyResponse remoteResponse = response.TryProbeMany!;
         RecordLockGrantTerms(remoteResponse.GrantTerms);
@@ -558,12 +539,7 @@ public partial class GrpcInterNodeCommunication
 
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryProbeManyRanges", node).ConfigureAwait(false);
         if (!response.IsAnswered)
-        {
-            KeyValueProbeRangeResult[] refused = new KeyValueProbeRangeResult[seeks.Length];
-            for (int i = 0; i < refused.Length; i++)
-                refused[i] = KeyValueProbeRangeResult.MustRetry;
-            return refused;
-        }
+            return UnansweredResults.TryProbeManyRanges(seeks.Length);
 
         GrpcTryProbeManyRangesResponse remoteResponse = response.TryProbeManyRanges!;
         RecordLockGrantTerms(remoteResponse.GrantTerms);
@@ -598,12 +574,7 @@ public partial class GrpcInterNodeCommunication
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryExistsManyNodeValues", node).ConfigureAwait(false);
         if (!response.IsAnswered)
         {
-            lock (lockSync)
-            {
-                foreach ((string key, _, KeyValueDurability durability) in keys)
-                    responses.Add((KeyValueResponseType.MustRetry, key, durability, null));
-            }
-
+            UnansweredResults.TryExistsManyNodeValues(keys, lockSync, responses);
             return;
         }
 
@@ -700,7 +671,7 @@ public partial class GrpcInterNodeCommunication
 
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryCheckWriteIntentValue", node).ConfigureAwait(false);
         if (!response.IsAnswered)
-            return KeyValueResponseType.MustRetry;
+            return UnansweredResults.TryCheckWriteIntentValue;
 
         GrpcTryCheckWriteIntentResponse remoteResponse = response.TryCheckWriteIntent!;
 
@@ -738,14 +709,7 @@ public partial class GrpcInterNodeCommunication
 
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryCheckManyWriteIntents", node).ConfigureAwait(false);
         if (!response.IsAnswered)
-        {
-            List<(KeyValueResponseType type, string key, KeyValueDurability durability)> refused = new(keys.Count);
-
-            foreach (KeyValueConflictProbe probe in keys)
-                refused.Add((KeyValueResponseType.MustRetry, probe.Key, probe.Durability));
-
-            return refused;
-        }
+            return UnansweredResults.TryCheckManyWriteIntents(keys);
 
         GrpcTryCheckManyWriteIntentsResponse remoteResponse = response.TryCheckManyWriteIntents!;
 

@@ -131,9 +131,13 @@ elect new leaders for the partitions that it led. `RestartNodeAsync` builds the 
 same endpoint, with empty storage and log. It rejoins through the static roster and catches up from
 the other nodes.
 
-**Retries during a failover.** A Kahuna call that another node forwards to a stopped node fails with
-`KahunaServerException` until a new leader is elected. A write that loses its leader can also return
-`MustRetry`. Retry both. The retry routes to the new leader.
+**Retries during a failover.** A Kahuna call that another node forwards to a stopped node, or over a
+blocked link, gets the answer that the gRPC transport gives for an unreachable peer, until a new leader
+is elected. An operation with a typed result returns its `MustRetry` result: a transaction start returns
+`MustRetry` with no handle, and a commit returns `MustRetry` with `CommitRefusalClass.Unresolved` and
+the caller's record anchor. The few operations without a typed result throw a `KahunaServerException`
+whose `ResponseType` is `MustRetry`, and `RetryableFailureClassifier` calls it retryable. Retry on
+`MustRetry`. The retry routes to the new leader.
 
 **Leader lookup.** `GetLeaderIndexAsync` returns a running node that believes that it leads the
 partition. Right after a failover, an old leader can still believe that it leads until it hears the new

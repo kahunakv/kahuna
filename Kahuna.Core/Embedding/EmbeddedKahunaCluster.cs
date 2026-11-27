@@ -17,10 +17,12 @@ namespace Kahuna;
 /// </para>
 /// <para>
 /// A stopped node is cut off from the Raft transport and removed from the Kahuna transport, as if its
-/// host had crashed. A Kahuna call that another node forwards to it in that window fails with a
-/// <see cref="KahunaServerException"/>; the caller retries, and the retry routes to the new leader once
-/// one is elected. A restarted node comes back under the same endpoint: with memory storage it starts
-/// empty and catches up from the others, with a persistent store and log it replays its own.
+/// host had crashed. A Kahuna call that another node forwards to it in that window gets the answer that
+/// the gRPC transport gives for an unreachable peer: the typed <c>MustRetry</c> result of the operation,
+/// or a retryable failure for an operation that has no such result. The caller retries, and the retry
+/// routes to the new leader once one is elected. A restarted node comes back under the same endpoint:
+/// with memory storage it starts empty and catches up from the others, with a persistent store and log
+/// it replays its own.
 /// </para>
 /// <para>
 /// The members are not thread-safe against one another's lifecycle: stop, restart and dispose are

@@ -65,7 +65,7 @@ public partial class GrpcInterNodeCommunication
 
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryAcquireExclusiveLock", node).ConfigureAwait(false);
         if (!response.IsAnswered)
-            return (KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero, PointLockBase.None);
+            return UnansweredResults.TryAcquireExclusiveLock(key, durability);
 
         GrpcTryAcquireExclusiveLockResponse remoteResponse = response.TryAcquireExclusiveLock!;
         RecordLockGrantTerms(remoteResponse.GrantTerms);
@@ -109,7 +109,7 @@ public partial class GrpcInterNodeCommunication
         
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryAcquireExclusivePrefixLock", node).ConfigureAwait(false);
         if (!response.IsAnswered)
-            return KeyValueResponseType.MustRetry;
+            return UnansweredResults.TryAcquireExclusivePrefixLock;
 
         GrpcTryAcquireExclusivePrefixLockResponse remoteResponse = response.TryAcquireExclusivePrefixLock!;
         RecordLockGrantTerms(remoteResponse.GrantTerms);
@@ -151,12 +151,7 @@ public partial class GrpcInterNodeCommunication
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryAcquireNodeExclusiveLocks", node).ConfigureAwait(false);
         if (!response.IsAnswered)
         {
-            lock (lockSync)
-            {
-                foreach ((string key, _, KeyValueDurability durability) in xkeys)
-                    responses.Add((KeyValueResponseType.MustRetry, key, durability, HLCTimestamp.Zero, PointLockBase.None));
-            }
-
+            UnansweredResults.TryAcquireNodeExclusiveLocks(xkeys, lockSync, responses);
             return;
         }
 
@@ -219,7 +214,7 @@ public partial class GrpcInterNodeCommunication
         
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryReleaseExclusiveLock", node).ConfigureAwait(false);
         if (!response.IsAnswered)
-            return (KeyValueResponseType.MustRetry, key);
+            return UnansweredResults.TryReleaseExclusiveLock(key);
 
         GrpcTryReleaseExclusiveLockResponse remoteResponse = response.TryReleaseExclusiveLock!;
         
@@ -258,7 +253,7 @@ public partial class GrpcInterNodeCommunication
 
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryReleaseExclusivePrefixLock", node).ConfigureAwait(false);
         if (!response.IsAnswered)
-            return KeyValueResponseType.MustRetry;
+            return UnansweredResults.TryReleaseExclusivePrefixLock;
 
         GrpcTryReleaseExclusivePrefixLockResponse remoteResponse = response.TryReleaseExclusivePrefixLock!;
 
@@ -298,7 +293,7 @@ public partial class GrpcInterNodeCommunication
 
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryAcquireRangeLock", node).ConfigureAwait(false);
         if (!response.IsAnswered)
-            return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero);
+            return UnansweredResults.TryAcquireRangeLock;
 
         GrpcTryAcquireExclusiveRangeLockResponse remoteResponse = response.TryAcquireExclusiveRangeLock!;
         RecordLockGrantTerms(remoteResponse.GrantTerms);
@@ -348,7 +343,7 @@ public partial class GrpcInterNodeCommunication
 
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryReleaseExclusiveRangeLock", node).ConfigureAwait(false);
         if (!response.IsAnswered)
-            return KeyValueResponseType.MustRetry;
+            return UnansweredResults.TryReleaseExclusiveRangeLock;
 
         GrpcTryReleaseExclusiveRangeLockResponse remoteResponse = response.TryReleaseExclusiveRangeLock!;
         return (KeyValueResponseType)remoteResponse.Type;
@@ -386,12 +381,7 @@ public partial class GrpcInterNodeCommunication
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request), "TryReleaseNodeExclusiveLocks", node).ConfigureAwait(false);
         if (!response.IsAnswered)
         {
-            lock (lockSync)
-            {
-                foreach ((string key, KeyValueDurability durability) in xkeys)
-                    responses.Add((KeyValueResponseType.MustRetry, key, durability));
-            }
-
+            UnansweredResults.TryReleaseNodeExclusiveLocks(xkeys, lockSync, responses);
             return;
         }
 

@@ -218,8 +218,8 @@ public sealed class TestEmbeddedKahunaCluster
 
     /// <summary>
     /// Runs one interactive transaction (begin, write, commit) through <paramref name="node"/>, retrying
-    /// while the cluster fails over: <c>MustRetry</c>, and a <see cref="KahunaServerException"/> from a
-    /// forward to a node that just stopped, both mean "try again".
+    /// while the cluster fails over: <c>MustRetry</c>, which a forward to a node that just stopped also
+    /// answers, and a <see cref="KahunaServerException"/> both mean "try again".
     /// </summary>
     internal static async Task CommitWriteAsync(EmbeddedKahunaNode node, string key, string value, CancellationToken ct)
     {
@@ -286,7 +286,7 @@ public sealed class TestEmbeddedKahunaCluster
             }
             catch (KahunaServerException)
             {
-                // A forward to a node that stopped in the meantime; the next attempt re-routes.
+                // A failure while the cluster fails over; the next attempt re-routes.
             }
 
             await Task.Delay(50, ct);

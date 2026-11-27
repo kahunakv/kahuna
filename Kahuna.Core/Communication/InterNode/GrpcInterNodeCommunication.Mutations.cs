@@ -61,7 +61,7 @@ public partial class GrpcInterNodeCommunication
 
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request), "TryPrepareMutations", node).ConfigureAwait(false);
         if (!response.IsAnswered)
-            return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero, key, durability);
+            return UnansweredResults.TryPrepareMutations(key, durability);
 
         GrpcTryPrepareMutationsResponse remoteResponse = response.TryPrepareMutations!;
         
@@ -105,12 +105,7 @@ public partial class GrpcInterNodeCommunication
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request), "TryPrepareNodeMutations", node).ConfigureAwait(false);
         if (!response.IsAnswered)
         {
-            lock (lockSync)
-            {
-                foreach ((string key, KeyValueDurability durability) in xkeys)
-                    responses.Add((KeyValueResponseType.MustRetry, HLCTimestamp.Zero, key, durability));
-            }
-
+            UnansweredResults.TryPrepareNodeMutations(xkeys, lockSync, responses);
             return;
         }
 
@@ -158,7 +153,7 @@ public partial class GrpcInterNodeCommunication
         
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request), "TryCommitMutations", node).ConfigureAwait(false);
         if (!response.IsAnswered)
-            return (KeyValueResponseType.MustRetry, 0);
+            return UnansweredResults.TryCommitMutations;
 
         GrpcTryCommitMutationsResponse remoteResponse = response.TryCommitMutations!;
         
@@ -182,12 +177,7 @@ public partial class GrpcInterNodeCommunication
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request), "TryCommitNodeMutations", node).ConfigureAwait(false);
         if (!response.IsAnswered)
         {
-            lock (lockSync)
-            {
-                foreach ((string key, _, KeyValueDurability durability) in xkeys)
-                    responses.Add((KeyValueResponseType.MustRetry, key, 0, durability));
-            }
-
+            UnansweredResults.TryCommitNodeMutations(xkeys, lockSync, responses);
             return;
         }
 
@@ -233,7 +223,7 @@ public partial class GrpcInterNodeCommunication
         
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request), "TryRollbackMutations", node).ConfigureAwait(false);
         if (!response.IsAnswered)
-            return (KeyValueResponseType.MustRetry, 0);
+            return UnansweredResults.TryRollbackMutations;
 
         GrpcTryRollbackMutationsResponse remoteResponse = response.TryRollbackMutations!;
         
@@ -257,12 +247,7 @@ public partial class GrpcInterNodeCommunication
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request), "TryRollbackNodeMutations", node).ConfigureAwait(false);
         if (!response.IsAnswered)
         {
-            lock (lockSync)
-            {
-                foreach ((string key, _, KeyValueDurability durability) in xkeys)
-                    responses.Add((KeyValueResponseType.MustRetry, key, 0, durability));
-            }
-
+            UnansweredResults.TryRollbackNodeMutations(xkeys, lockSync, responses);
             return;
         }
 

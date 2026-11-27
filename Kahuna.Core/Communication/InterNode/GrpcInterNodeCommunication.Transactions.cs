@@ -75,7 +75,7 @@ public partial class GrpcInterNodeCommunication
             // The leader was resolved but died or became unreachable before answering. No session
             // was opened, so a retry (ideally against another node) is unconditionally safe — tell
             // the caller that instead of leaking the transport failure as a server error.
-            return (KeyValueResponseType.MustRetry, TransactionHandle.None);
+            return UnansweredResults.StartTransaction;
         }
 
         GrpcStartTransactionResponse remoteResponse = response.StartTransaction!;
@@ -119,7 +119,7 @@ public partial class GrpcInterNodeCommunication
             // preserves that indeterminacy: the commit path is idempotent and a retry (carrying the
             // record anchor when one exists) consults the session or the durable decision to
             // resolve the true outcome. Hand the caller's own anchor back so the retry keeps it.
-            return new TransactionCommitAnswer(KeyValueResponseType.MustRetry, handle.RecordAnchorKey, CommitRefusalClass.Unresolved, "The forwarded commit was not answered");
+            return UnansweredResults.CommitTransaction(handle);
         }
 
         GrpcCommitTransactionResponse remoteResponse = response.CommitTransaction!;
@@ -154,7 +154,7 @@ public partial class GrpcInterNodeCommunication
             // Same indeterminacy contract as commit: rollback is idempotent and a retry consults
             // the session or the durable decision (via the anchor), so MustRetry is safe and a
             // decided commit can never be undone by the retried rollback.
-            return KeyValueResponseType.MustRetry;
+            return UnansweredResults.RollbackTransaction;
         }
 
         GrpcRollbackTransactionResponse remoteResponse = response.RollbackTransaction!;
@@ -184,7 +184,7 @@ public partial class GrpcInterNodeCommunication
 
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request), "BeginOperation", node).ConfigureAwait(false);
         if (!response.IsAnswered)
-            return (OperationRegistrationOutcome.AlreadyPending, KeyValueResponseType.MustRetry, 0, HLCTimestamp.Zero, null, TransactionConflictPolicy.Normal);
+            return UnansweredResults.BeginOperation;
 
         GrpcBeginOperationResponse remoteResponse = response.BeginOperation!;
 
@@ -208,7 +208,7 @@ public partial class GrpcInterNodeCommunication
 
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request), "CompleteOperation", node).ConfigureAwait(false);
         if (!response.IsAnswered)
-            return (KeyValueResponseType.MustRetry, null);
+            return UnansweredResults.CompleteOperation;
 
         GrpcCompleteOperationResponse remoteResponse = response.CompleteOperation!;
         KeyValueResponseType outcome = remoteResponse.Acknowledged ? KeyValueResponseType.Set : KeyValueResponseType.MustRetry;
@@ -310,7 +310,7 @@ public partial class GrpcInterNodeCommunication
 
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request), "GetTransactionWorkingSet", node).ConfigureAwait(false);
         if (!response.IsAnswered)
-            return null;
+            return UnansweredResults.GetTransactionWorkingSet;
 
         GrpcGetTransactionWorkingSetResponse remoteResponse = response.GetTransactionWorkingSet!;
 
@@ -331,7 +331,7 @@ public partial class GrpcInterNodeCommunication
 
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request), "CloseTransaction", node).ConfigureAwait(false);
         if (!response.IsAnswered)
-            return (KeyValueResponseType.MustRetry, null);
+            return UnansweredResults.CloseTransaction;
 
         GrpcCloseTransactionResponse remoteResponse = response.CloseTransaction!;
 

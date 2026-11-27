@@ -58,7 +58,7 @@ public partial class GrpcInterNodeCommunication
         
         GrpcServerBatcherResponse batchResponse = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "GetByBucket", node).ConfigureAwait(false);
         if (!batchResponse.IsAnswered)
-            return new(KeyValueResponseType.MustRetry, []);
+            return UnansweredResults.GetByBucket;
        
         GrpcGetByBucketResponse remoteResponse = batchResponse.GetByBucket!;
         
@@ -116,7 +116,7 @@ public partial class GrpcInterNodeCommunication
 
         GrpcServerBatcherResponse batchResponse = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "GetByRange", node).ConfigureAwait(false);
         if (!batchResponse.IsAnswered)
-            return new(KeyValueResponseType.MustRetry, [], null, false);
+            return UnansweredResults.GetByRange;
 
         GrpcGetByRangeResponse remoteResponse = batchResponse.GetByRange!;
 
@@ -144,7 +144,7 @@ public partial class GrpcInterNodeCommunication
         
         GrpcServerBatcherResponse batchResponse = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "ScanByPrefix", node).ConfigureAwait(false);
         if (!batchResponse.IsAnswered)
-            return new(KeyValueResponseType.MustRetry, []);
+            return UnansweredResults.ScanByPrefix;
        
         GrpcScanByPrefixResponse remoteResponse = batchResponse.ScanByPrefix!;
         

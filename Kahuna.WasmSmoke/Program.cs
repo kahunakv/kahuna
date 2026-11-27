@@ -301,8 +301,8 @@ async Task LightLoadAsync(EmbeddedKahunaCluster cluster, TimeSpan duration, Canc
     Console.WriteLine($"[smoke] light load: {writes} transactions");
 }
 
-// One interactive transaction (begin, write, commit) through the node. MustRetry, and a
-// KahunaServerException from a forward to a node that just stopped, both mean "try again".
+// One interactive transaction (begin, write, commit) through the node. MustRetry, which a forward to a
+// node that just stopped also answers, and a KahunaServerException both mean "try again".
 static async Task CommitWriteAsync(EmbeddedKahunaNode node, string key, string value, CancellationToken ct)
 {
     while (true)

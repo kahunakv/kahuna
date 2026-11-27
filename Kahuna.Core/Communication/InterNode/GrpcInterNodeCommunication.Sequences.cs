@@ -81,7 +81,7 @@ public partial class GrpcInterNodeCommunication
         {
             LogForwardingTransportFailure("CreateSequence", node, ex.StatusCode);
 
-            return (SequenceResponseType.MustRetry, 0);
+            return UnansweredResults.CreateSequence;
         }
 
         return ((SequenceResponseType)response.Type, response.Revision);
@@ -135,7 +135,7 @@ public partial class GrpcInterNodeCommunication
         {
             LogForwardingTransportFailure("UpdateSequence", node, ex.StatusCode);
 
-            return (SequenceResponseType.MustRetry, 0);
+            return UnansweredResults.UpdateSequence;
         }
 
         return ((SequenceResponseType)response.Type, response.Revision);
@@ -167,7 +167,7 @@ public partial class GrpcInterNodeCommunication
         {
             LogForwardingTransportFailure("GetSequence", node, ex.StatusCode);
 
-            return (SequenceResponseType.MustRetry, null);
+            return UnansweredResults.GetSequence;
         }
 
         SequenceResponseType type = (SequenceResponseType)response.Type;
@@ -222,7 +222,7 @@ public partial class GrpcInterNodeCommunication
         {
             LogForwardingTransportFailure("NextSequenceValue", node, ex.StatusCode);
 
-            return (SequenceResponseType.MustRetry, default);
+            return UnansweredResults.NextSequenceValue;
         }
 
         return ((SequenceResponseType)response.Type, ToAllocation(response.Allocation));
@@ -260,7 +260,7 @@ public partial class GrpcInterNodeCommunication
         {
             LogForwardingTransportFailure("ReserveSequenceRange", node, ex.StatusCode);
 
-            return (SequenceResponseType.MustRetry, default);
+            return UnansweredResults.ReserveSequenceRange;
         }
 
         return ((SequenceResponseType)response.Type, ToAllocation(response.Allocation));
@@ -292,7 +292,7 @@ public partial class GrpcInterNodeCommunication
         {
             LogForwardingTransportFailure("DeleteSequence", node, ex.StatusCode);
 
-            return SequenceResponseType.MustRetry;
+            return UnansweredResults.DeleteSequence;
         }
 
         return (SequenceResponseType)response.Type;

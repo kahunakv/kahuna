@@ -62,7 +62,7 @@ public partial class GrpcInterNodeCommunication
         
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryLock", node).ConfigureAwait(false);
         if (!response.IsAnswered)
-            return (LockResponseType.MustRetry, 0);
+            return UnansweredResults.TryLock;
         
         GrpcTryLockResponse remoteResponse = response.TryLock!;
         
@@ -101,7 +101,7 @@ public partial class GrpcInterNodeCommunication
         
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryExtendLock", node).ConfigureAwait(false);
         if (!response.IsAnswered)
-            return (LockResponseType.MustRetry, 0);
+            return UnansweredResults.TryExtendLock;
 
         GrpcExtendLockResponse remoteResponse = response.ExtendLock!;
         
@@ -137,7 +137,7 @@ public partial class GrpcInterNodeCommunication
         
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "TryUnlock", node).ConfigureAwait(false);
         if (!response.IsAnswered)
-            return LockResponseType.MustRetry;
+            return UnansweredResults.TryUnlock;
 
         GrpcUnlockResponse remoteResponse = response.Unlock!;
         
@@ -170,7 +170,7 @@ public partial class GrpcInterNodeCommunication
         
         GrpcServerBatcherResponse response = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "GetLock", node).ConfigureAwait(false);
         if (!response.IsAnswered)
-            return (LockResponseType.MustRetry, null);
+            return UnansweredResults.GetLock;
 
         GrpcGetLockResponse remoteResponse = response.GetLock!;
         

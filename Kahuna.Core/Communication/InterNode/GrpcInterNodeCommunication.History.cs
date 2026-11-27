@@ -47,7 +47,7 @@ public partial class GrpcInterNodeCommunication
 
         GrpcServerBatcherResponse batchResponse = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "AcquireSnapshotHold", node).ConfigureAwait(false);
         if (!batchResponse.IsAnswered)
-            return (KeyValueResponseType.MustRetry, string.Empty, HLCTimestamp.Zero);
+            return UnansweredResults.AcquireSnapshotHold;
 
         GrpcAcquireSnapshotHoldResponse r = batchResponse.AcquireSnapshotHold!;
         return (
@@ -70,7 +70,7 @@ public partial class GrpcInterNodeCommunication
 
         GrpcServerBatcherResponse batchResponse = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "RenewSnapshotHold", node).ConfigureAwait(false);
         if (!batchResponse.IsAnswered)
-            return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero);
+            return UnansweredResults.RenewSnapshotHold;
 
         GrpcRenewSnapshotHoldResponse r = batchResponse.RenewSnapshotHold!;
         return (
@@ -88,7 +88,7 @@ public partial class GrpcInterNodeCommunication
 
         GrpcServerBatcherResponse batchResponse = await ForwardAsync(batcher.Enqueue(request).WaitAsync(cancellationToken), "ReleaseSnapshotHold", node).ConfigureAwait(false);
         if (!batchResponse.IsAnswered)
-            return KeyValueResponseType.MustRetry;
+            return UnansweredResults.ReleaseSnapshotHold;
 
         return (KeyValueResponseType)batchResponse.ReleaseSnapshotHold!.Type;
     }
@@ -107,7 +107,7 @@ public partial class GrpcInterNodeCommunication
             // safe to answer with the endpoint's own typed refusal — the caller re-resolves the meta
             // leader and asks again — instead of escaping as an exception the external surfaces would
             // report as an unclassifiable server error.
-            return (KeyValueResponseType.MustRetry, HLCTimestamp.Zero, 0);
+            return UnansweredResults.GetSnapshotFloor;
         }
 
         GrpcGetSnapshotFloorResponse r = batchResponse.GetSnapshotFloor!;
@@ -145,7 +145,7 @@ public partial class GrpcInterNodeCommunication
         {
             LogForwardingTransportFailure("HistoryHold", node, ex.StatusCode);
 
-            return HistoryHoldAnswer.Refused(KeyValueResponseType.MustRetry);
+            return UnansweredResults.HistoryHold;
         }
     }
 
@@ -172,7 +172,7 @@ public partial class GrpcInterNodeCommunication
         {
             LogForwardingTransportFailure("GetPartitionApplyFingerprint", node, ex.StatusCode);
 
-            return (KeyValueResponseType.MustRetry, default);
+            return UnansweredResults.GetPartitionApplyFingerprint;
         }
 
         return (
@@ -204,12 +204,12 @@ public partial class GrpcInterNodeCommunication
             if (ex.StatusCode != StatusCode.Unimplemented)
                 LogForwardingTransportFailure("GetAppliedLogTypes", node, ex.StatusCode);
 
-            return null;
+            return UnansweredResults.GetAppliedLogTypes;
         }
         catch (Exception ex) when (ex is not OutOfMemoryException && !cancellationToken.IsCancellationRequested)
         {
             // The channel could not be opened (a stopped node, a bad address): no answer.
-            return null;
+            return UnansweredResults.GetAppliedLogTypes;
         }
     }
 
@@ -274,7 +274,7 @@ public partial class GrpcInterNodeCommunication
         {
             LogForwardingTransportFailure("GetPreparedIntentPresence", node, ex.StatusCode);
 
-            return (KeyValueResponseType.MustRetry, false, 0);
+            return UnansweredResults.GetPreparedIntentPresence;
         }
 
         return ((KeyValueResponseType)response.Type, response.Held, response.AppliedLogId);
@@ -322,7 +322,7 @@ public partial class GrpcInterNodeCommunication
         {
             LogForwardingTransportFailure("ConfirmRangeQuiesce", node, ex.StatusCode);
 
-            return KeyValueResponseType.MustRetry;
+            return UnansweredResults.ConfirmRangeQuiesce;
         }
     }
 
@@ -367,7 +367,7 @@ public partial class GrpcInterNodeCommunication
         {
             LogForwardingTransportFailure("SettleDecidedBlockers", node, ex.StatusCode);
 
-            return (KeyValueResponseType.MustRetry, 0, 0, 0);
+            return UnansweredResults.SettleDecidedBlockers;
         }
     }
 }

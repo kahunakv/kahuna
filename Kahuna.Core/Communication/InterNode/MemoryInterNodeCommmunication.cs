@@ -136,9 +136,10 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <summary>
     /// Blocks the link from <paramref name="from"/> to <paramref name="to"/>. A call is a request and a
     /// reply, so a call between the two nodes fails in either direction while the link is blocked. It
-    /// fails before it runs, with a <see cref="KahunaServerException"/>, as a call to a stopped node
-    /// does. A real network can also lose only the reply after the call ran; this transport does not
-    /// model that. Only calls through a view from <see cref="ForNode"/> are checked.
+    /// fails before it runs, as a call to a node that is not registered does, and gets the answer that
+    /// the gRPC transport gives for an unreachable peer (see <see cref="UnansweredResults"/>). A real
+    /// network can also lose only the reply after the call ran; this transport does not model that.
+    /// Only calls through a view from <see cref="ForNode"/> are checked.
     /// </summary>
     public void BlockLink(string from, string to) => ChangeLink(from, to, block: true);
 
@@ -176,7 +177,9 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
 
     /// <summary>
     /// Resolves the target node of a call. False when the node is not registered, or when the link
-    /// between this view's node and the target is blocked in either direction.
+    /// between this view's node and the target is blocked in either direction. On false the call does
+    /// not run on the target: an operation with a typed result for an unanswered call returns its
+    /// <see cref="UnansweredResults"/> value, and the other operations throw <see cref="Unreachable"/>.
     /// </summary>
     private bool TryGetNode(string node, [NotNullWhen(true)] out IKahuna? kahunaNode)
     {
@@ -198,11 +201,17 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
         return true;
     }
 
-    /// <summary>The failure of a call whose target is not registered or cannot be reached.</summary>
+    /// <summary>
+    /// The failure of a call whose target is not registered or cannot be reached, for an operation that has
+    /// no typed result for that case. On gRPC such an operation lets the transport exception go to the
+    /// caller, and <see cref="RetryableFailureClassifier"/> calls it retryable. This exception carries
+    /// <see cref="KeyValueResponseType.MustRetry"/>, so the classifier calls it retryable too. The message
+    /// names the node and the reason, for the log.
+    /// </summary>
     private KahunaServerException Unreachable(string node) =>
         localEndpoint is not null && routes.Nodes is { } current && current.ContainsKey(node)
-            ? new($"The node {node} is not reachable from {localEndpoint}: the link between them is blocked.")
-            : new($"The node {node} does not exist.");
+            ? new($"The node {node} is not reachable from {localEndpoint}: the link between them is blocked.", KeyValueResponseType.MustRetry)
+            : new($"The node {node} does not exist.", KeyValueResponseType.MustRetry);
     
     /// <summary>
     /// Attempts to acquire a lock on a resource in a specific node.
@@ -214,7 +223,6 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <param name="durability">The durability level of the lock.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
     /// <returns>A tuple containing the lock response type and the lock revision.</returns>
-    /// <exception cref="KahunaServerException">Thrown if the node does not exist.</exception>
     public async Task<(LockResponseType, long)> TryLock(
         string node, 
         string resource, 
@@ -235,7 +243,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.LocateAndTryLock(resource, owner, expiresMs, durability, cancellationToken);
         }
         
-        throw Unreachable(node);
+        return UnansweredResults.TryLock;
     }
     
     /// <summary>
@@ -248,7 +256,6 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <param name="durability">The durability level of the lock.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
     /// <returns>A tuple containing the lock response type and the lock revision.</returns>
-    /// <exception cref="KahunaServerException">Thrown if the node does not exist.</exception>
     public async Task<(LockResponseType, long)> TryExtendLock(
         string node, 
         string resource, 
@@ -265,7 +272,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.LocateAndTryExtendLock(resource, owner, expiresMs, durability, cancellationToken);
         }
         
-        throw Unreachable(node);
+        return UnansweredResults.TryExtendLock;
     }
     
     /// <summary>
@@ -277,7 +284,6 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <param name="durability">The durability level of the lock.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
     /// <returns>The lock response type.</returns>
-    /// <exception cref="KahunaServerException">Thrown if the node does not exist.</exception>
     public async Task<LockResponseType> TryUnlock(
         string node, 
         string resource, 
@@ -293,7 +299,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.LocateAndTryUnlock(resource, owner, durability, cancellationToken);
         }
         
-        throw Unreachable(node);
+        return UnansweredResults.TryUnlock;
     }
     
     /// <summary>
@@ -304,7 +310,6 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <param name="durability">The durability level of the lock.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
     /// <returns>A tuple containing the lock response type and the lock context.</returns>
-    /// <exception cref="KahunaServerException">Thrown if the node does not exist.</exception>
     public async Task<(LockResponseType, ReadOnlyLockEntry?)> GetLock(
         string node, 
         string resource, 
@@ -319,7 +324,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.LocateAndGetLock(resource, durability, cancellationToken);
         }
         
-        throw Unreachable(node);
+        return UnansweredResults.GetLock;
     }
 
     /// <summary>Forwards a sequence create to the node that owns the sequence's partition.</summary>
@@ -346,7 +351,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.LocateAndCreateSequence(name, initialValue, increment, maxValue, blockSize, durability, cancellationToken);
         }
 
-        throw Unreachable(node);
+        return UnansweredResults.CreateSequence;
     }
 
     /// <summary>Forwards a sequence update to the node that owns the sequence's partition.</summary>
@@ -367,7 +372,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.LocateAndUpdateSequence(name, update, durability, cancellationToken);
         }
 
-        throw Unreachable(node);
+        return UnansweredResults.UpdateSequence;
     }
 
     /// <summary>Forwards a sequence read to the node that owns the sequence's partition.</summary>
@@ -387,7 +392,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.LocateAndGetSequence(name, durability, cancellationToken);
         }
 
-        throw Unreachable(node);
+        return UnansweredResults.GetSequence;
     }
 
     /// <summary>Forwards a single-value allocation to the node that owns the sequence's partition.</summary>
@@ -408,7 +413,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.LocateAndNextSequenceValue(name, idempotencyKey, durability, cancellationToken);
         }
 
-        throw Unreachable(node);
+        return UnansweredResults.NextSequenceValue;
     }
 
     /// <summary>Forwards a multi-value allocation to the node that owns the sequence's partition.</summary>
@@ -430,7 +435,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.LocateAndReserveSequenceRange(name, count, idempotencyKey, durability, cancellationToken);
         }
 
-        throw Unreachable(node);
+        return UnansweredResults.ReserveSequenceRange;
     }
 
     /// <summary>Forwards a sequence delete to the node that owns the sequence's partition.</summary>
@@ -450,7 +455,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.LocateAndDeleteSequence(name, durability, cancellationToken);
         }
 
-        throw Unreachable(node);
+        return UnansweredResults.DeleteSequence;
     }
 
     /// <summary>
@@ -467,7 +472,6 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    /// <exception cref="KahunaServerException"></exception>
     public async Task<(KeyValueResponseType, long, HLCTimestamp)> TrySetKeyValue(
         string node,
         HLCTimestamp transactionId,
@@ -489,7 +493,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.LocateAndTrySetKeyValue(transactionId, key, value, compareValue, compareRevision, flags, expiresMs, durability, cancellationToken, routedGeneration);
         }
 
-        throw Unreachable(node);
+        return UnansweredResults.TrySetKeyValue;
     }
 
     /// <summary>
@@ -500,7 +504,6 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <param name="lockSync"></param>
     /// <param name="responses"></param>
     /// <param name="cancellationToken"></param>
-    /// <exception cref="KahunaServerException"></exception>
     public async Task TrySetManyNodeKeyValue(
         string node, 
         List<KahunaSetKeyValueRequestItem> items, 
@@ -528,7 +531,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return;
         }
         
-        throw Unreachable(node);
+        UnansweredResults.TrySetManyNodeKeyValue(items, lockSync, responses);
     }
     
     public async Task TryDeleteManyNodeKeyValue(
@@ -573,7 +576,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return;
         }
 
-        throw Unreachable(node);
+        UnansweredResults.TryDeleteManyNodeKeyValue(items, lockSync, responses);
     }
 
     /// <summary>
@@ -585,7 +588,6 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    /// <exception cref="KahunaServerException"></exception>
     public async Task<(KeyValueResponseType, long, HLCTimestamp)> TryDeleteKeyValue(
         string node, 
         HLCTimestamp transactionId, 
@@ -601,7 +603,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.LocateAndTryDeleteKeyValue(transactionId, key, durability, cancellationToken);
         }
         
-        throw Unreachable(node);
+        return UnansweredResults.TryDeleteKeyValue;
     }
 
     /// <summary>
@@ -614,7 +616,6 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    /// <exception cref="KahunaServerException"></exception>
     public async Task<(KeyValueResponseType, long, HLCTimestamp)> TryExtendKeyValue(
         string node, 
         HLCTimestamp transactionId, 
@@ -631,7 +632,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.LocateAndTryExtendKeyValue(transactionId, key, expiresMs, durability, cancellationToken);
         }
         
-        throw Unreachable(node);
+        return UnansweredResults.TryExtendKeyValue;
     }
 
     /// <summary>
@@ -644,7 +645,6 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    /// <exception cref="KahunaServerException"></exception>
     public async Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryGetValue(
         string node,
         HLCTimestamp transactionId,
@@ -664,7 +664,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken, readMode: readMode, intentWait: intentWait);
         }
 
-        throw Unreachable(node);
+        return UnansweredResults.TryGetValue;
     }
 
     /// <summary>
@@ -677,7 +677,6 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    /// <exception cref="KahunaServerException"></exception>
     public async Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryExistsValue(
         string node,
         HLCTimestamp transactionId,
@@ -695,7 +694,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.LocateAndTryExistsValue(transactionId, key, revision, readTimestamp, durability, cancellationToken);
         }
 
-        throw Unreachable(node);
+        return UnansweredResults.TryExistsValue;
     }
 
     public async Task TryGetManyNodeValues(
@@ -743,7 +742,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return;
         }
 
-        throw Unreachable(node);
+        UnansweredResults.TryGetManyNodeValues(keys, lockSync, responses);
     }
 
     public async Task<KeyValueProbeResult[]> TryProbeMany(
@@ -773,7 +772,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return results;
         }
 
-        throw Unreachable(node);
+        return UnansweredResults.TryProbeMany(keys.Length);
     }
 
     /// <summary>
@@ -809,7 +808,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return results;
         }
 
-        throw Unreachable(node);
+        return UnansweredResults.TryProbeManyRanges(seeks.Length);
     }
 
     /// <summary>
@@ -854,7 +853,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return;
         }
 
-        throw Unreachable(node);
+        UnansweredResults.TryExistsManyNodeValues(keys, lockSync, responses);
     }
 
     private static void AddToReadManyResponses(
@@ -887,7 +886,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.LocateAndTryCheckWriteIntent(transactionId, key, durability, cancellationToken);
         }
 
-        throw Unreachable(node);
+        return UnansweredResults.TryCheckWriteIntentValue;
     }
 
     public async Task<List<(KeyValueResponseType type, string key, KeyValueDurability durability)>> TryCheckManyWriteIntents(
@@ -908,7 +907,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.TryCheckManyWriteIntentValuesConfirmed(transactionId, keys, cancellationToken);
         }
 
-        throw Unreachable(node);
+        return UnansweredResults.TryCheckManyWriteIntents(keys);
     }
 
     /// <summary>
@@ -921,7 +920,6 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    /// <exception cref="KahunaServerException"></exception>
     public async Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId, long BaseRevision)> TryAcquireExclusiveLock(
         string node,
         HLCTimestamp transactionId,
@@ -938,7 +936,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.LocateAndTryAcquireExclusiveLockObserved(transactionId, key, expiresMs, durability, cancellationToken);
         }
 
-        throw Unreachable(node);
+        return UnansweredResults.TryAcquireExclusiveLock(key, durability);
     }
 
     /// <summary>
@@ -967,7 +965,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.LocateAndTryAcquireExclusivePrefixLock(transactionId, prefixKey, expiresMs, durability, cancellationToken);
         }
         
-        throw Unreachable(node);
+        return UnansweredResults.TryAcquireExclusivePrefixLock;
     }
 
     /// <summary>
@@ -979,7 +977,6 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <param name="lockSync"></param>
     /// <param name="responses"></param>
     /// <param name="cancellationToken"></param>
-    /// <exception cref="KahunaServerException"></exception>
     public async Task TryAcquireNodeExclusiveLocks(
         string node,
         HLCTimestamp transactionId,
@@ -1017,7 +1014,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return;
         }
 
-        throw Unreachable(node);
+        UnansweredResults.TryAcquireNodeExclusiveLocks(xkeys, lockSync, responses);
     }
 
     /// <summary>
@@ -1029,7 +1026,6 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    /// <exception cref="KahunaServerException"></exception>
     public async Task<(KeyValueResponseType, string)> TryReleaseExclusiveLock(
         string node, 
         HLCTimestamp transactionId, 
@@ -1045,7 +1041,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.LocateAndTryReleaseExclusiveLock(transactionId, key, durability, cancellationToken);
         }
         
-        throw Unreachable(node);
+        return UnansweredResults.TryReleaseExclusiveLock(key);
     }
     
     /// <summary>
@@ -1074,7 +1070,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.LocateAndTryReleaseExclusivePrefixLock(transactionId, prefixKey, durability, cancellationToken);
         }
 
-        throw Unreachable(node);
+        return UnansweredResults.TryReleaseExclusivePrefixLock;
     }
 
     /// <summary>
@@ -1107,7 +1103,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
 
             return await kahunaNode.LocateAndTryAcquireRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, mode, cancellationToken);
         }
-        throw Unreachable(node);
+        return UnansweredResults.TryAcquireRangeLock;
     }
 
     public Task<(KeyValueResponseType, HLCTimestamp HolderTransactionId)> TryAcquireExclusiveRangeLock(
@@ -1144,7 +1140,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
 
             return await kahunaNode.LocateAndTryReleaseExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability, cancellationToken);
         }
-        throw Unreachable(node);
+        return UnansweredResults.TryReleaseExclusiveRangeLock;
     }
 
     /// <summary>
@@ -1156,7 +1152,6 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <param name="lockSync"></param>
     /// <param name="responses"></param>
     /// <param name="cancellationToken"></param>
-    /// <exception cref="KahunaServerException"></exception>
     public async Task TryReleaseNodeExclusiveLocks(
         string node, 
         HLCTimestamp transactionId, 
@@ -1182,7 +1177,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return;
         }
         
-        throw Unreachable(node);
+        UnansweredResults.TryReleaseNodeExclusiveLocks(xkeys, lockSync, responses);
     }
     
     /// <summary>
@@ -1210,7 +1205,6 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    /// <exception cref="KahunaServerException"></exception>
     public async Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> TryPrepareMutations(
         string node,
         HLCTimestamp transactionId,
@@ -1229,7 +1223,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.LocateAndTryPrepareMutations(transactionId, commitId, key, durability, cancellationToken, routedGeneration, recordAnchorKey);
         }
 
-        throw Unreachable(node);
+        return UnansweredResults.TryPrepareMutations(key, durability);
     }
 
     /// <summary>
@@ -1242,7 +1236,6 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <param name="lockSync"></param>
     /// <param name="responses"></param>
     /// <param name="cancellationToken"></param>
-    /// <exception cref="KahunaServerException"></exception>
     public async Task TryPrepareNodeMutations(
         string node, 
         HLCTimestamp transactionId,
@@ -1270,7 +1263,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return;
         }
         
-        throw Unreachable(node);
+        UnansweredResults.TryPrepareNodeMutations(xkeys, lockSync, responses);
     }
     
     /// <summary>
@@ -1302,7 +1295,6 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    /// <exception cref="KahunaServerException"></exception>
     public async Task<(KeyValueResponseType, long)> TryCommitMutations(
         string node, 
         HLCTimestamp transactionId, 
@@ -1334,7 +1326,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.LocateAndTryCommitMutations(transactionId, key, ticketId, durability, cancellationToken);
         }
 
-        throw Unreachable(node);
+        return UnansweredResults.TryCommitMutations;
     }
 
     public async Task<bool> DurableOperation(string node, int partitionId, int kind, string logType, byte[] payload, CancellationToken cancellationToken)
@@ -1503,7 +1495,6 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <param name="lockSync"></param>
     /// <param name="responses"></param>
     /// <param name="cancellationToken"></param>
-    /// <exception cref="KahunaServerException"></exception>
     public async Task TryCommitNodeMutations(
         string node, 
         HLCTimestamp transactionId, 
@@ -1537,7 +1528,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return;
         }
         
-        throw Unreachable(node);
+        UnansweredResults.TryCommitNodeMutations(xkeys, lockSync, responses);
     }
 
     /// <summary>
@@ -1569,7 +1560,6 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    /// <exception cref="KahunaServerException"></exception>
     public async Task<(KeyValueResponseType, long)> TryRollbackMutations(string node, HLCTimestamp transactionId, string key, HLCTimestamp ticketId, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         if (TryGetNode(node, out IKahuna? kahunaNode))
@@ -1580,7 +1570,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.LocateAndTryRollbackMutations(transactionId, key, ticketId, durability, cancellationToken);
         }
 
-        throw Unreachable(node);
+        return UnansweredResults.TryRollbackMutations;
     }
 
     /// <summary>
@@ -1592,7 +1582,6 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <param name="lockSync"></param>
     /// <param name="responses"></param>
     /// <param name="cancellationToken"></param>
-    /// <exception cref="KahunaServerException"></exception>
     public async Task TryRollbackNodeMutations(string node, HLCTimestamp transactionId, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> xkeys, Lock lockSync, List<(KeyValueResponseType type, string key, long, KeyValueDurability durability)> responses, CancellationToken cancellationToken)
     {
         if (TryGetNode(node, out IKahuna? kahunaNode))
@@ -1612,7 +1601,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return;
         }
         
-        throw Unreachable(node);
+        UnansweredResults.TryRollbackNodeMutations(xkeys, lockSync, responses);
     }
     
     /// <summary>
@@ -1643,7 +1632,6 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    /// <exception cref="KahunaServerException"></exception>
     public async Task<KeyValueGetByBucketResult> GetByBucket(string node, HLCTimestamp transactionId, string prefixedKey, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
     {
         if (TryGetNode(node, out IKahuna? kahunaNode))
@@ -1653,7 +1641,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.LocateAndGetByBucket(transactionId, prefixedKey, readTimestamp, durability, cancellationToken);
         }
 
-        throw Unreachable(node);
+        return UnansweredResults.GetByBucket;
     }
 
     public async Task<KeyValueGetByRangeResult> GetByRange(string node, HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken, bool snapshotAtLeader = false, KeyValueReadMode readMode = KeyValueReadMode.Default)
@@ -1670,7 +1658,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken, snapshotAtLeader: snapshotAtLeader, readMode: readMode);
         }
 
-        throw Unreachable(node);
+        return UnansweredResults.GetByRange;
     }
 
     /// <summary>
@@ -1681,13 +1669,12 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <param name="durability"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    /// <exception cref="KahunaServerException"></exception>
     public async Task<KeyValueGetByBucketResult> ScanByPrefix(string node, string prefixedKey, HLCTimestamp readTimestamp, KeyValueDurability durability, bool includeTombstones, CancellationToken cancellationToken)
     {
         if (TryGetNode(node, out IKahuna? kahunaNode))
             return await kahunaNode.ScanByPrefix(prefixedKey, readTimestamp, durability, includeTombstones);
 
-        throw Unreachable(node);
+        return UnansweredResults.ScanByPrefix;
     }
 
     /// <summary>
@@ -1697,7 +1684,6 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
     /// <param name="options"></param>
     /// <param name="cancellationToken"></param>
     /// <returns></returns>
-    /// <exception cref="KahunaServerException"></exception>
     public async Task<(KeyValueResponseType, TransactionHandle)> StartTransaction(string node, KeyValueTransactionOptions options, CancellationToken cancellationToken)
     {
         if (TryGetNode(node, out IKahuna? kahunaNode))
@@ -1707,7 +1693,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.LocateAndStartTransaction(options, cancellationToken);
         }
 
-        throw Unreachable(node);
+        return UnansweredResults.StartTransaction;
     }
 
     public async Task<TransactionCommitAnswer> CommitTransaction(string node, TransactionHandle handle, CancellationToken cancellationToken)
@@ -1719,7 +1705,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.LocateAndCommitTransaction(handle, cancellationToken);
         }
 
-        throw Unreachable(node);
+        return UnansweredResults.CommitTransaction(handle);
     }
 
     public async Task<KeyValueResponseType> RollbackTransaction(string node, TransactionHandle handle, CancellationToken cancellationToken)
@@ -1731,7 +1717,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.LocateAndRollbackTransaction(handle, cancellationToken);
         }
 
-        throw Unreachable(node);
+        return UnansweredResults.RollbackTransaction;
     }
 
     public async Task<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy)> BeginOperation(string node, string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken, int itemCount = 0)
@@ -1749,7 +1735,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, payloadDigest, itemCount, cancellationToken);
         }
 
-        throw Unreachable(node);
+        return UnansweredResults.BeginOperation;
     }
 
     public async Task<(KeyValueResponseType outcome, string? anchor)> CompleteOperation(string node, string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload, CancellationToken cancellationToken)
@@ -1777,7 +1763,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.CompleteOperationInbound(coordinatorKey, transactionId, operationId, payload);
         }
 
-        throw Unreachable(node);
+        return UnansweredResults.CompleteOperation;
     }
 
     /// <summary>
@@ -1831,7 +1817,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.LocateAndGetTransactionWorkingSet(coordinatorKey, transactionId, cancellationToken);
         }
 
-        throw Unreachable(node);
+        return UnansweredResults.GetTransactionWorkingSet;
     }
 
     public async Task<(KeyValueResponseType, TransactionWorkingSet?)> CloseTransaction(string node, string coordinatorKey, HLCTimestamp transactionId, CancellationToken cancellationToken)
@@ -1846,7 +1832,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.LocateAndCloseTransaction(coordinatorKey, transactionId, cancellationToken);
         }
 
-        throw Unreachable(node);
+        return UnansweredResults.CloseTransaction;
     }
 
     public async Task<bool> EnsureKeyRangeSeeded(string node, string keySpace, CancellationToken cancellationToken)
@@ -1912,7 +1898,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.LocateAndAcquireSnapshotHold(holderId, timestamp, leaseMs, cancellationToken);
         }
 
-        throw Unreachable(node);
+        return UnansweredResults.AcquireSnapshotHold;
     }
 
     public async Task<(KeyValueResponseType Type, HLCTimestamp LeaseExpiry)>
@@ -1925,7 +1911,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.LocateAndRenewSnapshotHold(holdId, leaseMs, cancellationToken);
         }
 
-        throw Unreachable(node);
+        return UnansweredResults.RenewSnapshotHold;
     }
 
     public async Task<KeyValueResponseType>
@@ -1938,7 +1924,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.LocateAndReleaseSnapshotHold(holdId, cancellationToken);
         }
 
-        throw Unreachable(node);
+        return UnansweredResults.ReleaseSnapshotHold;
     }
 
     public async Task<(KeyValueResponseType Type, HLCTimestamp Floor, int LiveHolds)>
@@ -1951,7 +1937,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.GetSnapshotFloor(cancellationToken);
         }
 
-        throw Unreachable(node);
+        return UnansweredResults.GetSnapshotFloor;
     }
 
     public async Task<HistoryHoldAnswer> HistoryHold(string node, HistoryHoldRequest request, CancellationToken cancellationToken)
@@ -1963,14 +1949,14 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.HistoryHold(request, cancellationToken);
         }
 
-        throw Unreachable(node);
+        return UnansweredResults.HistoryHold;
     }
 
     public Task<IReadOnlyList<string>?> GetAppliedLogTypes(string node, CancellationToken cancellationToken)
     {
         // A node that is gone, or not yet registered here, does not answer.
         if (!TryGetNode(node, out IKahuna? kahunaNode))
-            return Task.FromResult<IReadOnlyList<string>?>(null);
+            return Task.FromResult(UnansweredResults.GetAppliedLogTypes);
 
         using ForwardedRequestScope.Scope forwardedScope = ForwardedRequestScope.Enter();
         return Task.FromResult(kahunaNode.GetAppliedLogTypes());
@@ -1986,7 +1972,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.GetPartitionApplyFingerprint(partitionId, cancellationToken);
         }
 
-        throw Unreachable(node);
+        return UnansweredResults.GetPartitionApplyFingerprint;
     }
 
     public async Task<BackupPartResult> CaptureBackupPart(
@@ -2012,7 +1998,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.GetPreparedIntentPresence(partitionId, transactionId, epoch, key, cancellationToken);
         }
 
-        throw Unreachable(node);
+        return UnansweredResults.GetPreparedIntentPresence;
     }
 
     public async Task<KeyValueResponseType> ConfirmRangeQuiesce(
@@ -2025,7 +2011,7 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.ConfirmRangeQuiesce(partitionId, keySpace, startKey, endKey, owner, cancellationToken);
         }
 
-        throw Unreachable(node);
+        return UnansweredResults.ConfirmRangeQuiesce;
     }
 
     public async Task<(KeyValueResponseType Type, int Settled, int Decided, int Undecided)> SettleDecidedBlockers(
@@ -2038,6 +2024,6 @@ public class MemoryInterNodeCommmunication : IInterNodeCommunication
             return await kahunaNode.SettleDecidedBlockers(partitionId, keys, transactionId, epoch, cancellationToken);
         }
 
-        throw Unreachable(node);
+        return UnansweredResults.SettleDecidedBlockers;
     }
 }

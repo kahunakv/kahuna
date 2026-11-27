@@ -1,5 +1,6 @@
 using System.Text;
 using Kahuna.Server.Communication.Internode;
+using Kahuna.Server.KeyValues;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Routing;
 using Kommander.Time;
@@ -59,23 +60,26 @@ public sealed class TestMemoryInterNodeLinkFilter
             (KeyValueResponseType set, _) = await TrySetAsync(cluster.GetNode(open), key, "through-open", ct);
             Assert.Equal(KeyValueResponseType.Set, set);
 
-            // Direct calls: both directions of the blocked pair fail before they run, with the reason;
-            // the shared unbound instance knows no sender and never filters.
-            KahunaServerException fromBlocked = await Assert.ThrowsAsync<KahunaServerException>(() =>
-                transport.ForNode(blockedEndpoint).TryGetValue(leaderEndpoint, HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct));
-            Assert.Contains("not reachable", fromBlocked.Message);
+            // Direct calls: both directions of the blocked pair fail before they run, and answer MustRetry with no
+            // entry, as the gRPC transport answers an unreachable peer; the shared unbound instance knows no sender
+            // and never filters.
+            (KeyValueResponseType fromBlocked, ReadOnlyKeyValueEntry? fromBlockedEntry) = await transport.ForNode(blockedEndpoint).TryGetValue(
+                leaderEndpoint, HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.MustRetry, fromBlocked);
+            Assert.Null(fromBlockedEntry);
 
-            await Assert.ThrowsAsync<KahunaServerException>(() =>
-                transport.ForNode(leaderEndpoint).TryGetValue(blockedEndpoint, HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct));
+            (KeyValueResponseType toBlocked, _) = await transport.ForNode(leaderEndpoint).TryGetValue(
+                blockedEndpoint, HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.MustRetry, toBlocked);
 
             (KeyValueResponseType unbound, _) = await transport.TryGetValue(
                 leaderEndpoint, HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
             Assert.Equal(KeyValueResponseType.Get, unbound);
 
-            // An unknown node keeps its own message.
-            KahunaServerException unknown = await Assert.ThrowsAsync<KahunaServerException>(() =>
-                transport.ForNode(blockedEndpoint).TryGetValue("nowhere:1", HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct));
-            Assert.Contains("does not exist", unknown.Message);
+            // An unknown node gets the same answer.
+            (KeyValueResponseType unknown, _) = await transport.ForNode(blockedEndpoint).TryGetValue(
+                "nowhere:1", HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, ct);
+            Assert.Equal(KeyValueResponseType.MustRetry, unknown);
 
             // Unblocked, the node forwards again.
             transport.UnblockLink(blockedEndpoint, leaderEndpoint);
@@ -94,7 +98,8 @@ public sealed class TestMemoryInterNodeLinkFilter
 
     /// <summary>
     /// A non-transactional write through <paramref name="node"/>, retried only on MustRetry so a leader
-    /// change does not fail the test. A blocked link surfaces as a thrown exception or a refused status.
+    /// change does not fail the test. A blocked link surfaces as a refused status: MustRetry on every
+    /// attempt, or another refusal. Threw is true for a <see cref="KahunaServerException"/>.
     /// </summary>
     private static async Task<(KeyValueResponseType Type, bool Threw)> TrySetAsync(EmbeddedKahunaNode node, string key, string value, CancellationToken ct)
     {
