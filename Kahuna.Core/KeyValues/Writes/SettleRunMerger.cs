@@ -163,6 +163,12 @@ internal sealed class MergedSettleSubmission : IProposalSubmission
         // Serialized from the commands, so each command keeps the identity of its own transaction. The call registers
         // the commands for the apply of these bytes on this node.
         byte[] data = PreparedIntentStore.SerializeDelta(all);
+
+        // The merged entry goes to the log in place of the member entries, so no apply sees their bytes, and their
+        // registrations are removed. A member that its producer sends again after a release is decoded again.
+        for (int i = 0; i < members.Length; i++)
+            PreparedIntentStore.ForgetProposedCommands(members[i].Entries[0].Data);
+
         RaftProposalEntry first = members[0].Entries[0];
         RaftProposalEntry entry = new(ReplicationTypes.PreparedIntent, data, AutoCommit: true, ExpectedGeneration: 0, ExpectedTerm: first.ExpectedTerm);
 

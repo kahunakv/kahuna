@@ -86,6 +86,36 @@ public sealed class TestSettleRunMerger
     }
 
     [Fact]
+    public void AMergedEntry_RemovesTheRegistrationsOfItsMembers_AndARunOfOneKeepsItsOwn()
+    {
+        PreparedIntentCommand[] first = DurableTransactionFinalizer.BuildSettleCommands([Intent(1, "a", 1)], commit: true, materializeOnResolve: true);
+        PreparedIntentCommand[] second = DurableTransactionFinalizer.BuildSettleCommands([Intent(2, "b", 1)], commit: true, materializeOnResolve: true);
+        PreparedIntentCommand[] alone = DurableTransactionFinalizer.BuildSettleCommands([Intent(3, "c", 1)], commit: true, materializeOnResolve: true);
+
+        DurableProposalSubmission s1 = Submission(PreparedIntentStore.SerializeDelta(first));
+        DurableProposalSubmission s2 = Submission(PreparedIntentStore.SerializeDelta(second));
+        DurableProposalSubmission record = Submission([1, 2, 3], WriteSubmissionStage.Decision);
+        DurableProposalSubmission s3 = Submission(PreparedIntentStore.SerializeDelta(alone));
+
+        List<IProposalSubmission> merged = SettleRunMerger.Merge([s1, s2, record, s3], 512, awaiter: null);
+
+        Assert.IsType<MergedSettleSubmission>(merged[0]);
+        Assert.Same(s3, merged[2]);
+
+        // The merged entry goes to the log in place of the two members: their bytes have no registration, and the
+        // commands of a member that is sent again are decoded.
+        Assert.True(PreparedIntentStore.TryGetProposedCommands(s1.Entries[0].Data, out PreparedIntentCommand[]? decodedFirst));
+        Assert.NotSame(first, decodedFirst);
+        Assert.Equal(first.Length, decodedFirst.Length);
+        Assert.True(PreparedIntentStore.TryGetProposedCommands(s2.Entries[0].Data, out PreparedIntentCommand[]? decodedSecond));
+        Assert.NotSame(second, decodedSecond);
+
+        // A run of one member goes to the log with its own bytes, and its apply reuses its commands.
+        Assert.True(PreparedIntentStore.TryGetProposedCommands(s3.Entries[0].Data, out PreparedIntentCommand[]? kept));
+        Assert.Same(alone, kept);
+    }
+
+    [Fact]
     public void OtherSubmissions_KeepTheirPlace_AndARunOfOneKeepsItsOwnEntry()
     {
         DurableProposalSubmission s1 = Settle(1, "a"), s2 = Settle(2, "b"), s3 = Settle(3, "c"), s4 = Settle(4, "d");

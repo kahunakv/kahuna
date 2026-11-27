@@ -14,8 +14,9 @@ namespace Kahuna.Server.KeyValues.Transactions;
 /// own, so the stores apply it with the bodies they use for that entry. A reader parses the parts from spans of the
 /// entry and copies nothing. A field that a newer writer adds is skipped.</para>
 ///
-/// <para>The node that serializes the entry registers the decoded commands of the three parts with the bytes, so its
-/// own apply parses nothing. A node that did not serialize it decodes the parts.</para>
+/// <para>The node that serializes the entry moves the decoded commands of the three parts from the registrations of the
+/// part bytes to one registration of the entry, so its own apply parses nothing. A node that did not serialize it
+/// decodes the parts.</para>
 /// </summary>
 internal static class OnePhaseBundleEntry
 {
@@ -39,7 +40,9 @@ internal static class OnePhaseBundleEntry
 
     /// <summary>
     /// Builds the entry from the three deltas of a one-phase commit. The decoded commands of each part that this node
-    /// registered or can decode go with the bytes, for the apply of the entry on this node.
+    /// registered or can decode go with the bytes, for the apply of the entry on this node. The registrations of the
+    /// three part arrays are removed, because the entry goes to the log in their place and no apply sees them. A part
+    /// array that goes to the log later as an entry of its own is decoded at its apply.
     /// </summary>
     internal static byte[] Serialize(byte[] recordInit, byte[] prepare, byte[] decision)
     {
@@ -51,10 +54,10 @@ internal static class OnePhaseBundleEntry
         WriteField(data, ref position, PrepareTag, prepare);
         WriteField(data, ref position, DecisionTag, decision);
 
-        TransactionRecordStore.TryPeekProposedCommands(recordInit, out TransactionRecordCommand[]? init);
-        TransactionRecordStore.TryPeekProposedCommands(decision, out TransactionRecordCommand[]? decided);
+        TransactionRecordStore.TryClaimProposedCommands(recordInit, out TransactionRecordCommand[]? init);
+        TransactionRecordStore.TryClaimProposedCommands(decision, out TransactionRecordCommand[]? decided);
 
-        if (PreparedIntentStore.TryGetProposedCommands(prepare, out PreparedIntentCommand[]? prepared))
+        if (PreparedIntentStore.TryClaimProposedCommands(prepare, out PreparedIntentCommand[]? prepared))
             locallyProposed.Register(data, new Commands(init, prepared, decided));
 
         return data;

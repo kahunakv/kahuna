@@ -438,10 +438,11 @@ internal sealed class TransactionRecordStore
             Apply(ToCommand(command, keyStrings), partitionId, logTerm);
     }
 
-    /// <summary>The commands that this node registered for <paramref name="delta"/> when it serialized it, without
-    /// taking the reuse that the apply of the same bytes takes.</summary>
-    internal static bool TryPeekProposedCommands(byte[] delta, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out TransactionRecordCommand[]? commands) =>
-        locallyProposedDeltas.TryPeek(delta, out commands);
+    /// <summary>The commands that this node registered for <paramref name="delta"/> when it serialized it. The
+    /// registration is removed: the caller puts <paramref name="delta"/> into an entry that replaces it in the log and
+    /// registers the commands with that entry.</summary>
+    internal static bool TryClaimProposedCommands(byte[] delta, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out TransactionRecordCommand[]? commands) =>
+        locallyProposedDeltas.TryClaim(delta, out commands);
 
     /// <summary>Serializes a batch of transitions for one atomic data-partition log entry. The produced bytes
     /// remember their decoded commands so the local apply of this same entry can skip re-parsing them.</summary>

@@ -38,4 +38,38 @@ public sealed class TestProposedDeltaCache
         Assert.False(cache.TryTake(lookalike, out _));
         Assert.True(cache.TryTake(registered, out _));
     }
+
+    [Fact]
+    public void AClaim_TakesThePayload_AndRemovesTheEntryWhateverItsBudget()
+    {
+        ProposedDeltaCache<string[]> cache = new();
+        byte[] bytes = [1, 2, 3];
+        string[] commands = ["a"];
+
+        cache.Register(bytes, commands, takeBudget: 3);
+
+        Assert.True(cache.TryClaim(bytes, out string[]? claimed));
+        Assert.Same(commands, claimed);
+        Assert.False(cache.TryPeek(bytes, out _));
+        Assert.False(cache.TryTake(bytes, out _));
+        Assert.False(cache.TryClaim(bytes, out _));
+    }
+
+    [Fact]
+    public void AForget_RemovesTheEntryWhateverItsBudget_AndIgnoresBytesWithNoEntry()
+    {
+        ProposedDeltaCache<string[]> cache = new();
+        byte[] bytes = [1, 2, 3];
+        byte[] other = [4, 5];
+
+        cache.Register(bytes, ["a"], takeBudget: 3);
+        cache.Register(other, ["b"], takeBudget: 1);
+
+        cache.Forget(bytes);
+        cache.Forget([9]);
+
+        Assert.False(cache.TryTake(bytes, out _));
+        Assert.True(cache.TryTake(other, out string[]? kept));
+        Assert.Equal(["b"], kept);
+    }
 }

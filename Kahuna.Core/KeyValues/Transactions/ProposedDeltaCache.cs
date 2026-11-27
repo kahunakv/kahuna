@@ -22,6 +22,12 @@ namespace Kahuna.Server.KeyValues.Transactions;
 /// budgeted taker never claims (for example a partition a co-hosted node does not replicate) vanishes
 /// with the proposal bytes. Reusing the producer's instances across nodes is safe only because the
 /// payload and everything it references are immutable.</para>
+///
+/// <para>A producer that puts registered bytes into other bytes, which go to Raft in their place, removes
+/// the entry of the inner bytes at once (<see cref="TryClaim"/>, <see cref="Forget"/>): a one-phase bundle
+/// entry for its three parts, and a merged settle entry for its members. No apply sees the inner bytes, so
+/// their entry would stay in the table until the collector frees the bytes. Under load such entries grow
+/// the table to thousands of slots, and its entry arrays go to the large object heap.</para>
 /// </summary>
 internal sealed class ProposedDeltaCache<TPayload> where TPayload : class
 {
@@ -74,4 +80,24 @@ internal sealed class ProposedDeltaCache<TPayload> where TPayload : class
         payload = entry.Payload;
         return true;
     }
+
+    /// <summary>Takes the payload registered for <paramref name="data"/> and removes the entry, whatever its take
+    /// budget is: for a producer that registers the payload again with the bytes that replace
+    /// <paramref name="data"/> in the log.</summary>
+    internal bool TryClaim(byte[] data, [NotNullWhen(true)] out TPayload? payload)
+    {
+        if (!table.TryGetValue(data, out Entry? entry))
+        {
+            payload = null;
+            return false;
+        }
+
+        table.Remove(data);
+        payload = entry.Payload;
+        return true;
+    }
+
+    /// <summary>Removes the entry of <paramref name="data"/>, whatever its take budget is: for a producer that put the
+    /// payload into other bytes, which replace <paramref name="data"/> in the log.</summary>
+    internal void Forget(byte[] data) => table.Remove(data);
 }

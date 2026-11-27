@@ -59,6 +59,58 @@ public sealed class TestOnePhaseBundleEntry
     }
 
     [Fact]
+    public void Serialize_MovesTheCommandsOfTheParts_ToTheRegistrationOfTheEntry()
+    {
+        HLCTimestamp txId = Ts(2_000);
+        const string key = "registrations/a";
+        List<TransactionParticipantRef> manifest = [new(key, KeyValueDurability.Persistent)];
+        long hash = TransactionManifest.ComputeHash(txId, 1, key, Ts(txId.L + 1), manifest);
+
+        TransactionRecordCommand[] initCommands = [new InitializeTransactionCommand(txId, 1, "coord", key, Ts(txId.L + 1), Ts(txId.L + 9_000), hash, manifest, Ts(txId.L + 2), txId)];
+        PreparedIntentCommand[] prepareCommands = [new PrepareIntentCommand(Intent(key, txId, 1, PreparedIntent.UnknownBaseRevision, KeyValueState.Undefined, hash))];
+        TransactionRecordCommand[] decisionCommands = [new CommitTransactionCommand(txId, 1, hash, Ts(txId.L + 2), Ts(txId.L + 2), BundledPrepareKeys: [key])];
+
+        byte[] init = TransactionRecordStore.SerializeDelta(initCommands);
+        byte[] prepare = PreparedIntentStore.SerializeDelta(prepareCommands);
+        byte[] decision = TransactionRecordStore.SerializeDelta(decisionCommands);
+
+        Assert.True(PreparedIntentStore.TryGetProposedCommands(prepare, out PreparedIntentCommand[]? registered));
+        Assert.Same(prepareCommands, registered);
+
+        byte[] entry = OnePhaseBundleEntry.Serialize(init, prepare, decision);
+
+        // The apply of the entry on this node reuses the commands of the three parts.
+        Assert.True(OnePhaseBundleEntry.TryTakeCommands(entry, out OnePhaseBundleEntry.Commands? commands));
+        Assert.Same(initCommands, commands.Init);
+        Assert.Same(prepareCommands, commands.Prepare);
+        Assert.Same(decisionCommands, commands.Decision);
+
+        // No apply sees the part arrays, so their registrations are gone. A part array that goes to the log later as
+        // an entry of its own is decoded.
+        Assert.False(TransactionRecordStore.TryClaimProposedCommands(init, out _));
+        Assert.False(TransactionRecordStore.TryClaimProposedCommands(decision, out _));
+        Assert.True(PreparedIntentStore.TryGetProposedCommands(prepare, out PreparedIntentCommand[]? decoded));
+        Assert.NotSame(prepareCommands, decoded);
+        PrepareIntentCommand again = Assert.IsType<PrepareIntentCommand>(Assert.Single(decoded));
+        Assert.Equal(key, again.Intent.Key);
+        Assert.Equal(((PrepareIntentCommand)prepareCommands[0]).Intent.Value, again.Intent.Value);
+    }
+
+    [Fact]
+    public void Serialize_OfPartsWithNoRegistration_DecodesThePrepare_AndLeavesTheRecordsToTheApply()
+    {
+        (byte[] init, byte[] prepare, byte[] decision) = Parts(Ts(3_000), "registrations/b");
+
+        // Arrays that this node did not serialize, as a remote leader receives them.
+        byte[] entry = OnePhaseBundleEntry.Serialize([.. init], [.. prepare], [.. decision]);
+
+        Assert.True(OnePhaseBundleEntry.TryTakeCommands(entry, out OnePhaseBundleEntry.Commands? commands));
+        Assert.Null(commands.Init);
+        Assert.Null(commands.Decision);
+        Assert.Equal("registrations/b", Assert.IsType<PrepareIntentCommand>(Assert.Single(commands.Prepare)).Intent.Key);
+    }
+
+    [Fact]
     public void Codec_AFieldOfANewerWriter_IsSkipped()
     {
         (byte[] init, byte[] prepare, byte[] decision) = Parts(Ts(1_000), "codec/b");

@@ -378,6 +378,18 @@ internal sealed partial class PreparedIntentStore
     }
 
     /// <summary>
+    /// The decoded commands of <paramref name="delta"/>, as <see cref="TryGetProposedCommands"/> gives them, with the
+    /// registration of the bytes removed: the caller puts <paramref name="delta"/> into an entry that replaces it in the
+    /// log and registers the commands with that entry.
+    /// </summary>
+    internal static bool TryClaimProposedCommands(byte[] delta, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out PreparedIntentCommand[]? commands) =>
+        locallyProposedDeltas.TryClaim(delta, out commands) || TryGetProposedCommands(delta, out commands);
+
+    /// <summary>Removes the registration of <paramref name="delta"/>: its commands went into an entry that replaces it in
+    /// the log, which has a registration of its own.</summary>
+    internal static void ForgetProposedCommands(byte[] delta) => locallyProposedDeltas.Forget(delta);
+
+    /// <summary>
     /// Adds the key of every intent that <paramref name="delta"/> prepares, resolves or removes to
     /// <paramref name="keys"/>, for the node that proposes it. False when the bytes are not a delta. A delta that this
     /// node serialized answers from its commands. One that another node sent is decoded here, and the apply of these
